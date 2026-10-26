@@ -1,0 +1,40 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: asia-south1-docker.pkg.dev/${{ vars.PROJECT_ID }}/incisive/incisive-app:${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+      - run: docker build -t "$IMAGE" .
+      - run: docker push "$IMAGE"
+      - run: |
+          gcloud run deploy incisive-app --image="$IMAGE" --region=asia-south1 \
+            --project=${{ vars.PROJECT_ID }} \
+            --service-account=incisive-run@${{ vars.PROJECT_ID }}.iam.gserviceaccount.com \
+            --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest \
+            --set-env-vars=APP_ENV=prod,CLAUDE_MODEL=${{ vars.CLAUDE_MODEL }} \
+            --timeout=3600 --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi \
+            --cpu-throttling --allow-unauthenticated

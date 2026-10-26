@@ -33,3 +33,10 @@ jobs:
       # RUSTSEC-2023-0071 (rsa) is in Cargo.lock only via sqlx-mysql, which is never compiled
       # (cargo tree -i rsa is empty); no fixed version exists.
       - run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071
+
+  container:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t incisive-app:ci .

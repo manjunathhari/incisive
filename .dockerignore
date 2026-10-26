@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+.superpowers/
+docs/
+infra/
+*.md
+.env
+.env.*
