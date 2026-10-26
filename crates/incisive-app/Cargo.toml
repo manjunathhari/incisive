@@ -1,0 +1,8 @@
+[package]
+name = "incisive-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+secrecy = "0.10"
