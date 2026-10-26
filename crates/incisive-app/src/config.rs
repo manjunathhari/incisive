@@ -10,6 +10,7 @@ pub enum AppEnv {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // fields are consumed by the claude-client and database wiring in later tasks
 pub struct Config {
     pub anthropic_api_key: SecretString,
     pub claude_model: String,
