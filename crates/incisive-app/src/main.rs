@@ -1,9 +1,10 @@
 mod config;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 use incisive_app::{
-    db::{PgReadiness, lazy_pool, migrate},
+    db::{PgReadiness, lazy_pool, migrate_until_done},
     server::build_router,
 };
 use leptos::config::get_configuration;
@@ -39,15 +40,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let migrate_pool = pool.clone();
-    tokio::spawn(async move {
-        match migrate(&migrate_pool).await {
-            Ok(()) => tracing::info!("migrations applied"),
-            Err(e) => tracing::error!(error = %e, "migrations failed"),
-        }
-    });
+    let migrated = Arc::new(AtomicBool::new(false));
+    tokio::spawn(migrate_until_done(
+        pool.clone(),
+        migrated.clone(),
+        Duration::from_secs(1),
+        Duration::from_secs(30),
+    ));
 
-    let app = build_router(Arc::new(PgReadiness(pool)), leptos_options.clone());
+    let app = build_router(
+        Arc::new(PgReadiness::new(pool, migrated)),
+        leptos_options.clone(),
+    );
     let listener = tokio::net::TcpListener::bind(leptos_options.site_addr)
         .await
         .expect("bind listener");
