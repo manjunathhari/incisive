@@ -72,6 +72,23 @@ async fn readyz_down() {
     assert_eq!(json(&body), serde_json::json!({"db": "down"}));
 }
 
+#[tokio::test]
+async fn health_alias_ok() {
+    let (status, body) = get(health_routes(Arc::new(AlwaysDown)), "/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+}
+
+#[tokio::test]
+async fn ready_alias_matches_readyz() {
+    let (status, body) = get(health_routes(Arc::new(AlwaysUp)), "/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body), serde_json::json!({"db": "up"}));
+    let (status, body) = get(health_routes(Arc::new(AlwaysDown)), "/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json(&body), serde_json::json!({"db": "down"}));
+}
+
 #[tokio::test(start_paused = true)]
 async fn readyz_times_out_as_down() {
     let app = health_routes(Arc::new(Hangs));

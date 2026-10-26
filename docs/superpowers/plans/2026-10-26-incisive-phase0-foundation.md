@@ -226,7 +226,7 @@ incisive/
 - Produces: Cloud Run service `incisive-app` in `asia-south1`, image `asia-south1-docker.pkg.dev/<PROJECT_ID>/incisive/incisive-app:<git-sha>`.
 
 - [ ] **Step 1: Write** `Dockerfile` (multi-stage): builder `rust:1-bookworm` installs `cargo-leptos` and the `wasm32-unknown-unknown` target, runs `cargo leptos build --release`; runtime `gcr.io/distroless/cc-debian12:nonroot` copies the server binary and `target/site`, sets `LEPTOS_SITE_ROOT=site`, `LEPTOS_SITE_ADDR=0.0.0.0:8080`, `APP_ENV=prod`, exposes 8080. `.dockerignore` excludes `target/`, `.git/`, `*.md` except `migrations/`.
-- [ ] **Step 2: Verify the image locally:** `docker build -t incisive-app .` succeeds; `docker run --rm -p 8080:8080 -e ANTHROPIC_API_KEY=x -e CLAUDE_MODEL=x -e DATABASE_URL=postgres://u:p@127.0.0.1:1/x incisive-app`; `curl -s localhost:8080/healthz` → `ok`; `curl -s -o /dev/null -w '%{http_code}' localhost:8080/readyz` → `503`.
+- [ ] **Step 2: Verify the image locally:** `docker build -t incisive-app .` succeeds; `docker run --rm -p 8080:8080 -e ANTHROPIC_API_KEY=x -e CLAUDE_MODEL=x -e DATABASE_URL=postgres://u:p@127.0.0.1:1/x incisive-app`; `curl -s localhost:8080/health` → `ok`; `curl -s -o /dev/null -w '%{http_code}' localhost:8080/ready` → `503`.
 - [ ] **Step 3: Write** `infra/README.md` with the exact one-time `gcloud` commands (owner or implementer with owner present):
   - `gcloud artifacts repositories create incisive --repository-format=docker --location=asia-south1`
   - Secrets: `gcloud secrets create anthropic-api-key` and `database-url`, values added via `gcloud secrets versions add <name> --data-file=-` (typed, never committed)
@@ -244,7 +244,7 @@ incisive/
     --cpu-throttling --allow-unauthenticated
   ```
   (`--allow-unauthenticated` is needed so browsers can reach the login page that Phase 1 adds; Phase 0 exposes only the placeholder page and health checks.)
-- [ ] **Step 6: Verify deployment:** merge to `main`; both workflows green; `curl -s https://<service-url>/healthz` → `ok`; `curl -s https://<service-url>/readyz` → `{"db":"up"}`; the home page shows "Incisive" and "Cut to the evidence."; Cloud Run console shows region `asia-south1`, timeout `3600s`, max instances `3`.
+- [ ] **Step 6: Verify deployment:** merge to `main`; both workflows green; `curl -s https://<service-url>/health` → `ok`; `curl -s https://<service-url>/ready` → `{"db":"up"}` (Cloud Run reserves paths ending in `z`, so use `/health` and `/ready` there; `/healthz` and `/readyz` are for local use); the home page shows "Incisive" and "Cut to the evidence."; Cloud Run console shows region `asia-south1`, timeout `3600s`, max instances `3`.
 - [ ] **Step 7: Verify secrets hygiene:** in Cloud Run logs for the deployment, search for `sk-ant` → no results; `gcloud run services describe incisive-app --region=asia-south1` shows secrets as Secret Manager references, not values.
 - [ ] **Step 8: Commit** `git commit -m "ci: container build and Cloud Run deploy (asia-south1)"`.
 
@@ -252,7 +252,7 @@ incisive/
 
 ## Done when
 
-- `https://<service-url>/` shows the Incisive placeholder in a browser; `/readyz` reports the Supabase database up.
+- `https://<service-url>/` shows the Incisive placeholder in a browser; `/ready` reports the Supabase database up (Cloud Run reserves paths ending in `z`; use `/health` and `/ready` there).
 - Every push runs fmt, clippy, tests and `cargo audit`; every green merge to `main` deploys automatically.
 - `cargo run -p claude-client --example ping` gets a reply from Claude using the Max API credits.
 - The billing budget alert exists at ₹500/month.

@@ -9,6 +9,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
 jobs:
   deploy:
     if: >-
@@ -19,6 +23,21 @@ jobs:
     env:
       IMAGE: asia-south1-docker.pkg.dev/${{ vars.PROJECT_ID }}/incisive/incisive-app:${{ github.event.workflow_run.head_sha }}
     steps:
+      - name: Check required repository variables
+        env:
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+          DEPLOY_SA: ${{ vars.DEPLOY_SA }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+        run: |
+          missing=0
+          for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md step 6)"
+              missing=1
+            fi
+          done
+          exit $missing
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}

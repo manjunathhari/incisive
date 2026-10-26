@@ -6,7 +6,7 @@ WORKDIR /build
 COPY rust-toolchain.toml .
 RUN rustup show active-toolchain || rustup toolchain install \
  && rustup target add wasm32-unknown-unknown \
- && cargo install cargo-leptos --locked
+ && cargo install cargo-leptos --version 0.3.11 --locked
 COPY . .
 RUN cargo leptos build --release
 

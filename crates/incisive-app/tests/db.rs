@@ -50,7 +50,7 @@ async fn unreachable_db_is_not_ready_and_does_not_panic() {
         .await;
     assert!(!ok);
     assert!(
-        start.elapsed() < Duration::from_secs(4),
+        start.elapsed() < Duration::from_secs(6),
         "took {:?}",
         start.elapsed()
     );

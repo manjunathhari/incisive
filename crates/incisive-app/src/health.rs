@@ -42,5 +42,8 @@ pub fn health_routes(r: Arc<dyn Readiness>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // Cloud Run reserves some paths ending in `z`; use these aliases there.
+        .route("/health", get(healthz))
+        .route("/ready", get(readyz))
         .with_state(r)
 }
