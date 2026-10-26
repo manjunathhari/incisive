@@ -39,4 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t incisive-app:ci .
+      - name: docker build
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! docker build --progress=plain -t incisive-app:ci . 2>&1 | tee build.log; then
+            msg=$(tail -n 80 build.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=docker build::${msg}"
+            exit 1
+          fi

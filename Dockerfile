@@ -1,8 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM rust:1-bookworm AS builder
-RUN rustup target add wasm32-unknown-unknown \
- && cargo install cargo-leptos --locked
 WORKDIR /build
+# rust-toolchain.toml selects "stable", which is not the image's pinned default toolchain;
+# add the wasm target from inside /build so it lands on the toolchain the build actually uses.
+COPY rust-toolchain.toml .
+RUN rustup show active-toolchain || rustup toolchain install \
+ && rustup target add wasm32-unknown-unknown \
+ && cargo install cargo-leptos --locked
 COPY . .
 RUN cargo leptos build --release
 
