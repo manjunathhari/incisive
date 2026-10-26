@@ -7,6 +7,18 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -16,4 +28,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - run: cargo install cargo-audit --locked && cargo audit
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # RUSTSEC-2023-0071 (rsa) is in Cargo.lock only via sqlx-mysql, which is never compiled
+      # (cargo tree -i rsa is empty); no fixed version exists.
+      - run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071
