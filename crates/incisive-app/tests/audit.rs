@@ -214,7 +214,9 @@ fn gate_and_charged_details_have_required_fields() {
     };
     let g = gate_detail(&d);
     assert_eq!(g["verdict"], "not_medical");
-    assert_eq!(g["reason"], "About billing.");
+    // Model-written reasons are never stored (they could echo the question).
+    assert!(g.get("reason").is_none());
+    assert!(!g.to_string().contains("billing"));
     assert_eq!(g["by_rule"], false);
     assert_eq!(g["model"], "m-gate");
     assert_eq!(g["input_tokens"], 900);
@@ -228,6 +230,7 @@ fn gate_and_charged_details_have_required_fields() {
         model: None,
     };
     let g = gate_detail(&rule);
+    assert_eq!(g["reason"], "r"); // static rule text is kept
     assert!(g["model"].is_null() && g["input_tokens"].is_null());
 
     let c = charged_detail(
@@ -250,6 +253,51 @@ fn lock_namespace_is_distinct_from_spend() {
     assert_ne!(LOCK_NS_AUDIT, incisive_app::spend::LOCK_NS_SPEND_USER);
 }
 
+#[tokio::test]
+async fn floats_are_rejected_before_any_db_access() {
+    // Lazy pool to an unreachable address: a pass proves rejection happens before
+    // the pool is touched (no lock, no connection).
+    let pool = lazy_pool(&SecretString::from(
+        "postgres://u@127.0.0.1:1/none".to_string(),
+    ))
+    .unwrap();
+    let bad = [
+        json!({"x": 1e16}),
+        json!({"a": {"b": [1, {"c": 1.5}]}}),
+        json!([0.1]),
+        json!({"neg": -0.0}),
+    ];
+    for d in bad {
+        let err = append(&pool, None, None, Event::Accepted, d.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, sqlx::Error::Encode(_)), "{d}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn integers_including_u64_max_are_accepted_and_verify() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let s = Scratch::new(&pool).await;
+    append_in(
+        &pool,
+        &s.table,
+        None,
+        None,
+        Event::Charged,
+        json!({"max": u64::MAX, "min": i64::MIN, "big": 10_000_000_000_000_000i64, "arr": [0, -1]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verify_chain_in(&pool, &s.table).await.unwrap(),
+        ChainStatus::Valid { entries: 1 }
+    );
+    s.finish().await;
+}
+
 // ---------- DB ----------
 
 async fn test_pool() -> Option<PgPool> {
@@ -259,7 +307,34 @@ async fn test_pool() -> Option<PgPool> {
     };
     let pool = lazy_pool(&SecretString::from(url)).expect("lazy pool");
     migrate(&pool).await.expect("migrate");
+    drop_stale_scratch(&pool).await;
     Some(pool)
+}
+
+/// Best-effort cleanup of scratch tables left by a crashed earlier run (Drop cannot
+/// be async). The creation time (unix seconds) is part of the table name, so only
+/// tables older than 10 minutes are removed and concurrent tests keep theirs.
+async fn drop_stale_scratch(pool: &PgPool) {
+    let Ok(names) = sqlx::query_scalar::<_, String>(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'incisive' AND tablename LIKE 'audit\\_t\\_%'",
+    )
+    .fetch_all(pool)
+    .await
+    else {
+        return;
+    };
+    let cutoff = Utc::now().timestamp() - 600;
+    for name in names {
+        let created = name
+            .strip_prefix("audit_t_")
+            .and_then(|r| r.split('_').next())
+            .and_then(|t| t.parse::<i64>().ok());
+        if created.is_some_and(|t| t < cutoff) {
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS incisive.{name}"))
+                .execute(pool)
+                .await;
+        }
+    }
 }
 
 /// A private copy of the audit table, dropped on `finish`.
@@ -270,7 +345,11 @@ struct Scratch {
 
 impl Scratch {
     async fn new(pool: &PgPool) -> Scratch {
-        let table = format!("incisive.audit_t_{}", Uuid::new_v4().simple());
+        let table = format!(
+            "incisive.audit_t_{}_{}",
+            Utc::now().timestamp(),
+            Uuid::new_v4().simple()
+        );
         sqlx::query(&format!(
             "CREATE TABLE {table} (LIKE incisive.audit INCLUDING ALL)"
         ))
@@ -517,7 +596,7 @@ async fn public_api_appends_to_the_real_table() {
         return;
     };
     // The real table is shared and may hold other tests' rows, so check only
-    // entries this test created, and the chain's validity (nothing tampers with it).
+    // entries this test created (found by request_id).
     let rid = Uuid::new_v4();
     let e1 = append(
         &pool,
@@ -545,8 +624,11 @@ async fn public_api_appends_to_the_real_table() {
         .filter(|e| e.request_id == Some(rid))
         .collect();
     assert_eq!(mine.len(), 2);
-    assert!(matches!(
-        verify_chain(&pool).await.unwrap(),
-        ChainStatus::Valid { .. }
-    ));
+    assert!(
+        mine.iter()
+            .any(|e| e.hash == e2.hash && e.prev_hash == e1.hash)
+    );
+    // verify_chain on the shared table must run; its verdict is not asserted here
+    // because other tests may share the table.
+    verify_chain(&pool).await.unwrap();
 }

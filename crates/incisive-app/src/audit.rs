@@ -19,10 +19,12 @@
 //!
 //! # Privacy
 //!
-//! No identifiable patient data and no question text is ever stored here. Use the
-//! typed detail helpers ([`deid_blocked_detail`], [`gate_detail`],
+//! The log never holds question text, patient identifiers, or model-generated text
+//! about the question. Use the typed detail helpers ([`deid_blocked_detail`], [`gate_detail`],
 //! [`accepted_detail`], [`charged_detail`]); they carry only finding kinds, byte
 //! offsets, lengths, a SHA-256 of the question, verdicts, models, tokens and paise.
+//! The gate's free-text reason is stored only for rule decisions (static text), never
+//! for model decisions.
 //!
 //! # Canonical hashing
 //!
@@ -37,9 +39,11 @@
 //! - `event`: its snake_case name.
 //! - `detail`: compact JSON with keys sorted at every nesting level. This is done
 //!   explicitly here and does not depend on serde_json's map type (JSONB also
-//!   reorders keys). Array order is significant. Avoid floats in `detail`: JSONB
-//!   stores numbers as numeric and a float may not round-trip textually; use
-//!   integers and strings.
+//!   reorders keys). Array order is significant. Floats are NOT allowed anywhere
+//!   in `detail` (enforced): JSONB stores numbers as numeric, and a float such as
+//!   `1e16` can come back as a different number, which would show up as a false
+//!   `Broken`. `append` rejects any `f64` number at any depth with
+//!   `sqlx::Error::Encode`, before taking the lock. Use integers and strings.
 //!
 //! Appends serialise on a transaction-scoped advisory lock
 //! `pg_advisory_xact_lock(LOCK_NS_AUDIT, 0)` (two-int form, a namespace distinct
@@ -67,8 +71,6 @@ pub const GENESIS_HASH: &str = "000000000000000000000000000000000000000000000000
 const AUDIT_TABLE: &str = "incisive.audit";
 const SEP: char = '\x1f';
 const VERIFY_BATCH: i64 = 1000;
-/// Cap on the free-text gate reason kept in the log.
-const MAX_REASON_CHARS: usize = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -218,17 +220,20 @@ pub fn deid_blocked_detail(findings: &[Finding], question_len: usize) -> Value {
     json!({ "findings": items, "question_len": question_len })
 }
 
-/// Verdict, reason (capped), by_rule, model and tokens.
+/// Verdict, by_rule, model and tokens. The reason is included ONLY when `by_rule`
+/// (static rule text); a model-written reason could echo the question, so it is omitted.
 pub fn gate_detail(d: &GateDecision) -> Value {
-    let reason: String = d.reason.chars().take(MAX_REASON_CHARS).collect();
-    json!({
+    let mut v = json!({
         "verdict": d.verdict,
-        "reason": reason,
         "by_rule": d.by_rule,
         "model": d.model,
         "input_tokens": d.usage.as_ref().map(|u| u.input_tokens),
         "output_tokens": d.usage.as_ref().map(|u| u.output_tokens),
-    })
+    });
+    if d.by_rule {
+        v["reason"] = Value::String(d.reason.clone());
+    }
+    v
 }
 
 /// Question byte length and SHA-256 hex. Never the text.
@@ -252,6 +257,7 @@ pub fn charged_detail(model: Option<&str>, usage: Option<&Usage>, paise: i64) ->
 
 /// Table names are interpolated into SQL (so tests can use a scratch copy);
 /// accept only `[A-Za-z0-9_.]`.
+#[cfg(feature = "test-util")]
 fn check_table(table: &str) -> sqlx::Result<()> {
     let ok = !table.is_empty()
         && table
@@ -292,10 +298,11 @@ pub async fn append(
     event: Event,
     detail: Value,
 ) -> sqlx::Result<Entry> {
-    append_in(pool, AUDIT_TABLE, request_id, user_id, event, detail).await
+    append_impl(pool, AUDIT_TABLE, request_id, user_id, event, detail).await
 }
 
-/// [`append`] against a named table with the audit schema (tests use a scratch copy).
+/// Tests only: [`append`] against a named table with the audit schema.
+#[cfg(feature = "test-util")]
 pub async fn append_in(
     pool: &PgPool,
     table: &str,
@@ -305,6 +312,34 @@ pub async fn append_in(
     detail: Value,
 ) -> sqlx::Result<Entry> {
     check_table(table)?;
+    append_impl(pool, table, request_id, user_id, event, detail).await
+}
+
+/// First float found at any depth, as a path-free description.
+fn contains_float(v: &Value) -> bool {
+    match v {
+        Value::Number(n) => n.is_f64(),
+        Value::Array(a) => a.iter().any(contains_float),
+        Value::Object(m) => m.values().any(contains_float),
+        _ => false,
+    }
+}
+
+async fn append_impl(
+    pool: &PgPool,
+    table: &str,
+    request_id: Option<Uuid>,
+    user_id: Option<i64>,
+    event: Event,
+    detail: Value,
+) -> sqlx::Result<Entry> {
+    // Checked before taking the lock. `Encode` is the sqlx variant for "this value
+    // cannot be encoded for storage", which is exactly what a float in detail is.
+    if contains_float(&detail) {
+        return Err(sqlx::Error::Encode(
+            "audit detail must not contain floating-point numbers; use integers or strings".into(),
+        ));
+    }
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
         .bind(LOCK_NS_AUDIT)
@@ -353,11 +388,17 @@ pub async fn append_in(
 
 /// Newest-first.
 pub async fn recent(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Entry>> {
-    recent_in(pool, AUDIT_TABLE, limit).await
+    recent_impl(pool, AUDIT_TABLE, limit).await
 }
 
+/// Tests only.
+#[cfg(feature = "test-util")]
 pub async fn recent_in(pool: &PgPool, table: &str, limit: i64) -> sqlx::Result<Vec<Entry>> {
     check_table(table)?;
+    recent_impl(pool, table, limit).await
+}
+
+async fn recent_impl(pool: &PgPool, table: &str, limit: i64) -> sqlx::Result<Vec<Entry>> {
     let rows = sqlx::query(&format!(
         "SELECT {COLUMNS} FROM {table} ORDER BY seq DESC LIMIT $1"
     ))
@@ -371,11 +412,17 @@ pub async fn recent_in(pool: &PgPool, table: &str, limit: i64) -> sqlx::Result<V
 /// contiguous from 1; a gap is `Broken` at the first missing seq. Reads in
 /// keyset-paged batches so memory stays bounded.
 pub async fn verify_chain(pool: &PgPool) -> sqlx::Result<ChainStatus> {
-    verify_chain_in(pool, AUDIT_TABLE).await
+    verify_chain_impl(pool, AUDIT_TABLE).await
 }
 
+/// Tests only.
+#[cfg(feature = "test-util")]
 pub async fn verify_chain_in(pool: &PgPool, table: &str) -> sqlx::Result<ChainStatus> {
     check_table(table)?;
+    verify_chain_impl(pool, table).await
+}
+
+async fn verify_chain_impl(pool: &PgPool, table: &str) -> sqlx::Result<ChainStatus> {
     let sql = format!(
         "SELECT seq, at, request_id, user_id, event, detail, prev_hash, hash \
          FROM {table} WHERE seq > $1 ORDER BY seq LIMIT $2"

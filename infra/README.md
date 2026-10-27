@@ -162,5 +162,9 @@ and is not detectable by the chain alone. Periodically saving the latest `(seq, 
 somewhere the database owner cannot edit (an external checkpoint) would cover it. This
 is a follow-up, not built yet.
 
-The log never holds question text or identifiers: only finding kinds with byte offsets,
-lengths, a SHA-256 of accepted questions, verdicts, models, tokens and paise.
+The log never holds question text, patient identifiers, or model-generated text about
+the question. It records only finding kinds with byte offsets, lengths, a SHA-256 of
+accepted questions, verdicts, models, tokens and paise; the gate's reason is stored
+only for rule decisions (static text), never for model decisions. `detail` may not
+contain floating-point numbers (rejected on append). Follow-up: the question hash is
+unsalted; an HMAC with a server secret would be stronger.

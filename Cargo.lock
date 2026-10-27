@@ -1308,6 +1308,7 @@ dependencies = [
  "console_error_panic_hook",
  "hex",
  "http-body-util",
+ "incisive-app",
  "jsonwebtoken",
  "leptos",
  "leptos_axum",

@@ -401,6 +401,7 @@ async fn request_uses_gate_model_and_150_tokens() {
     assert!(body.get("tools").is_none());
     let system = body["system"].as_str().unwrap();
     assert!(system.contains(GATE_POLICY));
+    assert!(system.contains("In the reason, do not quote or repeat the question."));
     assert!(
         system.contains(r#"{"verdict":"medical|not_medical|unclear","reason":"<one sentence>"}"#)
     );
