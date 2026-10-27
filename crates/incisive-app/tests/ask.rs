@@ -1026,6 +1026,84 @@ async fn server_function_activity_is_403_for_non_owner_page_stays_200() {
     assert!(String::from_utf8_lossy(&body).contains("Only the Incisive owner"));
 }
 
+// ---------- same-origin check ----------
+
+fn post_with(path: &str, origin: Option<&str>, host: &str, email: &str) -> Request<Body> {
+    let mut b = Request::post(path)
+        .header("host", host)
+        .header("x-dev-user-email", email);
+    if let Some(o) = origin {
+        b = b.header("origin", o);
+    }
+    if path == "/api/ask" {
+        b.header("content-type", "application/json")
+            .body(Body::from(json!({ "question": " " }).to_string()))
+            .unwrap()
+    } else {
+        b.header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("question=+"))
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn cross_site_posts_are_refused_before_anything_else() {
+    // Unreachable database and a gate that panics: a 403 here proves nothing
+    // past the check ran (identity would need the database).
+    for path in ["/api/ask", "/api/fn/ask", "/api/fn/activity"] {
+        for origin in [
+            "https://evil.example",
+            "http://incisive.test:9999",
+            "http://incisive.test",
+            "http://evil.example:8080",
+            "null",
+            "not a url",
+        ] {
+            let st = state_with(unreachable_pool(), Arc::new(MustNotCall), true);
+            let req = post_with(path, Some(origin), "incisive.test:8080", "x@example.com");
+            let (s, b) = call(router(st), req).await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{path} {origin}");
+            assert_eq!(
+                b,
+                json!({"error": "cross_site", "message": "Request blocked: cross-site request."}),
+                "{path} {origin}"
+            );
+        }
+    }
+    // api_routes on its own is protected too.
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), true);
+    let req = post_with(
+        "/api/ask",
+        Some("https://evil.example"),
+        "incisive.test",
+        "x@example.com",
+    );
+    assert_eq!(call(api_routes(st), req).await.0, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn same_origin_and_missing_origin_are_allowed() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "origin", Role::Surgeon, 30_000).await;
+    for (origin, host) in [
+        (Some("http://incisive.test:8080"), "incisive.test:8080"),
+        (Some("https://Incisive.Test"), "incisive.test"),
+        (Some("https://incisive.test"), "incisive.test:443"),
+        (Some("http://incisive.test"), "incisive.test:80"),
+        // curl and server-side clients send no Origin.
+        (None, "incisive.test"),
+    ] {
+        for path in ["/api/ask", "/api/fn/ask"] {
+            let st = state_with(pool.clone(), Arc::new(MustNotCall), true);
+            let (s, b) = call(router(st), post_with(path, origin, host, &u.email)).await;
+            assert_eq!(s, StatusCode::OK, "{path} {origin:?} {host}: {b}");
+            assert_eq!(b["status"], "invalid_input", "{path} {origin:?}: {b}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn home_page_renders_question_box() {
     let st = state_with(unreachable_pool(), Arc::new(MustNotCall), false);

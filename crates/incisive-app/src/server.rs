@@ -86,6 +86,65 @@ pub fn install_panic_hook() {
     }));
 }
 
+pub const CROSS_SITE_MESSAGE: &str = "Request blocked: cross-site request.";
+
+/// Whether `origin` (an `Origin` header value) names the same host and port as
+/// `authority` (the request's `Host`). Ports default from the origin's scheme.
+fn same_origin(origin: &str, authority: &str) -> bool {
+    let Ok(o) = url::Url::parse(origin) else {
+        return false;
+    };
+    let (Some(o_host), Some(o_port)) = (o.host_str(), o.port_or_known_default()) else {
+        return false;
+    };
+    let Ok(a) = authority.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let a_port = a.port_u16().unwrap_or(o_port);
+    // url lowercases the host; IPv6 hosts keep their brackets in both.
+    o_host.eq_ignore_ascii_case(a.host()) && o_port == a_port
+}
+
+/// `POST /api/ask` and `POST /api/fn/*`: when an `Origin` header is present it
+/// must match the request's host and port, or the request is refused with 403
+/// before identity, audit or spend. A missing `Origin` is allowed (curl and
+/// server-side clients omit it).
+async fn same_origin_check(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{Method, StatusCode, header};
+    use axum::response::IntoResponse;
+    let path = req.uri().path();
+    let guarded =
+        req.method() == Method::POST && (path == "/api/ask" || path.starts_with("/api/fn/"));
+    if guarded && let Some(origin) = req.headers().get(header::ORIGIN) {
+        // HTTP/2 carries the host in the URI authority instead of a Host header.
+        let authority = req
+            .headers()
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| req.uri().authority().map(|a| a.to_string()));
+        let ok = match (origin.to_str(), authority) {
+            (Ok(o), Some(a)) => same_origin(o, &a),
+            _ => false,
+        };
+        if !ok {
+            tracing::warn!("cross-site request refused");
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "cross_site",
+                    "message": CROSS_SITE_MESSAGE,
+                })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// `GET /api/me`, `POST /api/ask`, `GET /api/activity`.
 pub fn api_routes(state: AppState) -> Router {
     Router::new()
@@ -95,6 +154,7 @@ pub fn api_routes(state: AppState) -> Router {
             post(ask_handler).layer(DefaultBodyLimit::max(ASK_BODY_LIMIT)),
         )
         .route("/api/activity", get(activity_handler))
+        .layer(axum::middleware::from_fn(same_origin_check))
         .with_state(state)
 }
 
@@ -120,6 +180,8 @@ pub fn build_router(
         // read the raw body, which axum's `DefaultBodyLimit` does not cover, so the
         // limit is enforced on the body itself (413 when exceeded).
         .layer(RequestBodyLimitLayer::new(ASK_BODY_LIMIT))
+        // Server functions read identity in the handler: refuse cross-site first.
+        .layer(axum::middleware::from_fn(same_origin_check))
         .with_state(leptos_options);
     health_routes(r)
         .merge(api_routes(state))
