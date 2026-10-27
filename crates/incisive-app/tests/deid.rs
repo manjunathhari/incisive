@@ -1,4 +1,4 @@
-use incisive_app::deid::{Finding, FindingKind as K, describe, scan};
+use incisive_app::deid::{Finding, FindingKind as K, describe, hint, scan};
 
 /// Distinct kinds found in `text`, in enum order.
 fn kinds(text: &str) -> Vec<K> {
@@ -256,6 +256,46 @@ const BLOCK: &[(&str, &[K])] = &[
     ("Pt. Name: RAMAKKA", &[K::PersonName]),
     ("Pt Name - Ramakka", &[K::PersonName]),
     ("Patient Name : RAMAKKA DEVI", &[K::PersonName]),
+    // Hidden and look-alike characters (R-F1: rejected, never normalised)
+    ("ph 98450\u{200B}12345", &[K::UnusualCharacters]),
+    ("ph 9845\u{AD}012345", &[K::UnusualCharacters]),
+    (
+        "ph \u{FF19}\u{FF18}\u{FF14}\u{FF15}\u{FF10}\u{FF11}\u{FF12}\u{FF13}\u{FF14}\u{FF15}",
+        &[K::UnusualCharacters],
+    ),
+    (
+        "Aadhaar 2345\u{200B}6789\u{200B}0123",
+        &[K::UnusualCharacters],
+    ),
+    ("Mrs\u{200B}. Lakshmi", &[K::UnusualCharacters]),
+    ("UHID\u{200B}: MH-2231", &[K::UnusualCharacters]),
+    ("DOB 12\u{2215}03\u{2215}1971", &[K::UnusualCharacters]),
+    // More of the same family
+    ("ph 98450\u{2060}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{FEFF}12345", &[K::UnusualCharacters]),
+    ("ph \u{202E}5432105489", &[K::UnusualCharacters]),
+    ("ph \u{0969}\u{0968}\u{0967}", &[K::UnusualCharacters]),
+    ("ph \u{0CEF}\u{0CEE}\u{0CEA}", &[K::UnusualCharacters]),
+    ("DOB 12\u{2044}03\u{2044}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{29F8}03\u{29F8}1971", &[K::UnusualCharacters]),
+    ("at 10\u{2236}30", &[K::UnusualCharacters]),
+    ("at 10\u{FE55}30", &[K::UnusualCharacters]),
+    ("at 10\u{FE13}30", &[K::UnusualCharacters]),
+    ("ph 98450\u{2012}12345", &[K::UnusualCharacters]),
+    ("DOB 12\u{2010}03\u{2010}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{2011}03\u{2011}1971", &[K::UnusualCharacters]),
+    ("ph 98450\u{2015}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2212}12345", &[K::UnusualCharacters]),
+    ("DOB 12\u{2027}03\u{2027}1971", &[K::UnusualCharacters]),
+    ("ph 98450\u{FF0D}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2079}2345", &[K::UnusualCharacters]),
+    (
+        "ph \u{2079}\u{2078}\u{2074}\u{2075}",
+        &[K::UnusualCharacters],
+    ),
+    // Ordinary en/em dashes between digits are handled by the phone and date rules.
+    ("ph 98450\u{2013}12345", &[K::Phone]),
+    ("DOB 12\u{2013}03\u{2013}1971", &[K::CalendarDate]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -524,6 +564,33 @@ const PASS: &[&str] = &[
     "w/o Recurrence, 10 years later",
     "c/o Backache, 10 yrs",
     "Biopsy s/o Signet Ring Cell Carcinoma",
+    // --- final fix wave: ordinary Unicode in clinical text
+    "Crohn\u{2019}s disease",
+    "5 \u{B5}g fentanyl",
+    "37.5 \u{B0}C fever",
+    "\u{2265} 2 cm margin",
+    "\u{2264} 5 mm",
+    "\u{3B2}-blocker",
+    "caf\u{E9}-au-lait spots",
+    "BMI 32 kg/m\u{B2}",
+    "BSA 1.8 m\u{B2}, 4 cm\u{B3}",
+    "platelets 150 \u{D7}10\u{2079}/L",
+    "RBC 4.5 \u{D7}10\u{B9}\u{B2}/L",
+    "1\u{BD} hours",
+    "\u{BD} tablet",
+    "mean 12 \u{B1} 3",
+    "HbA1c 7.2 %, SpO\u{2082} 94%",
+    "ICG in robotic low anterior resection \u{2014} evidence for leak?",
+    "dose 5\u{2013}10 mg",
+    "temperature \u{2212}2 \u{B0}C",
+    "\u{3B2}\u{2010}blocker",
+    "mild \u{2010} moderate",
+    "pain \u{2015} worse",
+    "\u{201C}leak\u{201D} \u{2026} \u{2018}rates\u{2019}",
+    "\u{2022} item one",
+    "\u{2192} next step",
+    "Ki\u{2011}67 index",
+    "\u{0930}\u{094B}\u{0917}\u{0940} 52 \u{0935}\u{0930}\u{094D}\u{0937}",
 ];
 
 #[test]
@@ -638,10 +705,86 @@ fn every_kind_has_a_label() {
         K::HospitalId,
         K::PersonName,
         K::Address,
+        K::UnusualCharacters,
     ] {
         assert!(!describe(k).is_empty());
     }
     assert_eq!(describe(K::Phone), "phone number");
+    assert_eq!(
+        describe(K::UnusualCharacters),
+        "hidden or unusual characters"
+    );
+    assert_eq!(
+        hint(K::UnusualCharacters),
+        Some("please retype the question without copy-pasted special characters")
+    );
+    assert_eq!(hint(K::Phone), None);
+    assert_eq!(
+        serde_json::to_string(&K::UnusualCharacters).unwrap(),
+        "\"unusual_characters\""
+    );
+}
+
+#[test]
+fn unusual_characters_flag_each_maximal_run() {
+    let t = "ph 98450\u{200B}\u{200C}\u{200D}12345 and 9845\u{AD}012345";
+    let f = scan(t);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert!(f.iter().all(|f| f.kind == K::UnusualCharacters));
+    assert_eq!(&t[f[0].start..f[0].end], "\u{200B}\u{200C}\u{200D}");
+    assert_eq!(&t[f[1].start..f[1].end], "\u{AD}");
+    // A full-width run is one finding over the whole run.
+    let t = "ph \u{FF19}\u{FF18}\u{FF14} ok";
+    let f = scan(t);
+    assert_eq!(f.len(), 1);
+    assert_eq!(&t[f[0].start..f[0].end], "\u{FF19}\u{FF18}\u{FF14}");
+    // A look-alike dash is flagged only between digits.
+    let t = "12\u{2010}03";
+    let f = scan(t);
+    assert_eq!(f.len(), 1);
+    assert_eq!(&t[f[0].start..f[0].end], "\u{2010}");
+}
+
+#[test]
+fn every_format_character_is_flagged() {
+    // Every Unicode format (Cf) character, not a hand-picked list.
+    for c in [
+        '\u{AD}',
+        '\u{600}',
+        '\u{61C}',
+        '\u{6DD}',
+        '\u{70F}',
+        '\u{180E}',
+        '\u{200B}',
+        '\u{200C}',
+        '\u{200D}',
+        '\u{200E}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202B}',
+        '\u{202C}',
+        '\u{202D}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{2061}',
+        '\u{2062}',
+        '\u{2063}',
+        '\u{2064}',
+        '\u{2066}',
+        '\u{2069}',
+        '\u{206F}',
+        '\u{FEFF}',
+        '\u{FFF9}',
+        '\u{FFFB}',
+        '\u{110BD}',
+        '\u{1D173}',
+        '\u{E0001}',
+        '\u{E0041}',
+        '\u{E007F}',
+    ] {
+        let t = format!("a{c}b");
+        assert_eq!(kinds(&t), [K::UnusualCharacters], "U+{:04X}", c as u32);
+    }
 }
 
 #[test]

@@ -276,6 +276,46 @@ async fn identifiers_blocked_before_gate() {
 }
 
 #[tokio::test]
+async fn hidden_characters_blocked_before_gate() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "zwsp", Role::Surgeon, 30_000).await;
+    let gate = Fixed::verdict(Verdict::Medical, "would accept");
+    let app = api_routes(state_with(pool.clone(), gate.clone(), true));
+    let q = "robotic LAR leak? ph 98450\u{200B}12345";
+    let (s, b) = call(app, ask_req(&u.email, q)).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["status"], "blocked_identifiers", "{b}");
+    assert_eq!(
+        gate.calls.load(Ordering::SeqCst),
+        0,
+        "classifier never called"
+    );
+    let f = &b["findings"][0];
+    assert_eq!(f["kind"], "unusual_characters");
+    assert_eq!(f["label"], "hidden or unusual characters");
+    let start = q.find('\u{200B}').unwrap();
+    assert_eq!(
+        (f["start"].as_u64(), f["end"].as_u64()),
+        (Some(start as u64), Some(start as u64 + 3))
+    );
+    assert_eq!(
+        b["message"],
+        "Incisive found details that could identify a patient. Please remove them and resend \
+         your question. Please retype the question without copy-pasted special characters."
+    );
+    let rows = audit_for(&pool, u.id).await;
+    assert_eq!(events(&rows), ["deid_blocked"]);
+    assert_eq!(
+        rows[0].2,
+        json!({"findings": [{"kind": "unusual_characters", "start_byte": start, "end_byte": start + 3}],
+               "question_len": q.len()})
+    );
+    assert!(spend_for(&pool, u.id).await.is_empty(), "no reservation");
+}
+
+#[tokio::test]
 async fn non_medical_refused_and_audited() {
     let Some(pool) = test_pool().await else {
         return;

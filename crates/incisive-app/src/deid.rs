@@ -40,7 +40,13 @@
 //!   (allowlisted given names always; clinical words never). It does not block after a
 //!   non-person qualifier ("Brand name:", "Drug name:", "Trial name:"), for a placeholder
 //!   value ("Name: Unknown"), or without a separator ("NAME OF SURGERY: ...").
-//! - Digits are ASCII only; Devanagari-digit numbers are not scanned.
+//! - Digits are ASCII only. Any other numeral (Devanagari, Kannada, full-width ...),
+//!   any Unicode format character (zero-width space, soft hyphen, bidi controls ...),
+//!   anything in the Halfwidth/Fullwidth Forms block and look-alike separators are
+//!   blocked as `UnusualCharacters` (rejected, never normalised). Exceptions: a short
+//!   superscript/subscript unit mark ("kg/m\u{B2}", "\u{D7}10\u{2079}/L", "SpO\u{2082}"), one
+//!   vulgar fraction, and look-alike dashes that are not between two digits.
+//!   Zero-width joiners used in some Indic scripts are therefore blocked too.
 //! - Unicode spaces (NBSP, narrow NBSP, thin space), en/em dashes and the
 //!   full-width `@` are accepted as separators; offsets stay on the original text.
 
@@ -59,6 +65,9 @@ pub enum FindingKind {
     HospitalId,
     PersonName,
     Address,
+    /// Hidden (format) characters, non-ASCII numerals, full-width forms or
+    /// look-alike separators. Rejected, never normalised (ruling R-F1).
+    UnusualCharacters,
 }
 
 /// A blocked span. `start`/`end` are byte offsets into the scanned `&str`.
@@ -80,6 +89,17 @@ pub fn describe(kind: FindingKind) -> &'static str {
         FindingKind::HospitalId => "hospital or patient ID",
         FindingKind::PersonName => "person's name",
         FindingKind::Address => "street address or PIN code",
+        FindingKind::UnusualCharacters => "hidden or unusual characters",
+    }
+}
+
+/// Extra advice for the user, for kinds where removing the span is not enough.
+pub fn hint(kind: FindingKind) -> Option<&'static str> {
+    match kind {
+        FindingKind::UnusualCharacters => {
+            Some("please retype the question without copy-pasted special characters")
+        }
+        _ => None,
     }
 }
 
@@ -2170,10 +2190,127 @@ fn run_rule(r: &Rule, text: &str, ctx: &[Finding], out: &mut Vec<Finding>) {
     }
 }
 
+// ---------- hidden and look-alike characters ----------
+
+/// Unicode general category Cf (format), from the regex crate's Unicode tables.
+static FORMAT_CHAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{Cf}$").expect("Cf pattern compiles"));
+
+fn is_format(c: char) -> bool {
+    let mut buf = [0u8; 4];
+    FORMAT_CHAR.is_match(c.encode_utf8(&mut buf))
+}
+
+/// Look-alike slashes, colons and dots: flagged wherever they appear.
+fn lookalike_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2215}' | '\u{2044}' | '\u{29F8}' | '\u{2236}' | '\u{FE55}' | '\u{FE13}' | '\u{2027}'
+    )
+}
+
+/// Look-alike dashes, flagged only between two digits. En and em dashes
+/// (U+2013, U+2014) are left out: the phone and date rules already accept them
+/// as separators, and "65000\u{2013}80000" style ranges must pass.
+fn lookalike_dash(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2015}' | '\u{2212}'
+    )
+}
+
+/// Superscript and subscript digits (as in "kg/m\u{B2}", "\u{D7}10\u{2079}/L", "SpO\u{2082}").
+fn script_digit(c: char) -> bool {
+    matches!(c, '\u{B2}' | '\u{B3}' | '\u{B9}' | '\u{2070}'..='\u{2079}' | '\u{2080}'..='\u{2089}')
+}
+
+/// Vulgar fractions ("1\u{BD} hours").
+fn vulgar_fraction(c: char) -> bool {
+    matches!(c, '\u{BC}'..='\u{BE}' | '\u{2150}'..='\u{215F}' | '\u{2189}')
+}
+
+fn odd_numeral(c: char) -> bool {
+    c.is_numeric() && !c.is_ascii_digit()
+}
+
+/// A short run of non-ASCII numerals that reads as a unit or an exponent, not
+/// as digits of a number: one or two superscript/subscript digits after a letter,
+/// a closing bracket, a superscript sign or an exact "10" ("m\u{B2}",
+/// "\u{D7}10\u{B9}\u{B2}/L", "SpO\u{2082}"), or one vulgar fraction. Never when
+/// another digit follows, so "98450\u{2079}2345" is still flagged.
+fn unit_mark(text: &str, start: usize, end: usize) -> bool {
+    let run: Vec<char> = text[start..end].chars().collect();
+    if run.len() > 2 || text[end..].chars().next().is_some_and(|c| c.is_numeric()) {
+        return false;
+    }
+    let before = &text[..start];
+    if run.iter().all(|&c| script_digit(c)) {
+        let prev = before.chars().next_back();
+        let exponent = before
+            .strip_suffix("10")
+            .is_some_and(|b| !b.chars().next_back().is_some_and(|c| c.is_numeric()));
+        return exponent
+            || prev
+                .is_some_and(|c| c.is_alphabetic() || matches!(c, ')' | '\u{207A}' | '\u{207B}'));
+    }
+    run.len() == 1
+        && vulgar_fraction(run[0])
+        && !before.chars().next_back().is_some_and(odd_numeral)
+}
+
+/// Every maximal run of hidden or look-alike characters (ruling R-F1: such text
+/// is rejected, never normalised, so nothing can slip past the rules above):
+/// (a) Unicode format characters (Cf: zero-width, soft hyphen, word joiner, BOM,
+/// bidi controls ...); (b) numerals other than ASCII 0-9 (full-width, Devanagari,
+/// Kannada ...), except a short unit mark (see [`unit_mark`]); (c) the
+/// Halfwidth and Fullwidth Forms block; (d) look-alike separators, and look-alike
+/// dashes between digits.
+fn unusual_characters(text: &str) -> Vec<Finding> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let flagged = |i: usize| -> bool {
+        let c = chars[i].1;
+        if is_format(c) || lookalike_separator(c) || ('\u{FF00}'..='\u{FFEF}').contains(&c) {
+            return true;
+        }
+        if lookalike_dash(c) {
+            let digit = |j: Option<usize>| {
+                j.and_then(|j| chars.get(j))
+                    .is_some_and(|(_, c)| c.is_numeric())
+            };
+            return digit(i.checked_sub(1)) && digit(Some(i + 1));
+        }
+        odd_numeral(c)
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !flagged(i) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < chars.len() && flagged(j) {
+            j += 1;
+        }
+        let start = chars[i].0;
+        let end = chars.get(j).map_or(text.len(), |(b, _)| *b);
+        let all_numerals = text[start..end].chars().all(odd_numeral);
+        if !(all_numerals && unit_mark(text, start, end)) {
+            out.push(Finding {
+                kind: FindingKind::UnusualCharacters,
+                start,
+                end,
+            });
+        }
+        i = j;
+    }
+    out
+}
+
 /// Scan `text` for patient identifiers. Findings are sorted by `start`;
 /// overlapping findings are merged into one (kind of the earliest/longest).
 pub fn scan(text: &str) -> Vec<Finding> {
-    let mut found: Vec<Finding> = Vec::new();
+    let mut found: Vec<Finding> = unusual_characters(text);
     for r in RULES.iter().filter(|r| !r.deferred) {
         run_rule(r, text, &[], &mut found);
     }

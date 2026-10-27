@@ -167,6 +167,26 @@ mod server {
             })
     }
 
+    /// The red-box message, plus each distinct kind's extra hint as a sentence.
+    fn blocked_message(findings: &[FindingView]) -> String {
+        let mut message = BLOCKED_MESSAGE.to_string();
+        let mut seen: Vec<&str> = Vec::new();
+        for h in findings.iter().filter_map(|f| deid::hint(f.kind)) {
+            if seen.contains(&h) {
+                continue;
+            }
+            seen.push(h);
+            let mut chars = h.chars();
+            if let Some(first) = chars.next() {
+                message.push(' ');
+                message.extend(first.to_uppercase());
+                message.push_str(chars.as_str());
+                message.push('.');
+            }
+        }
+        message
+    }
+
     /// Best effort: turn an open reservation into a zero charge.
     async fn release(state: &AppState, user_id: i64, request_id: Uuid) {
         if spend::settle(&state.pool, user_id, request_id, None, None, 0)
@@ -211,7 +231,7 @@ mod server {
                 audit::deid_blocked_detail(&findings, question.len()),
             )
             .await?;
-            let findings = findings
+            let findings: Vec<FindingView> = findings
                 .iter()
                 .map(|f| FindingView {
                     kind: f.kind,
@@ -221,8 +241,8 @@ mod server {
                 })
                 .collect();
             return Ok(AskOutcome::BlockedIdentifiers {
+                message: blocked_message(&findings),
                 findings,
-                message: BLOCKED_MESSAGE.to_string(),
             });
         }
 
