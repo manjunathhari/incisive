@@ -18,7 +18,7 @@ A running record of the Phase 2 build, updated after every stage.
 | E. Quick, production, proof | 14–15 + review | ⬜ not started |
 
 ## Decisions made before the build
-1. **Test data for the literature sources is hand-written.** This build environment can't reach PubMed, Europe PMC or Unpaywall, so the saved sample responses the tests use are written by hand from each service's documented format. The Stage E live check runs against the real services. If you allow those three sites in claude.ai → Settings → Capabilities, I'll record real responses instead. *Cost if wrong:* a quirk in a real response would only show up at the live check.
+1. **Test data for the literature sources is recorded from the real services.** You allowed PubMed, Europe PMC and Unpaywall in Settings (23:05 IST), so the saved sample responses the tests use come from the live services. Europe PMC was briefly down on its own side when I checked; if it stays down, I will write its sample by hand from the documented format and replace it later.
 2. **The activity log keeps recording "Accepted"** when the gate approves a question, and then adds "Run started". *Cost:* one extra log row per question.
 3. **This log** lives in the repo and is mirrored to the Project as *incisive-phase2-build-log*.
 
