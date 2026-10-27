@@ -321,7 +321,7 @@ These are the decisions I took on your behalf during the build. Each is recorded
 - **Pre-flight:** 8 rulings (top of this log).
 - **Stage A:** library backend, temporary `/api/me`, owner limits not overwritten, `APP_ENV` required, sign-in rejections audited later.
 - **Stage B:**
-  - month-year allowed (**your decision pending**)
+  - month-year allowed (you chose to leave this open for now)
   - "s/o" / "d/o" + name always blocks
   - bare "c/o" / "w/o" pass
   - one extra fix past the review cap for privacy leaks
