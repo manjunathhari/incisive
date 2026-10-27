@@ -274,7 +274,8 @@ fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
             .into_any()
         }
         Ok(
-            AskOutcome::NotMedical { message }
+            AskOutcome::InvalidInput { message }
+            | AskOutcome::NotMedical { message }
             | AskOutcome::Unclear { message }
             | AskOutcome::OverCap { message }
             | AskOutcome::GateUnavailable { message },

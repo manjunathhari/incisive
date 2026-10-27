@@ -748,7 +748,7 @@ async fn empty_and_oversized_questions_rejected_before_anything_else() {
     for q in ["", "   \n\t  "] {
         assert_eq!(
             run_ask(&st, &user, q).await,
-            Ok(AskOutcome::Unclear {
+            Ok(AskOutcome::InvalidInput {
                 message: "Please type your clinical question.".into()
             }),
             "{q:?}"
@@ -758,7 +758,7 @@ async fn empty_and_oversized_questions_rejected_before_anything_else() {
     let long = format!("Mrs. Lakshmi ph 9845012345 {}", "é".repeat(4_000));
     assert_eq!(
         run_ask(&st, &user, &long).await,
-        Ok(AskOutcome::NotMedical {
+        Ok(AskOutcome::InvalidInput {
             message:
                 "That question is too long for Incisive (4,000 characters max). Please shorten it."
                     .into()
@@ -779,9 +779,12 @@ async fn empty_question_is_not_audited_or_charged() {
     let u = make_user(&pool, "empty", Role::Surgeon, 30_000).await;
     let app = || api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true));
     let (_, b) = call(app(), ask_req(&u.email, "  ")).await;
-    assert_eq!(b["status"], "unclear");
+    assert_eq!(
+        b,
+        json!({"status": "invalid_input", "message": "Please type your clinical question."})
+    );
     let (_, b) = call(app(), ask_req(&u.email, &"a".repeat(4_001))).await;
-    assert_eq!(b["status"], "not_medical");
+    assert_eq!(b["status"], "invalid_input");
     assert!(audit_for(&pool, u.id).await.is_empty());
     assert!(spend_for(&pool, u.id).await.is_empty());
 }

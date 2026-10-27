@@ -43,6 +43,10 @@ pub struct FindingView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AskOutcome {
+    /// Empty or over-length question, refused before any check runs.
+    InvalidInput {
+        message: String,
+    },
     BlockedIdentifiers {
         findings: Vec<FindingView>,
         message: String,
@@ -202,12 +206,12 @@ mod server {
         // 0. Input limits, before anything else: no scan, audit, reservation or
         // gate. Nothing about the content is decided and the text goes nowhere.
         if question.trim().is_empty() {
-            return Ok(AskOutcome::Unclear {
+            return Ok(AskOutcome::InvalidInput {
                 message: EMPTY_MESSAGE.to_string(),
             });
         }
         if question.chars().count() > MAX_QUESTION_CHARS {
-            return Ok(AskOutcome::NotMedical {
+            return Ok(AskOutcome::InvalidInput {
                 message: TOO_LONG_MESSAGE.to_string(),
             });
         }
