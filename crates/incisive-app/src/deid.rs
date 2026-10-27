@@ -27,9 +27,19 @@
 //!   block with a title, an age/sex marker after the name ("56M", "aged 56", "56 yrs/M";
 //!   a bare duration such as "20 years" is not an age), or a second name-candidate word.
 //!   `c/o` and `w/o` also block with a comma age ("c/o Puttaswamy, 56 yrs") unless a
-//!   duration word follows. `s/o`, `d/o`, "son of", "wife of" + a name candidate always
-//!   block, unless a clinical phrase follows (clinical words ending in a head noun, no
-//!   label colon: "s/o Sebaceous Cyst"; not "S/O MUNIYAPPA OCCUPATION: ...").
+//!   duration word follows; "56 years of age" and "56 years, history of ..." are ages,
+//!   "12 years of history" is not. `s/o`, `d/o`, "son of", "wife of" + a name candidate
+//!   always block, unless a clinical phrase follows (clinical words ending in a head
+//!   noun, no label colon: "s/o Sebaceous Cyst"; not "S/O MUNIYAPPA OCCUPATION: ...").
+//!   A field label (Diagnosis, Prognosis, Occupation, Admission, Religion, Residence,
+//!   Address, Impression, Findings, Provisional, Final, Diagnosed) or a connective
+//!   (With, Without, And, For) before the head noun stops the walk as NOT exempt, colon
+//!   or not ("S/O MUNIYAPPA DIAGNOSIS HERNIA", "S/O MUNIYAPPA WITH INGUINAL HERNIA").
+//! - A "Name" label ("Name", "NAME", "Patient Name", "Pt. Name", any case, optional space
+//!   before ":" or "-") blocks a Title-case or ALL-CAPS value that is a name candidate
+//!   (allowlisted given names always; clinical words never). It does not block after a
+//!   non-person qualifier ("Brand name:", "Drug name:", "Trial name:"), for a placeholder
+//!   value ("Name: Unknown"), or without a separator ("NAME OF SURGERY: ...").
 //! - Digits are ASCII only; Devanagari-digit numbers are not scanned.
 //! - Unicode spaces (NBSP, narrow NBSP, thin space), en/em dashes and the
 //!   full-width `@` are accepted as separators; offsets stay on the original text.
@@ -922,9 +932,100 @@ fn name_check_titled(text: &str, c: &Captures, _: &[Finding]) -> bool {
     true
 }
 
-fn name_check_context(_: &str, c: &Captures, _: &[Finding]) -> bool {
+fn name_check_context(text: &str, c: &Captures, _: &[Finding]) -> bool {
     let w = word_key(c.name("name").map_or("", |m| m.as_str()));
+    let (s, _) = span(c);
+    let is_name_label = text[s..]
+        .get(..4)
+        .is_some_and(|l| l.eq_ignore_ascii_case("name"));
+    if is_name_label && !name_label_ok(text, s, &w) {
+        return false;
+    }
     name_candidate(&w)
+}
+
+/// Words that make a following "name:" label a non-person field ("Brand name:",
+/// "Drug name:", "Trial name:", "Procedure name:").
+const NON_PERSON_NAME_QUALIFIERS: &[&str] = &[
+    "brand",
+    "drug",
+    "trade",
+    "generic",
+    "proprietary",
+    "trial",
+    "study",
+    "device",
+    "product",
+    "implant",
+    "mesh",
+    "instrument",
+    "stapler",
+    "suture",
+    "procedure",
+    "surgery",
+    "operation",
+    "test",
+    "investigation",
+    "medicine",
+    "medication",
+    "molecule",
+    "compound",
+    "vaccine",
+    "antibiotic",
+    "scheme",
+    "programme",
+    "program",
+    "protocol",
+    "file",
+    "kit",
+    "score",
+    "scale",
+    "classification",
+    "technique",
+    "disease",
+    "diagnosis",
+    "syndrome",
+    "gene",
+    "organism",
+    "software",
+    "journal",
+];
+
+/// Placeholder values after a name label, not a person ("Name: Unknown").
+const NAME_PLACEHOLDERS: &[&str] = &[
+    "unknown",
+    "withheld",
+    "anonymous",
+    "anonymised",
+    "anonymized",
+    "redacted",
+    "nil",
+    "none",
+    "not",
+];
+
+/// A "name" label starting at `s` names a person unless a non-person qualifier word
+/// directly precedes it on the same line, or its value `k` is a placeholder.
+fn name_label_ok(text: &str, s: usize, k: &str) -> bool {
+    if NAME_PLACEHOLDERS.contains(&k) {
+        return false;
+    }
+    let line = &text[..s];
+    let line = &line[line.rfind('\n').map_or(0, |i| i + 1)..];
+    let prev = line
+        .trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+        .rsplit(|c: char| !c.is_alphabetic())
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    !NON_PERSON_NAME_QUALIFIERS.contains(&prev.as_str())
+}
+
+/// Case-insensitive "Name:" / "PATIENT NAME -" label with a Title-case or ALL-CAPS value.
+fn name_check_label(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let w = word_key(c.name("name").map_or("", |m| m.as_str()));
+    let s = c.name("label").map_or(0, |m| m.start());
+    name_label_ok(text, s, &w) && name_candidate(&w)
 }
 
 /// Suffixes that make a word a diagnosis/procedure/finding, never a name.
@@ -1263,6 +1364,10 @@ const CLINICAL_WORDS: &[&str] = &[
     "findings",
     "impression",
     "annular",
+    "recurrence",
+    "backache",
+    "signet",
+    "ring",
     // organs and further adjectives
     "stomach",
     "oesophagus",
@@ -1446,14 +1551,37 @@ fn exemption_head(k: &str) -> bool {
         || (strong_medical(k) && !k.ends_with("ation") && !LABEL_STOP.contains(&k))
 }
 
+/// Words that end the `s/o` walk as NOT exempt, colon or not: case-sheet field labels
+/// ("S/O MUNIYAPPA DIAGNOSIS HERNIA", "IMPRESSION ...") and connectives that come before
+/// any head noun ("S/O MUNIYAPPA WITH INGUINAL HERNIA").
+fn walk_stop(k: &str) -> bool {
+    LABEL_STOP.contains(&k)
+        || matches!(
+            k,
+            "impression"
+                | "findings"
+                | "provisional"
+                | "final"
+                | "diagnosed"
+                | "with"
+                | "without"
+                | "and"
+                | "for"
+        )
+}
+
 /// True when the run of capitalised words after the first relation word is a clinical
-/// phrase: clinical words ending in a head noun, with no label colon. Walked in order.
+/// phrase: clinical words ending in a head noun, with no label colon and no label or
+/// connective word before the head noun. Walked in order.
 fn diagnosis_phrase(run: &[(&str, bool)]) -> bool {
     for &(w, colon) in run {
         if colon {
             return false;
         }
         let k = word_key(w);
+        if walk_stop(&k) {
+            return false;
+        }
         if exemption_head(&k) {
             return true;
         }
@@ -1469,21 +1597,28 @@ static COMMA_AGE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// "c/o Puttaswamy, 56 yrs": a comma then an age, unless a duration word follows
-/// ("c/o Swelling, 10 years duration", "15 years back").
+/// ("c/o Swelling, 10 years duration", "15 years back"). "56 years of age" is an age;
+/// "12 years of history" is not. "56 years, history of ..." (comma before "history")
+/// is an age: the caller has already required the first word to be a name candidate.
 fn comma_age_follows(rest: &str) -> bool {
     let Some(m) = COMMA_AGE.find(rest) else {
         return false;
     };
-    let next: String = rest[m.end()..]
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .chars()
-        .take_while(|c| c.is_alphabetic())
-        .collect::<String>()
-        .to_lowercase();
-    !matches!(
-        next.as_str(),
-        "ago" | "back" | "before" | "since" | "duration" | "of" | "history"
-    )
+    let after = &rest[m.end()..];
+    let tail = after.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let word = |t: &str| -> String {
+        t.chars()
+            .take_while(|c| c.is_alphabetic())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let next = word(tail);
+    match next.as_str() {
+        "of" => word(tail[2..].trim_start()) == "age",
+        "history" => after[..after.len() - tail.len()].contains(','),
+        "ago" | "back" | "before" | "since" | "duration" => false,
+        _ => true,
+    }
 }
 
 fn not_name(k: &str) -> bool {
@@ -1946,6 +2081,13 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             PersonName,
             r"\b(?:[Pp]atient|[Pp]t|[Nn]ame|named|called)\b\.?(?:\s*[:,]\s*|\s+[\-\x{2013}\x{2014}]\s*|\s*[\x{2013}\x{2014}]\s+|\s+)(?:(?:is|was)\s+)?(?P<name>[A-Z][a-z]+)\b",
             name_check_context,
+        )
+        .names(2),
+        // Names: case-insensitive name label ("NAME: RAMAKKA", "Pt. Name - Ramakka").
+        rule(
+            PersonName,
+            r"(?i:\b(?:(?:patient|pt)\.?[ \t]*)?(?P<label>name))[ \t]*[:\-\x{2013}\x{2014}][ \t]*(?P<name>[A-Z][a-z]+|[A-Z]{2,})\b",
+            name_check_label,
         )
         .names(2),
         // Relations: s/o, w/o, d/o, c/o + name.

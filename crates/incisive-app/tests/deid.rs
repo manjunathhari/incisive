@@ -218,6 +218,44 @@ const BLOCK: &[(&str, &[K])] = &[
     ("Pt Soma, 45F", &[K::PersonName]),
     ("Patient Roma Devi", &[K::PersonName]),
     ("Name: Nancy Thomas", &[K::PersonName]),
+    // --- fix round 6: label words stop the s/o walk
+    (
+        "s/o Thimmaiah Diagnosis Acute Appendicitis",
+        &[K::PersonName],
+    ),
+    ("S/O MUNIYAPPA DIAGNOSIS INGUINAL HERNIA", &[K::PersonName]),
+    ("s/o Muniyappa Diagnosis Hernia", &[K::PersonName]),
+    (
+        "S/O MUNIYAPPA IMPRESSION ACUTE APPENDICITIS",
+        &[K::PersonName],
+    ),
+    (
+        "Wife of Chandrashekar Diagnosis Carcinoma",
+        &[K::PersonName],
+    ),
+    (
+        "D/O Venkatappa Diagnosis Carcinoma Breast",
+        &[K::PersonName],
+    ),
+    ("S/O MUNIYAPPA WITH INGUINAL HERNIA", &[K::PersonName]),
+    // years of age
+    ("c/o Puttaswamy, 56 years of age", &[K::PersonName]),
+    ("W/O MUNIRAJU, 54 years of age", &[K::PersonName]),
+    (
+        "c/o Puttaswamy , 56 years, history of hernia",
+        &[K::PersonName],
+    ),
+    // case-insensitive name label
+    ("NAME: RAMAKKA", &[K::PersonName]),
+    ("Name: RAMAKKA", &[K::PersonName]),
+    ("NAME: Ramakka", &[K::PersonName]),
+    ("NAME : RAMAKKA", &[K::PersonName]),
+    ("PATIENT NAME: RAMAKKA", &[K::PersonName]),
+    ("NAME: RAMESH", &[K::PersonName]),
+    ("NAME: RAMAKKA AGE/SEX: 45/F", &[K::PersonName]),
+    ("Pt. Name: RAMAKKA", &[K::PersonName]),
+    ("Pt Name - Ramakka", &[K::PersonName]),
+    ("Patient Name : RAMAKKA DEVI", &[K::PersonName]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -464,6 +502,28 @@ const PASS: &[&str] = &[
     "c/o Heartburn, 15 years back",
     "h/o Epilepsy, 12 yrs",
     "CT s/o Annular Pancreas",
+    // --- fix round 6
+    "s/o Sigmoid Diverticulitis with pericolic abscess",
+    "USG s/o Acute Calculous Cholecystitis with GB wall edema",
+    "s/o Desmoid Tumour of anterior abdominal wall",
+    "c/o Dyspepsia, 12 years of history",
+    "c/o Pain, 2 months of duration",
+    "Name of the procedure: Whipple",
+    "NAME OF SURGERY: LAP CHOLECYSTECTOMY",
+    "Brand name: Prolene mesh",
+    "Drug name: Tranexamic acid",
+    "Trial name: ROLARR",
+    "Procedure name: Whipple",
+    "PROCEDURE NAME: LAP CHOLECYSTECTOMY",
+    "Generic name: Paracetamol",
+    "Trade Name: Ultrapro",
+    "Device name: Stapler",
+    "Study Name: ROLARR",
+    "Name: Unknown",
+    "PATIENT NAME: WITHHELD",
+    "w/o Recurrence, 10 years later",
+    "c/o Backache, 10 yrs",
+    "Biopsy s/o Signet Ring Cell Carcinoma",
 ];
 
 #[test]
@@ -619,6 +679,8 @@ fn name_spans_cover_the_whole_name() {
         ("Name: Kunal Shah", "Name: Kunal Shah"),
         ("seen s/o Gopal Krishna today", "s/o Gopal Krishna"),
         ("Mrs. Lakshmi UHID 4421", "Mrs. Lakshmi"),
+        ("NAME: RAMAKKA AGE/SEX: 45/F", "NAME: RAMAKKA"),
+        ("PATIENT NAME: RAMAKKA", "PATIENT NAME: RAMAKKA"),
     ] {
         let f = scan(t);
         assert_eq!(&t[f[0].start..f[0].end], want, "{t}");
@@ -747,6 +809,56 @@ const ROUND4_PROBES: &[(&str, &[K])] = &[
     ("c/o Heartburn, 15 years back", &[]),
     ("h/o Epilepsy, 12 yrs", &[]),
     ("CT s/o Annular Pancreas", &[]),
+    // --- round 6 probes
+    (
+        "s/o Thimmaiah Diagnosis Acute Appendicitis",
+        &[K::PersonName],
+    ),
+    ("S/O MUNIYAPPA DIAGNOSIS INGUINAL HERNIA", &[K::PersonName]),
+    ("s/o Muniyappa Diagnosis Hernia", &[K::PersonName]),
+    (
+        "S/O MUNIYAPPA IMPRESSION ACUTE APPENDICITIS",
+        &[K::PersonName],
+    ),
+    (
+        "Wife of Chandrashekar Diagnosis Carcinoma",
+        &[K::PersonName],
+    ),
+    (
+        "D/O Venkatappa Diagnosis Carcinoma Breast",
+        &[K::PersonName],
+    ),
+    ("S/O MUNIYAPPA WITH INGUINAL HERNIA", &[K::PersonName]),
+    ("Impression: s/o Acute Appendicitis", &[]),
+    ("s/o Sigmoid Diverticulitis with pericolic abscess", &[]),
+    (
+        "USG s/o Acute Calculous Cholecystitis with GB wall edema",
+        &[],
+    ),
+    ("s/o Desmoid Tumour of anterior abdominal wall", &[]),
+    ("c/o Puttaswamy, 56 years of age", &[K::PersonName]),
+    ("W/O MUNIRAJU, 54 years of age", &[K::PersonName]),
+    (
+        "c/o Puttaswamy , 56 years, history of hernia",
+        &[K::PersonName],
+    ),
+    ("c/o Dyspepsia, 12 years of history", &[]),
+    ("c/o Pain, 2 months of duration", &[]),
+    ("NAME: RAMAKKA", &[K::PersonName]),
+    ("Name: RAMAKKA", &[K::PersonName]),
+    ("NAME: Ramakka", &[K::PersonName]),
+    ("NAME : RAMAKKA", &[K::PersonName]),
+    ("PATIENT NAME: RAMAKKA", &[K::PersonName]),
+    ("NAME: RAMESH", &[K::PersonName]),
+    ("NAME: RAMAKKA AGE/SEX: 45/F", &[K::PersonName]),
+    ("Name of the procedure: Whipple", &[]),
+    ("NAME OF SURGERY: LAP CHOLECYSTECTOMY", &[]),
+    ("Brand name: Prolene mesh", &[]),
+    ("Drug name: Tranexamic acid", &[]),
+    ("Trial name: ROLARR", &[]),
+    ("w/o Recurrence, 10 years later", &[]),
+    ("c/o Backache, 10 yrs", &[]),
+    ("Biopsy s/o Signet Ring Cell Carcinoma", &[]),
 ];
 
 #[test]
