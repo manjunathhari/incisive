@@ -35,6 +35,44 @@
 
 ---
 
+## Build process (owner requirement, 27 Oct 2026)
+
+Execution: subagent-driven (fresh implementer per task, independent reviewer per task, fix loop until clean, whole-phase review at the end). The seven tasks are grouped into five **stages**; each stage ends with a written report and a message to the owner before the next stage starts.
+
+| Stage | Tasks | What it delivers |
+|---|---|---|
+| A. Identity | 1 | Verified Google identity on every request; users table; owner set up |
+| B. Safety filters | 2, 3 | Local patient-identifier filter; medical-only gate (fails closed) |
+| C. Money and records | 4, 5 | Spending caps in paise; hash-chained audit log |
+| D. Ask pipeline and screens | 6 | Question box, Activity page, all checks joined in order |
+| E. Production wiring and final review | 7 + whole-phase review | Live settings, CI smoke checks, independent review of the whole phase |
+
+**Per task (step):** implementer (tests first) → task review (spec compliance + code quality) → fix rounds with scoped re-review until clean → task recorded in the ledger.
+
+**Per stage (gate):** all stage tasks clean → branch pushed → GitHub CI green (fmt, clippy, tests with Postgres+pgvector, audit, container build including the browser/WASM build, smoke test) → stage report written and committed → owner message sent.
+
+**Stage reports:** `docs/build-log/phase1/stage-<letter>-<name>.md` in the repository (permanent, versioned with the code), and the same content appended to the Project document `plans/incisive-phase1-build-log.md`. Each report uses this template:
+
+```
+# Phase 1 · Stage <X>: <name>
+Date · Branch · Commits <base>..<head> · CI run <id> <result>
+
+## What was built (plain English)
+## How to see it / what changes for the user
+## Tasks
+| Task | Implementer status | Review verdict | Fix rounds | Commits |
+## Tests
+New tests (names, counts) · full-suite result · CI result
+## Review findings
+Important/critical findings and how each was resolved; minor findings deferred
+## Decisions made during the stage (rulings)
+Each with: what, why, cost if wrong
+## Known limitations / follow-ups
+## Next stage
+```
+
+---
+
 ## File structure
 
 ```
