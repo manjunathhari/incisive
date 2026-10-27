@@ -93,27 +93,20 @@ pub trait Classifier: Send + Sync {
 
 // ---------- rules ----------
 
-/// Medical and surgical terms. Entries of 5+ letters match as word prefixes
-/// (so "resect" covers resection/resected); shorter ones must match a whole
-/// word. Only the distinct count matters.
-const MEDICAL_STEMS: &[&str] = &[
+/// Specific clinical terms: procedures, diseases, anatomy and study designs.
+/// Only these count toward a rule-based Medical decision. Entries of 5+ letters
+/// match as word prefixes (so "resect" covers resection/resected); shorter
+/// ones must match a whole word.
+const SPECIFIC_STEMS: &[&str] = &[
     "resect",
     "anastomo",
     "laparoscop",
-    "robotic",
     "cholecystectom",
     "hernia",
     "carcinoma",
     "rct",
     "icg",
     "guideline",
-    "surgery",
-    "surgical",
-    "surgeon",
-    "operative",
-    "postoperative",
-    "perioperative",
-    "patient",
     "spleen",
     "splenic",
     "pancrea",
@@ -129,14 +122,35 @@ const MEDICAL_STEMS: &[&str] = &[
     "tumor",
     "neoadjuvant",
     "adjuvant",
-    "oncolog",
     "metasta",
     "stoma",
     "ileus",
     "sepsis",
     "abscess",
     "fistula",
-    "incision",
+    "lymph",
+    "bariatric",
+    "endoscop",
+    "colonoscop",
+    "biopsy",
+    "mesh",
+];
+
+/// Whole phrases (token sequences) that count as one specific term.
+const SPECIFIC_PHRASES: &[&str] = &["meta analysis", "t3n1"];
+
+/// Generic medical words. They stop a NotMedical rule from firing but never
+/// count toward a Medical decision: "surgical robotics company valuation" and
+/// "write a cover letter about patient care" are not clinical questions.
+const GENERIC_STEMS: &[&str] = &[
+    "robotic",
+    "surgery",
+    "surgical",
+    "surgeon",
+    "operative",
+    "postoperative",
+    "perioperative",
+    "patient",
     "clinical",
     "diagnos",
     "prognos",
@@ -146,18 +160,12 @@ const MEDICAL_STEMS: &[&str] = &[
     "randomi",
     "cohort",
     "systematic",
-    "lymph",
     "abdominal",
-    "bariatric",
-    "endoscop",
-    "biopsy",
-    "mesh",
+    "incision",
+    "oncolog",
 ];
 
-/// Whole phrases that count as one medical term.
-const MEDICAL_PHRASES: &[&str] = &["meta-analysis", "meta analysis", "t3n1"];
-
-/// Obvious non-medical topics, matched as phrases on lower-cased text.
+/// Obvious non-medical topics, matched as whole-word phrases.
 const NON_MEDICAL_PHRASES: &[&str] = &[
     "bitcoin",
     "ethereum",
@@ -171,10 +179,13 @@ const NON_MEDICAL_PHRASES: &[&str] = &[
     "recipe for",
     "weather in",
     "horoscope",
+    "tax",
+    "income tax",
 ];
 
-/// Administrative topics the policy refuses. They never make a question
-/// "medical by rule" even when clinical words are present; the model decides.
+/// Administrative and commercial topics the policy refuses. They never make a
+/// question "medical by rule", even with clinical words present; the model
+/// decides. Whole-word phrases.
 const ADMIN_PHRASES: &[&str] = &[
     "billing",
     "reimbursement",
@@ -184,8 +195,26 @@ const ADMIN_PHRASES: &[&str] = &[
     "coding",
     "revenue",
     "salary",
-    "tax ",
+    "tax",
     "insurance claim",
+    "market",
+    "markets",
+    "invest",
+    "investing",
+    "investment",
+    "investments",
+    "investor",
+    "valuation",
+    "share",
+    "shares",
+    "stock",
+    "stocks",
+    "rota",
+    "roster",
+    "staffing",
+    "job",
+    "jobs",
+    "cover letter",
 ];
 
 fn tokens(lower: &str) -> Vec<&str> {
@@ -195,9 +224,18 @@ fn tokens(lower: &str) -> Vec<&str> {
         .collect()
 }
 
-fn medical_term_count(lower: &str) -> usize {
-    let words = tokens(lower);
-    let stems = MEDICAL_STEMS
+/// Whole-word phrase match: `phrase` words must appear as consecutive tokens.
+fn has_phrase(words: &[&str], phrase: &str) -> bool {
+    let want: Vec<&str> = phrase.split(' ').collect();
+    words.windows(want.len()).any(|w| w == want.as_slice())
+}
+
+fn has_any_phrase(words: &[&str], phrases: &[&str]) -> bool {
+    phrases.iter().any(|p| has_phrase(words, p))
+}
+
+fn stem_hits(words: &[&str], stems: &[&str]) -> usize {
+    stems
         .iter()
         .filter(|stem| {
             words.iter().any(|w| {
@@ -208,12 +246,7 @@ fn medical_term_count(lower: &str) -> usize {
                 }
             })
         })
-        .count();
-    let phrases = MEDICAL_PHRASES
-        .iter()
-        .filter(|p| lower.contains(**p))
-        .count();
-    stems + phrases
+        .count()
 }
 
 /// Decide obvious cases without a model call. `None` means "ask the model".
@@ -232,20 +265,28 @@ pub fn rule_prefilter(question: &str) -> Option<GateDecision> {
         ));
     }
     let lower = trimmed.to_lowercase();
-    let medical = medical_term_count(&lower);
-    let non_medical = NON_MEDICAL_PHRASES.iter().any(|p| lower.contains(p));
-    // Non-medical keywords count only when no medical term is present.
-    if medical == 0 && non_medical {
+    let words = tokens(&lower);
+    let specific = stem_hits(&words, SPECIFIC_STEMS)
+        + SPECIFIC_PHRASES
+            .iter()
+            .filter(|p| has_phrase(&words, p))
+            .count();
+    let any_medical = specific + stem_hits(&words, GENERIC_STEMS);
+    let non_medical = has_any_phrase(&words, NON_MEDICAL_PHRASES);
+    // Non-medical keywords count only when no medical term (generic or
+    // specific) is present.
+    if any_medical == 0 && non_medical {
         return Some(GateDecision::by_rule(
             Verdict::NotMedical,
             "That looks like a non-medical topic.",
         ));
     }
-    let admin = ADMIN_PHRASES.iter().any(|p| lower.contains(p));
-    if medical >= 2 && !non_medical && !admin {
+    let admin = has_any_phrase(&words, ADMIN_PHRASES);
+    // Medical by rule needs two specific terms; generic words never count.
+    if specific >= 2 && !non_medical && !admin {
         return Some(GateDecision::by_rule(
             Verdict::Medical,
-            "Contains several surgical or medical terms.",
+            "Contains several specific surgical or medical terms.",
         ));
     }
     None
@@ -310,14 +351,21 @@ impl Classifier for ClaudeClassifier {
             messages: vec![Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
-                    text: format!("<question>\n{question}\n</question>"),
+                    text: format!(
+                        "<question>\n{}\n</question>",
+                        neutralise_close_tag(question)
+                    ),
                 }],
             }],
             tools: vec![],
         };
         let resp = self.client.create_message(&req).await.map_err(|e| {
             // Error kind only: never the request, which holds the question.
-            tracing::warn!(error_kind = %error_kind(&e), "gate classifier call failed");
+            tracing::warn!(
+                error_kind = %error_kind(&e),
+                http_status = ?error_status(&e),
+                "gate classifier call failed"
+            );
             GateError::Unavailable
         })?;
         let text: String = resp
@@ -333,11 +381,60 @@ impl Classifier for ClaudeClassifier {
         })?;
         Ok(GateDecision {
             verdict: raw.verdict,
-            reason: raw.reason.trim().chars().take(MAX_REASON_CHARS).collect(),
+            reason: sanitise_reason(&raw.reason),
             by_rule: false,
             usage: Some(resp.usage),
             model: Some(self.model.clone()),
         })
+    }
+}
+
+fn error_status(e: &claude_client::ClaudeError) -> Option<u16> {
+    use claude_client::ClaudeError::*;
+    match e {
+        Api { status, .. } | Decode { status, .. } => Some(*status),
+        RateLimited { .. } => Some(429),
+        Overloaded => Some(529),
+        Transport(_) => None,
+    }
+}
+
+/// Stop the question from closing our `<question>` wrapper early.
+fn neutralise_close_tag(question: &str) -> String {
+    const TAG: &str = "</question>";
+    let lower = question.to_ascii_lowercase();
+    let mut out = String::with_capacity(question.len());
+    let mut last = 0;
+    for (i, _) in lower.match_indices(TAG) {
+        out.push_str(&question[last..i]);
+        out.push_str("< /question>");
+        last = i + TAG.len();
+    }
+    out.push_str(&question[last..]);
+    out
+}
+
+/// One line, no control characters, bounded; never empty.
+fn sanitise_reason(raw: &str) -> String {
+    let spaced: String = raw
+        .chars()
+        .filter_map(|c| {
+            if c.is_whitespace() {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bounded: String = joined.chars().take(MAX_REASON_CHARS).collect();
+    let bounded = bounded.trim_end();
+    if bounded.is_empty() {
+        "No further detail was given.".to_string()
+    } else {
+        bounded.to_string()
     }
 }
 
