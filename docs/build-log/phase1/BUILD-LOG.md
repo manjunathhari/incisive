@@ -16,7 +16,7 @@ Running record of the Phase 1 build. Updated after every task and every stage.
 | B. Safety filters | 2, 3 | ✅ complete (27 Oct) |
 | C. Money and records | 4, 5 | ✅ complete (27 Oct) |
 | D. Ask pipeline and screens | 6 | ✅ complete (27 Oct) |
-| E. Production wiring and final review | 7 + review | ⏳ in progress |
+| E. Production wiring and final review | 7 + review | ✅ complete (27 Oct) — awaiting your settings and merge go-ahead |
 
 ## Decisions made before the build (pre-flight rulings)
 
@@ -266,3 +266,84 @@ Gate: the model's one-line reason is shown to the user; Stage D must render it a
 
 ### Next stage
 **Stage E: Production wiring and final review.** Deploy settings, a final whole-phase review, then merge on your go-ahead.
+
+## Stage E: Production wiring and final review ✅
+
+**Date:** 27 Oct 2026 · **Commits:** `fa6d767..3705df5` · **GitHub CI:** run 40506856319 on `3705df5`. All checks passed: fmt, clippy, all tests with Postgres, the security audit, the container build including the browser (WASM) build, and the container smoke test.
+
+### What was built (plain English)
+- **Deploy settings (Task 7).** The live site needs six new settings, listed below.
+  - Before building anything, the deploy checks that none are blank, that the model-price list is valid JSON, and that the exchange rate and budget are numbers. If a setting is missing, the live site stays on the old version instead of breaking.
+  - The deploy passes the price list through a file, so its commas and quotes can't be mangled.
+  - In production, the app refuses to start if the gate model or the main model has no price.
+- **GitHub's automatic smoke test** now runs the real container in production mode. It confirms the home page, the question box, the health checks, and that asking without signing in is refused.
+- **Instructions** (infra/README.md §10): where each setting comes from, and how to add a colleague. That means adding them as a Google test user, giving them the "IAP-secured Web App User" role, and adding one database row with their role and limits (SQL included).
+
+### Final whole-phase review
+A fresh reviewer on the most capable model checked all 37 commits together. Its verdict was "merge after fixes". These were fixed and re-verified:
+1. **Hidden characters got past the identifier filter.** A phone number with an invisible zero-width space inside it ("98450​12345"), full-width digits, or look-alike slashes in a date went through to Claude. A first fix banned specific characters. The re-review found more look-alikes, so the rule was reversed:
+   - Incisive now accepts **only** plain English text, accented Latin letters, Greek letters and a fixed list of clinical symbols (µ ° ± ≥ ² ₂ ₹ and curly quotes).
+   - Everything else is blocked with "please retype without copy-pasted special characters (use plain hyphens, colons and spaces)".
+   - Checked against 28 known leak attempts (all blocked) and 22 everyday clinical lines (all pass).
+2. **Unreadable gate replies were logged as ₹0** even though the call was billed, so limits could be bypassed. Now:
+   - Unreadable replies are charged at their real cost.
+   - Timeouts are charged at the estimate.
+   - Errors that Anthropic doesn't bill are charged ₹0.
+3. **Smaller hardening:**
+   - Crash messages can no longer print question text into the server logs.
+   - The gate's cost estimate now grows with the question's length.
+   - Empty and over-long questions get their own "invalid input" status.
+   - Requests sent from other websites are refused before anything else runs.
+4. **Intermittent GitHub test failures:** the likely causes were removed. These were a timing-sensitive sign-in test, a test that could run out of database connections, tests that assumed nobody else had written to the log, and tests that could fail if run across midnight IST. GitHub now also prepares the database once before testing.
+   - Full suite: **175 tests**, run twice on a fresh database squeezed onto 2 CPUs: all passing.
+
+### Decisions made during the stage (rulings)
+- **The GitHub smoke test runs in production mode** with dummy values. That is stronger than the plan's dev mode, because it proves production settings are read correctly.
+- **Characters allowed are a fixed list (fail closed).** *Cost:* questions typed in Kannada or Hindi script are blocked for now, as are some pasted symbols: en-dash ranges like "65000–80000", "Grade Ⅲ", and non-breaking spaces next to numbers. The user is told to retype. Incisive is English-only in Phase 1.
+- **Gate retries:** if a gate call times out and is retried, only the last attempt is recorded. *Cost:* at most about 30 paise under-counted per question. The follow-up is to stop retrying timeouts on the gate.
+- **The same-site check compares the web address but not the port,** when Cloud Run's address has no port. It can't be abused on Cloud Run.
+
+### Follow-ups for later phases
+- Patient-identifier filter:
+  - a place-name rule (villages, taluks, "R/o Hoskote")
+  - "Husband:", "Guardian:" and "Surname:" fields
+  - a name written directly before a diagnosis
+- Activity log:
+  - key the question fingerprint with a server secret
+  - an external copy of the latest log fingerprint, to detect deleted newest entries
+- Money:
+  - reservations left open by a failed settlement have no expiry
+  - the gate shouldn't retry timeouts
+- Operations: if a deploy's database migration fails, the new version serves errors. Rolling back to Phase 0 isn't possible once the Phase 1 tables exist; roll forward with a fix instead.
+
+## Rulings I made (whole phase)
+These are the decisions I took on your behalf during the build. Each is recorded in its stage report, with the reasoning and the cost if it was wrong:
+- **Pre-flight:** 8 rulings (top of this log).
+- **Stage A:** library backend, temporary `/api/me`, owner limits not overwritten, `APP_ENV` required, sign-in rejections audited later.
+- **Stage B:**
+  - month-year allowed (**your decision pending**)
+  - "s/o" / "d/o" + name always blocks
+  - bare "c/o" / "w/o" pass
+  - one extra fix past the review cap for privacy leaks
+  - the gate's keyword list is best-effort
+  - billing words always go to the model
+  - configuration faults fail closed
+- **Stage C:**
+  - lock order
+  - tamper *detection* rather than prevention
+  - plain SHA-256 question fingerprint
+  - decimals rejected in the log
+  - the gate's model-written reason never stored
+  - charges dated at settlement
+- **Stage D:**
+  - spend reserved before the gate
+  - "ICG for leak" goes to the model
+  - empty or over-long questions not logged
+  - log failure refuses the request
+  - Activity is owner-only
+- **Stage E:**
+  - smoke test in production mode
+  - deploy settings in README §10
+  - reject (not clean up) unusual characters, then switch to an allowlist
+  - billed gate failures charged
+  - gate retry under-count accepted as a follow-up
