@@ -92,7 +92,7 @@ Deferred minor items (logged for the final review): key-cache lock held during t
 
 ## Stage B: Safety filters ✅
 
-**Date:** 27 Oct 2026 · **Branch:** `phase1-safety-core` · **Commits:** `2a87358..fcc56d8` (11 commits) · **GitHub CI:** CI_PLACEHOLDER
+**Date:** 27 Oct 2026 · **Branch:** `phase1-safety-core` · **Commits:** `2a87358..fcc56d8` (11 commits) · **GitHub CI:** run 40492553405 on `fcc56d8`, all checks passed (fmt, clippy, tests with Postgres, security audit, container build including the browser/WASM build, container smoke test)
 
 ### What was built (plain English)
 - **Patient-identifier filter (Task 2).** Every question is scanned *on our own server, before anything is sent anywhere*. If it contains something that could identify a patient, it is stopped and the user is told exactly what to remove. Nothing is sent to Claude and the question text is never stored.
