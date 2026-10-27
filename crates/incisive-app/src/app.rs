@@ -1,4 +1,4 @@
-//! Pages: signed-in banner, Ask page, Activity page (owner).
+//! Pages: signed-in banner, Ask page, run page, history (My questions), Activity page (owner).
 //!
 //! The server functions here call the same code as the JSON routes
 //! (`crate::ask::run_ask` and friends). All server-only imports live inside their
@@ -10,11 +10,13 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
 use leptos_router::{
     components::{A, Route, Router, Routes},
+    hooks::{use_navigate, use_params_map},
     path,
 };
 
 use crate::ask::{ActivityView, AskOutcome, MeView};
-use crate::runs::RunMode;
+use crate::runs::{RunMode, RunStatus, RunSummary, RunView};
+use uuid::Uuid;
 
 const STYLE: &str = r#"
 :root { --fg:#1d232b; --muted:#5b6672; --bg:#f7f8fa; --card:#fff; --line:#d9dee4;
@@ -44,6 +46,19 @@ button[disabled] { opacity:.6; cursor:default; }
 table { border-collapse:collapse; width:100%; font-size:.85rem; background:var(--card); }
 th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
 td code { font-size:.8rem; word-break:break-all; }
+button.secondary { background:#fff; color:var(--accent); border:1px solid var(--accent); margin-left:8px; }
+button.danger { background:var(--red); }
+button.small { padding:4px 12px; font-size:.85rem; }
+.badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:.85rem; background:var(--line); color:var(--fg); }
+.badge.queued, .badge.running { background:var(--amber-bg); color:var(--amber); }
+.badge.done { background:var(--green-bg); color:var(--green); }
+.badge.partial { background:var(--amber-bg); color:var(--amber); }
+.badge.failed, .badge.interrupted { background:var(--red-bg); color:var(--red); }
+.steps { padding-left:20px; } .steps li { margin:4px 0; }
+.runs { list-style:none; padding:0; margin:12px 0; }
+.runs li { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; justify-content:space-between; padding:10px 12px; background:var(--card); border:1px solid var(--line); border-radius:6px; margin-bottom:8px; }
+.runs .meta { color:var(--muted); font-size:.85rem; }
+pre.answer { white-space:pre-wrap; word-break:break-word; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; font-size:.85rem; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -128,6 +143,72 @@ pub async fn get_activity() -> Result<ActivityView, ServerFnError> {
         })
 }
 
+/// The signed-in user's runs, newest first. Same as `GET /api/runs`.
+#[server(prefix = "/api/fn", endpoint = "my_runs")]
+pub async fn list_my_runs() -> Result<Vec<RunSummary>, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::list_view(&state, &user, None)
+        .await
+        .map_err(run_api_error)
+}
+
+/// One of the user's runs. Same as `GET /api/runs/{id}`; someone else's run is "not found".
+#[server(prefix = "/api/fn", endpoint = "my_run")]
+pub async fn get_my_run(run_id: Uuid) -> Result<RunView, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::get_view(&state, &user, run_id)
+        .await
+        .map_err(run_api_error)
+}
+
+/// Delete one of the user's runs (cancelling it if active). Same as `DELETE /api/runs/{id}`.
+#[server(prefix = "/api/fn", endpoint = "delete_my_run")]
+pub async fn delete_my_run(run_id: Uuid) -> Result<(), ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::delete_one(&state, &user, run_id)
+        .await
+        .map_err(run_api_error)
+}
+
+/// Delete all of the user's runs; returns how many. Same as `DELETE /api/runs`.
+#[server(prefix = "/api/fn", endpoint = "delete_my_runs")]
+pub async fn delete_my_runs() -> Result<u64, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::delete_all(&state, &user)
+        .await
+        .map_err(run_api_error)
+}
+
+#[cfg(feature = "ssr")]
+fn run_api_error(e: crate::runs::api::RunApiError) -> ServerFnError {
+    use crate::runs::api::RunApiError;
+    set_status(match e {
+        RunApiError::NotFound => axum::http::StatusCode::NOT_FOUND,
+        RunApiError::Failed => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    });
+    ServerFnError::new(e.message())
+}
+
 #[cfg(feature = "ssr")]
 type SignedIn = (
     crate::server::AppState,
@@ -201,6 +282,7 @@ pub fn App() -> impl IntoView {
                                                 <p class="banner">"Signed in as " {m.display_name}</p>
                                                 <nav>
                                                     <A href="/">"Ask"</A>
+                                                    <A href="/history">"My questions"</A>
                                                     {owner.then(|| view! { <A href="/activity">"Activity"</A> })}
                                                 </nav>
                                             </div>
@@ -216,6 +298,8 @@ pub fn App() -> impl IntoView {
             <main>
                 <Routes fallback=|| view! { <p>"Page not found. Go back to the question box."</p> }>
                     <Route path=path!("") view=AskPage />
+                    <Route path=path!("runs/:id") view=RunPage />
+                    <Route path=path!("history") view=HistoryPage />
                     <Route path=path!("activity") view=ActivityPage />
                 </Routes>
             </main>
@@ -228,6 +312,13 @@ fn AskPage() -> impl IntoView {
     let (question, set_question) = signal(String::new());
     let action = ServerAction::<AskQuestion>::new();
     let pending = action.pending();
+    // Once the question is accepted, follow its run (browser only: an effect never runs on the server).
+    let navigate = use_navigate();
+    Effect::new(move |_| {
+        if let Some(Ok(AskOutcome::RunStarted { run_id, .. })) = action.value().get() {
+            navigate(&format!("/runs/{run_id}"), Default::default());
+        }
+    });
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         action.dispatch(AskQuestion {
@@ -304,6 +395,234 @@ fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
             </div>
         }
         .into_any(),
+    }
+}
+
+fn status_label(s: RunStatus) -> &'static str {
+    match s {
+        RunStatus::Queued => "Waiting to start",
+        RunStatus::Running => "Working",
+        RunStatus::Done => "Done",
+        RunStatus::Partial => "Partly done",
+        RunStatus::Failed => "Didn't finish",
+        RunStatus::Interrupted => "Interrupted",
+    }
+}
+
+fn status_badge(s: RunStatus) -> impl IntoView {
+    view! { <span class=format!("badge {}", s.as_str())>{status_label(s)}</span> }
+}
+
+fn rupees(paise: i64) -> String {
+    format!("\u{20b9}{}.{:02}", paise / 100, paise % 100)
+}
+
+/// How often the run page asks for news while the run is queued or running.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[component]
+fn RunPage() -> impl IntoView {
+    let params = use_params_map();
+    let run_id = move || {
+        params
+            .read()
+            .get("id")
+            .and_then(|s| Uuid::parse_str(&s).ok())
+    };
+    let tick = RwSignal::new(0u32);
+    let data = Resource::new(
+        move || (run_id(), tick.get()),
+        |(id, _)| async move {
+            match id {
+                Some(id) => get_my_run(id).await,
+                None => Err(ServerFnError::new(
+                    "That question wasn't found. It may have been deleted.",
+                )),
+            }
+        },
+    );
+
+    // Poll while queued or running; stop at a terminal status. Effects run only
+    // in the browser, so the server never starts a timer.
+    let timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage> =
+        StoredValue::new_local(None);
+    let stop = move || {
+        if let Some(h) = timer.try_update_value(|t| t.take()).flatten() {
+            h.clear();
+        }
+    };
+    Effect::new(move |_| match data.get() {
+        Some(Ok(v)) if v.summary.status.is_active() => {
+            if timer.with_value(|t| t.is_none()) {
+                let h = leptos::leptos_dom::helpers::set_interval_with_handle(
+                    move || tick.update(|t| *t += 1),
+                    POLL_EVERY,
+                );
+                timer.set_value(h.ok());
+            }
+        }
+        Some(_) => stop(),
+        None => {}
+    });
+    on_cleanup(stop);
+
+    view! {
+        <p>
+            <A href="/history">"\u{2190} My questions"</A>
+        </p>
+        <Transition fallback=|| view! { <p>"Loading…"</p> }>
+            {move || {
+                data.get()
+                    .map(|r| match r {
+                        Ok(v) => run_view(v).into_any(),
+                        Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
+                    })
+            }}
+        </Transition>
+    }
+}
+
+fn run_view(v: RunView) -> impl IntoView {
+    let status = v.summary.status;
+    let ended_without_answer = v.answer.is_none() && !status.is_active();
+    // Placeholder until the real answer view (Task 13): the stored JSON, as text.
+    let answer = v
+        .answer
+        .map(|a| serde_json::to_string_pretty(&a).unwrap_or_default());
+    view! {
+        <h2>{v.summary.title}</h2>
+        <p>{status_badge(status)} " " <span class="meta">{rupees(v.summary.cost_paise)}</span></p>
+        <h3>"Progress"</h3>
+        {if v.steps.is_empty() {
+            view! { <p class="hint">"Nothing yet. This page updates by itself."</p> }.into_any()
+        } else {
+            view! {
+                <ol class="steps">
+                    {v.steps.into_iter().map(|s| view! { <li>{s.line}</li> }).collect_view()}
+                </ol>
+            }
+                .into_any()
+        }}
+        {answer
+            .map(|a| view! {
+                <h3>"Answer"</h3>
+                <pre class="answer">{a}</pre>
+            })}
+        {ended_without_answer
+            .then(|| view! {
+                <p class="box amber" role="status">
+                    "This question ended without an answer. You can ask it again from the Ask page."
+                </p>
+            })}
+    }
+}
+
+#[component]
+fn HistoryPage() -> impl IntoView {
+    let refresh = RwSignal::new(0u32);
+    let runs = Resource::new(move || refresh.get(), |_| list_my_runs());
+    let confirming = RwSignal::new(false);
+    let delete_one = Action::new(move |id: &Uuid| {
+        let id = *id;
+        async move {
+            let r = delete_my_run(id).await;
+            refresh.update(|n| *n += 1);
+            r
+        }
+    });
+    let delete_all = Action::new(move |_: &()| async move {
+        let r = delete_my_runs().await;
+        confirming.set(false);
+        refresh.update(|n| *n += 1);
+        r.map(|_| ())
+    });
+    let failure = move || {
+        let e = match (delete_one.value().get(), delete_all.value().get()) {
+            (Some(Err(e)), _) | (_, Some(Err(e))) => Some(e),
+            _ => None,
+        };
+        e.map(|e| view! { <p class="box amber" role="alert">{error_text(&e)}</p> })
+    };
+    view! {
+        <h2>"My questions"</h2>
+        <p class="hint">"Only you can see these. They are kept for 12 months."</p>
+        {failure}
+        <Suspense fallback=|| view! { <p>"Loading your questions…"</p> }>
+            {move || {
+                runs.get()
+                    .map(|r| match r {
+                        Ok(list) if list.is_empty() => {
+                            view! { <p>"No questions yet. Ask one on the Ask page."</p> }.into_any()
+                        }
+                        Ok(list) => {
+                            view! {
+                                <ul class="runs">
+                                    {list
+                                        .into_iter()
+                                        .map(|r| {
+                                            let id = r.id;
+                                            view! {
+                                                <li>
+                                                    <span>
+                                                        <A href=format!("/runs/{id}")>{r.title}</A>
+                                                        <br />
+                                                        <span class="meta">
+                                                            {r.created_at.format("%Y-%m-%d %H:%M UTC").to_string()}
+                                                            " \u{b7} " {rupees(r.cost_paise)}
+                                                        </span>
+                                                    </span>
+                                                    <span>
+                                                        {status_badge(r.status)} " "
+                                                        <button
+                                                            class="secondary small"
+                                                            on:click=move |_| {
+                                                                delete_one.dispatch(id);
+                                                            }
+                                                        >
+                                                            "Delete"
+                                                        </button>
+                                                    </span>
+                                                </li>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </ul>
+                            }
+                                .into_any()
+                        }
+                        Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
+                    })
+            }}
+        </Suspense>
+        {move || {
+            if confirming.get() {
+                view! {
+                    <div class="box amber" role="alertdialog">
+                        <p>"Delete all? This cannot be undone."</p>
+                        <button
+                            class="danger"
+                            disabled=move || delete_all.pending().get()
+                            on:click=move |_| {
+                                delete_all.dispatch(());
+                            }
+                        >
+                            "Yes, delete all"
+                        </button>
+                        <button class="secondary" on:click=move |_| confirming.set(false)>
+                            "Cancel"
+                        </button>
+                    </div>
+                }
+                    .into_any()
+            } else {
+                view! {
+                    <button class="secondary" on:click=move |_| confirming.set(true)>
+                        "Delete all my history"
+                    </button>
+                }
+                    .into_any()
+            }
+        }}
     }
 }
 

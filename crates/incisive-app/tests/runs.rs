@@ -3,7 +3,13 @@
 //! The global operations (`interrupt_stale_runs`, recovery, self-heal,
 //! `delete_runs_older_than`) are asserted only on rows each test created.
 
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
 use claude_client::Usage;
+use http_body_util::BodyExt;
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::identity::User;
 use incisive_app::runs::budget::{BudgetError, RunBudget};
@@ -14,10 +20,12 @@ use incisive_app::runs::store::{
 };
 use incisive_app::runs::{RunMode, RunStatus, StepKind};
 use incisive_app::spend::{CapCheck, CapsConfig, Prices, charge_call, release, reserve, totals};
+use leptos::config::LeptosOptions;
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::PgPool;
 use std::time::{Duration, Instant};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 /// `interrupt_stale_runs` is global: it would interrupt the queued/running
@@ -1727,4 +1735,484 @@ async fn already_finished_run_is_left_alone() {
     assert!(v.steps.is_empty());
     assert_eq!(reservation(&pool, run).await, None);
     assert!(run_events(&pool, run).await.is_empty());
+}
+
+// ---------- run API, My questions and deletion ----------
+
+struct AlwaysUp;
+
+#[async_trait::async_trait]
+impl incisive_app::health::Readiness for AlwaysUp {
+    async fn db_ok(&self) -> bool {
+        true
+    }
+}
+
+fn router(st: AppState) -> Router {
+    let opts = LeptosOptions::builder().output_name("incisive-app").build();
+    incisive_app::server::build_router(Arc::new(AlwaysUp), st, opts)
+}
+
+async fn email_of(pool: &PgPool, uid: i64) -> String {
+    sqlx::query_scalar("SELECT email FROM incisive.users WHERE id = $1")
+        .bind(uid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Send `req` and return the status and the raw body.
+async fn send(app: Router, req: Request<Body>) -> (StatusCode, String) {
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn as_json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
+}
+
+fn api(method: &str, path: &str, email: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-dev-user-email", email)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// A finished run for `uid` (so the user can start another), created `age_s`
+/// seconds ago.
+async fn finished_run(pool: &PgPool, uid: i64, question: &str, age_s: i64) -> Uuid {
+    let id = create_run(pool, uid, question, RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(pool, id, RunStatus::Done, None).await.unwrap(),
+        "finish"
+    );
+    backdate(pool, id, "created_at", age_s).await;
+    id
+}
+
+#[tokio::test]
+async fn run_endpoints_are_owner_scoped() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (a, run) = reserved_run(&pool, 4000).await;
+    let (b, _other) = reserved_run(&pool, 4000).await;
+    let (ea, eb) = (email_of(&pool, a).await, email_of(&pool, b).await);
+    let path = format!("/api/runs/{run}");
+
+    // B sees A's run exactly like a missing one, on read and on delete.
+    let (s, body) = send(router(st.clone()), api("GET", &path, &eb)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(as_json(&body)["error"], "not_found");
+    assert!(!body.contains(MARKER));
+    let (s, _) = send(router(st.clone()), api("DELETE", &path, &eb)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(get_run_for_user(&pool, a, run).await.unwrap().is_some());
+    assert!(reservation(&pool, run).await.is_some());
+    // A malformed id is the same 404.
+    let (s, _) = send(router(st.clone()), api("GET", "/api/runs/not-a-uuid", &ea)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // B's list never contains A's run.
+    let (s, body) = send(router(st.clone()), api("GET", "/api/runs", &eb)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!body.contains(&run.to_string()));
+
+    // The owner reads, then deletes, then it is gone for the owner too.
+    let (s, body) = send(router(st.clone()), api("GET", &path, &ea)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = as_json(&body);
+    assert_eq!(v["summary"]["id"], run.to_string());
+    assert_eq!(v["summary"]["status"], "queued");
+    let (s, body) = send(router(st.clone()), api("DELETE", &path, &ea)).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+    assert!(body.is_empty());
+    let (s, _) = send(router(st.clone()), api("GET", &path, &ea)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send(router(st.clone()), api("DELETE", &path, &ea)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // Unauthenticated callers (no dev header in a prod-style state) get nothing.
+    let mut prod = app_state(pool.clone());
+    prod.dev_mode = false;
+    let (s, _) = send(router(prod), api("GET", &path, &ea)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Audited once, with the id only.
+    let ev = run_events(&pool, run).await;
+    let deleted: Vec<_> = ev.iter().filter(|e| e.0 == "run_deleted").collect();
+    assert_eq!(deleted.len(), 1, "{ev:?}");
+    assert_eq!(deleted[0].1, json!({"run_id": run.to_string()}));
+}
+
+/// Writes one step, charges one call, then runs (up to 5 s) until cancelled.
+fn slow_charging(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        let pool = &ctx.state.pool;
+        add_step(pool, ctx.run_id, StepKind::Frame, "framing")
+            .await
+            .unwrap();
+        let h = ctx.budget.try_hold(100).unwrap();
+        ctx.budget
+            .charge(pool, h, Uuid::new_v4(), "m-test", &usage(1000, 100))
+            .await
+            .unwrap();
+        for _ in 0..500 {
+            if ctx.cancel.is_cancelled() {
+                return PipelineOutcome::Failed("cancelled");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        PipelineOutcome::Done(json!({"not": "cancelled"}))
+    })
+}
+
+#[tokio::test]
+async fn delete_while_running_cancels_and_releases() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let email = email_of(&pool, uid).await;
+    st.worker.spawn_with(st.clone(), run, slow_charging);
+    // Genuinely running: a step and a charge exist, the worker is live.
+    for _ in 0..500 {
+        if count(&pool, "run_steps", run).await == 1 && charges(&pool, uid).await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(st.worker.is_running(run));
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    let charge_before = charges(&pool, uid).await;
+
+    let (s, body) = send(
+        router(st.clone()),
+        api("DELETE", &format!("/api/runs/{run}"), &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+
+    // The worker stops (is_running turns false within 5 s).
+    wait_idle(&st, run).await;
+    assert!(!st.worker.is_running(run));
+    // No answer row, and the run is gone.
+    assert_eq!(count(&pool, "run_answers", run).await, 0);
+    assert_eq!(count(&pool, "run_steps", run).await, 0);
+    assert!(get_run_for_user(&pool, uid, run).await.unwrap().is_none());
+    // Charges stand; the reservation is released.
+    assert_eq!(charges(&pool, uid).await, charge_before);
+    assert!(charge_before[0].0 > 0);
+    assert_eq!(reservation(&pool, run).await, None);
+    // Audited as deleted (ids only).
+    let ev = run_events(&pool, run).await;
+    assert!(
+        ev.iter()
+            .any(|e| e.0 == "run_deleted" && e.1 == json!({"run_id": run.to_string()})),
+        "{ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn delete_all_returns_count() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let other = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    for i in 0..3 {
+        finished_run(&pool, uid, &format!("q{i}"), 10 + i).await;
+    }
+    let theirs = finished_run(&pool, other, "theirs", 5).await;
+
+    let (s, body) = send(router(st.clone()), api("DELETE", "/api/runs", &email)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(as_json(&body), json!({"deleted": 3}));
+    assert!(list_runs(&pool, uid, 10).await.unwrap().is_empty());
+    assert!(
+        get_run_for_user(&pool, other, theirs)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Nothing left: zero, not an error.
+    let (s, body) = send(router(st.clone()), api("DELETE", "/api/runs", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(as_json(&body), json!({"deleted": 0}));
+}
+
+#[tokio::test]
+async fn delete_all_cancels_and_releases_an_active_run() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let email = email_of(&pool, uid).await;
+    st.worker.spawn_with(st.clone(), run, slow_charging);
+    for _ in 0..500 {
+        if charges(&pool, uid).await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (s, body) = send(router(st.clone()), api("DELETE", "/api/runs", &email)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(as_json(&body), json!({"deleted": 1}));
+    wait_idle(&st, run).await;
+    assert_eq!(count(&pool, "run_answers", run).await, 0);
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    assert_eq!(reservation(&pool, run).await, None);
+}
+
+#[tokio::test]
+async fn list_is_newest_first_and_clamped() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let oldest = finished_run(&pool, uid, "oldest", 300).await;
+    let middle = finished_run(&pool, uid, "middle", 200).await;
+    let newest = finished_run(&pool, uid, "newest", 100).await;
+
+    let ids = |body: &str| -> Vec<String> {
+        as_json(body)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (s, body) = send(router(st.clone()), api("GET", "/api/runs", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        ids(&body),
+        [newest.to_string(), middle.to_string(), oldest.to_string()]
+    );
+    let first = &as_json(&body)[0];
+    assert_eq!(first["title"], "newest");
+    assert_eq!(first["status"], "done");
+    assert_eq!(first["mode"], "quick");
+
+    let (_, body) = send(router(st.clone()), api("GET", "/api/runs?limit=2", &email)).await;
+    assert_eq!(ids(&body), [newest.to_string(), middle.to_string()]);
+    // Below 1 is raised to 1; above 100 is lowered (3 rows here either way).
+    let (_, body) = send(router(st.clone()), api("GET", "/api/runs?limit=0", &email)).await;
+    assert_eq!(ids(&body), [newest.to_string()]);
+    let (_, body) = send(router(st.clone()), api("GET", "/api/runs?limit=-5", &email)).await;
+    assert_eq!(ids(&body), [newest.to_string()]);
+    let (_, body) = send(
+        router(st.clone()),
+        api("GET", "/api/runs?limit=1000", &email),
+    )
+    .await;
+    assert_eq!(ids(&body).len(), 3);
+
+    use incisive_app::runs::api::clamp_limit;
+    assert_eq!(clamp_limit(None), 20);
+    assert_eq!(clamp_limit(Some(0)), 1);
+    assert_eq!(clamp_limit(Some(-3)), 1);
+    assert_eq!(clamp_limit(Some(100)), 100);
+    assert_eq!(clamp_limit(Some(101)), 100);
+    assert_eq!(clamp_limit(Some(i64::MAX)), 100);
+}
+
+#[tokio::test]
+async fn poll_shows_steps_in_order() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let email = email_of(&pool, uid).await;
+    let path = format!("/api/runs/{run}");
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for (kind, line) in [
+        (StepKind::Frame, "one"),
+        (StepKind::Search, "two"),
+        (StepKind::Screen, "three"),
+    ] {
+        add_step(&pool, run, kind, line).await.unwrap();
+    }
+    let (s, body) = send(router(st.clone()), api("GET", &path, &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let v = as_json(&body);
+    assert_eq!(v["summary"]["status"], "running");
+    assert_eq!(v["answer"], serde_json::Value::Null);
+    let lines: Vec<_> = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["seq"].as_i64().unwrap(), x["line"].as_str().unwrap()))
+        .collect();
+    assert_eq!(lines, [(1, "one"), (2, "two"), (3, "three")]);
+
+    // A later poll sees the new line after the old ones, and the answer.
+    add_step(&pool, run, StepKind::Write, "four").await.unwrap();
+    assert!(save_answer(&pool, run, &json!({"a": 1})).await.unwrap());
+    let (_, body) = send(router(st.clone()), api("GET", &path, &email)).await;
+    let v = as_json(&body);
+    assert_eq!(v["steps"].as_array().unwrap().len(), 4);
+    assert_eq!(v["steps"][3]["line"], "four");
+    assert_eq!(v["steps"][3]["kind"], "write");
+    assert_eq!(v["answer"], json!({"a": 1}));
+}
+
+fn cross_site(method: &str, path: &str, origin: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "incisive.test:8080")
+        .header("origin", origin)
+        .header("x-dev-user-email", "x@example.com");
+    if method == "POST" {
+        b = b.header("content-type", "application/x-www-form-urlencoded");
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn fn_routes_reject_cross_site_origin() {
+    // Unreachable database: a 403 proves nothing past the origin check ran.
+    let unreachable = || {
+        let pool = lazy_pool(&SecretString::from(
+            "postgres://u:p@127.0.0.1:1/none".to_string(),
+        ))
+        .unwrap();
+        app_state(pool)
+    };
+    let run = Uuid::new_v4();
+    let cases: Vec<(&str, String)> = vec![
+        ("POST", "/api/fn/my_runs".into()),
+        ("POST", "/api/fn/my_run".into()),
+        ("POST", "/api/fn/delete_my_run".into()),
+        ("POST", "/api/fn/delete_my_runs".into()),
+        ("DELETE", format!("/api/runs/{run}")),
+        ("DELETE", "/api/runs".into()),
+    ];
+    for (method, path) in &cases {
+        for origin in [
+            "https://evil.example",
+            "http://incisive.test:9999",
+            "http://incisive.test",
+            "null",
+            "not a url",
+        ] {
+            let (s, body) = send(router(unreachable()), cross_site(method, path, origin)).await;
+            assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} {origin}");
+            assert_eq!(
+                as_json(&body),
+                json!({"error": "cross_site", "message": "Request blocked: cross-site request."}),
+                "{method} {path} {origin}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_functions_list_get_and_delete() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let other = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let mine = finished_run(&pool, uid, "mine", 10).await;
+    let theirs = finished_run(&pool, other, "theirs", 10).await;
+    let post = |path: &str, body: String| {
+        Request::post(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("x-dev-user-email", &email)
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    let (s, body) = send(router(st.clone()), post("/api/fn/my_runs", String::new())).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(as_json(&body).as_array().unwrap().len(), 1);
+    let (s, body) = send(
+        router(st.clone()),
+        post("/api/fn/my_run", format!("run_id={mine}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(as_json(&body)["summary"]["id"], mine.to_string());
+    // Someone else's run is a 404 here too.
+    let (s, _) = send(
+        router(st.clone()),
+        post("/api/fn/my_run", format!("run_id={theirs}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send(
+        router(st.clone()),
+        post("/api/fn/delete_my_run", format!("run_id={theirs}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(
+        get_run_for_user(&pool, other, theirs)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let (s, body) = send(
+        router(st.clone()),
+        post("/api/fn/delete_my_runs", String::new()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(as_json(&body), json!(1));
+    assert!(list_runs(&pool, uid, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ssr_history_page_renders() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    // Text with markup: it must be escaped, never rendered as HTML.
+    finished_run(&pool, uid, "ICG <b>leak</b> evidence?", 10).await;
+    let (s, body) = send(router(st.clone()), api("GET", "/history", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains("My questions"), "{body}");
+    assert!(body.contains("Delete all my history"), "{body}");
+    assert!(
+        body.contains("ICG &lt;b&gt;leak&lt;/b&gt; evidence?"),
+        "{body}"
+    );
+    assert!(!body.contains("<b>leak</b>"));
+
+    // The run page renders too (nothing sensitive is in the shell for others).
+    let run = list_runs(&pool, uid, 1).await.unwrap()[0].id;
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run}"), &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        body.contains("ICG &lt;b&gt;leak&lt;/b&gt; evidence?"),
+        "{body}"
+    );
 }

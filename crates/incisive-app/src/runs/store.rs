@@ -336,3 +336,29 @@ pub async fn delete_runs_older_than(pool: &PgPool, days: i32) -> sqlx::Result<u6
     .await?;
     Ok(r.rows_affected())
 }
+
+/// Ids of the user's queued or running runs (at most one in practice).
+pub async fn active_run_ids(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM incisive.runs WHERE user_id = $1 AND status IN ('queued','running')",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Delete all of the user's runs and return `(id, was_active)` for each, where
+/// `was_active` means queued or running at the moment of deletion (such a run
+/// may still hold a spend reservation).
+pub async fn delete_all_runs_returning(
+    pool: &PgPool,
+    user_id: i64,
+) -> sqlx::Result<Vec<(Uuid, bool)>> {
+    sqlx::query_as(
+        "DELETE FROM incisive.runs WHERE user_id = $1 \
+         RETURNING id, status IN ('queued','running')",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}

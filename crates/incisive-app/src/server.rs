@@ -19,6 +19,7 @@ use crate::gate::Classifier;
 use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
 use crate::runs::RunsConfig;
+use crate::runs::api as runs_api;
 use crate::runs::worker::WorkerHandle;
 use crate::spend::{CapsConfig, Prices};
 
@@ -111,7 +112,7 @@ fn same_origin(origin: &str, authority: &str) -> bool {
     o_host.eq_ignore_ascii_case(a.host()) && o_port == a_port
 }
 
-/// `POST /api/ask` and `POST /api/fn/*`: when an `Origin` header is present it
+/// `POST /api/ask`, `POST /api/fn/*` and `DELETE /api/runs[/*]`: when an `Origin` header is present it
 /// must match the request's host and port, or the request is refused with 403
 /// before identity, audit or spend. A missing `Origin` is allowed (curl and
 /// server-side clients omit it).
@@ -122,8 +123,11 @@ async fn same_origin_check(
     use axum::http::{Method, StatusCode, header};
     use axum::response::IntoResponse;
     let path = req.uri().path();
-    let guarded =
-        req.method() == Method::POST && (path == "/api/ask" || path.starts_with("/api/fn/"));
+    let guarded = match *req.method() {
+        Method::POST => path == "/api/ask" || path.starts_with("/api/fn/"),
+        Method::DELETE => path == "/api/runs" || path.starts_with("/api/runs/"),
+        _ => false,
+    };
     if guarded && let Some(origin) = req.headers().get(header::ORIGIN) {
         // HTTP/2 carries the host in the URI authority instead of a Host header.
         let authority = req
@@ -151,7 +155,7 @@ async fn same_origin_check(
     next.run(req).await
 }
 
-/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`.
+/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`, and the run routes.
 pub fn api_routes(state: AppState) -> Router {
     Router::new()
         .route("/api/me", get(me_handler))
@@ -160,6 +164,14 @@ pub fn api_routes(state: AppState) -> Router {
             post(ask_handler).layer(DefaultBodyLimit::max(ASK_BODY_LIMIT)),
         )
         .route("/api/activity", get(activity_handler))
+        .route(
+            "/api/runs",
+            get(runs_api::list_handler).delete(runs_api::delete_all_handler),
+        )
+        .route(
+            "/api/runs/{id}",
+            get(runs_api::get_handler).delete(runs_api::delete_handler),
+        )
         .layer(axum::middleware::from_fn(same_origin_check))
         .with_state(state)
 }
