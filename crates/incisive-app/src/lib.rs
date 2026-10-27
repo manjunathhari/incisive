@@ -1,5 +1,7 @@
 pub mod app;
 #[cfg(feature = "ssr")]
+pub mod audit;
+#[cfg(feature = "ssr")]
 pub mod config;
 #[cfg(feature = "ssr")]
 pub mod db;

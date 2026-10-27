@@ -144,3 +144,23 @@ gcloud iap web add-iam-policy-binding --region=asia-south1 \
 To add a colleague later, repeat the second command with their Google email.
 After this, the section 7 checks are done in a signed-in browser
 (`curl` without a Google identity token gets the sign-in redirect).
+
+## 9. Audit log (`incisive.audit`)
+
+The audit log is a hash chain: each row's hash covers its fields and the previous
+row's hash. `audit::verify_chain` recomputes it and reports the first broken `seq`
+(an edited row, a deleted row anywhere but the tail, or a gap in `seq`).
+
+This is tamper **detection**, not prevention. Supabase connects the app as the
+database owner, so the migration's `REVOKE UPDATE, DELETE ... FROM PUBLIC` does not
+restrict the app; it is kept because it is harmless and documents intent. Real
+prevention needs a separate restricted database role for the app (INSERT and SELECT
+only on `incisive.audit`); that is a later follow-up.
+
+Known limit: deleting the **newest** rows (truncating the tail) leaves a valid chain
+and is not detectable by the chain alone. Periodically saving the latest `(seq, hash)`
+somewhere the database owner cannot edit (an external checkpoint) would cover it. This
+is a follow-up, not built yet.
+
+The log never holds question text or identifiers: only finding kinds with byte offsets,
+lengths, a SHA-256 of accepted questions, verdicts, models, tokens and paise.
