@@ -62,6 +62,15 @@ impl Client {
         }
     }
 
+    /// Per-attempt timeout (default 120 s). Mainly for tests and short calls.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Client {
+        self.http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("reqwest client builds with static configuration");
+        self
+    }
+
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Client {
         self.retry = retry;
         self

@@ -1,11 +1,14 @@
-mod config;
-
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
+use claude_client::Client;
 use incisive_app::{
+    config::{AppEnv, Config},
     db::{PgReadiness, lazy_pool, migrate_until_done},
-    server::build_router,
+    gate::{Classifier, ClaudeClassifier, OfflineClassifier},
+    identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
+    server::{AppState, build_router, install_panic_hook},
+    spend::CapsConfig,
 };
 use leptos::config::get_configuration;
 
@@ -18,14 +21,22 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    // After the subscriber, so the hook's single error line is logged as JSON.
+    install_panic_hook();
 
-    let config = match config::Config::from_env() {
+    let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+
+    if config.app_env == AppEnv::Dev {
+        tracing::warn!(
+            "APP_ENV=dev: the x-dev-user-email identity header is enabled; never use in production"
+        );
+    }
 
     let mut leptos_options = get_configuration(None)
         .expect("leptos configuration")
@@ -41,15 +52,59 @@ async fn main() {
         }
     };
     let migrated = Arc::new(AtomicBool::new(false));
-    tokio::spawn(migrate_until_done(
-        pool.clone(),
-        migrated.clone(),
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    ));
+    let (base, cap) = (Duration::from_secs(1), Duration::from_secs(30));
+    // Migrations first, then the owner row (which needs the users table).
+    tokio::spawn({
+        let (pool, migrated) = (pool.clone(), migrated.clone());
+        let (owner_email,) = (config.owner_email.clone(),);
+        async move {
+            migrate_until_done(pool.clone(), migrated, base, cap).await;
+            ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
+        }
+    });
+
+    let verifier = IapVerifier::new(
+        config.iap_audience.clone(),
+        JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
+    );
+
+    // The gate. No network at startup; the key is never logged. Config only lets
+    // the key be absent in dev, where every model call then fails closed.
+    let gate: Arc<dyn Classifier> = match config.anthropic_api_key.clone() {
+        Some(key) => Arc::new(ClaudeClassifier::new(
+            Arc::new(Client::new(key)),
+            config.gate_model.clone(),
+        )),
+        None => {
+            tracing::warn!(
+                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable"
+            );
+            Arc::new(OfflineClassifier)
+        }
+    };
+    if config.model_prices.get(&config.gate_model).is_none() {
+        tracing::warn!(
+            gate_model = %config.gate_model,
+            "GATE_MODEL has no entry in MODEL_PRICES; every question will fail closed"
+        );
+    }
+
+    let state = AppState {
+        pool: pool.clone(),
+        verifier: Arc::new(verifier),
+        gate,
+        prices: config.model_prices.clone(),
+        usd_inr: config.usd_inr,
+        caps: CapsConfig {
+            global_monthly_paise: config.global_monthly_cap_paise,
+        },
+        gate_model: config.gate_model.clone(),
+        dev_mode: config.app_env == AppEnv::Dev,
+    };
 
     let app = build_router(
         Arc::new(PgReadiness::new(pool, migrated)),
+        state,
         leptos_options.clone(),
     );
     let listener = tokio::net::TcpListener::bind(leptos_options.site_addr)

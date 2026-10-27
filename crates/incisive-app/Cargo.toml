@@ -16,16 +16,28 @@ required-features = ["ssr"]
 secrecy = "0.10"
 leptos = { version = "0.8" }
 leptos_meta = { version = "0.8" }
+leptos_router = { version = "0.8" }
 leptos_axum = { version = "0.8", optional = true }
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"], optional = true }
 async-trait = { version = "0.1", optional = true }
+claude-client = { path = "../claude-client", optional = true }
 serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "uuid"], optional = true }
+serde = { version = "1", features = ["derive"] }
+regex = "1"
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
+url = { version = "2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+uuid = { version = "1", features = ["serde", "v4"], optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+tower-http = { version = "0.6", default-features = false, features = ["limit", "catch-panic"], optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -34,21 +46,40 @@ serde_json = "1"
 async-trait = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+base64 = "0.22"
+wiremock = "0.6"
+claude-client = { path = "../claude-client" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+incisive-app = { path = ".", features = ["test-util"] }
 
 [features]
 default = ["ssr"]
+# Test-only helpers (scratch-table audit variants). Enabled by the self dev-dependency; never by default.
+test-util = ["ssr"]
 hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook"]
 ssr = [
     "dep:axum",
     "dep:tokio",
     "dep:async-trait",
+    "dep:claude-client",
     "dep:serde_json",
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:sqlx",
+    "dep:jsonwebtoken",
+    "dep:reqwest",
+    "dep:url",
+    "dep:chrono",
+    "dep:uuid",
+    "dep:sha2",
+    "dep:hex",
+    "dep:tower-http",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",
+    "leptos_router/ssr",
     "leptos_axum/default",
 ]
 

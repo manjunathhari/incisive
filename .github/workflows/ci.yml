@@ -30,7 +30,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Apply the migrations once, before any test binary starts, so parallel
+      # tests never race the first migration on the empty CI database. This
+      # reuses an existing test (no extra tool, no reliance on binary order);
+      # every later migrate() call is then a no-op.
+      - name: apply migrations to the CI database
+        run: cargo test -p incisive-app --test db migrations_apply_and_ready_is_true -- --exact
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # --no-fail-fast runs every test binary; failing tests and panic lines are
+      # also emitted as annotations so they are readable without the raw log.
+      - name: cargo test --workspace
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace --no-fail-fast 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E -- "--- FAILED|panicked at|^thread '.*' panicked|assertion|left:|right:" test.log \
+              | head -40 | while IFS= read -r line; do echo "::error::${line//%/%25}"; done
+          fi
+          exit "$status"
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       # RUSTSEC-2023-0071 (rsa) is in Cargo.lock only via sqlx-mysql, which is never compiled
@@ -55,8 +75,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prod mode with dummy values: proves prod config parsing accepts every
+          # required variable (the image sets APP_ENV=prod). Prod requires both
+          # GATE_MODEL and CLAUDE_MODEL to be priced in MODEL_PRICES.
           cid=$(docker run -d -p 8080:8080 \
-            -e ANTHROPIC_API_KEY=x -e CLAUDE_MODEL=x \
+            -e APP_ENV=prod \
+            -e ANTHROPIC_API_KEY=sk-ant-FAKE-smoke-test-not-a-real-key \
+            -e CLAUDE_MODEL=claude-sonnet-5-5 -e GATE_MODEL=claude-haiku-5-5 \
+            -e OWNER_EMAIL=owner@example.com \
+            -e MODEL_PRICES='{"claude-haiku-5-5":{"input":1,"output":5},"claude-sonnet-5-5":{"input":3,"output":15}}' \
+            -e USD_INR=88 -e GLOBAL_MONTHLY_CAP_INR=10000 \
+            -e IAP_AUDIENCE=/projects/0/locations/asia-south1/services/test \
             -e DATABASE_URL=postgres://u:p@127.0.0.1:1/x incisive-app:ci)
           cleanup() {
             status=$?
@@ -76,3 +105,9 @@ jobs:
           [ "$code" = "503" ] || { echo "::error::/ready returned $code, expected 503"; exit 1; }
           curl -fsS localhost:8080/ | grep -q 'Cut to the evidence.' \
             || { echo "::error::home page missing tagline"; exit 1; }
+          curl -fsS localhost:8080/ | grep -q '<textarea id="question"' \
+            || { echo "::error::home page missing question box"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{"question":"hello"}' \
+            localhost:8080/api/ask)
+          [ "$code" = "401" ] || { echo "::error::POST /api/ask without identity returned $code, expected 401"; exit 1; }

@@ -13,6 +13,30 @@ use incisive_app::server::build_router;
 use leptos::config::LeptosOptions;
 use tower::ServiceExt;
 
+fn identity_state() -> incisive_app::server::AppState {
+    use incisive_app::identity::{IapVerifier, JwkSource};
+    let pool = incisive_app::db::lazy_pool(&secrecy::SecretString::from(
+        "postgres://u:p@127.0.0.1:1/none".to_string(),
+    ))
+    .unwrap();
+    let verifier = IapVerifier::new(
+        "aud".into(),
+        JwkSource::Static(serde_json::from_str(r#"{"keys":[]}"#).unwrap()),
+    );
+    incisive_app::server::AppState {
+        pool,
+        verifier: Arc::new(verifier),
+        gate: Arc::new(incisive_app::gate::OfflineClassifier),
+        prices: incisive_app::spend::Prices::default(),
+        usd_inr: 88.0,
+        caps: incisive_app::spend::CapsConfig {
+            global_monthly_paise: 1,
+        },
+        gate_model: "unused".into(),
+        dev_mode: false,
+    }
+}
+
 struct AlwaysUp;
 struct AlwaysDown;
 struct Hangs;
@@ -102,7 +126,11 @@ async fn readyz_times_out_as_down() {
 #[tokio::test]
 async fn home_page_shows_name_and_tagline() {
     let opts = LeptosOptions::builder().output_name("incisive-app").build();
-    let (status, body) = get(build_router(Arc::new(AlwaysUp), opts), "/").await;
+    let (status, body) = get(
+        build_router(Arc::new(AlwaysUp), identity_state(), opts),
+        "/",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Incisive"));
     assert!(body.contains("Cut to the evidence."));
