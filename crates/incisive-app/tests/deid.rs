@@ -140,6 +140,48 @@ const BLOCK: &[(&str, &[K])] = &[
     ("PAN abcde1234f", &[K::Pan]),
     ("PAN no: abcde1234f", &[K::Pan]),
     ("Patient - Ramesh Kumar", &[K::PersonName]),
+    ("S/o Gopal", &[K::PersonName]),
+    ("s/o Vishal", &[K::PersonName]),
+    ("s/o Kunal, 23M", &[K::PersonName]),
+    ("s/o Sonal", &[K::PersonName]),
+    ("s/o Kunal", &[K::PersonName]),
+    ("w/o Kamal", &[K::PersonName]),
+    ("D/o Sonia", &[K::PersonName]),
+    ("S/O. GOPAL", &[K::PersonName]),
+    ("W/O GOPAL", &[K::PersonName]),
+    ("S/O GOPAL KRISHNA", &[K::PersonName]),
+    ("s/o Gopal Krishna", &[K::PersonName]),
+    ("w/o Gopal Kumar", &[K::PersonName]),
+    ("c/o Vishal Kumar", &[K::PersonName]),
+    ("c/o Kunal Shah", &[K::PersonName]),
+    ("w/o Kunal Shah", &[K::PersonName]),
+    ("w/o Sonia Gandhi", &[K::PersonName]),
+    ("c/o Kamala, aged 45", &[K::PersonName]),
+    ("s/o:Ramesh", &[K::PersonName]),
+    ("S/o- Ramesh", &[K::PersonName]),
+    ("son of Ramesh", &[K::PersonName]),
+    ("wife of Suresh Kumar", &[K::PersonName]),
+    ("s/o Dr. Ramesh", &[K::PersonName]),
+    ("s/o late Ramaiah", &[K::PersonName]),
+    ("h/o Ramesh, 60M", &[K::PersonName]),
+    ("s/o Late Sri Ramaiah", &[K::PersonName]),
+    ("Name: Kunal Shah", &[K::PersonName]),
+    ("CRP 12, mobile 9845012345", &[K::Phone]),
+    ("WBC 11000 count, call 9845012345", &[K::Phone]),
+    ("attender 9845012345 per son", &[K::Phone]),
+    ("ph 9845012345 MG Road", &[K::Phone]),
+    ("contact 98450 12345 ml-ward", &[K::Phone]),
+    ("Bengaluru 560038 and phone below", &[K::Address]),
+    ("resides Whitefield 560066 with wife", &[K::Address]),
+    (
+        "Address: Whitefield, Bengaluru 560066 for review",
+        &[K::Address],
+    ),
+    ("House No. 45 G Block", &[K::Address]),
+    ("Door No 12 G Floor", &[K::Address]),
+    ("Flat 302 G Wing, Prestige", &[K::Address]),
+    ("IP 4471 M 45y", &[K::HospitalId]),
+    ("IP 4471 m", &[K::HospitalId]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -303,6 +345,29 @@ const PASS: &[&str] = &[
     // numbered cases
     "Case No. 2, A 60-year-old male",
     "Table No. 3, The results",
+    "s/o Mucocele",
+    "s/o Abscess",
+    "s/o Ascites",
+    "s/o Fistula",
+    "s/o Volvulus",
+    "s/o Leak",
+    "s/o Small Bowel Obstruction",
+    "CT s/o Bowel Wall Thickening",
+    "d/o Hirschsprung",
+    "w/o Injury",
+    "w/o Drain",
+    "Robotic TME done w/o Conversion",
+    "C/O PAIN ABDOMEN",
+    "S/O ACUTE APPENDICITIS",
+    "c/o Mild pain at port site",
+    "MRCP s/o Choledocholithiasis",
+    "platelets 65000\u{2013}80000",
+    "Platelets 85000-120000/cumm",
+    "65000-80000/cumm",
+    "Overall 120000 robotic cases",
+    "IP 200 ml/hr fluids",
+    "Flat 30-degree scope",
+    "Patient, Seen in OPD",
 ];
 
 #[test]
@@ -449,4 +514,17 @@ fn six_digit_counts_scan_fast() {
     // allow 10 s there: still catches any quadratic behaviour.
     let limit = if cfg!(debug_assertions) { 10_000 } else { 300 };
     assert!(t.elapsed().as_millis() < limit, "took {:?}", t.elapsed());
+}
+
+#[test]
+fn name_spans_cover_the_whole_name() {
+    for (t, want) in [
+        ("s/o Late Sri Ramaiah", "s/o Late Sri Ramaiah"),
+        ("Name: Kunal Shah", "Name: Kunal Shah"),
+        ("seen s/o Gopal Krishna today", "s/o Gopal Krishna"),
+        ("Mrs. Lakshmi UHID 4421", "Mrs. Lakshmi"),
+    ] {
+        let f = scan(t);
+        assert_eq!(&t[f[0].start..f[0].end], want, "{t}");
+    }
 }
