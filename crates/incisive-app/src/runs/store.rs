@@ -76,6 +76,7 @@ pub async fn create_run(
 ///
 /// A run already in a terminal status (done, partial, failed, interrupted) is
 /// never changed. Returns whether a row was updated.
+#[must_use = "false means the run was already finished and was not changed"]
 pub async fn set_status(
     pool: &PgPool,
     run_id: Uuid,

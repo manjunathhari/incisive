@@ -499,10 +499,12 @@ async fn full_user(pool: &PgPool, id: i64) -> User {
         .unwrap()
 }
 
+const MARKER: &str = "UNIQUE-QUESTION-MARKER-7f3a";
+
 /// A run with `limit` reserved up front, as `run_ask` will do.
 async fn reserved_run(pool: &PgPool, limit: i64) -> (i64, Uuid) {
     let uid = new_user(pool).await;
-    let run = create_run(pool, uid, "q", RunMode::Focused, limit)
+    let run = create_run(pool, uid, MARKER, RunMode::Focused, limit)
         .await
         .unwrap()
         .unwrap();
@@ -548,17 +550,21 @@ async fn charge_call_reduces_reservation_and_records_charge() {
     };
     let (uid, run) = reserved_run(&pool, 4000).await;
     let call = Uuid::new_v4();
-    charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
-        .await
-        .unwrap();
+    assert!(
+        charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
+            .await
+            .unwrap()
+    );
     assert_eq!(reservation(&pool, run).await, Some(3700));
     assert_eq!(charges(&pool, uid).await, [(300, format!("run:{run}"))]);
     let t = totals(&pool, uid).await.unwrap();
     assert_eq!((t.today_paise, t.month_paise), (4000, 4000));
     // Replaying the same call id neither double-charges nor double-decrements.
-    charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
-        .await
-        .unwrap();
+    assert!(
+        !charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
+            .await
+            .unwrap()
+    );
     assert_eq!(reservation(&pool, run).await, Some(3700));
     assert_eq!(charges(&pool, uid).await.len(), 1);
 }
@@ -608,6 +614,18 @@ async fn charge_and_release_survive_a_missing_reservation() {
     assert_eq!(reservation(&pool, run).await, None);
 }
 
+fn hold(b: &RunBudget, n: i64) -> incisive_app::runs::budget::Hold<'_> {
+    b.try_hold(n).expect("hold fits")
+}
+
+async fn audit_rows(pool: &PgPool, uid: i64) -> Vec<(String, serde_json::Value)> {
+    sqlx::query_as("SELECT event, detail FROM incisive.audit WHERE user_id = $1 ORDER BY seq")
+        .bind(uid)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn budget_charge_books_audits_and_adds_run_cost() {
     let Some((pool, _guard)) = test_pool().await else {
@@ -616,25 +634,32 @@ async fn budget_charge_books_audits_and_adds_run_cost() {
     let (uid, run) = reserved_run(&pool, 4000).await;
     let b = budget(run, uid, 4000, Instant::now());
     // 1,000 in + 150 out at $1/$5 per Mtok, 88 INR/USD = 15.4 paise -> 16.
+    let h = hold(&b, 100);
     assert_eq!(
-        b.charge(&pool, "m-test", &usage(1000, 150)).await.unwrap(),
+        b.charge(&pool, h, Uuid::new_v4(), "m-test", &usage(1000, 150))
+            .await
+            .unwrap(),
         16
     );
     assert_eq!(b.spent(), 16);
     assert_eq!(reservation(&pool, run).await, Some(4000 - 16));
     let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
     assert_eq!(v.summary.cost_paise, 16);
-    let rows: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT event, detail FROM incisive.audit WHERE user_id = $1 ORDER BY seq")
-            .bind(uid)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let rows = audit_rows(&pool, uid).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, "charged");
     assert_eq!(rows[0].1["paise"], 16);
     assert_eq!(rows[0].1["model"], "m-test");
-    assert!(!rows[0].1.to_string().contains("\"q\""));
+    // The question text never reaches the audit detail.
+    let q: String = sqlx::query_scalar("SELECT question FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(q, MARKER);
+    assert!(!rows[0].1.to_string().contains(MARKER));
+    // The hold was converted: all 4000 can be held again less the 16 spent.
+    assert!(b.try_hold(3984).is_some());
 }
 
 #[tokio::test]
@@ -644,11 +669,138 @@ async fn unknown_model_is_an_error_not_free() {
     };
     let (uid, run) = reserved_run(&pool, 4000).await;
     let b = budget(run, uid, 4000, Instant::now());
-    let err = b.charge(&pool, "mystery", &usage(5, 5)).await.unwrap_err();
+    let h = hold(&b, 100);
+    let err = b
+        .charge(&pool, h, Uuid::new_v4(), "mystery", &usage(5, 5))
+        .await
+        .unwrap_err();
     assert!(matches!(err, BudgetError::UnknownModel));
     assert_eq!(b.spent(), 0);
     assert!(charges(&pool, uid).await.is_empty());
     assert_eq!(reservation(&pool, run).await, Some(4000));
+    // The failed call's hold was freed.
+    assert!(b.try_hold(4000).is_some());
+}
+
+#[tokio::test]
+async fn retry_with_same_call_id_books_once() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let b = budget(run, uid, 4000, Instant::now());
+    let call = Uuid::new_v4();
+    assert_eq!(
+        b.charge(&pool, hold(&b, 50), call, "m-test", &usage(1000, 150))
+            .await
+            .unwrap(),
+        16
+    );
+    assert_eq!(
+        b.charge(&pool, hold(&b, 50), call, "m-test", &usage(1000, 150))
+            .await
+            .unwrap(),
+        16
+    );
+    assert_eq!(b.spent(), 16);
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    assert_eq!(reservation(&pool, run).await, Some(4000 - 16));
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.cost_paise, 16);
+    assert_eq!(audit_rows(&pool, uid).await.len(), 1);
+}
+
+#[tokio::test]
+async fn booked_but_not_recorded_then_retry_completes_without_double_booking() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let b = budget(run, uid, 4000, Instant::now());
+    let call = Uuid::new_v4();
+
+    // Make add_cost fail for this run only: a trigger that rejects its updates.
+    let fname = format!("fail_{}", run.simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION incisive.{fname}() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'injected'; END $$"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {fname} BEFORE UPDATE ON incisive.runs FOR EACH ROW \
+         WHEN (NEW.id = '{run}') EXECUTE FUNCTION incisive.{fname}()"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = b
+        .charge(&pool, hold(&b, 50), call, "m-test", &usage(1000, 150))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, BudgetError::BookedButNotRecorded(_)),
+        "{err:?}"
+    );
+    // Booked: ledger and spent reflect it; the run cost and audit do not yet.
+    assert_eq!(b.spent(), 16);
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.cost_paise, 0);
+    assert!(audit_rows(&pool, uid).await.is_empty());
+
+    sqlx::query(&format!("DROP TRIGGER {fname} ON incisive.runs"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP FUNCTION incisive.{fname}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Retry with the same call id: completes the records, books nothing twice.
+    assert_eq!(
+        b.charge(&pool, hold(&b, 50), call, "m-test", &usage(1000, 150))
+            .await
+            .unwrap(),
+        16
+    );
+    assert_eq!(b.spent(), 16);
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    assert_eq!(reservation(&pool, run).await, Some(4000 - 16));
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.cost_paise, 16);
+    assert_eq!(audit_rows(&pool, uid).await.len(), 1);
+}
+
+#[test]
+fn concurrent_holds_admit_only_what_fits() {
+    let b = budget(Uuid::new_v4(), 1, 1000, Instant::now());
+    let holds: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..32).map(|_| s.spawn(|| b.try_hold(100))).collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert_eq!(holds.len(), 10);
+    assert!(b.try_hold(1).is_none());
+    assert!(!b.can_afford(1));
+    drop(holds);
+    assert!(b.can_afford(1000));
+}
+
+#[test]
+fn dropped_hold_frees_its_amount() {
+    let b = budget(Uuid::new_v4(), 1, 1000, Instant::now());
+    b.record_spent_for_test(300);
+    let h = b.try_hold(700).unwrap();
+    assert!(b.try_hold(1).is_none());
+    drop(h);
+    assert!(b.try_hold(700).is_some());
+    assert!(b.try_hold(-1).is_none());
 }
 
 #[test]

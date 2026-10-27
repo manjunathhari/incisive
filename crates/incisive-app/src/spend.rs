@@ -417,6 +417,13 @@ pub async fn settle(
 /// shrink the reservation again. Safe if the reservation is already gone
 /// (released, or never made): the charge is still recorded. The real cost is
 /// always recorded in full, even beyond the reservation.
+///
+/// Returns whether a new charge row was inserted (false on a replay). A replay
+/// whose user or amount differs from the stored charge is logged (ids only) and
+/// changes nothing.
+///
+/// Charges are dated at settle time (now), not at reservation time, so a run
+/// that crosses IST midnight counts in the new day. This is accepted.
 pub async fn charge_call(
     pool: &PgPool,
     user_id: i64,
@@ -425,7 +432,7 @@ pub async fn charge_call(
     model: &str,
     usage: &Usage,
     paise: i64,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
     if paise < 0 {
         tracing::warn!(%run_id, %call_id, "negative call charge; recording zero");
     }
@@ -462,8 +469,19 @@ pub async fn charge_call(
         .bind(paise)
         .execute(&mut *tx)
         .await?;
+    } else {
+        let existing: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT user_id, paise FROM incisive.spend WHERE request_id = $1 AND kind = 'charge'",
+        )
+        .bind(call_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some_and(|(u, p)| u != user_id || p != paise) {
+            tracing::warn!(%run_id, %call_id, "charge replay differs from the stored charge");
+        }
     }
-    tx.commit().await
+    tx.commit().await?;
+    Ok(inserted)
 }
 
 /// Delete the run's remaining reservation and return the paise released
