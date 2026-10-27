@@ -33,13 +33,57 @@ use uuid::Uuid;
 /// this lock, and the stale-runs test alone takes the write side.
 static ACTIVE_RUNS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
-async fn test_pool() -> Option<(PgPool, tokio::sync::RwLockReadGuard<'static, ()>)> {
-    let guard = ACTIVE_RUNS.read().await;
+/// Longest a database test may hold [`ACTIVE_RUNS`] (they take ~2 s at most).
+const TEST_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Safety net: a test still holding its guard after [`TEST_DEADLINE`] is hung.
+/// A hung holder would block every test queued behind the lock, so the whole
+/// binary is stopped with the test's name rather than left to stall CI.
+/// Dropping it (the sender) wakes the watchdog thread, which then just exits.
+struct Watchdog(#[allow(dead_code)] std::sync::mpsc::Sender<()>);
+
+impl Watchdog {
+    fn start() -> Self {
+        let name = std::thread::current()
+            .name()
+            .unwrap_or("unnamed test")
+            .to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(TEST_DEADLINE)
+            {
+                eprintln!("test {name} exceeded {TEST_DEADLINE:?}; aborting the runs binary");
+                std::process::exit(1);
+            }
+        });
+        Watchdog(tx)
+    }
+}
+
+/// Held for the whole test: the lock side, plus its watchdog.
+struct TestGuard<G> {
+    _lock: G,
+    _watchdog: Watchdog,
+}
+
+async fn test_pool() -> Option<(PgPool, TestGuard<tokio::sync::RwLockReadGuard<'static, ()>>)> {
+    let lock = ACTIVE_RUNS.read().await;
+    let guard = TestGuard {
+        _lock: lock,
+        _watchdog: Watchdog::start(),
+    };
     Some((connect().await?, guard))
 }
 
-async fn test_pool_exclusive() -> Option<(PgPool, tokio::sync::RwLockWriteGuard<'static, ()>)> {
-    let guard = ACTIVE_RUNS.write().await;
+async fn test_pool_exclusive() -> Option<(
+    PgPool,
+    TestGuard<tokio::sync::RwLockWriteGuard<'static, ()>>,
+)> {
+    let lock = ACTIVE_RUNS.write().await;
+    let guard = TestGuard {
+        _lock: lock,
+        _watchdog: Watchdog::start(),
+    };
     Some((connect().await?, guard))
 }
 
@@ -2181,6 +2225,55 @@ async fn server_functions_list_get_and_delete() {
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(as_json(&body), json!(1));
     assert!(list_runs(&pool, uid, 10).await.unwrap().is_empty());
+}
+
+/// Building a router while another request renders must not stall that
+/// render. (Leptos route generation sets a process-global "suppress resource
+/// loads" flag; a resource first polled while it was set never loaded, which
+/// hung this binary when tests built routers concurrently.)
+#[tokio::test]
+async fn ssr_render_survives_concurrent_router_builds() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    finished_run(&pool, uid, "concurrent build", 10).await;
+    let app = router(st.clone());
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let builder = {
+        let (stop, st) = (stop.clone(), st.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _rt = rt.enter();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                drop(router(st.clone()));
+            }
+        })
+    };
+    let mut outcome = Ok(());
+    for i in 0..20 {
+        let req = send(app.clone(), api("GET", "/history", &email));
+        match tokio::time::timeout(Duration::from_secs(10), req).await {
+            Ok((s, body)) if s == StatusCode::OK && body.contains("concurrent build") => {}
+            Ok((s, _)) => {
+                outcome = Err(format!("render {i}: status {s}"));
+                break;
+            }
+            Err(_) => {
+                outcome = Err(format!("render {i} stalled while routers were being built"));
+                break;
+            }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    builder.join().unwrap();
+    outcome.unwrap();
 }
 
 #[tokio::test]

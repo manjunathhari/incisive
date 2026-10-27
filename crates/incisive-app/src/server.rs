@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     Router,
@@ -7,7 +7,7 @@ use axum::{
 };
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
-use leptos_axum::{LeptosRoutes, generate_route_list};
+use leptos_axum::{AxumRouteListing, LeptosRoutes, generate_route_list};
 use sqlx::PgPool;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -176,12 +176,21 @@ pub fn api_routes(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The app's route list, generated once per process. Generating it renders the
+/// app with Leptos' resource loading suppressed through a process-global flag,
+/// so any page render in flight elsewhere at that moment would wait forever on
+/// its resources. Generating once (before any router can serve) avoids that.
+fn route_list() -> Vec<AxumRouteListing> {
+    static ROUTES: OnceLock<Vec<AxumRouteListing>> = OnceLock::new();
+    ROUTES.get_or_init(|| generate_route_list(App)).clone()
+}
+
 pub fn build_router(
     r: Arc<dyn Readiness>,
     state: AppState,
     leptos_options: LeptosOptions,
 ) -> Router {
-    let routes = generate_route_list(App);
+    let routes = route_list();
     let context_state = state.clone();
     let app: Router = Router::new()
         .leptos_routes_with_context(
