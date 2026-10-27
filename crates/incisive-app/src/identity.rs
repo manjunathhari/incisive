@@ -6,7 +6,9 @@
 //! only when `APP_ENV=dev`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use axum::{
     Json, Router,
@@ -31,7 +33,10 @@ pub const DEV_EMAIL_HEADER: &str = "x-dev-user-email";
 pub const IAP_ISSUER: &str = "https://cloud.google.com/iap";
 pub const IAP_JWK_URL: &str = "https://www.gstatic.com/iap/verify/public_key-jwk";
 const LEEWAY_SECS: u64 = 30;
+/// Once keys are loaded, refetch on an unknown `kid` at most this often.
 const KEY_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(300);
+/// With no keys at all (cold start, failed first fetch), retry this soon.
+const KEY_EMPTY_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const OWNER_DAILY_CAP_PAISE: i64 = 150_000;
 const NOT_SET_UP_MESSAGE: &str = "Your Google account is allowed in, but you haven't been set up in Incisive yet. Ask the owner to add you.";
 
@@ -247,9 +252,12 @@ impl IapVerifier {
         let JwkSource::Remote(url) = &self.source else {
             return Err(IdentityError::Invalid("unknown key id"));
         };
-        let due = cache
-            .last_fetch
-            .is_none_or(|t| t.elapsed() >= KEY_REFRESH_MIN_INTERVAL);
+        let min_interval = if cache.set.is_some() {
+            KEY_REFRESH_MIN_INTERVAL
+        } else {
+            KEY_EMPTY_RETRY_INTERVAL
+        };
+        let due = cache.last_fetch.is_none_or(|t| t.elapsed() >= min_interval);
         if !due {
             return Err(if cache.set.is_some() {
                 IdentityError::Invalid("unknown key id")
@@ -309,6 +317,7 @@ pub struct CurrentUser(pub User);
 #[derive(Debug)]
 pub enum IdentityRejection {
     NotSignedIn,
+    KeysUnavailable,
     NotSetUp,
     Internal,
 }
@@ -319,6 +328,13 @@ impl IntoResponse for IdentityRejection {
             IdentityRejection::NotSignedIn => (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "not_signed_in"})),
+            ),
+            IdentityRejection::KeysUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "sign_in_check_unavailable",
+                    "message": "Sign-in could not be checked just now. Please try again in a moment."
+                })),
             ),
             IdentityRejection::NotSetUp => (
                 StatusCode::FORBIDDEN,
@@ -368,7 +384,11 @@ where
                             IdentityError::KeysUnavailable => "signing keys unavailable",
                         };
                         tracing::info!(reason, "identity rejected");
-                        return Err(IdentityRejection::NotSignedIn);
+                        return Err(if e == IdentityError::KeysUnavailable {
+                            IdentityRejection::KeysUnavailable
+                        } else {
+                            IdentityRejection::NotSignedIn
+                        });
                     }
                 }
             }

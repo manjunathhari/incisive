@@ -61,10 +61,11 @@ impl Config {
         let claude_model = required("CLAUDE_MODEL")?;
         let database_url = SecretString::from(required("DATABASE_URL")?);
 
-        let app_env = match lookup("APP_ENV").as_deref() {
-            None | Some("dev") => AppEnv::Dev,
-            Some("prod") => AppEnv::Prod,
-            Some(other) => {
+        // Required: dev mode trusts a plain header, so it must never be a default.
+        let app_env = match required("APP_ENV")?.as_str() {
+            "dev" => AppEnv::Dev,
+            "prod" => AppEnv::Prod,
+            other => {
                 return Err(ConfigError::Invalid {
                     var: "APP_ENV",
                     reason: format!("expected `dev` or `prod`, got `{other}`"),
@@ -119,6 +120,7 @@ mod tests {
             ("ANTHROPIC_API_KEY", "sk-test-123"),
             ("CLAUDE_MODEL", "claude-test"),
             ("DATABASE_URL", DB),
+            ("APP_ENV", "dev"),
             ("OWNER_EMAIL", "Owner@Example.com"),
         ]
     }
@@ -143,10 +145,26 @@ mod tests {
     }
 
     #[test]
-    fn port_defaults_to_8080_and_env_to_dev() {
+    fn port_defaults_to_8080() {
         let c = Config::from_lookup(lookup(&full())).unwrap();
         assert_eq!(c.port, 8080);
         assert_eq!(c.app_env, AppEnv::Dev);
+    }
+
+    #[test]
+    fn missing_app_env_is_error() {
+        let pairs: Vec<_> = full()
+            .into_iter()
+            .filter(|(k, _)| *k != "APP_ENV")
+            .collect();
+        let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("APP_ENV"));
+        let mut blank = pairs;
+        blank.push(("APP_ENV", "  "));
+        assert_eq!(
+            Config::from_lookup(lookup(&blank)).unwrap_err(),
+            ConfigError::Missing("APP_ENV")
+        );
     }
 
     #[test]

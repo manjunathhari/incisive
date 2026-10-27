@@ -356,3 +356,65 @@ async fn ensure_owner_is_idempotent() {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+// ---- cold-start key fetch ----
+
+async fn counting_listener() -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let n = Arc::new(AtomicUsize::new(0));
+    let n2 = n.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((sock, _)) = l.accept().await {
+                n2.fetch_add(1, Ordering::SeqCst);
+                drop(sock); // close without answering: fetch fails
+            }
+        }
+    });
+    (addr, n)
+}
+
+#[tokio::test(start_paused = true)]
+async fn empty_cache_retries_after_short_interval() {
+    use std::sync::atomic::Ordering;
+    let (addr, hits) = counting_listener().await;
+    let v = IapVerifier::new(
+        AUD.to_string(),
+        JwkSource::Remote(format!("http://{addr}/keys").parse().unwrap()),
+    );
+    let t = good_token("a@b.com");
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // Within the short interval: no new fetch.
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    // After it: one more attempt, long before the 5-minute throttle.
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn keys_unavailable_is_503() {
+    let verifier = IapVerifier::new(
+        AUD.to_string(),
+        JwkSource::Remote("http://127.0.0.1:1/keys".parse().unwrap()),
+    );
+    let app = identity_routes(IdentityState::new(verifier, unused_pool(), AppEnv::Prod));
+    let (s, b) = call(app, iap_req(&good_token("a@b.com"))).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        b,
+        json!({"error": "sign_in_check_unavailable",
+               "message": "Sign-in could not be checked just now. Please try again in a moment."})
+    );
+}

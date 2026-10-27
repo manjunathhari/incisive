@@ -27,6 +27,12 @@ async fn main() {
         }
     };
 
+    if config.app_env == incisive_app::config::AppEnv::Dev {
+        tracing::warn!(
+            "APP_ENV=dev: the x-dev-user-email identity header is enabled; never use in production"
+        );
+    }
+
     let mut leptos_options = get_configuration(None)
         .expect("leptos configuration")
         .leptos_options;
