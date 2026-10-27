@@ -4,8 +4,10 @@
 //! plain view types, so nothing here has to compile for the browser build.
 
 pub mod cache;
+pub mod europepmc;
 pub mod http;
 pub mod pubmed;
+pub mod unpaywall;
 
 use serde::{Deserialize, Serialize};
 

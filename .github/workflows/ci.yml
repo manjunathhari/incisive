@@ -82,7 +82,7 @@ jobs:
             -e APP_ENV=prod \
             -e ANTHROPIC_API_KEY=sk-ant-FAKE-smoke-test-not-a-real-key \
             -e CLAUDE_MODEL=claude-sonnet-5-5 -e GATE_MODEL=claude-haiku-5-5 \
-            -e OWNER_EMAIL=owner@example.com \
+            -e OWNER_EMAIL=owner@example.com -e UNPAYWALL_EMAIL=ci@example.invalid \
             -e MODEL_PRICES='{"claude-haiku-5-5":{"input":1,"output":5},"claude-sonnet-5-5":{"input":3,"output":15}}' \
             -e USD_INR=88 -e GLOBAL_MONTHLY_CAP_INR=10000 \
             -e IAP_AUDIENCE=/projects/0/locations/asia-south1/services/test \

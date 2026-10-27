@@ -36,6 +36,9 @@ pub struct Config {
     pub global_monthly_cap_paise: i64,
     /// Per-depth run limits (`RUN_LIMITS`, optional; defaults otherwise).
     pub runs: RunsConfig,
+    /// Contact address sent to Unpaywall (required there) and NCBI (`UNPAYWALL_EMAIL`).
+    /// Required in prod; an obviously fake address in dev.
+    pub unpaywall_email: String,
 }
 
 /// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
@@ -44,6 +47,8 @@ const DEV_MODEL_PRICES: &str = r#"{
   "claude-haiku-5-5": {"input": 1.0, "output": 5.0},
   "claude-sonnet-5-5": {"input": 3.0, "output": 15.0}
 }"#;
+/// DEV ONLY. `.invalid` can never resolve, so a dev run cannot pose as a real contact.
+const DEV_UNPAYWALL_EMAIL: &str = "dev@example.invalid";
 const DEV_USD_INR: f64 = 88.0;
 const DEV_GLOBAL_MONTHLY_CAP_INR: i64 = 10_000;
 
@@ -193,6 +198,20 @@ impl Config {
             })?,
         };
 
+        let unpaywall_email = match (app_env, lookup("UNPAYWALL_EMAIL")) {
+            (_, Some(e)) => {
+                if !e.contains('@') || e.chars().any(char::is_whitespace) {
+                    return Err(ConfigError::Invalid {
+                        var: "UNPAYWALL_EMAIL",
+                        reason: "expected an email address".to_string(),
+                    });
+                }
+                e
+            }
+            (AppEnv::Dev, None) => DEV_UNPAYWALL_EMAIL.to_string(),
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("UNPAYWALL_EMAIL")),
+        };
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
@@ -206,6 +225,7 @@ impl Config {
             usd_inr,
             global_monthly_cap_paise,
             runs,
+            unpaywall_email,
         })
     }
 }
@@ -339,6 +359,11 @@ mod tests {
         prod.push(("MODEL_PRICES", PROD_PRICES));
         prod.push(("USD_INR", "90"));
         prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.iap_audience, "/projects/1/apps/2");
     }
@@ -386,6 +411,11 @@ mod tests {
             ConfigError::Missing("GLOBAL_MONTHLY_CAP_INR")
         );
         prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.usd_inr, 90.0);
         assert_eq!(c.global_monthly_cap_paise, 500_000);
@@ -546,6 +576,40 @@ mod tests {
             );
             assert!(err.to_string().contains("RUN_LIMITS"), "{err}");
         }
+    }
+
+    #[test]
+    fn unpaywall_email_required_in_prod() {
+        // Dev: an obviously fake default.
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.unpaywall_email, "dev@example.invalid");
+        // Prod: missing (or blank) is an error that names the variable.
+        let mut prod = prod_with(PROD_PRICES);
+        let err = Config::from_lookup(lookup(&prod)).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("UNPAYWALL_EMAIL"));
+        assert!(err.to_string().contains("UNPAYWALL_EMAIL"));
+        prod.push(("UNPAYWALL_EMAIL", "   "));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        // Set: used as given (trimmed).
+        prod.pop();
+        prod.push(("UNPAYWALL_EMAIL", " ops@example.org "));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(c.unpaywall_email, "ops@example.org");
+        // Dev may override too; a value that is not an address names the variable.
+        let mut dev = full();
+        dev.push(("UNPAYWALL_EMAIL", "not-an-address"));
+        let err = Config::from_lookup(lookup(&dev)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "UNPAYWALL_EMAIL",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("UNPAYWALL_EMAIL"));
     }
 
     #[test]

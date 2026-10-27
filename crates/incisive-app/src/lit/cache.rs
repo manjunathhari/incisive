@@ -2,8 +2,8 @@
 //! No user linkage and no full texts. Entries are served for 30 days and
 //! pruned after 90.
 //!
-//! The table (migration 0005) has no `pmcid` or source column, so a cached
-//! paper comes back with `pmcid: None` and `source: PubMed`.
+//! The table has no source column, so a cached paper always comes back with
+//! `source: PubMed`. `pmcid` was added by migration 0007.
 
 use sqlx::{PgPool, Row};
 
@@ -21,7 +21,7 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted \
+        "SELECT pmid, pmcid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted \
          FROM incisive.paper_cache \
          WHERE pmid = ANY($1) AND fetched_at > now() - make_interval(days => $2)",
     )
@@ -34,7 +34,7 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
             let authors: String = r.try_get("authors")?;
             Ok(Paper {
                 pmid: Some(r.try_get("pmid")?),
-                pmcid: None,
+                pmcid: r.try_get("pmcid")?,
                 doi: r.try_get("doi")?,
                 title: r.try_get("title")?,
                 // Stored as a JSON array; a damaged value degrades to no authors.
@@ -52,7 +52,7 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
 }
 
 /// Upserts papers and stamps them as fetched now. A refresh never erases data:
-/// a missing `doi`, `abstract` or `oa_url` keeps the cached value, and
+/// a missing `doi`, `pmcid`, `abstract` or `oa_url` keeps the cached value, and
 /// `retracted` is sticky once set. Papers without a PMID have
 /// no cache key and are skipped.
 pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
@@ -64,10 +64,11 @@ pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
         let authors = serde_json::to_string(&p.authors).unwrap_or_else(|_| "[]".into());
         sqlx::query(
             "INSERT INTO incisive.paper_cache \
-               (pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted, fetched_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now()) \
+               (pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted, pmcid, fetched_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) \
              ON CONFLICT (pmid) DO UPDATE SET \
-               doi = COALESCE(EXCLUDED.doi, incisive.paper_cache.doi), title = EXCLUDED.title, authors = EXCLUDED.authors, \
+               doi = COALESCE(EXCLUDED.doi, incisive.paper_cache.doi), \
+               pmcid = COALESCE(EXCLUDED.pmcid, incisive.paper_cache.pmcid), title = EXCLUDED.title, authors = EXCLUDED.authors, \
                journal = EXCLUDED.journal, year = EXCLUDED.year, pub_types = EXCLUDED.pub_types, \
                abstract = COALESCE(EXCLUDED.abstract, incisive.paper_cache.abstract), \
                oa_url = COALESCE(EXCLUDED.oa_url, incisive.paper_cache.oa_url), \
@@ -84,6 +85,7 @@ pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
         .bind(&p.abstract_text)
         .bind(&p.oa_url)
         .bind(p.retracted)
+        .bind(&p.pmcid)
         .execute(&mut *tx)
         .await?;
     }

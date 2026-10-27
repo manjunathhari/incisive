@@ -1053,7 +1053,7 @@ mod pubmed_tests {
     fn paper(pmid: &str, title: &str) -> Paper {
         Paper {
             pmid: Some(pmid.into()),
-            pmcid: None,
+            pmcid: Some("PMC123".into()),
             doi: Some(format!("10.1000/{pmid}")),
             title: title.into(),
             authors: vec!["Rinne JKA".into(), "Köss\u{ed}, J; Jr".into()],
@@ -1137,7 +1137,7 @@ mod pubmed_tests {
 
         // Full round trip of every stored field.
         let mut expect = paper(&fresh, "Fresh");
-        expect.pmcid = None; // not stored by the 0005 schema
+        expect.pmcid = Some("PMC123".into()); // stored since migration 0007
         assert_eq!(by[&fresh], &expect);
         assert_eq!(by[retracted.pmid.as_deref().unwrap()], &retracted);
         assert!(by[retracted.pmid.as_deref().unwrap()].retracted);
@@ -1351,6 +1351,726 @@ mod fix_round_1 {
 
         sqlx::query("DELETE FROM incisive.paper_cache WHERE pmid = $1")
             .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Europe PMC, Unpaywall and the merge (Task 7)
+// ---------------------------------------------------------------------------
+
+mod epmc_unpaywall_tests {
+    use std::time::Duration;
+
+    use incisive_app::db::{lazy_pool, migrate};
+    use incisive_app::lit::cache;
+    use incisive_app::lit::europepmc::{
+        EuropePmc, FULL_TEXT_CHARS, full_text_from_xml, merge_results,
+    };
+    use incisive_app::lit::http::{AllowlistedClient, LitError, OaPolicy};
+    use incisive_app::lit::unpaywall::Unpaywall;
+    use incisive_app::lit::{Paper, PaperSource};
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SEARCH: &str = "/europepmc/webservices/rest/search";
+    const TOPIC1: &str = r#"(indocyanine green OR ICG) AND "anastomotic leak" AND colorectal"#;
+
+    fn fixture(name: &str) -> String {
+        let p = format!("{}/tests/fixtures/lit/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{p}: {e}"))
+    }
+
+    fn client(server: &MockServer, oa: &OaPolicy) -> AllowlistedClient {
+        AllowlistedClient::new("Incisive/test", oa.clone())
+            .with_base_override(server.uri())
+            .with_retry_backoff(Duration::from_millis(1))
+    }
+
+    fn epmc(server: &MockServer, oa: &OaPolicy) -> EuropePmc {
+        EuropePmc::new(client(server, oa), oa.clone())
+    }
+
+    fn unpaywall(server: &MockServer, oa: &OaPolicy) -> Unpaywall {
+        Unpaywall::new(client(server, oa), oa.clone(), "ci@example.invalid".into())
+    }
+
+    async fn serve_json(server: &MockServer, route: &str, body: String) {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(server)
+            .await;
+    }
+
+    // ----- Europe PMC search -----
+
+    #[tokio::test]
+    async fn epmc_search_parses_ids_and_oa_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(SEARCH))
+            .and(query_param("query", TOPIC1))
+            .and(query_param("resultType", "core"))
+            .and(query_param("format", "json"))
+            .and(query_param("pageSize", "10"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture("epmc_search_icg.json"), "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let oa = OaPolicy::default();
+        let papers = epmc(&server, &oa).search(TOPIC1, 10).await.unwrap();
+        assert_eq!(papers.len(), 10);
+        assert!(papers.iter().all(|p| p.source == PaperSource::EuropePmc));
+
+        // MED record, open access, with a PMCID.
+        let p = papers
+            .iter()
+            .find(|p| p.pmid.as_deref() == Some("42778806"))
+            .unwrap();
+        assert_eq!(p.pmcid.as_deref(), Some("PMC13601099"));
+        assert_eq!(p.doi.as_deref(), Some("10.1007/s10151-026-03388-4"));
+        assert_eq!(p.journal.as_deref(), Some("Techniques in coloproctology"));
+        assert_eq!(p.year, Some(2026));
+        assert!(
+            p.title
+                .starts_with("Indocyanine green fluorescence angiograp")
+        );
+        assert!(!p.authors.is_empty());
+        assert!(p.pub_types.contains(&"Meta-Analysis".to_string()));
+        assert!(!p.retracted);
+        let abs = p.abstract_text.as_deref().unwrap();
+        assert!(
+            abs.contains("Anastomotic leak (AL) is a major driver"),
+            "{abs}"
+        );
+        assert!(!abs.contains('<'), "markup is stripped: {abs}");
+        let url = p.oa_url.as_deref().unwrap();
+        assert!(url.starts_with("https://"), "{url}");
+
+        // Closed MED record: no PMCID, no OA url.
+        let closed = papers
+            .iter()
+            .find(|p| p.pmid.as_deref() == Some("42891491"))
+            .unwrap();
+        assert_eq!(closed.pmcid, None);
+        assert_eq!(closed.oa_url, None);
+        // PMC-only record (no PMID, no DOI).
+        let pmc_only = papers
+            .iter()
+            .find(|p| p.pmcid.as_deref() == Some("PMC13675078"))
+            .unwrap();
+        assert_eq!(pmc_only.pmid, None);
+        assert_eq!(pmc_only.doi, None);
+        assert!(pmc_only.oa_url.is_some());
+        // Preprint with neither.
+        assert!(papers.iter().any(|p| p.pmid.is_none()
+            && p.pmcid.is_none()
+            && p.oa_url.is_none()
+            && p.doi.is_some()));
+    }
+
+    #[tokio::test]
+    async fn epmc_search_registers_open_access_urls_once_and_only_those() {
+        let server = MockServer::start().await;
+        serve_json(&server, SEARCH, fixture("epmc_search_icg.json")).await;
+        Mock::given(method("GET"))
+            .and(path("/articles/PMC13601099"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>full</html>"))
+            .mount(&server)
+            .await;
+        let oa = OaPolicy::default();
+        let e = epmc(&server, &oa);
+        let papers = e.search(TOPIC1, 10).await.unwrap();
+        let granted = papers
+            .iter()
+            .find(|p| p.pmid.as_deref() == Some("42778806"))
+            .and_then(|p| p.oa_url.clone())
+            .unwrap();
+        assert_eq!(granted, "https://europepmc.org/articles/PMC13601099");
+        let c = client(&server, &oa);
+        assert_eq!(c.get_text(&granted).await.unwrap(), "<html>full</html>");
+        // One-time: the second fetch is refused.
+        assert!(matches!(
+            c.get_text(&granted).await,
+            Err(LitError::Disallowed(_))
+        ));
+        // A closed record's own landing page was never registered.
+        assert!(matches!(
+            c.get_text("https://doi.org/10.7759/cureus.117951").await,
+            Err(LitError::Disallowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn epmc_only_grants_https_urls_of_open_access_records() {
+        let body = r#"{"resultList":{"result":[
+{"id":"1","source":"MED","pmid":"1","pmcid":"PMC1","title":"http only","isOpenAccess":"Y",
+ "fullTextUrlList":{"fullTextUrl":[{"availabilityCode":"OA","availability":"Open access","documentStyle":"html","site":"Europe_PMC","url":"http://evil.example/a"}]}},
+{"id":"2","source":"MED","pmid":"2","pmcid":"PMC2","title":"not open access","isOpenAccess":"N",
+ "fullTextUrlList":{"fullTextUrl":[{"availabilityCode":"OA","availability":"Open access","documentStyle":"html","site":"Europe_PMC","url":"https://evil.example/b"}]}},
+{"id":"3","source":"MED","pmid":"3","title":"subscription link","isOpenAccess":"Y",
+ "fullTextUrlList":{"fullTextUrl":[{"availabilityCode":"S","availability":"Subscription required","documentStyle":"html","site":"Elsevier","url":"https://evil.example/c"}]}},
+{"id":"4","source":"MED","pmid":"4","pmcid":"PMC4","title":"no list, has pmcid","isOpenAccess":"Y"}
+]}}"#;
+        let server = MockServer::start().await;
+        serve_json(&server, SEARCH, body.to_string()).await;
+        let oa = OaPolicy::default();
+        let papers = epmc(&server, &oa).search("x", 5).await.unwrap();
+        assert_eq!(papers[0].oa_url, None, "http is never granted");
+        assert_eq!(papers[1].oa_url, None, "closed record");
+        assert_eq!(papers[2].oa_url, None, "subscription link");
+        // Fallback: the PMC render URL for an OA record with a PMCID.
+        assert_eq!(
+            papers[3].oa_url.as_deref(),
+            Some("https://europepmc.org/articles/PMC4?pdf=render")
+        );
+        let c = client(&server, &oa);
+        for u in [
+            "http://evil.example/a",
+            "https://evil.example/b",
+            "https://evil.example/c",
+        ] {
+            assert!(matches!(c.get_text(u).await, Err(LitError::Disallowed(_))));
+        }
+    }
+
+    #[tokio::test]
+    async fn epmc_search_reports_odd_responses() {
+        let server = MockServer::start().await;
+        serve_json(&server, SEARCH, r#"{"hitCount":0}"#.into()).await;
+        let r = epmc(&server, &OaPolicy::default()).search("x", 5).await;
+        assert_eq!(r, Err(LitError::Parse));
+        let server = MockServer::start().await;
+        serve_json(
+            &server,
+            SEARCH,
+            r#"{"hitCount":0,"resultList":{"result":[]}}"#.into(),
+        )
+        .await;
+        let r = epmc(&server, &OaPolicy::default()).search("x", 5).await;
+        assert_eq!(r.unwrap(), vec![]);
+    }
+
+    // ----- Europe PMC full text -----
+
+    #[tokio::test]
+    async fn epmc_full_text_sections_in_order_and_truncated() {
+        // The real fixture first.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/europepmc/webservices/rest/PMC13375015/fullTextXML"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture("epmc_fulltext.xml"), "application/xml"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ft = epmc(&server, &OaPolicy::default())
+            .full_text("PMC13375015")
+            .await
+            .unwrap();
+        let names: Vec<&str> = ft.sections.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["abstract", "methods", "results", "discussion"]);
+        let get = |n: &str| &ft.sections.iter().find(|(k, _)| k == n).unwrap().1;
+        assert!(get("abstract").contains("Indocyanine green fluorescence angiography"));
+        assert!(
+            !get("abstract").contains("<p>") && !get("abstract").contains("<title"),
+            "no markup"
+        );
+        assert!(get("methods").len() > 3000);
+        assert!(get("results").len() > 3000);
+        assert!(get("discussion").len() > 3000);
+        // Neither the references nor the disclosures leak into a section.
+        assert!(ft.sections.iter().all(|(_, t)| !t.contains("Disclosures")));
+        let total: usize = ft.sections.iter().map(|(_, t)| t.chars().count()).sum();
+        assert!(total <= FULL_TEXT_CHARS);
+    }
+
+    fn article(abs: usize, methods: usize, results: usize, discussion: usize) -> String {
+        let w = |c: char, n: usize| c.to_string().repeat(n);
+        format!(
+            r#"<article><front><article-meta><abstract><p>{}</p></abstract></article-meta></front><body>
+<sec><title>Introduction</title><p>intro</p></sec>
+<sec><title>Discussion</title><p>{}</p></sec>
+<sec><title>Results</title><p>{}</p></sec>
+<sec><title>Methods</title><p>{}</p></sec>
+</body></article>"#,
+            w('a', abs),
+            w('d', discussion),
+            w('r', results),
+            w('m', methods)
+        )
+    }
+
+    fn lens(xml: &str) -> Vec<(String, usize)> {
+        full_text_from_xml(xml)
+            .unwrap()
+            .sections
+            .into_iter()
+            .map(|(n, t)| (n, t.chars().count()))
+            .collect()
+    }
+
+    #[test]
+    fn full_text_is_ordered_by_kind_not_by_document_position() {
+        let l = lens(&article(10, 20, 30, 40));
+        assert_eq!(
+            l,
+            vec![
+                ("abstract".to_string(), 10),
+                ("methods".to_string(), 20),
+                ("results".to_string(), 30),
+                ("discussion".to_string(), 40)
+            ]
+        );
+    }
+
+    #[test]
+    fn full_text_truncates_discussion_first_then_results() {
+        // Over by 5,000: only the discussion shrinks.
+        let l = lens(&article(1000, 9000, 30_000, 25_000));
+        let sum: usize = l.iter().map(|(_, n)| n).sum();
+        assert_eq!(sum, FULL_TEXT_CHARS);
+        assert_eq!(l[0].1, 1000);
+        assert_eq!(l[1].1, 9000);
+        assert_eq!(l[2].1, 30_000);
+        assert_eq!(l[3].1, 20_000);
+        // Discussion alone cannot absorb it: it goes, then results shrink.
+        let l = lens(&article(1000, 9000, 60_000, 5000));
+        assert_eq!(
+            l.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["abstract", "methods", "results"]
+        );
+        assert_eq!(l.iter().map(|(_, n)| n).sum::<usize>(), FULL_TEXT_CHARS);
+        assert_eq!(l[2].1, 50_000);
+        // Multi-byte text is cut on a character boundary.
+        let xml = format!(
+            "<article><body><sec><title>Results</title><p>{}</p></sec></body></article>",
+            "é".repeat(70_000)
+        );
+        let ft = full_text_from_xml(&xml).unwrap();
+        assert_eq!(ft.sections[0].1.chars().count(), FULL_TEXT_CHARS);
+    }
+
+    #[test]
+    fn full_text_matches_titles_and_sec_type_and_ignores_the_rest() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE article>
+<article><front><article-meta>
+<abstract abstract-type="graphical"><p>graphical thing</p></abstract>
+<abstract><sec><title>Background</title><p>Real &amp; <italic>proper</italic> abstract.</p></sec></abstract>
+</article-meta></front><body>
+<sec sec-type="intro"><title>Background</title><p>skip me</p></sec>
+<sec sec-type="materials|methods"><title>Study design</title><p>Design text.</p>
+  <sec><title>Subsection</title><p>Nested text.</p><table-wrap><table><tr><td>CELL</td></tr></table></table-wrap></sec></sec>
+<sec><title>Patients and Methods</title><p>More methods <xref ref-type="bibr" rid="r1">12</xref>.</p></sec>
+<sec><title>RESULTS</title><p>Result text.</p><fig><caption><p>FIGCAPTION</p></caption></fig></sec>
+<sec><title>Discussion and conclusions</title><p>Disc text.</p></sec>
+<sec sec-type="conclusions"><title>Conclusions</title><p>concl</p></sec>
+<sec sec-type="ref-list"><title>References</title><p>REFS</p></sec>
+</body><back><ref-list><ref>BACKREF</ref></ref-list></back></article>"#;
+        let ft = full_text_from_xml(xml).unwrap();
+        let names: Vec<&str> = ft.sections.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["abstract", "methods", "results", "discussion"]);
+        let get = |n: &str| ft.sections.iter().find(|(k, _)| k == n).unwrap().1.clone();
+        let abs = get("abstract");
+        assert!(abs.contains("Real & proper abstract."), "{abs}");
+        assert!(!abs.contains("graphical"));
+        let m = get("methods");
+        assert!(
+            m.contains("Design text.") && m.contains("Nested text."),
+            "{m}"
+        );
+        assert!(m.contains("More methods"), "{m}");
+        assert!(!m.contains("CELL"), "tables are skipped: {m}");
+        assert!(!m.contains("12"), "citation numbers are skipped: {m}");
+        assert!(!get("results").contains("FIGCAPTION"));
+        assert!(get("discussion").contains("Disc text."));
+        let all: String = ft.sections.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(!all.contains("REFS") && !all.contains("BACKREF") && !all.contains("skip me"));
+    }
+
+    #[test]
+    fn full_text_never_panics_on_odd_xml() {
+        for bad in [
+            "",
+            "not xml at all",
+            "<article>",
+            "<article><body><sec><title>Results</title><p>x</sec></body></article>",
+            "</article>",
+            "<error>not available</error>",
+            "<article><body/></article>",
+            "<<<>>>&&&",
+            "<article><body><sec><title>Methods</title><p>&bogus; &#xD800; &#99999999; ok</p></sec></body></article>",
+        ] {
+            // Ok or Err are both fine; panicking is not.
+            let _ = full_text_from_xml(bad);
+        }
+        assert_eq!(full_text_from_xml("<error>x</error>"), Err(LitError::Parse));
+        assert_eq!(
+            full_text_from_xml("<article><body/></article>"),
+            Err(LitError::Parse)
+        );
+        // Deep nesting does not blow the stack.
+        let deep = format!(
+            "<article><body><sec><title>Methods</title>{}x{}</sec></body></article>",
+            "<sec>".repeat(50_000),
+            "</sec>".repeat(50_000)
+        );
+        let _ = full_text_from_xml(&deep);
+    }
+
+    #[tokio::test]
+    async fn epmc_full_text_rejects_malformed_pmcid_without_a_request() {
+        let server = MockServer::start().await;
+        let e = epmc(&server, &OaPolicy::default());
+        for bad in [
+            "",
+            "PMC",
+            "12345",
+            "PMC12/../x",
+            "pmc123",
+            "PMC1?x=1",
+            "PMC12 34",
+        ] {
+            assert_eq!(e.full_text(bad).await, Err(LitError::Parse), "{bad:?}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn epmc_full_text_reports_http_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/europepmc/webservices/rest/PMC9/fullTextXML"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let r = epmc(&server, &OaPolicy::default()).full_text("PMC9").await;
+        assert_eq!(r, Err(LitError::Http(404)));
+    }
+
+    // ----- Unpaywall -----
+
+    fn unpaywall_route(doi: &str) -> String {
+        format!("/v2/{doi}")
+    }
+
+    #[tokio::test]
+    async fn unpaywall_returns_https_url_or_none() {
+        let server = MockServer::start().await;
+        let doi_pdf = "10.1007/s10151-026-03388-4";
+        let doi_url = "10.1056/NEJMoa2034577";
+        let doi_closed = "10.1016/j.surg.2019.05.025";
+        for (doi, f) in [
+            (doi_pdf, "unpaywall_oa_pdf.json"),
+            (doi_url, "unpaywall_oa_url_only.json"),
+            (doi_closed, "unpaywall_closed.json"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(unpaywall_route(doi)))
+                .and(query_param("email", "ci@example.invalid"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(fixture(f), "application/json"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let oa = OaPolicy::default();
+        let u = unpaywall(&server, &oa);
+        // url_for_pdf is preferred.
+        let pdf = u.best_oa(doi_pdf).await.unwrap().unwrap();
+        assert_eq!(
+            pdf,
+            "https://link.springer.com/content/pdf/10.1007/s10151-026-03388-4.pdf"
+        );
+        // No url_for_pdf: falls back to url.
+        let url = u.best_oa(doi_url).await.unwrap().unwrap();
+        assert_eq!(url, "https://www.ncbi.nlm.nih.gov/pmc/articles/7745181");
+        // Not open access.
+        assert_eq!(u.best_oa(doi_closed).await.unwrap(), None);
+        // The returned URLs were registered, once each; nothing else was.
+        let c = client(&server, &oa);
+        for (url, body_path) in [
+            (pdf.as_str(), "/content/pdf/10.1007/s10151-026-03388-4.pdf"),
+            (url.as_str(), "/pmc/articles/7745181"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(body_path))
+                .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+                .mount(&server)
+                .await;
+            assert_eq!(c.get_text(url).await.unwrap(), "ok");
+            assert!(matches!(
+                c.get_text(url).await,
+                Err(LitError::Disallowed(_))
+            ));
+        }
+        assert!(matches!(
+            c.get_text("https://doi.org/10.1016/j.surg.2019.05.025")
+                .await,
+            Err(LitError::Disallowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unpaywall_http_url_is_ignored() {
+        let body = |pdf: &str, url: &str| {
+            format!(r#"{{"is_oa":true,"best_oa_location":{{"url_for_pdf":{pdf},"url":{url}}}}}"#)
+        };
+        let server = MockServer::start().await;
+        serve_json(
+            &server,
+            "/v2/10.1/a",
+            body(
+                r#""http://insecure.example/a.pdf""#,
+                r#""http://insecure.example/a""#,
+            ),
+        )
+        .await;
+        // http pdf but https landing url: the https one is used.
+        serve_json(
+            &server,
+            "/v2/10.1/b",
+            body(
+                r#""http://insecure.example/b.pdf""#,
+                r#""https://ok.example/b""#,
+            ),
+        )
+        .await;
+        serve_json(&server, "/v2/10.1/c", body("null", "null")).await;
+        serve_json(
+            &server,
+            "/v2/10.1/d",
+            r#"{"is_oa":false,"best_oa_location":null}"#.into(),
+        )
+        .await;
+        serve_json(&server, "/v2/10.1/e", r#"{"is_oa":true}"#.into()).await;
+        let oa = OaPolicy::default();
+        let u = unpaywall(&server, &oa);
+        assert_eq!(u.best_oa("10.1/a").await.unwrap(), None);
+        assert_eq!(
+            u.best_oa("10.1/b").await.unwrap().as_deref(),
+            Some("https://ok.example/b")
+        );
+        for d in ["10.1/c", "10.1/d", "10.1/e"] {
+            assert_eq!(u.best_oa(d).await.unwrap(), None, "{d}");
+        }
+        let c = client(&server, &oa);
+        assert!(matches!(
+            c.get_text("http://insecure.example/a").await,
+            Err(LitError::Disallowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unpaywall_unknown_doi_is_none_and_errors_are_reported() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/10.1/missing"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string(
+                    r#"{"HTTP_status_code":404,"error":true,"message":"not found"}"#,
+                ),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/10.1/down"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        serve_json(&server, "/v2/10.1/junk", "not json".into()).await;
+        let u = unpaywall(&server, &OaPolicy::default());
+        assert_eq!(u.best_oa("10.1/missing").await.unwrap(), None);
+        assert_eq!(u.best_oa("10.1/down").await, Err(LitError::Http(503)));
+        assert_eq!(u.best_oa("10.1/junk").await, Err(LitError::Parse));
+        // Blank DOIs never reach the network.
+        let before = server.received_requests().await.unwrap().len();
+        assert_eq!(u.best_oa("  ").await.unwrap(), None);
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+    }
+
+    // ----- merge -----
+
+    fn p(pmid: Option<&str>, doi: Option<&str>, title: &str, src: PaperSource) -> Paper {
+        Paper {
+            pmid: pmid.map(String::from),
+            pmcid: None,
+            doi: doi.map(String::from),
+            title: title.into(),
+            authors: vec![],
+            journal: None,
+            year: None,
+            pub_types: vec![],
+            abstract_text: None,
+            oa_url: None,
+            retracted: false,
+            source: src,
+        }
+    }
+
+    #[test]
+    fn merge_dedupes_by_pmid_then_doi() {
+        let mut pm1 = p(
+            Some("1"),
+            Some("10.1/AAA"),
+            "PubMed title",
+            PaperSource::PubMed,
+        );
+        pm1.authors = vec!["A B".into()];
+        pm1.pub_types = vec!["Journal Article".into()];
+        pm1.abstract_text = Some("pubmed abstract".into());
+        let pm2 = p(Some("2"), None, "Two", PaperSource::PubMed);
+        let pm3 = p(Some("3"), Some("10.1/ccc"), "Three", PaperSource::PubMed);
+
+        // Same PMID.
+        let mut e1 = p(Some("1"), None, "EPMC title", PaperSource::EuropePmc);
+        e1.pmcid = Some("PMC11".into());
+        e1.oa_url = Some("https://europepmc.org/articles/PMC11".into());
+        e1.abstract_text = Some("epmc abstract".into());
+        e1.journal = Some("J".into());
+        e1.year = Some(2024);
+        e1.pub_types = vec!["Journal Article".into(), "Review".into()];
+        // Same DOI (different case), PMID missing on the EPMC side.
+        let mut e3 = p(
+            None,
+            Some("10.1/CCC"),
+            "Three (epmc)",
+            PaperSource::EuropePmc,
+        );
+        e3.pmcid = Some("PMC33".into());
+        e3.retracted = true;
+        // Same DOI but a different PMID: not the same record.
+        let e4 = p(
+            Some("99"),
+            Some("10.1/ccc"),
+            "Other pmid",
+            PaperSource::EuropePmc,
+        );
+        // Only in EPMC.
+        let e5 = p(Some("5"), Some("10.1/eee"), "Five", PaperSource::EuropePmc);
+        // A duplicate inside the EPMC list itself.
+        let e5b = p(None, Some("10.1/EEE"), "Five again", PaperSource::EuropePmc);
+
+        let out = merge_results(vec![pm1, pm2, pm3], vec![e1, e3, e4, e5, e5b]);
+        let key = |x: &Paper| x.pmid.clone().or(x.doi.clone());
+        assert_eq!(
+            out.iter().map(key).collect::<Vec<_>>(),
+            vec![
+                Some("1".into()),
+                Some("2".into()),
+                Some("3".into()),
+                Some("99".into()),
+                Some("5".into()),
+            ]
+        );
+        let m1 = &out[0];
+        assert_eq!(m1.source, PaperSource::Both);
+        assert_eq!(m1.title, "PubMed title", "PubMed values win when present");
+        assert_eq!(m1.abstract_text.as_deref(), Some("pubmed abstract"));
+        assert_eq!(m1.doi.as_deref(), Some("10.1/AAA"));
+        assert_eq!(m1.pmcid.as_deref(), Some("PMC11"), "null filled from EPMC");
+        assert_eq!(
+            m1.oa_url.as_deref(),
+            Some("https://europepmc.org/articles/PMC11")
+        );
+        assert_eq!(m1.journal.as_deref(), Some("J"));
+        assert_eq!(m1.year, Some(2024));
+        assert_eq!(m1.authors, vec!["A B".to_string()]);
+        assert_eq!(m1.pub_types, vec!["Journal Article", "Review"]);
+        assert_eq!(out[1].source, PaperSource::PubMed);
+        let m3 = &out[2];
+        assert_eq!(m3.source, PaperSource::Both);
+        assert_eq!(m3.pmid.as_deref(), Some("3"));
+        assert_eq!(m3.pmcid.as_deref(), Some("PMC33"));
+        assert!(m3.retracted, "retracted is sticky across sources");
+        assert_eq!(out[3].source, PaperSource::EuropePmc);
+        assert_eq!(out[4].source, PaperSource::EuropePmc);
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
+    fn merge_matches_a_pmc_only_record_by_pmcid() {
+        let mut pm = p(Some("7"), None, "Seven", PaperSource::PubMed);
+        pm.pmcid = Some("PMC70".into());
+        let mut e = p(None, None, "Seven (pmc)", PaperSource::EuropePmc);
+        e.pmcid = Some("PMC70".into());
+        e.oa_url = Some("https://europepmc.org/articles/PMC70".into());
+        let out = merge_results(vec![pm], vec![e]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, PaperSource::Both);
+        assert!(out[0].oa_url.is_some());
+    }
+
+    #[test]
+    fn merge_keeps_pubmed_order() {
+        let pubmed: Vec<Paper> = ["30", "10", "20"]
+            .iter()
+            .map(|i| p(Some(i), None, i, PaperSource::PubMed))
+            .collect();
+        let epmc = vec![
+            p(Some("99"), None, "e-only-1", PaperSource::EuropePmc),
+            p(Some("20"), None, "dup", PaperSource::EuropePmc),
+            p(Some("10"), None, "dup", PaperSource::EuropePmc),
+            p(Some("98"), None, "e-only-2", PaperSource::EuropePmc),
+        ];
+        let out = merge_results(pubmed, epmc);
+        let ids: Vec<_> = out.iter().map(|x| x.pmid.clone().unwrap()).collect();
+        assert_eq!(ids, ["30", "10", "20", "99", "98"]);
+        assert_eq!(merge_results(vec![], vec![]), vec![]);
+    }
+
+    // ----- cache keeps pmcid (DB-gated) -----
+
+    #[tokio::test]
+    async fn cache_stores_pmcid_and_keeps_it_on_refresh() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("SKIP: TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = lazy_pool(&SecretString::from(url)).expect("lazy pool");
+        migrate(&pool).await.expect("migrate");
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let pmid = format!("t7-{tag}");
+        let mut a = p(Some(&pmid), Some("10.1/x"), "T", PaperSource::PubMed);
+        a.pmcid = Some("PMC555".into());
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert_eq!(got[0].pmcid.as_deref(), Some("PMC555"));
+        // A refresh without a pmcid keeps the stored one.
+        a.pmcid = None;
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert_eq!(got[0].pmcid.as_deref(), Some("PMC555"));
+        // A newer pmcid replaces it.
+        a.pmcid = Some("PMC556".into());
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert_eq!(got[0].pmcid.as_deref(), Some("PMC556"));
+        sqlx::query("DELETE FROM incisive.paper_cache WHERE pmid = $1")
+            .bind(&pmid)
             .execute(&pool)
             .await
             .unwrap();
