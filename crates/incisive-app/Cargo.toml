@@ -41,6 +41,8 @@ hex = { version = "0.4", optional = true }
 tower-http = { version = "0.6", default-features = false, features = ["limit", "catch-panic"], optional = true }
 # `catch_unwind` for the run worker (a panicking pipeline fails its run, not the process).
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+# PubMed efetch XML (abstracts, retraction notices).
+quick-xml = { version = "0.42", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -82,6 +84,7 @@ ssr = [
     "dep:hex",
     "dep:tower-http",
     "dep:futures-util",
+    "dep:quick-xml",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",

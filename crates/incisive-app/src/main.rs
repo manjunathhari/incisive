@@ -14,7 +14,8 @@ use incisive_app::{
 use leptos::config::get_configuration;
 
 /// Retention: runs older than 12 months are deleted at startup (after
-/// migrations) and then daily. Logs counts only.
+/// migrations) and then daily, together with the paper-cache prune (entries
+/// older than 90 days). Logs counts only.
 async fn retention_loop(pool: sqlx::PgPool) {
     let mut every = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
     loop {
@@ -23,6 +24,10 @@ async fn retention_loop(pool: sqlx::PgPool) {
         match incisive_app::runs::store::delete_runs_older_than(&pool, 365).await {
             Ok(deleted) => tracing::info!(deleted, "run retention pass"),
             Err(_) => tracing::error!("run retention pass failed"),
+        }
+        match incisive_app::lit::cache::prune(&pool).await {
+            Ok(pruned) => tracing::info!(pruned, "paper cache prune"),
+            Err(_) => tracing::error!("paper cache prune failed"),
         }
     }
 }

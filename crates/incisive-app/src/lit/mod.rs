@@ -3,7 +3,9 @@
 //! This whole module is `ssr`-only. The answer views (Task 13) define their own
 //! plain view types, so nothing here has to compile for the browser build.
 
+pub mod cache;
 pub mod http;
+pub mod pubmed;
 
 use serde::{Deserialize, Serialize};
 
