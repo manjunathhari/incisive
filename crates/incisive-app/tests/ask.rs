@@ -19,7 +19,7 @@ use axum::{
 };
 use claude_client::{Client, RetryPolicy, Usage};
 use http_body_util::BodyExt;
-use incisive_app::ask::{AskFailure, AskOutcome, GATE_ESTIMATE, run_ask};
+use incisive_app::ask::{AskFailure, AskOutcome, gate_estimate, run_ask};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::{Classifier, ClaudeClassifier, GateDecision, GateError, Verdict};
 use incisive_app::identity::{IapVerifier, JwkSource, Role, User};
@@ -423,8 +423,29 @@ fn bad_response(model: &str, input_tokens: u32, output_tokens: u32) -> GateError
 
 /// The priced gate estimate for `question`, as `run_ask` reserves it.
 fn estimate_paise(question: &str) -> i64 {
-    let _ = question;
-    cost_paise(&prices(), 88.0, GATE_MODEL, &GATE_ESTIMATE).unwrap()
+    cost_paise(&prices(), 88.0, GATE_MODEL, &gate_estimate(question)).unwrap()
+}
+
+#[test]
+fn gate_estimate_grows_with_question_bytes() {
+    let u = |q: &str| {
+        let e = gate_estimate(q);
+        (e.input_tokens, e.output_tokens)
+    };
+    // 700 for the prompt and policy, ceil(bytes / 2) for the question, 150 out.
+    assert_eq!(u(""), (700, 150));
+    assert_eq!(u("a"), (701, 150));
+    assert_eq!(u("abcd"), (702, 150));
+    assert_eq!(u("abcde"), (703, 150));
+    // Indic scripts are 3 bytes per character in UTF-8: estimated conservatively.
+    let kannada = "\u{0CB0}\u{0CCB}\u{0C97}"; // 3 chars, 9 bytes
+    assert_eq!(u(kannada), (705, 150));
+    let long = "\u{0930}".repeat(4_000); // the longest question: 12,000 bytes
+    assert_eq!(u(&long), (6_700, 150));
+    assert_eq!(
+        u(MODEL_QUESTION),
+        (700 + MODEL_QUESTION.len().div_ceil(2) as u32, 150)
+    );
 }
 
 #[tokio::test]
@@ -637,8 +658,11 @@ async fn accepted_by_rule_needs_no_model_and_shows_alert() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    // Estimate is 16 paise; a 20-paise cap puts the reservation past 80%.
-    let u = make_user(&pool, "rule-alert", Role::Surgeon, 20).await;
+    // A cap just above the estimate puts the reservation past 80%.
+    let est = estimate_paise(RULE_QUESTION);
+    let cap = est * 100 / 85;
+    assert!(est <= cap && est * 100 >= cap * 80, "{est} / {cap}");
+    let u = make_user(&pool, "rule-alert", Role::Surgeon, cap).await;
     let app = api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true));
     let (_, b) = call(app, ask_req(&u.email, RULE_QUESTION)).await;
     assert_eq!(b["status"], "accepted", "{b}");

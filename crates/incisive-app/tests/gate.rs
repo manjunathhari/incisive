@@ -7,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use claude_client::{Client, RetryPolicy, Usage};
 use incisive_app::gate::{
-    Classifier, ClaudeClassifier, GATE_POLICY, GateDecision, GateError, Verdict, check,
-    rule_prefilter,
+    Classifier, ClaudeClassifier, GATE_POLICY, GATE_PROMPT_TOKENS, GateDecision, GateError,
+    Verdict, check, prompt_bytes, rule_prefilter,
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -508,6 +508,19 @@ async fn request_uses_gate_model_and_150_tokens() {
     let user = body["messages"][0]["content"][0]["text"].as_str().unwrap();
     assert!(user.contains("Evidence for ICG in robotic colectomy?"));
     assert_eq!(body["messages"][0]["role"], "user");
+}
+
+#[test]
+fn prompt_token_allowance_covers_the_prompt() {
+    // ceil(bytes / 3) + 50 is a conservative token count for the fixed prompt
+    // (system prompt plus the <question> wrapper); the allowance must cover it.
+    let measured = prompt_bytes().div_ceil(3) + 50;
+    assert!(
+        GATE_PROMPT_TOKENS as usize >= measured,
+        "{GATE_PROMPT_TOKENS} < {measured}"
+    );
+    assert_eq!(GATE_PROMPT_TOKENS, 700);
+    assert!(prompt_bytes() > GATE_POLICY.len());
 }
 
 #[test]

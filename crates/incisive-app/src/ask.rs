@@ -138,11 +138,16 @@ mod server {
     use crate::server::AppState;
     use crate::spend::{self, CapCheck, SpendError};
 
-    /// Phase 1 estimate for one gate call: 1,000 input + 150 output tokens.
-    pub const GATE_ESTIMATE: Usage = Usage {
-        input_tokens: 1_000,
-        output_tokens: 150,
-    };
+    /// Estimate for one gate call on `question`: the fixed prompt allowance plus
+    /// ceil(question UTF-8 bytes / 2) input tokens (conservative for Indic
+    /// scripts, which are 3 bytes per character), and the 150-token output cap.
+    pub fn gate_estimate(question: &str) -> Usage {
+        let question_tokens = u32::try_from(question.len().div_ceil(2)).unwrap_or(u32::MAX);
+        Usage {
+            input_tokens: gate::GATE_PROMPT_TOKENS.saturating_add(question_tokens),
+            output_tokens: gate::GATE_MAX_TOKENS,
+        }
+    }
     const ACTIVITY_DEFAULT: i64 = 50;
     const ACTIVITY_MAX: i64 = 500;
     const DETAIL_CHARS: usize = 160;
@@ -241,7 +246,7 @@ mod server {
             &state.prices,
             state.usd_inr,
             &state.gate_model,
-            &GATE_ESTIMATE,
+            &gate_estimate(question),
         ) {
             Ok(p) => p,
             Err(e) => {

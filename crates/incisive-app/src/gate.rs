@@ -15,7 +15,19 @@ use serde::{Deserialize, Serialize};
 
 /// Longest question the gate will consider, in characters.
 const MAX_QUESTION_CHARS: usize = 4_000;
-const GATE_MAX_TOKENS: u32 = 150;
+pub const GATE_MAX_TOKENS: u32 = 150;
+/// Input-token allowance for the fixed part of a gate call (system prompt,
+/// policy and the `<question>` wrapper). Measured at 777 bytes, so
+/// ceil(777 / 3) + 50 = 309 tokens; 700 leaves room for prompt growth, and a
+/// test keeps it above the measured figure.
+pub const GATE_PROMPT_TOKENS: u32 = 700;
+const QUESTION_OPEN: &str = "<question>\n";
+const QUESTION_CLOSE: &str = "\n</question>";
+
+/// Bytes of the fixed prompt: the system prompt plus the question wrapper.
+pub fn prompt_bytes() -> usize {
+    ClaudeClassifier::system_prompt().len() + QUESTION_OPEN.len() + QUESTION_CLOSE.len()
+}
 const MAX_REASON_CHARS: usize = 300;
 
 /// Owner decision, verbatim from the plan's Global Constraints.
@@ -520,7 +532,7 @@ impl Classifier for ClaudeClassifier {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: format!(
-                        "<question>\n{}\n</question>",
+                        "{QUESTION_OPEN}{}{QUESTION_CLOSE}",
                         neutralise_close_tag(question)
                     ),
                 }],
