@@ -606,3 +606,30 @@ async fn different_users_racing_the_global_cap_do_not_overshoot() {
         );
     }
 }
+
+#[tokio::test]
+async fn charge_call_without_reservation_and_release_are_safe() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "nores", 10_000, None).await;
+    let run = Uuid::new_v4();
+    assert_eq!(
+        incisive_app::spend::release(&pool, u.id, run)
+            .await
+            .unwrap(),
+        0
+    );
+    let call = Uuid::new_v4();
+    incisive_app::spend::charge_call(&pool, u.id, run, call, "m-test", &usage(1, 1), 7)
+        .await
+        .unwrap();
+    let (paise, purpose): (i64, String) = sqlx::query_as(
+        "SELECT paise, purpose FROM incisive.spend WHERE request_id = $1 AND kind = 'charge'",
+    )
+    .bind(call)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((paise, purpose), (7, format!("run:{run}")));
+}

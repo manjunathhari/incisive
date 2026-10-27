@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "ssr")]
+pub mod budget;
+#[cfg(feature = "ssr")]
 pub mod store;
 
 /// How deep the run goes.

@@ -73,24 +73,27 @@ pub async fn create_run(
 
 /// Move a run to `status`. `Running` stamps `started_at` (once); terminal
 /// statuses stamp `finished_at`. `error_kind` is stored as given.
+///
+/// A run already in a terminal status (done, partial, failed, interrupted) is
+/// never changed. Returns whether a row was updated.
 pub async fn set_status(
     pool: &PgPool,
     run_id: Uuid,
     status: RunStatus,
     error_kind: Option<&str>,
-) -> sqlx::Result<()> {
-    sqlx::query(
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
         "UPDATE incisive.runs SET status = $2, error_kind = $3, \
            started_at = CASE WHEN $2 = 'running' THEN COALESCE(started_at, now()) ELSE started_at END, \
            finished_at = CASE WHEN $2 IN ('queued','running') THEN NULL ELSE now() END \
-         WHERE id = $1",
+         WHERE id = $1 AND status NOT IN ('done','partial','failed','interrupted')",
     )
     .bind(run_id)
     .bind(status.as_str())
     .bind(error_kind)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(r.rows_affected() > 0)
 }
 
 /// Append a progress line and return its sequence number (1, 2, 3, ...).

@@ -3,16 +3,21 @@
 //! The two global operations (`mark_stale_runs_interrupted`,
 //! `delete_runs_older_than`) are asserted only on rows each test created.
 
+use claude_client::Usage;
 use incisive_app::db::{lazy_pool, migrate};
+use incisive_app::identity::User;
+use incisive_app::runs::budget::{BudgetError, RunBudget};
 use incisive_app::runs::store::{
     ActiveRunExists, add_cost, add_step, create_run, delete_all_runs, delete_run,
     delete_runs_older_than, get_run_for_user, list_runs, load_question,
     mark_stale_runs_interrupted, save_answer, set_status,
 };
 use incisive_app::runs::{RunMode, RunStatus, StepKind};
+use incisive_app::spend::{CapCheck, CapsConfig, Prices, charge_call, release, reserve, totals};
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// `mark_stale_runs_interrupted` is global: it would interrupt the queued/running
@@ -413,4 +418,270 @@ async fn retention_deletes_only_older_than_365_days() {
     assert_eq!(count(&pool, "run_steps", ids[0]).await, 0);
     assert_eq!(count(&pool, "run_answers", ids[1]).await, 0);
     assert_eq!(count(&pool, "run_steps", ids[2]).await, 1);
+}
+
+// ---------- terminal status ----------
+
+#[tokio::test]
+async fn terminal_status_is_not_overwritten() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let u = new_user(&pool).await;
+    for terminal in [
+        RunStatus::Done,
+        RunStatus::Partial,
+        RunStatus::Failed,
+        RunStatus::Interrupted,
+    ] {
+        let id = create_run(&pool, u, "q", RunMode::Quick, 500)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            set_status(&pool, id, RunStatus::Running, None)
+                .await
+                .unwrap()
+        );
+        assert!(set_status(&pool, id, terminal, None).await.unwrap());
+        let finished = |pool: &PgPool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+                    "SELECT finished_at FROM incisive.runs WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let before = finished(&pool).await;
+        for later in [
+            RunStatus::Running,
+            RunStatus::Queued,
+            RunStatus::Done,
+            RunStatus::Failed,
+        ] {
+            assert!(!set_status(&pool, id, later, Some("x")).await.unwrap());
+        }
+        let v = get_run_for_user(&pool, u, id).await.unwrap().unwrap();
+        assert_eq!(v.summary.status, terminal);
+        assert_eq!(finished(&pool).await, before);
+    }
+}
+
+// ---------- run budget ----------
+
+fn prices() -> Prices {
+    Prices::from_json(r#"{"m-test": {"input": 1.0, "output": 5.0}}"#).unwrap()
+}
+
+fn budget(run: Uuid, user: i64, limit: i64, started: Instant) -> RunBudget {
+    RunBudget::new(run, user, limit, started, prices(), 88.0)
+}
+
+fn big_global() -> CapsConfig {
+    CapsConfig {
+        global_monthly_paise: i64::MAX / 4,
+    }
+}
+
+async fn full_user(pool: &PgPool, id: i64) -> User {
+    let email: String = sqlx::query_scalar("SELECT email FROM incisive.users WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    incisive_app::identity::find_user(pool, &email)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// A run with `limit` reserved up front, as `run_ask` will do.
+async fn reserved_run(pool: &PgPool, limit: i64) -> (i64, Uuid) {
+    let uid = new_user(pool).await;
+    let run = create_run(pool, uid, "q", RunMode::Focused, limit)
+        .await
+        .unwrap()
+        .unwrap();
+    let user = full_user(pool, uid).await;
+    let c = reserve(pool, &user, &big_global(), limit, run, "run")
+        .await
+        .unwrap();
+    assert!(matches!(c, CapCheck::Ok { .. }));
+    (uid, run)
+}
+
+async fn reservation(pool: &PgPool, run: Uuid) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation'",
+    )
+    .bind(run)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+async fn charges(pool: &PgPool, uid: i64) -> Vec<(i64, String)> {
+    sqlx::query_as(
+        "SELECT paise, purpose FROM incisive.spend WHERE user_id = $1 AND kind = 'charge' ORDER BY id",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn usage(i: u32, o: u32) -> Usage {
+    Usage {
+        input_tokens: i,
+        output_tokens: o,
+    }
+}
+
+#[tokio::test]
+async fn charge_call_reduces_reservation_and_records_charge() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let call = Uuid::new_v4();
+    charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
+        .await
+        .unwrap();
+    assert_eq!(reservation(&pool, run).await, Some(3700));
+    assert_eq!(charges(&pool, uid).await, [(300, format!("run:{run}"))]);
+    let t = totals(&pool, uid).await.unwrap();
+    assert_eq!((t.today_paise, t.month_paise), (4000, 4000));
+    // Replaying the same call id neither double-charges nor double-decrements.
+    charge_call(&pool, uid, run, call, "m-test", &usage(10, 10), 300)
+        .await
+        .unwrap();
+    assert_eq!(reservation(&pool, run).await, Some(3700));
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+}
+
+#[tokio::test]
+async fn charge_beyond_reservation_floors_at_zero() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 100).await;
+    charge_call(&pool, uid, run, Uuid::new_v4(), "m-test", &usage(1, 1), 250)
+        .await
+        .unwrap();
+    assert_eq!(reservation(&pool, run).await, Some(0));
+    assert_eq!(charges(&pool, uid).await[0].0, 250);
+    // Real cost counts in full even past the reservation.
+    assert_eq!(totals(&pool, uid).await.unwrap().today_paise, 250);
+}
+
+#[tokio::test]
+async fn release_returns_remaining_and_is_idempotent() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    charge_call(&pool, uid, run, Uuid::new_v4(), "m-test", &usage(1, 1), 300)
+        .await
+        .unwrap();
+    assert_eq!(release(&pool, uid, run).await.unwrap(), 3700);
+    assert_eq!(reservation(&pool, run).await, None);
+    assert_eq!(totals(&pool, uid).await.unwrap().today_paise, 300);
+    assert_eq!(release(&pool, uid, run).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn charge_and_release_survive_a_missing_reservation() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let uid = new_user(&pool).await;
+    let run = Uuid::new_v4();
+    assert_eq!(release(&pool, uid, run).await.unwrap(), 0);
+    charge_call(&pool, uid, run, Uuid::new_v4(), "m-test", &usage(1, 1), 40)
+        .await
+        .unwrap();
+    assert_eq!(charges(&pool, uid).await[0].0, 40);
+    assert_eq!(reservation(&pool, run).await, None);
+}
+
+#[tokio::test]
+async fn budget_charge_books_audits_and_adds_run_cost() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let b = budget(run, uid, 4000, Instant::now());
+    // 1,000 in + 150 out at $1/$5 per Mtok, 88 INR/USD = 15.4 paise -> 16.
+    assert_eq!(
+        b.charge(&pool, "m-test", &usage(1000, 150)).await.unwrap(),
+        16
+    );
+    assert_eq!(b.spent(), 16);
+    assert_eq!(reservation(&pool, run).await, Some(4000 - 16));
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.cost_paise, 16);
+    let rows: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT event, detail FROM incisive.audit WHERE user_id = $1 ORDER BY seq")
+            .bind(uid)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "charged");
+    assert_eq!(rows[0].1["paise"], 16);
+    assert_eq!(rows[0].1["model"], "m-test");
+    assert!(!rows[0].1.to_string().contains("\"q\""));
+}
+
+#[tokio::test]
+async fn unknown_model_is_an_error_not_free() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    let b = budget(run, uid, 4000, Instant::now());
+    let err = b.charge(&pool, "mystery", &usage(5, 5)).await.unwrap_err();
+    assert!(matches!(err, BudgetError::UnknownModel));
+    assert_eq!(b.spent(), 0);
+    assert!(charges(&pool, uid).await.is_empty());
+    assert_eq!(reservation(&pool, run).await, Some(4000));
+}
+
+#[test]
+fn wrap_up_at_70_percent_or_3_minutes() {
+    let t0 = Instant::now();
+    let b = budget(Uuid::new_v4(), 1, 1000, t0);
+    assert!(!b.should_wrap_up(t0));
+    assert!(!b.should_wrap_up(t0 + Duration::from_secs(179)));
+    assert!(b.should_wrap_up(t0 + Duration::from_secs(180)));
+
+    let spent = |n: i64| {
+        let b = budget(Uuid::new_v4(), 1, 1000, t0);
+        b.record_spent_for_test(n);
+        b
+    };
+    assert!(!spent(699).should_wrap_up(t0));
+    assert!(spent(700).should_wrap_up(t0));
+}
+
+#[test]
+fn hard_stop_at_6_minutes() {
+    let t0 = Instant::now();
+    let b = budget(Uuid::new_v4(), 1, 1000, t0);
+    assert!(!b.past_hard_stop(t0 + Duration::from_secs(359)));
+    assert!(b.past_hard_stop(t0 + Duration::from_secs(360)));
+}
+
+#[test]
+fn can_afford_checks_the_limit() {
+    let b = budget(Uuid::new_v4(), 1, 1000, Instant::now());
+    b.record_spent_for_test(900);
+    assert!(b.can_afford(100));
+    assert!(!b.can_afford(101));
+    assert!(b.can_afford(0));
+    assert!(!b.can_afford(-1));
 }
