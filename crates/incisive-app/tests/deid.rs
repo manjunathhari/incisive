@@ -182,6 +182,17 @@ const BLOCK: &[(&str, &[K])] = &[
     ("Flat 302 G Wing, Prestige", &[K::Address]),
     ("IP 4471 M 45y", &[K::HospitalId]),
     ("IP 4471 m", &[K::HospitalId]),
+    // --- fix round 4
+    ("from Whitefield 560066 presents with pain", &[K::Address]),
+    (
+        "Address: Whitefield, Bengaluru 560066 presents for review",
+        &[K::Address],
+    ),
+    ("Kadugodi, Bengaluru 560067 visits OPD", &[K::Address]),
+    ("Bengaluru 560038 attends clinic", &[K::Address]),
+    ("MRS SAROJAMMA, 67 F", &[K::PersonName]),
+    ("call on 98450 12 345", &[K::Phone]),
+    ("s/o Om", &[K::PersonName]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -368,6 +379,49 @@ const PASS: &[&str] = &[
     "IP 200 ml/hr fluids",
     "Flat 30-degree scope",
     "Patient, Seen in OPD",
+    // --- fix round 4
+    "c/o Lt Inguinal Swelling",
+    "c/o Lt Sided Abdominal Pain",
+    "s/o Lt Inguinal Hernia",
+    "Healed w/o Late Complications",
+    "CT s/o Intestinal Obstruction",
+    "S/O INTESTINAL OBSTRUCTION",
+    "s/o Achalasia (Cardia)",
+    "s/o Duodenal Ulcer Perforation",
+    "s/o Intussusception",
+    "s/o Rectal Growth",
+    "s/o Umbilical Hernia",
+    "s/o Perianal Fistula",
+    "s/o Peritoneal Carcinomatosis",
+    "Findings s/o Sigmoid Volvulus",
+    "s/o Hepatic Abscess",
+    "s/o Pancreatic Pseudocyst",
+    "s/o Gastric Outlet Obstruction",
+    "s/o Appendicular Lump",
+    "s/o Mesenteric Ischemia",
+    "s/o Koch's Abdomen",
+    "s/o Free Fluid",
+    "S/O SUBACUTE INTESTINAL OBSTRUCTION",
+    "s/o Gas Under Diaphragm",
+    "s/o Fatty Liver",
+    "s/o Calculous Cholecystitis",
+    "h/o Previous Surgery",
+    "h/o Similar Complaints",
+    "c/o Heaviness Over Left Groin",
+    "Consent from Son of Patient",
+    "Wife of Patient informed",
+    "h/o Smoking 20 years",
+    "h/o Alcohol Intake 15 years",
+    "h/o Surgery 10 yrs ago",
+    "h/o Asthma 20 years",
+    "h/o Tobacco Chewing 30 years",
+    "h/o Trauma 12 years back",
+    "ABG pH 7.31, Plt 65000-80000",
+    "Flat 8 MM polyp",
+    "Flat 2 CM lesion",
+    "IP 500 MG CISPLATIN",
+    "IP 1 g ceftriaxone",
+    "HBV DNA 7800000000 IU/mL",
 ];
 
 #[test]
@@ -527,4 +581,101 @@ fn name_spans_cover_the_whole_name() {
         let f = scan(t);
         assert_eq!(&t[f[0].start..f[0].end], want, "{t}");
     }
+}
+
+/// Every probe from fix round 4 (R-2d), with its expected kinds (empty = must pass).
+/// Checked together with every BLOCK and PASS row so no earlier row can regress.
+const ROUND4_PROBES: &[(&str, &[K])] = &[
+    // 1. PIN followed by a verb
+    ("from Whitefield 560066 presents with pain", &[K::Address]),
+    (
+        "Address: Whitefield, Bengaluru 560066 presents for review",
+        &[K::Address],
+    ),
+    ("Kadugodi, Bengaluru 560067 visits OPD", &[K::Address]),
+    ("Bengaluru 560038 attends clinic", &[K::Address]),
+    // 2. Lt / Late
+    ("c/o Lt Inguinal Swelling", &[]),
+    ("c/o Lt Sided Abdominal Pain", &[]),
+    ("s/o Lt Inguinal Hernia", &[]),
+    ("Healed w/o Late Complications", &[]),
+    ("s/o Late Sri Ramaiah", &[K::PersonName]),
+    ("s/o late Ramaiah", &[K::PersonName]),
+    // 3. s/o + clinical words
+    ("CT s/o Intestinal Obstruction", &[]),
+    ("S/O INTESTINAL OBSTRUCTION", &[]),
+    ("s/o Achalasia (Cardia)", &[]),
+    ("s/o Duodenal Ulcer Perforation", &[]),
+    ("s/o Intussusception", &[]),
+    ("s/o Rectal Growth", &[]),
+    ("s/o Umbilical Hernia", &[]),
+    ("s/o Perianal Fistula", &[]),
+    ("s/o Peritoneal Carcinomatosis", &[]),
+    ("Findings s/o Sigmoid Volvulus", &[]),
+    ("s/o Hepatic Abscess", &[]),
+    ("s/o Pancreatic Pseudocyst", &[]),
+    ("s/o Gastric Outlet Obstruction", &[]),
+    ("s/o Appendicular Lump", &[]),
+    ("s/o Mesenteric Ischemia", &[]),
+    ("s/o Koch's Abdomen", &[]),
+    ("s/o Free Fluid", &[]),
+    ("S/O SUBACUTE INTESTINAL OBSTRUCTION", &[]),
+    ("s/o Gas Under Diaphragm", &[]),
+    ("s/o Fatty Liver", &[]),
+    ("s/o Calculous Cholecystitis", &[]),
+    ("S/o Gopal", &[K::PersonName]),
+    ("s/o Vishal", &[K::PersonName]),
+    ("s/o Kunal", &[K::PersonName]),
+    ("s/o Sonal", &[K::PersonName]),
+    ("w/o Kamal", &[K::PersonName]),
+    ("D/o Sonia", &[K::PersonName]),
+    ("S/O. GOPAL", &[K::PersonName]),
+    ("S/O GOPAL KRISHNA", &[K::PersonName]),
+    ("s/o Kunal, 23M", &[K::PersonName]),
+    // 4. second word must be a name
+    ("h/o Previous Surgery", &[]),
+    ("h/o Similar Complaints", &[]),
+    ("c/o Heaviness Over Left Groin", &[]),
+    ("Consent from Son of Patient", &[]),
+    ("Wife of Patient informed", &[]),
+    // 5. durations are not ages
+    ("h/o Smoking 20 years", &[]),
+    ("h/o Alcohol Intake 15 years", &[]),
+    ("h/o Surgery 10 yrs ago", &[]),
+    ("h/o Asthma 20 years", &[]),
+    ("h/o Tobacco Chewing 30 years", &[]),
+    ("h/o Trauma 12 years back", &[]),
+    ("h/o Ramesh, 60M", &[K::PersonName]),
+    ("c/o Kamala, aged 45", &[K::PersonName]),
+    ("MRS SAROJAMMA, 67 F", &[K::PersonName]),
+    // 6. ranges and pH
+    ("ABG pH 7.31, Plt 65000-80000", &[]),
+    // 7. units
+    ("Flat 8 MM polyp", &[]),
+    ("Flat 2 CM lesion", &[]),
+    ("IP 500 MG CISPLATIN", &[]),
+    ("IP 1 g ceftriaxone", &[]),
+    ("HBV DNA 7800000000 IU/mL", &[]),
+    ("House No. 45 G Block", &[K::Address]),
+    ("Door No 12 G Floor", &[K::Address]),
+    ("Flat 302 G Wing, Prestige", &[K::Address]),
+    ("IP 4471 M 45y", &[K::HospitalId]),
+    ("IP 4471 m", &[K::HospitalId]),
+    // 9. optional
+    ("call on 98450 12 345", &[K::Phone]),
+    ("s/o Om", &[K::PersonName]),
+];
+
+#[test]
+fn regression_corpus() {
+    let mut bad = Vec::new();
+    let blocks = BLOCK.iter().copied();
+    let passes = PASS.iter().map(|t| (*t, &[][..]));
+    for (text, want) in blocks.chain(passes).chain(ROUND4_PROBES.iter().copied()) {
+        let got = kinds(text);
+        if got != want {
+            bad.push(format!("{text:?}: want {want:?}, got {got:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "regressions:\n{}", bad.join("\n"));
 }

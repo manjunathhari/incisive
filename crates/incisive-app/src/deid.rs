@@ -11,15 +11,23 @@
 //! - `d/m` without a year ("3/12") is not treated as a calendar date (it is also
 //!   how clinicians write fractions and follow-up in months).
 //! - Month-and-year ("March 2024") and year alone are allowed.
-//! - Names are only caught with a title or patient-context word and an ASCII
-//!   capitalised word; all-caps and non-Latin names are not caught.
+//! - Names are only caught after a title, a patient-context word or a relation
+//!   (`s/o` ...), and only in ASCII letters; lowercase and non-Latin names are not caught.
+//! - Name words are decided by two explicit lists: a CLINICAL lexicon (never a name) and a
+//!   GIVEN-NAME allowlist (always a name candidate). Any other capitalised word of 3+
+//!   letters is a candidate; word endings alone never decide.
 //! - `#12` alone is not an address; it needs a street word nearby.
-//! - A bare 6-digit number is a PIN code only with an address cue (a `pin` label,
-//!   a capitalised place word right before it, or another address finding nearby).
-//! - `c/o`, `w/o`, `h/o` ("complains of", "without", "history of") + a bare single word is
-//!   NOT treated as a name ("c/o Ramesh" passes: accepted gap). They block only with a title,
-//!   an age/sex after the name, a second non-clinical capitalised word, or a common given
-//!   name. `s/o`, `d/o`, "son of", "wife of" + a non-clinical word always block.
+//! - A bare 6-digit number is a PIN code only with an address cue: a `pin` label (always
+//!   wins), an "Address" label or another address finding nearby, or a capitalised place
+//!   word right before it. A count noun after it ("150000 gastrectomies") overrides only
+//!   the place-word cue.
+//! - `c/o`, `w/o`, `h/o` ("complains of", "without", "history of") + a bare single word
+//!   that is not on the given-name allowlist is NOT treated as a name ("c/o Puttaswamy"
+//!   passes: accepted gap; "c/o Ramesh" blocks because Ramesh is allowlisted). They also
+//!   block with a title, an age/sex marker after the name ("56M", "aged 56", "56 yrs/M";
+//!   a bare duration such as "20 years" is not an age), or a second name-candidate word.
+//!   `s/o`, `d/o`, "son of", "wife of" + a name candidate always block, unless the
+//!   capitalised phrase ends in a clinical head noun ("s/o Hollow Viscus Perforation").
 //! - Digits are ASCII only; Devanagari-digit numbers are not scanned.
 //! - Unicode spaces (NBSP, narrow NBSP, thin space), en/em dashes and the
 //!   full-width `@` are accepted as separators; offsets stay on the original text.
@@ -276,10 +284,37 @@ fn starts_with_unit(rest: &str, units: &[&str]) -> bool {
     })
 }
 
+/// A phone label within the previous 3 tokens. "pH" (acidity) is never a label.
+fn phone_label_before(text: &str, s: usize) -> bool {
+    text[..s].split_whitespace().rev().take(3).any(|t| {
+        let raw = t.trim_matches(|ch: char| ch.is_ascii_punctuation());
+        raw != "pH" && PHONE_LABELS.contains(&raw.to_lowercase().as_str())
+    })
+}
+
+/// "65000-80000": two dash-separated round numbers in ascending order are a range.
+fn looks_like_range(m: &str) -> bool {
+    let parts: Vec<&str> = m
+        .split(['-', '\u{2013}', '\u{2014}'])
+        .map(str::trim)
+        .collect();
+    let [a, b] = parts.as_slice() else {
+        return false;
+    };
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(x), Ok(y)) => x < y && x % 100 == 0 && y % 100 == 0,
+        _ => false,
+    }
+}
+
 fn phone_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
     let (s, e) = span(c);
     if inside_longer_number(text, s, e) {
         return false;
+    }
+    // A phone label nearby always wins over lab-value heuristics.
+    if phone_label_before(text, s) {
+        return true;
     }
     let before: Vec<String> = text[..s]
         .split_whitespace()
@@ -287,35 +322,44 @@ fn phone_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
         .take(3)
         .map(token_key)
         .collect();
-    // A phone label nearby always wins over lab-value heuristics.
-    if before.iter().any(|k| PHONE_LABELS.contains(&k.as_str())) {
-        return true;
-    }
     // A hyphen/en-dash range after a lab word is a lab range ("platelets 65000-80000").
     let m = &text[s..e];
     let ranged = m.contains(['-', '\u{2013}', '\u{2014}']);
     if ranged
-        && before
-            .iter()
-            .any(|k| PHONE_VETO_WORDS.contains(&k.as_str()))
+        && (looks_like_range(m)
+            || before
+                .iter()
+                .any(|k| PHONE_VETO_WORDS.contains(&k.as_str())))
     {
         return false;
     }
     // Followed by a real unit: a count, not a phone.
     let hi = ceil_boundary(text, e + 12);
-    !starts_with_unit(text[e..hi].trim_start(), PHONE_UNITS)
+    let rest = text[e..hi].trim_start();
+    let iu = rest.get(..2).is_some_and(|u| u.eq_ignore_ascii_case("iu"))
+        && !rest[2..].chars().next().is_some_and(char::is_alphanumeric);
+    !(iu || starts_with_unit(rest, PHONE_UNITS))
 }
 
-const UNITS_AFTER_NUMBER: &[&str] = &["mmHg", "mm", "cm", "mg", "ml", "kg", "%"];
+/// Any 10-digit mobile grouping ("98450 12 345"), only right after a phone label.
+fn labelled_phone(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let (s, e) = span(c);
+    !inside_longer_number(text, s, e) && phone_label_before(text, s)
+}
 
-/// True when the text right after `e` is a measurement unit ("8 mm", "2 cm", "500 mg").
+/// Multi-letter units, matched case-insensitively ("8 mm", "2 CM", "500 MG").
+const UNITS_AFTER_NUMBER: &[&str] = &["mmhg", "mcg", "mm", "cm", "mg", "ml", "kg", "iu"];
+
+/// True when the text right after `e` is a measurement unit. Single-letter `g` counts
+/// only in lower case ("1 g"), so "45 G Block" stays an address.
 fn unit_follows(text: &str, e: usize) -> bool {
     let hi = ceil_boundary(text, e + 8);
     let rest = text[e..hi].trim_start();
     if rest.starts_with('%') {
         return true;
     }
-    starts_with_unit(rest, UNITS_AFTER_NUMBER)
+    let lower = rest.to_ascii_lowercase();
+    starts_with_unit(&lower, UNITS_AFTER_NUMBER) || starts_with_unit(rest, &["g"])
 }
 
 fn no_unit_after(text: &str, c: &Captures, _: &[Finding]) -> bool {
@@ -379,10 +423,58 @@ fn pin_label_before(text: &str, s: usize) -> bool {
     })
 }
 
+/// Nouns that make a preceding 6-digit number a count ("150000 gastrectomies").
+const COUNT_NOUNS: &[&str] = &[
+    "patients",
+    "procedures",
+    "admissions",
+    "beneficiaries",
+    "cases",
+    "gastrectomies",
+    "cholecystectomies",
+    "resections",
+    "operations",
+    "subjects",
+    "participants",
+    "copies",
+    "cells",
+    "surgeries",
+    "deaths",
+    "births",
+    "people",
+    "individuals",
+    "adults",
+    "children",
+    "samples",
+    "specimens",
+    "records",
+    "encounters",
+    "discharges",
+];
+
+fn count_noun(w: &str) -> bool {
+    COUNT_NOUNS.contains(&w)
+        || ["ectomies", "otomies", "ostomies", "plasties", "scopies"]
+            .iter()
+            .any(|s| w.ends_with(s))
+}
+
+/// "Address" / "addr" within the previous 60 bytes.
+fn address_label_before(text: &str, s: usize) -> bool {
+    let lo = floor_boundary(text, s.saturating_sub(60));
+    text[lo..s]
+        .split(|c: char| !c.is_alphabetic())
+        .any(|w| w.eq_ignore_ascii_case("address") || w.eq_ignore_ascii_case("addr"))
+}
+
 fn pin_check(text: &str, c: &Captures, addr: &[Finding]) -> bool {
     let (s, e) = span(c);
     if inside_longer_number(text, s, e) {
         return false;
+    }
+    // A pin label always wins.
+    if pin_label_before(text, s) {
+        return true;
     }
     // A lab/count word within the previous 3 tokens means this is a count.
     let lab_before = text[..s].split_whitespace().rev().take(3).any(|t| {
@@ -401,13 +493,19 @@ fn pin_check(text: &str, c: &Captures, addr: &[Finding]) -> bool {
     if UNIT_PREFIXES.iter().any(|u| rest.starts_with(u)) {
         return false;
     }
-    // Address cue: a pin label, a place word right before, or an address nearby.
-    if pin_label_before(text, s) {
+    // Strong address cues: an "Address" label or another address finding nearby.
+    let from = addr.partition_point(|f| f.start < s.saturating_sub(200));
+    let addr_near = addr[from..]
+        .iter()
+        .take_while(|f| f.start <= e + 60)
+        .any(|f| f.end + 60 >= s);
+    if addr_near || address_label_before(text, s) {
         return true;
     }
-    // "250000 procedures", "120000 robotic cases": plural count nouns in the next two
-    // words mean this is a count, even after a capitalised word.
-    let prose = rest_full
+    // "Japan 150000 gastrectomies", "Overall 120000 robotic cases": a count noun in the
+    // next two words outweighs a capitalised word before. Verbs ("presents", "visits")
+    // are not count nouns, so "Bengaluru 560038 attends clinic" stays an address.
+    let counted = rest_full
         .split_whitespace()
         .take(2)
         .map(|w| {
@@ -415,24 +513,12 @@ fn pin_check(text: &str, c: &Captures, addr: &[Finding]) -> bool {
                 .take_while(|ch| ch.is_alphabetic())
                 .collect::<String>()
         })
-        .any(|w| {
-            w.chars().next().is_some_and(|ch| ch.is_lowercase())
-                && ((w.len() >= 4 && w.ends_with('s') && !w.ends_with("ss"))
-                    || w == "copies"
-                    || w == "cells")
-        });
-    if prose {
+        .any(|w| count_noun(&w));
+    if counted {
         return false;
     }
     let lo = floor_boundary(text, s.saturating_sub(40));
-    if PLACE_BEFORE.is_match(&text[lo..s]) {
-        return true;
-    }
-    let from = addr.partition_point(|f| f.start < s.saturating_sub(200));
-    addr[from..]
-        .iter()
-        .take_while(|f| f.start <= e + 60)
-        .any(|f| f.start <= e + 60 && f.end + 60 >= s)
+    PLACE_BEFORE.is_match(&text[lo..s])
 }
 
 // ---------- names ----------
@@ -511,6 +597,44 @@ const EPONYMS: &[&str] = &[
     "fontaine",
     "rutherford",
     "bosniak",
+    "klatskin",
+    "mirizzi",
+    "meckel",
+    "budd",
+    "chiari",
+    "caroli",
+    "wilms",
+    "zenker",
+    "morgagni",
+    "bochdalek",
+    "amyand",
+    "littre",
+    "richter",
+    "spigelian",
+    "krukenberg",
+    "virchow",
+    "rovsing",
+    "mcburney",
+    "pfannenstiel",
+    "fournier",
+    "ogilvie",
+    "ladd",
+    "bouveret",
+    "frantz",
+    "vater",
+    "oddi",
+    "treitz",
+    "morison",
+    "winslow",
+    "peutz",
+    "jeghers",
+    "dieulafoy",
+    "menetrier",
+    "hodgkin",
+    "burkitt",
+    "kaposi",
+    "hashimoto",
+    "paget",
 ];
 
 /// Words that follow a titled eponym in procedure context ("Hartmann's", "Hartmann pouch").
@@ -798,7 +922,7 @@ fn name_check_titled(text: &str, c: &Captures, _: &[Finding]) -> bool {
 
 fn name_check_context(_: &str, c: &Captures, _: &[Finding]) -> bool {
     let w = word_key(c.name("name").map_or("", |m| m.as_str()));
-    !EPONYMS.contains(&w.as_str()) && !not_name(&w) && !strong_medical(&w)
+    name_candidate(&w)
 }
 
 /// Suffixes that make a word a diagnosis/procedure/finding, never a name.
@@ -881,8 +1005,436 @@ const NOT_NAMES_2: &[&str] = &[
     "emergency",
 ];
 
+/// CLINICAL lexicon (ruling R-2d): anatomical adjectives, diagnoses, findings and
+/// history words common in Indian surgical notes and imaging impressions. Never names.
+const CLINICAL_WORDS: &[&str] = &[
+    // anatomy / adjectives
+    "intestinal",
+    "duodenal",
+    "rectal",
+    "umbilical",
+    "paraumbilical",
+    "periumbilical",
+    "perianal",
+    "perineal",
+    "peritoneal",
+    "retroperitoneal",
+    "hepatic",
+    "pancreatic",
+    "peripancreatic",
+    "gastric",
+    "appendicular",
+    "appendiceal",
+    "diverticular",
+    "mesenteric",
+    "omental",
+    "anastomotic",
+    "peptic",
+    "pyloric",
+    "anorectal",
+    "colorectal",
+    "splenic",
+    "sigmoid",
+    "rectosigmoid",
+    "cardia",
+    "inguinal",
+    "femoral",
+    "incisional",
+    "ventral",
+    "abdominal",
+    "pelvic",
+    "renal",
+    "biliary",
+    "cystic",
+    "colonic",
+    "caecal",
+    "cecal",
+    "ileal",
+    "jejunal",
+    "ileocaecal",
+    "ileocecal",
+    "oesophageal",
+    "esophageal",
+    "hiatal",
+    "hiatus",
+    "pilonidal",
+    "scrotal",
+    "groin",
+    "flank",
+    "loin",
+    "iliac",
+    "fossa",
+    "quadrant",
+    "region",
+    "diaphragm",
+    "subphrenic",
+    "subhepatic",
+    "liver",
+    "colon",
+    "caecum",
+    "cecum",
+    "appendix",
+    "gallbladder",
+    "bile",
+    "duct",
+    "outlet",
+    "wall",
+    "bowel",
+    "stump",
+    "port",
+    "site",
+    "wound",
+    // findings / diagnoses
+    "ileus",
+    "gallstones",
+    "gallstone",
+    "stones",
+    "calculi",
+    "sludge",
+    "pneumoperitoneum",
+    "fatty",
+    "hydatid",
+    "amoebic",
+    "pyogenic",
+    "malignant",
+    "benign",
+    "metastatic",
+    "neoplastic",
+    "cancer",
+    "carcinoma",
+    "carcinomatosis",
+    "free",
+    "fluid",
+    "gas",
+    "air",
+    "pus",
+    "subacute",
+    "koch",
+    "kochs",
+    "calculous",
+    "acalculous",
+    "achalasia",
+    "intussusception",
+    "ulcer",
+    "ulcers",
+    "perforation",
+    "perforated",
+    "growth",
+    "hernia",
+    "fistula",
+    "fissure",
+    "sinus",
+    "prolapse",
+    "obstruction",
+    "obstructed",
+    "strangulated",
+    "incarcerated",
+    "gangrenous",
+    "volvulus",
+    "abscess",
+    "ascites",
+    "mucocele",
+    "pseudocyst",
+    "necrosis",
+    "necrotising",
+    "necrotizing",
+    "collection",
+    "effusion",
+    "leak",
+    "bleed",
+    "thickening",
+    "thickened",
+    "dilated",
+    "distended",
+    "enlarged",
+    "impacted",
+    "inflamed",
+    "inflammatory",
+    "infected",
+    "tubercular",
+    "tuberculous",
+    "adhesions",
+    "adhesive",
+    "stricture",
+    "narrowing",
+    "nodule",
+    "nodules",
+    "varices",
+    "injury",
+    "trauma",
+    "blunt",
+    "infection",
+    "sepsis",
+    "septic",
+    "shock",
+    "dehiscence",
+    "lump",
+    "mass",
+    "drain",
+    "contrast",
+    "conversion",
+    "complications",
+    "complication",
+    // history / complaints
+    "previous",
+    "prior",
+    "similar",
+    "complaints",
+    "complaint",
+    "heaviness",
+    "swelling",
+    "pain",
+    "sided",
+    "side",
+    "left",
+    "right",
+    "bilateral",
+    "unilateral",
+    "upper",
+    "lower",
+    "lateral",
+    "medial",
+    "anterior",
+    "posterior",
+    "proximal",
+    "distal",
+    "patient",
+    "patients",
+    "surgery",
+    "surgeries",
+    "operation",
+    "procedure",
+    "smoking",
+    "smoker",
+    "alcohol",
+    "alcoholic",
+    "tobacco",
+    "chewing",
+    "intake",
+    "asthma",
+    "copd",
+    "thyroid",
+    "stroke",
+    "over",
+    "under",
+    "below",
+    "above",
+    "around",
+    "within",
+    "near",
+    "acute",
+    "chronic",
+    "mild",
+    "moderate",
+    "severe",
+    "sudden",
+    "gradual",
+    "intermittent",
+    "continuous",
+    "colicky",
+    "dull",
+    "recurrent",
+    "grade",
+    "stage",
+    "type",
+    "small",
+    "large",
+    "giant",
+    "huge",
+    "minimal",
+    "gross",
+    "multiple",
+    "single",
+    "early",
+    "delayed",
+    "partial",
+    "complete",
+    "focal",
+    "diffuse",
+    "residual",
+    "healed",
+    "healing",
+    "surgical",
+    "operative",
+    "postoperative",
+    "preoperative",
+    "findings",
+    "impression",
+    // organs and further adjectives
+    "stomach",
+    "oesophagus",
+    "esophagus",
+    "duodenum",
+    "jejunum",
+    "ileum",
+    "anus",
+    "omentum",
+    "mesentery",
+    "peritoneum",
+    "spleen",
+    "kidney",
+    "ureter",
+    "bladder",
+    "uterus",
+    "ovary",
+    "ovarian",
+    "breast",
+    "lymph",
+    "node",
+    "nodes",
+    "vein",
+    "artery",
+    "arterial",
+    "venous",
+    "portal",
+    "hollow",
+    "viscus",
+    "gastrointestinal",
+    "stromal",
+    "hepatocellular",
+    "periampullary",
+    "ampullary",
+    "choledochal",
+    "subdiaphragmatic",
+    "ureteric",
+    "pulmonary",
+    "ischemic",
+    "ischaemic",
+    "heart",
+    "calcific",
+    "ulcerative",
+    "sliding",
+    "simple",
+    "complex",
+    "solid",
+    "mucinous",
+    "serous",
+    "twisted",
+    "walled",
+    "retained",
+    "space",
+    "occupying",
+    "typhoid",
+    "fibroid",
+    "neoplasm",
+    "metastases",
+    "metastasis",
+    "torsion",
+    "gangrene",
+    "infarct",
+    "infarction",
+    "disease",
+    "section",
+    "caesarean",
+    "cesarean",
+    "allergy",
+    "drug",
+    "urine",
+    "stools",
+    "stool",
+    "dark",
+    "clay",
+    "coloured",
+    "colored",
+    "episodes",
+    "episode",
+    "transfusion",
+    "accident",
+    "traffic",
+    "road",
+    "lap",
+    "chole",
+    // abbreviations written in capitals
+    "cbd",
+    "gerd",
+    "hcc",
+    "gist",
+    "sol",
+    "ibd",
+    "ibs",
+    "sbo",
+    "ercp",
+    "mrcp",
+    "usg",
+    "cect",
+    "hpe",
+    "fnac",
+    "rta",
+    "ihd",
+    "cad",
+    "htn",
+    "ckd",
+    "cva",
+    "ptb",
+    "uti",
+    "dvt",
+    "pud",
+    "nafld",
+    "nash",
+    "lscs",
+    "tah",
+    "bso",
+    "rif",
+    "ruq",
+    "luq",
+];
+
+/// Clinical head nouns: when one closes the capitalised run after `s/o`
+/// ("Hollow Viscus Perforation", "Ovarian Cyst"), the run is a diagnosis, not a name.
+const HEAD_NOUNS: &[&str] = &[
+    "perforation",
+    "growth",
+    "cyst",
+    "stone",
+    "stones",
+    "calculus",
+    "lump",
+    "mass",
+    "tumour",
+    "tumor",
+    "carcinoma",
+    "cancer",
+    "lesion",
+    "stricture",
+    "obstruction",
+    "abscess",
+    "collection",
+    "leak",
+    "hernia",
+    "fistula",
+    "ulcer",
+    "nodule",
+    "nodules",
+    "polyp",
+    "neoplasm",
+    "syndrome",
+    "disease",
+    "diverticulum",
+    "infarct",
+    "injury",
+    "fluid",
+    "effusion",
+    "volvulus",
+    "ileus",
+    "ischemia",
+    "ischaemia",
+    "liver",
+    "abdomen",
+    "uterus",
+];
+
+fn head_noun(k: &str) -> bool {
+    HEAD_NOUNS.contains(&k) || strong_medical(k)
+}
+
 fn not_name(k: &str) -> bool {
-    NOT_NAMES.contains(&k) || NOT_NAMES_2.contains(&k)
+    NOT_NAMES.contains(&k) || NOT_NAMES_2.contains(&k) || CLINICAL_WORDS.contains(&k)
+}
+
+/// A capitalised word that may be a person's name: an allowlisted given name (always),
+/// or a word of 3+ letters that is not clinical. Weak suffixes alone never decide.
+fn name_candidate(k: &str) -> bool {
+    GIVEN_NAMES.contains(&k) || (k.len() >= 3 && !clinical_word(k))
 }
 
 /// Imaging / report-heading words that follow "MR", "CT" etc.
@@ -907,26 +1459,158 @@ fn clinical_word(k: &str) -> bool {
 
 fn name_check_caps_title(_: &str, c: &Captures, _: &[Finding]) -> bool {
     let w = word_key(c.name("name").map_or("", |m| m.as_str()));
-    !strong_medical(&w) && !imaging_word(&w) && !TITLE_COMMON.contains(&w.as_str())
+    !TITLE_COMMON.contains(&w.as_str()) && name_candidate(&w)
 }
 
-/// Common given names that are also ordinary-looking words (Gopal, Kamal, Sonia ...).
+/// GIVEN-NAME allowlist (ruling R-2d): common Indian given names, including ones that
+/// look like ordinary words or end in clinical-looking suffixes (Gopal, Kamal, Sonia).
+/// An allowlisted word is always a name candidate.
 const GIVEN_NAMES: &[&str] = &[
-    "gopal", "vishal", "kunal", "sonal", "kamal", "komal", "nirmal", "vimal", "amal", "kushal",
-    "ujjwal", "dhaval", "jamal", "bilal", "faisal", "iqbal", "sonia", "rajan", "kamala", "ramesh",
-    "suresh", "mahesh", "rajesh", "ganesh", "lakshmi", "anjali", "pooja", "arjun", "prashant",
+    "gopal",
+    "vishal",
+    "kunal",
+    "sonal",
+    "kamal",
+    "komal",
+    "nirmal",
+    "vimal",
+    "amal",
+    "kushal",
+    "ujjwal",
+    "dhaval",
+    "jamal",
+    "bilal",
+    "faisal",
+    "iqbal",
+    "sonia",
+    "rajan",
+    "kamala",
+    "ramesh",
+    "suresh",
+    "mahesh",
+    "rajesh",
+    "ganesh",
+    "lakshmi",
+    "anjali",
+    "pooja",
+    "arjun",
+    "prashant",
     "ramaiah",
+    // two-letter names (only reachable through this list)
+    "om",
+    // South Indian
+    "manjunath",
+    "nagaraj",
+    "basavaraj",
+    "venkatesh",
+    "srinivas",
+    "srinivasa",
+    "murali",
+    "mohan",
+    "krishna",
+    "shankar",
+    "shiva",
+    "siva",
+    "subramanya",
+    "raghavendra",
+    "narayana",
+    "narayan",
+    "gowda",
+    "reddy",
+    "naidu",
+    "nair",
+    "menon",
+    "pillai",
+    "iyer",
+    "rao",
+    "ravi",
+    "anil",
+    "sunil",
+    "kiran",
+    "naveen",
+    "praveen",
+    "prakash",
+    "anand",
+    "arun",
+    "vijay",
+    "ajay",
+    "kumar",
+    "raju",
+    "ramu",
+    "babu",
+    "anitha",
+    "kavitha",
+    "kavita",
+    "sunitha",
+    "geetha",
+    "shanthi",
+    "saroja",
+    "sarojamma",
+    "padma",
+    "nirmala",
+    "vimala",
+    "shyamala",
+    "mangala",
+    "sushila",
+    "parvathi",
+    "bhavani",
+    "yashoda",
+    "savitri",
+    "radha",
+    "rekha",
+    "usha",
+    "asha",
+    "uma",
+    "devi",
+    "meena",
+    "priya",
+    "divya",
+    "kavya",
+    // North Indian
+    "rahul",
+    "rohit",
+    "amit",
+    "sanjay",
+    "ashok",
+    "manoj",
+    "deepak",
+    "raj",
+    "ram",
+    "sunita",
+    "neha",
+    "sharma",
+    "verma",
+    "gupta",
+    "singh",
+    "patel",
+    "shah",
+    "gurpreet",
+    "harpreet",
+    // other
+    "mohammed",
+    "mohammad",
+    "abdul",
+    "ahmed",
+    "imran",
+    "salim",
+    "ali",
+    "fatima",
+    "ayesha",
+    "joseph",
+    "thomas",
+    "mary",
 ];
 
 static AGE_SEX_AFTER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^[,\s]*(?:aged\s+[0-9]+|(?P<n1>[0-9]{1,3})\s*[MFmf]\b|(?P<n2>[0-9]{1,3})\s*(?:y|yr|yrs|yo|years)\b)",
+        r"^[,\s]*(?:aged\s+[0-9]+|(?P<n1>[0-9]{1,3})\s*[MFmf]\b|(?P<n2>[0-9]{1,3})\s*(?:yo\b|y/o\b|(?:y|yrs?|years?)\s*(?:old\b|/\s*[MFmf]\b|[MFmf]\b)))",
     )
     .expect("age regex")
 });
 
-/// An age/sex marker right after the name ("Kunal, 23M", "Kamala, aged 45"). Small numbers
-/// are durations ("Heartburn 2 years"), not ages.
+/// An age/sex marker right after the name ("Kunal, 23M", "Kamala, aged 45",
+/// "Ravi 45 yrs/M"). A bare duration ("Smoking 20 years") is not an age, and small
+/// numbers before M/F are months ("Pain 3m"), not ages.
 fn age_follows(rest: &str) -> bool {
     let hi = ceil_boundary(rest, 28);
     let Some(m) = AGE_SEX_AFTER.captures(&rest[..hi]) else {
@@ -954,34 +1638,59 @@ fn next_cap_word(rest: &str) -> Option<&str> {
 
 /// s/o, d/o, h/o, w/o, c/o (and "son of" ...) + name.
 ///
-/// `s/o`, `d/o` and the long forms are names unless the word is clinical. `c/o`
-/// ("complains of"), `w/o` ("without") and `h/o` ("history of") are mostly clinical, so a
-/// bare word passes; they block only with a title, an age/sex after the name, a second
-/// non-clinical capitalised word, or a common given name.
+/// The first word must be a name candidate. `s/o`, `d/o` and the long forms then block
+/// unless a clinical head noun ends the phrase. `c/o` ("complains of"), `w/o` ("without")
+/// and `h/o` ("history of") are mostly clinical, so a bare word passes unless it is an
+/// allowlisted given name; they also block with a title, an age/sex after the name, or a
+/// second name-candidate word. "Late" counts as a title only before a name candidate.
 fn relation_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
     let rel = c
         .name("rel")
         .map_or_else(|| "s".to_string(), |m| m.as_str().to_lowercase());
     let strict = rel == "s" || rel == "d";
+    let k1 = word_key(c.name("w1").map_or("", |m| m.as_str()));
+    // Every path needs the first word to be a NAME candidate ("Intestinal", "Lt",
+    // "Patient" never are).
+    if !name_candidate(&k1) {
+        return false;
+    }
+    let (_, e) = span(c);
+    // Titles are evidence; "late" ("s/o late Ramaiah") only counts because the word
+    // after it has already been checked as a name candidate above.
     let titled = c
         .name("title")
         .is_some_and(|m| !m.as_str().trim().is_empty());
-    let k1 = word_key(c.name("w1").map_or("", |m| m.as_str()));
-    let (_, e) = span(c);
-    let clinical = clinical_word(&k1);
-    if titled && !strong_medical(&k1) {
-        return true;
-    }
-    if !clinical && age_follows(&text[e..]) {
-        return true;
-    }
-    if !clinical && next_cap_word(&text[e..]).is_some_and(|w2| !clinical_word(&word_key(w2))) {
+    let given = GIVEN_NAMES.contains(&k1.as_str());
+    // The capitalised words that follow on the same line ("Viscus Perforation").
+    let run = cap_run(&text[e..], 3);
+    if titled || given {
         return true;
     }
     if strict {
-        return !clinical;
+        // "s/o Hollow Viscus Perforation": a clinical head noun ends the phrase.
+        return !run.iter().any(|w| head_noun(&word_key(w)));
     }
-    GIVEN_NAMES.contains(&k1.as_str())
+    // c/o, w/o, h/o: need more evidence than a bare word: an age/sex after it, or a
+    // second name word ("c/o Vishal Kumar") not closed by a clinical head noun
+    // ("h/o Ischemic Heart Disease").
+    age_follows(&text[e..])
+        || (run.first().is_some_and(|w2| name_candidate(&word_key(w2)))
+            && !run.iter().any(|w| head_noun(&word_key(w))))
+}
+
+/// Up to `n` capitalised words directly following, separated only by spaces/tabs.
+fn cap_run(rest: &str, n: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while out.len() < n {
+        let Some(w) = next_cap_word(&rest[pos..]) else {
+            break;
+        };
+        let skipped = rest[pos..].len() - rest[pos..].trim_start_matches([' ', '\t']).len();
+        pos += skipped + w.len();
+        out.push(w);
+    }
+    out
 }
 
 /// Words that start a different identifier; a name never extends over them.
@@ -1096,6 +1805,12 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             r"(?:\+91$H?|\b91$H|\b0)?(?:[6-9]\d{4}$H?\d{5}|[6-9]\d{2}$H\d{3}$H\d{4}|[6-9]\d{3}$H\d{3}$H\d{3}|[6-9]\d$H\d{3}$H\d{5})\b",
             phone_check,
         ),
+        // Any other grouping of a 10-digit mobile, only after a phone label.
+        rule(
+            Phone,
+            r"(?:\+91$H?|\b0$H?|\b)[6-9](?:$H?\d){9}\b",
+            labelled_phone,
+        ),
         // Landline with STD code (0-prefixed, or +91 prefixed).
         rule(
             Phone,
@@ -1162,14 +1877,14 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         // Names: patient-context word + capitalised word.
         rule(
             PersonName,
-            r"\b(?:[Pp]atient|[Pp]t|[Nn]ame|named|called)\b\.?(?:\s*[:,]\s*|\s+[\-\x{2013}\x{2014}]\s*|\s*[\x{2013}\x{2014}]\s+|\s+)(?:(?:is|was)\s+)?(?P<name>[A-Z][a-z]{2,})\b",
+            r"\b(?:[Pp]atient|[Pp]t|[Nn]ame|named|called)\b\.?(?:\s*[:,]\s*|\s+[\-\x{2013}\x{2014}]\s*|\s*[\x{2013}\x{2014}]\s+|\s+)(?:(?:is|was)\s+)?(?P<name>[A-Z][a-z]+)\b",
             name_check_context,
         )
         .names(2),
         // Relations: s/o, w/o, d/o, c/o + name.
         rule(
             PersonName,
-            r"(?i:\b(?:(?P<rel>[sdwch])/o\b|(?:son|daughter|wife|husband)[ \t]+of\b))[ \t]*[:.\-\x{2013}\x{2014}]?[ \t]*(?P<title>(?:(?i:dr|late|lt|sri|shri|smt|mr|mrs|ms)\b[.:]?[ \t]*)*)(?P<w1>[A-Z][A-Za-z]{2,})\b",
+            r"(?i:\b(?:(?P<rel>[sdwch])/o\b|(?:son|daughter|wife|husband)[ \t]+of\b))[ \t]*[:.\-\x{2013}\x{2014}]?[ \t]*(?P<title>(?:(?i:dr|late|sri|shri|smt|mr|mrs|ms)\b[.:]?[ \t]*)*)(?P<w1>[A-Z][A-Za-z]+)\b",
             relation_check,
         )
         .names(2),
