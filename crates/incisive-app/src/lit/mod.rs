@@ -33,6 +33,9 @@ pub struct Paper {
     pub abstract_text: Option<String>,
     /// Open-access full-text URL, only ever taken from a Europe PMC or Unpaywall response.
     pub oa_url: Option<String>,
+    /// `oa_url` points at a PDF. Phase 2 does not parse PDFs, so such a paper
+    /// counts as abstract-only.
+    pub oa_is_pdf: bool,
     pub retracted: bool,
     pub source: PaperSource,
 }
@@ -53,4 +56,19 @@ impl PaperId {
         }
         format!("title:{}", p.title.trim().to_lowercase())
     }
+}
+
+/// An open-access full-text link and whether it is a PDF.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OaLink {
+    pub url: String,
+    pub is_pdf: bool,
+}
+
+/// True when the URL path ends in `.pdf` or it is a Europe PMC `?pdf=render` link.
+pub fn url_is_pdf(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| {
+        u.path().to_ascii_lowercase().ends_with(".pdf")
+            || u.query_pairs().any(|(k, v)| k == "pdf" && v == "render")
+    })
 }

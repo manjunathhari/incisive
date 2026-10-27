@@ -338,6 +338,7 @@ fn parse_esummary(body: &serde_json::Value, requested: &[String]) -> Result<Vec<
             pub_types,
             abstract_text: None,
             oa_url: None,
+            oa_is_pdf: false,
             retracted,
             source: PaperSource::PubMed,
         });

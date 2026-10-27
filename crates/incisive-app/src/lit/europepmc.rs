@@ -19,7 +19,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::http::{AllowlistedClient, FULL_TEXT_MAX, LitError, OaPolicy};
-use super::{Paper, PaperSource};
+use super::{OaLink, Paper, PaperSource, url_is_pdf};
 
 const REST: &str = "https://www.ebi.ac.uk/europepmc/webservices/rest/";
 /// Characters of full text kept per paper (spec §5).
@@ -202,9 +202,8 @@ fn to_paper(r: Raw) -> Paper {
             .flatten()
     });
     let pmcid = non_empty(r.pmcid).filter(|p| is_pmcid(p));
-    let oa_url = open_access_url(
+    let oa = open_access_link(
         r.is_open_access.as_deref() == Some("Y"),
-        pmcid.as_deref(),
         r.full_text_url_list.as_ref(),
     );
     let authors = match r.author_list {
@@ -276,23 +275,22 @@ fn to_paper(r: Raw) -> Paper {
             .as_deref()
             .map(strip_markup)
             .filter(|a| !a.is_empty()),
-        oa_url,
+        oa_is_pdf: oa.as_ref().is_some_and(|l| l.is_pdf),
+        oa_url: oa.map(|l| l.url),
         retracted,
         source: PaperSource::EuropePmc,
     }
 }
 
-/// One https full-text URL for an open-access hit, from its own response fields.
-fn open_access_url(is_oa: bool, pmcid: Option<&str>, list: Option<&UrlList>) -> Option<String> {
+/// One https full-text link for an open-access hit, from its own response
+/// fields. HTML is preferred to PDF; there is no synthesised fallback (full text
+/// comes from `fullTextXML` by PMCID, which needs no grant).
+fn open_access_link(is_oa: bool, list: Option<&UrlList>) -> Option<OaLink> {
     if !is_oa {
         return None;
     }
-    let entries = list.map(|l| l.full_text_url.as_slice()).unwrap_or_default();
-    if entries.is_empty() {
-        // No list at all: the Europe PMC render URL for the PMCID.
-        return pmcid.map(|p| format!("https://europepmc.org/articles/{p}?pdf=render"));
-    }
-    entries
+    list?
+        .full_text_url
         .iter()
         .filter(|e| {
             let code = e.availability_code.as_deref().unwrap_or_default();
@@ -306,19 +304,25 @@ fn open_access_url(is_oa: bool, pmcid: Option<&str>, list: Option<&UrlList>) -> 
             let url = e.url.as_deref()?.trim();
             let parsed = Url::parse(url).ok()?;
             (parsed.scheme() == "https" && parsed.host_str().is_some()).then(|| {
-                let html = e.document_style.as_deref() == Some("html");
+                let is_pdf = e.document_style.as_deref() == Some("pdf") || url_is_pdf(url);
                 let epmc = e.site.as_deref() == Some("Europe_PMC");
-                let rank = match (epmc, html) {
-                    (true, true) => 0,
-                    (_, true) => 1,
-                    (true, false) => 2,
-                    _ => 3,
+                let rank = match (epmc, is_pdf) {
+                    (true, false) => 0,
+                    (false, false) => 1,
+                    (true, true) => 2,
+                    (false, true) => 3,
                 };
-                (rank, url.to_string())
+                (
+                    rank,
+                    OaLink {
+                        url: url.to_string(),
+                        is_pdf,
+                    },
+                )
             })
         })
         .min_by_key(|(rank, _)| *rank)
-        .map(|(_, url)| url)
+        .map(|(_, link)| link)
 }
 
 /// Removes markup from an abstract or title: inline tags (`<i>`, `<sub>`) vanish,
@@ -713,7 +717,13 @@ fn merge_into(base: &mut Paper, other: Paper) {
     fill(&mut base.doi, other.doi);
     fill(&mut base.journal, other.journal);
     fill(&mut base.abstract_text, other.abstract_text);
-    fill(&mut base.oa_url, other.oa_url);
+    // The link and its PDF flag travel together; an HTML link beats a PDF one.
+    if clean(&base.oa_url).is_none()
+        || (base.oa_is_pdf && !other.oa_is_pdf && other.oa_url.is_some())
+    {
+        base.oa_url = other.oa_url;
+        base.oa_is_pdf = other.oa_is_pdf;
+    }
     if base.title.trim().is_empty() {
         base.title = other.title;
     }

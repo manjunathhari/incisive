@@ -7,7 +7,7 @@
 
 use sqlx::{PgPool, Row};
 
-use super::{Paper, PaperSource};
+use super::{Paper, PaperSource, url_is_pdf};
 
 /// Entries older than this are not served.
 pub const FRESH_DAYS: i32 = 30;
@@ -32,6 +32,9 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
     rows.into_iter()
         .map(|r| {
             let authors: String = r.try_get("authors")?;
+            // Only the URL is stored; whether it is a PDF is recovered from its shape.
+            let oa_url: Option<String> = r.try_get("oa_url")?;
+            let oa_is_pdf = oa_url.as_deref().is_some_and(url_is_pdf);
             Ok(Paper {
                 pmid: Some(r.try_get("pmid")?),
                 pmcid: r.try_get("pmcid")?,
@@ -43,7 +46,8 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
                 year: r.try_get("year")?,
                 pub_types: r.try_get("pub_types")?,
                 abstract_text: r.try_get("abstract")?,
-                oa_url: r.try_get("oa_url")?,
+                oa_url,
+                oa_is_pdf,
                 retracted: r.try_get("retracted")?,
                 source: PaperSource::PubMed,
             })

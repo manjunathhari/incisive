@@ -1,12 +1,14 @@
 //! Unpaywall lookup: is there a free full-text copy of this DOI?
 //!
 //! The request carries `?email=` (Unpaywall requires a contact address). The
-//! answer is `best_oa_location.url_for_pdf`, else `best_oa_location.url`, and
-//! only an https URL is ever returned. That URL is the one place this module
+//! answer is an [`OaLink`]: the HTML link (`best_oa_location.url`, or
+//! `url_for_landing_page` when `url` is absent) if there is an https one,
+//! otherwise the PDF (`url_for_pdf`, or a `url` that is a PDF) with
+//! `is_pdf = true`. Only an https URL is ever returned. That URL is the one place this module
 //! calls [`OaPolicy::allow_once`], so the HTTP client will fetch it exactly
 //! once. Nothing but the parsed API response reaches the grant.
 //!
-//! PDFs are not parsed in Phase 2: a PDF-only result counts as "abstract only"
+//! PDFs are not parsed in Phase 2: a link with `is_pdf` counts as "abstract only"
 //! to the caller.
 
 use std::fmt;
@@ -15,6 +17,7 @@ use serde::Deserialize;
 use url::Url;
 
 use super::http::{AllowlistedClient, LitError, OaPolicy};
+use super::{OaLink, url_is_pdf};
 
 const BASE: &str = "https://api.unpaywall.org/v2/";
 
@@ -39,6 +42,7 @@ struct Response {
 struct Location {
     url_for_pdf: Option<String>,
     url: Option<String>,
+    url_for_landing_page: Option<String>,
 }
 
 impl Unpaywall {
@@ -47,11 +51,13 @@ impl Unpaywall {
         Self { client, oa, email }
     }
 
-    /// The best free full-text URL for `doi`, or `None` (not open access,
-    /// unknown DOI, or no https location). Registers the URL for one fetch.
-    pub async fn best_oa(&self, doi: &str) -> Result<Option<String>, LitError> {
+    /// The best free full-text link for `doi`, or `None` (not open access,
+    /// unknown or malformed DOI, or no https location). Registers the URL for
+    /// one fetch.
+    pub async fn best_oa(&self, doi: &str) -> Result<Option<OaLink>, LitError> {
         let doi = doi.trim();
-        if doi.is_empty() {
+        // A DOI starts `10.`; `..` could climb out of the `/v2/` path.
+        if !doi.starts_with("10.") || doi.contains("..") {
             return Ok(None);
         }
         let mut u = Url::parse(BASE).expect("static unpaywall url");
@@ -67,15 +73,28 @@ impl Unpaywall {
         let Some(loc) = body.best_oa_location else {
             return Ok(None);
         };
-        let url = [loc.url_for_pdf, loc.url]
-            .into_iter()
-            .flatten()
-            .find(|c| is_https(c));
-        if let Some(url) = &url {
+        let https = |u: Option<String>| u.filter(|c| is_https(c));
+        let mut pdf = https(loc.url_for_pdf);
+        let page = https(loc.url);
+        // `url` is the HTML link unless it is a PDF (then it is the PDF link).
+        let html = match page {
+            Some(u) if url_is_pdf(&u) || pdf.as_deref() == Some(u.as_str()) => {
+                pdf.get_or_insert(u);
+                None
+            }
+            Some(u) => Some(u),
+            None => https(loc.url_for_landing_page),
+        };
+        let link = match (html, pdf) {
+            (Some(url), _) => Some(OaLink { url, is_pdf: false }),
+            (None, Some(url)) => Some(OaLink { url, is_pdf: true }),
+            (None, None) => None,
+        };
+        if let Some(link) = &link {
             // The one grant site: a URL parsed from Unpaywall's own response.
-            self.oa.allow_once(url);
+            self.oa.allow_once(&link.url);
         }
-        Ok(url)
+        Ok(link)
     }
 }
 

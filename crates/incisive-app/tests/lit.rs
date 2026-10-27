@@ -367,6 +367,7 @@ fn paper(pmid: Option<&str>, doi: Option<&str>) -> Paper {
         pub_types: vec![],
         abstract_text: None,
         oa_url: None,
+        oa_is_pdf: false,
         retracted: false,
         source: PaperSource::PubMed,
     }
@@ -1064,7 +1065,8 @@ mod pubmed_tests {
                 "Randomized Controlled Trial".into(),
             ],
             abstract_text: Some("BACKGROUND: x\n\nMETHODS: y".into()),
-            oa_url: Some("https://europepmc.org/articles/PMC1?pdf=render".into()),
+            oa_url: Some("https://europepmc.org/articles/PMC1".into()),
+            oa_is_pdf: false,
             retracted: false,
             source: PaperSource::PubMed,
         }
@@ -1305,6 +1307,7 @@ mod fix_round_1 {
             pub_types: vec![],
             abstract_text: Some("BACKGROUND: kept".into()),
             oa_url: Some("https://europepmc.org/x".into()),
+            oa_is_pdf: false,
             retracted: true,
             source: PaperSource::PubMed,
         }
@@ -1371,7 +1374,7 @@ mod epmc_unpaywall_tests {
     };
     use incisive_app::lit::http::{AllowlistedClient, LitError, OaPolicy};
     use incisive_app::lit::unpaywall::Unpaywall;
-    use incisive_app::lit::{Paper, PaperSource};
+    use incisive_app::lit::{OaLink, Paper, PaperSource, url_is_pdf};
     use secrecy::SecretString;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1453,6 +1456,7 @@ mod epmc_unpaywall_tests {
         assert!(!abs.contains('<'), "markup is stripped: {abs}");
         let url = p.oa_url.as_deref().unwrap();
         assert!(url.starts_with("https://"), "{url}");
+        assert!(!p.oa_is_pdf, "HTML is preferred to the PDF entries");
 
         // Closed MED record: no PMCID, no OA url.
         let closed = papers
@@ -1526,11 +1530,9 @@ mod epmc_unpaywall_tests {
         assert_eq!(papers[0].oa_url, None, "http is never granted");
         assert_eq!(papers[1].oa_url, None, "closed record");
         assert_eq!(papers[2].oa_url, None, "subscription link");
-        // Fallback: the PMC render URL for an OA record with a PMCID.
-        assert_eq!(
-            papers[3].oa_url.as_deref(),
-            Some("https://europepmc.org/articles/PMC4?pdf=render")
-        );
+        // No synthesised fallback: an OA record without a list gets no link.
+        assert_eq!(papers[3].oa_url, None);
+        assert!(papers.iter().all(|p| !p.oa_is_pdf));
         let c = client(&server, &oa);
         for u in [
             "http://evil.example/a",
@@ -1791,18 +1793,30 @@ mod epmc_unpaywall_tests {
         let pdf = u.best_oa(doi_pdf).await.unwrap().unwrap();
         assert_eq!(
             pdf,
-            "https://link.springer.com/content/pdf/10.1007/s10151-026-03388-4.pdf"
+            OaLink {
+                url: "https://link.springer.com/content/pdf/10.1007/s10151-026-03388-4.pdf".into(),
+                is_pdf: true
+            }
         );
         // No url_for_pdf: falls back to url.
         let url = u.best_oa(doi_url).await.unwrap().unwrap();
-        assert_eq!(url, "https://www.ncbi.nlm.nih.gov/pmc/articles/7745181");
+        assert_eq!(
+            url,
+            OaLink {
+                url: "https://www.ncbi.nlm.nih.gov/pmc/articles/7745181".into(),
+                is_pdf: false
+            }
+        );
         // Not open access.
         assert_eq!(u.best_oa(doi_closed).await.unwrap(), None);
         // The returned URLs were registered, once each; nothing else was.
         let c = client(&server, &oa);
         for (url, body_path) in [
-            (pdf.as_str(), "/content/pdf/10.1007/s10151-026-03388-4.pdf"),
-            (url.as_str(), "/pmc/articles/7745181"),
+            (
+                pdf.url.as_str(),
+                "/content/pdf/10.1007/s10151-026-03388-4.pdf",
+            ),
+            (url.url.as_str(), "/pmc/articles/7745181"),
         ] {
             Mock::given(method("GET"))
                 .and(path(body_path))
@@ -1859,8 +1873,11 @@ mod epmc_unpaywall_tests {
         let u = unpaywall(&server, &oa);
         assert_eq!(u.best_oa("10.1/a").await.unwrap(), None);
         assert_eq!(
-            u.best_oa("10.1/b").await.unwrap().as_deref(),
-            Some("https://ok.example/b")
+            u.best_oa("10.1/b").await.unwrap(),
+            Some(OaLink {
+                url: "https://ok.example/b".into(),
+                is_pdf: false
+            })
         );
         for d in ["10.1/c", "10.1/d", "10.1/e"] {
             assert_eq!(u.best_oa(d).await.unwrap(), None, "{d}");
@@ -1870,6 +1887,160 @@ mod epmc_unpaywall_tests {
             c.get_text("http://insecure.example/a").await,
             Err(LitError::Disallowed(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn unpaywall_prefers_html_and_flags_pdfs() {
+        let loc = |pdf: &str, url: &str, landing: &str| {
+            format!(
+                r#"{{"is_oa":true,"best_oa_location":{{"url_for_pdf":{pdf},"url":{url},"url_for_landing_page":{landing}}}}}"#
+            )
+        };
+        let server = MockServer::start().await;
+        // html url + pdf: html wins.
+        serve_json(
+            &server,
+            "/v2/10.1/h",
+            loc(
+                r#""https://x.example/a.pdf""#,
+                r#""https://x.example/a""#,
+                "null",
+            ),
+        )
+        .await;
+        // url is the pdf itself: pdf, flagged.
+        serve_json(
+            &server,
+            "/v2/10.1/p",
+            loc(
+                "null",
+                r#""https://x.example/b.PDF""#,
+                r#""https://doi.org/10.1/p""#,
+            ),
+        )
+        .await;
+        // no url: the https landing page is the html link.
+        serve_json(
+            &server,
+            "/v2/10.1/l",
+            loc(
+                r#""https://x.example/c.pdf""#,
+                "null",
+                r#""https://x.example/c""#,
+            ),
+        )
+        .await;
+        // pdf only.
+        serve_json(
+            &server,
+            "/v2/10.1/o",
+            loc(r#""https://x.example/d.pdf""#, "null", "null"),
+        )
+        .await;
+        let u = unpaywall(&server, &OaPolicy::default());
+        let get = |d: &'static str| {
+            let u = &u;
+            async move { u.best_oa(d).await.unwrap().unwrap() }
+        };
+        assert_eq!(
+            get("10.1/h").await,
+            OaLink {
+                url: "https://x.example/a".into(),
+                is_pdf: false
+            }
+        );
+        assert_eq!(
+            get("10.1/p").await,
+            OaLink {
+                url: "https://x.example/b.PDF".into(),
+                is_pdf: true
+            }
+        );
+        assert_eq!(
+            get("10.1/l").await,
+            OaLink {
+                url: "https://x.example/c".into(),
+                is_pdf: false
+            }
+        );
+        assert_eq!(
+            get("10.1/o").await,
+            OaLink {
+                url: "https://x.example/d.pdf".into(),
+                is_pdf: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn unpaywall_rejects_malformed_dois_without_a_request() {
+        let server = MockServer::start().await;
+        let u = unpaywall(&server, &OaPolicy::default());
+        for bad in [
+            "",
+            "11.1/x",
+            "doi:10.1/x",
+            "10.1/../../etc",
+            "10.1/a..b",
+            "/v2/10.1/x",
+        ] {
+            assert_eq!(u.best_oa(bad).await.unwrap(), None, "{bad:?}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn epmc_flags_pdf_links_and_prefers_html() {
+        let entry = |style: &str, site: &str, url: &str| {
+            format!(
+                r#"{{"availabilityCode":"OA","documentStyle":"{style}","site":"{site}","url":"{url}"}}"#
+            )
+        };
+        let body = format!(
+            r#"{{"resultList":{{"result":[
+{{"id":"1","source":"MED","pmid":"1","isOpenAccess":"Y","title":"pdf only","fullTextUrlList":{{"fullTextUrl":[{}]}}}},
+{{"id":"2","source":"MED","pmid":"2","isOpenAccess":"Y","title":"both","fullTextUrlList":{{"fullTextUrl":[{},{}]}}}},
+{{"id":"3","source":"MED","pmid":"3","isOpenAccess":"Y","title":"pdf suffix","fullTextUrlList":{{"fullTextUrl":[{}]}}}}
+]}}}}"#,
+            entry(
+                "pdf",
+                "Europe_PMC",
+                "https://europepmc.org/articles/PMC1?pdf=render"
+            ),
+            entry(
+                "pdf",
+                "Europe_PMC",
+                "https://europepmc.org/articles/PMC2?pdf=render"
+            ),
+            entry(
+                "html",
+                "PubMedCentral",
+                "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2/"
+            ),
+            entry("html", "Publisher", "https://pub.example/paper.pdf"),
+        );
+        let server = MockServer::start().await;
+        serve_json(&server, SEARCH, body).await;
+        let papers = epmc(&server, &OaPolicy::default())
+            .search("x", 5)
+            .await
+            .unwrap();
+        assert!(papers[0].oa_is_pdf, "documentStyle pdf");
+        assert_eq!(
+            papers[0].oa_url.as_deref(),
+            Some("https://europepmc.org/articles/PMC1?pdf=render")
+        );
+        assert!(!papers[1].oa_is_pdf, "html beats pdf");
+        assert_eq!(
+            papers[1].oa_url.as_deref(),
+            Some("https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2/")
+        );
+        assert!(papers[2].oa_is_pdf, ".pdf suffix");
+        assert!(
+            url_is_pdf("https://a.example/x.PDF")
+                && url_is_pdf("https://europepmc.org/articles/PMC1?pdf=render")
+        );
+        assert!(!url_is_pdf("https://a.example/pdf/x") && !url_is_pdf("not a url"));
     }
 
     #[tokio::test]
@@ -1914,6 +2085,7 @@ mod epmc_unpaywall_tests {
             pub_types: vec![],
             abstract_text: None,
             oa_url: None,
+            oa_is_pdf: false,
             retracted: false,
             source: src,
         }
@@ -2069,6 +2241,23 @@ mod epmc_unpaywall_tests {
             .await
             .unwrap();
         assert_eq!(got[0].pmcid.as_deref(), Some("PMC556"));
+        // oa_is_pdf is recovered from the stored URL's shape.
+        a.oa_url = Some("https://x.example/paper.pdf".into());
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert!(got[0].oa_is_pdf);
+        a.oa_url = Some("https://x.example/paper".into());
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert!(!got[0].oa_is_pdf);
         sqlx::query("DELETE FROM incisive.paper_cache WHERE pmid = $1")
             .bind(&pmid)
             .execute(&pool)
