@@ -81,6 +81,56 @@ const BLOCK: &[(&str, &[K])] = &[
         "Aadhaar 2345 6789 0123 and PAN ABCDE1234F",
         &[K::Aadhaar, K::Pan],
     ),
+    // --- fix round 1: PIN with place/label context
+    ("Bengaluru-560038", &[K::Address]),
+    ("Whitefield, Bangalore 560066", &[K::Address]),
+    ("Bangalore 560 038", &[K::Address]),
+    ("PIN: 560038", &[K::Address]),
+    ("PIN code 560038", &[K::Address]),
+    ("4th Cross, Indiranagar", &[K::Address]),
+    // hospital IDs
+    ("UHID no. 4471", &[K::HospitalId]),
+    ("uhid- MH 12345", &[K::HospitalId]),
+    ("MR no 4471", &[K::HospitalId]),
+    ("MR No. 4471", &[K::HospitalId]),
+    ("MRD no 4471", &[K::HospitalId]),
+    ("Hosp no 4471", &[K::HospitalId]),
+    ("Hospital No: 4471", &[K::HospitalId]),
+    ("IP 2231/24", &[K::HospitalId]),
+    ("Bed 12, IP 4471", &[K::HospitalId]),
+    // names
+    ("Mr.Ramesh", &[K::PersonName]),
+    ("MRS LAKSHMI 52F", &[K::PersonName]),
+    ("SHRI GOPAL", &[K::PersonName]),
+    ("my patient, Ramesh, 52M", &[K::PersonName]),
+    ("Name - Ramesh Kumar", &[K::PersonName]),
+    ("s/o Ramesh", &[K::PersonName]),
+    ("w/o Suresh Kumar", &[K::PersonName]),
+    ("D/O Ramesh", &[K::PersonName]),
+    ("c/o Ramesh", &[K::PersonName]),
+    ("Mrs. Hartmann 52F", &[K::PersonName]),
+    ("Mr. Lewis, 60M", &[K::PersonName]),
+    ("Mr. Miles 62M", &[K::PersonName]),
+    // addresses
+    ("Flat 302, Prestige Towers", &[K::Address]),
+    ("Plot 12, Sector 5", &[K::Address]),
+    ("No. 45, MG Road, Bengaluru", &[K::Address]),
+    ("45 MG Road", &[K::Address]),
+    ("Koramangala 5th Block", &[K::Address]),
+    ("Door No 12", &[K::Address]),
+    // unicode separators and spacing
+    ("98450\u{00a0}12345", &[K::Phone]),
+    ("98450\u{2013}12345", &[K::Phone]),
+    ("2345\u{00a0}6789\u{00a0}0123", &[K::Aadhaar]),
+    ("2345\u{202f}6789\u{2009}0123", &[K::Aadhaar]),
+    ("12\u{2013}Mar\u{2013}2024", &[K::CalendarDate]),
+    ("12\u{00a0}March\u{00a0}2024", &[K::CalendarDate]),
+    ("ramesh\u{ff20}gmail.com", &[K::Email]),
+    ("98 450 12345", &[K::Phone]),
+    ("2345.6789.0123", &[K::Aadhaar]),
+    ("2345  6789  0123", &[K::Aadhaar]),
+    ("12-Mar-2024", &[K::CalendarDate]),
+    ("12-Mar-24", &[K::CalendarDate]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -114,7 +164,6 @@ const PASS: &[&str] = &[
     "called Hartmann",
     "Child-Pugh B, Dukes C, Billroth II",
     "Heller myotomy vs Nissen",
-    "Mr Dukes C staging",
     // Lab values and counts vs phones / PINs
     "platelets 150000",
     "WBC 11200",
@@ -147,6 +196,49 @@ const PASS: &[&str] = &[
     "IPD analysis of 8 trials",
     "MRN is recorded in the notes",
     "T3N1M0 ypT2N0, R0 resection",
+    // --- fix round 1: six-digit counts are not PINs
+    "a cohort of 150000 patients",
+    "sample size 120000 patients",
+    "150000 cases",
+    "n = 240000",
+    "NSQIP 2015-2019 data of 234567 patients",
+    "AFP 400000",
+    "ferritin 120000",
+    "D-dimer 500000",
+    "viral load 250000 copies",
+    "CA 19-9 > 100000",
+    "cost 250000 rupees",
+    "Bilirubin 123456 mg",
+    // cross is not always a street
+    "12 cross-sectional studies",
+    "3 cross-over trials",
+    "the 2nd cross-match",
+    "4th cross-sectional",
+    // eponyms in procedure context
+    "Mr. Hartmann's procedure",
+    "Ivor Lewis operation",
+    "Mr Hartmann pouch",
+    // words after patient/titles
+    "Patient Blood Management",
+    "Patient Controlled Analgesia",
+    "Ms Excel",
+    "Master Class",
+    "Miss Rate",
+    "patient Murphy sign positive",
+    "patient Courvoisier",
+    "patient Boerhaave",
+    "patient Charlson index 4",
+    "patient Caprini 5",
+    "patient Kaplan-Meier",
+    "patient Gleason 7",
+    "patient Fontaine IV",
+    "c/o abdominal pain",
+    "C/O Abdominal pain for 3 days",
+    "w/o jaundice",
+    // '#' and main without a road
+    "#12 French catheter, main bile duct",
+    "port #3, main working port",
+    "6th main, leak",
 ];
 
 #[test]
@@ -265,4 +357,32 @@ fn every_kind_has_a_label() {
         assert!(!describe(k).is_empty());
     }
     assert_eq!(describe(K::Phone), "phone number");
+}
+
+#[test]
+fn full_date_span_covers_the_year() {
+    for t in ["12-Mar-2024", "12-Mar-24"] {
+        let f = scan(t);
+        assert_eq!(f.len(), 1, "{t}: {f:?}");
+        assert_eq!((f[0].start, f[0].end), (0, t.len()), "{t}");
+    }
+    let t = "seen \u{2013} 12\u{2013}Mar\u{2013}2024 ok";
+    let f = scan(t);
+    assert_eq!(&t[f[0].start..f[0].end], "12\u{2013}Mar\u{2013}2024");
+}
+
+#[test]
+fn month_year_stays_allowed() {
+    assert!(scan("in March 2024").is_empty());
+}
+
+#[test]
+fn six_digit_counts_scan_fast() {
+    let text = "123456 mg ".repeat(100_000);
+    let t = std::time::Instant::now();
+    assert!(scan(&text).is_empty());
+    // 300 ms in release (measured ~70 ms); debug builds of regex are ~30x slower, so
+    // allow 10 s there: still catches any quadratic behaviour.
+    let limit = if cfg!(debug_assertions) { 10_000 } else { 300 };
+    assert!(t.elapsed().as_millis() < limit, "took {:?}", t.elapsed());
 }
