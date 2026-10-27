@@ -271,6 +271,7 @@ The validation study is designed to be publishable.
 4. **Budget:** Claude Max monthly API credits via a linked Console organisation, with default caps as in section 2.
 5. **Name:** Incisive ("Cut to the evidence"), subject to trademark and domain checks.
 6. **Agent loop: built in Rust on the Claude Messages API.** Alternatives considered and declined for v1: the Claude Agent SDK (Claude Code's harness as a library; Python/TypeScript only, coding-oriented built-in tools) and Claude Managed Agents (hosted harness; beta, data regions unspecified, not currently eligible for zero-data-retention). Managed Agents may be revisited for later phases.
+7. **Login: Google sign-in via Identity-Aware Proxy (27 Oct 2026).** Replaces invites and passkeys for v1: access is an allow-list of Google accounts (IAP policy + OAuth test users); the app verifies IAP's signed JWT and maps the email to `incisive.users` (role, caps). Roles, caps and audit from section 2 and 6 are unchanged. A full login system is deferred to the patient-facing version.
 
 ## 11. Remaining open items (non-blocking)
 - Confirmation of Anthropic's Supplemental Credit Terms for group use of Max API credits.
