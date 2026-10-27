@@ -1,6 +1,11 @@
 //! Medical-only gate. Runs after the identifier filter, so it never sees
 //! patient identifiers. Cheap local rules decide the obvious cases; one small
 //! model call decides the rest. Any failure is an `Err`, never `Medical`.
+//!
+//! `ADMIN_PHRASES` is a best-effort blocklist. A hit only removes the
+//! Medical-by-rule shortcut, so a miss sends the question to the model and
+//! never causes a refusal. Spelling evasions are a known residual, covered by
+//! the model gate and the downstream medical-only agent.
 
 use std::sync::Arc;
 
@@ -253,6 +258,77 @@ const ADMIN_PHRASES: &[&str] = &[
     "job",
     "jobs",
     "cover letter",
+    // Commercial and fee vocabulary. "rate(s)", "premium", "ad" and bare
+    // "cost(s)"/"charge" are left out: they are common in clinical questions.
+    "fee",
+    "fees",
+    "tariff",
+    "tariffs",
+    "charges",
+    "expense",
+    "expenses",
+    "quote",
+    "quotes",
+    "quotation",
+    "discount",
+    "discounts",
+    "budget",
+    "budgets",
+    "estimate",
+    "gst",
+    "vat",
+    "copay",
+    "deductible",
+    "insurance",
+    "insurer",
+    "insurers",
+    "drg",
+    "hcpcs",
+    "cghs",
+    "tpa",
+    "preauth",
+    "authorisation",
+    "authorization",
+    "tender",
+    "procurement",
+    "vendor",
+    "vendors",
+    "buy",
+    "sell",
+    "purchase",
+    "sponsorship",
+    "sponsor",
+    "commission",
+    "margin",
+    "wage",
+    "wages",
+    "compensation",
+    "remuneration",
+    "income",
+    "contract",
+    "contracts",
+    "marketing",
+    "advertisement",
+    "advertising",
+    "ads",
+    "promotion",
+    "promote",
+    "coupon",
+    "startup",
+    "business",
+    "rebate",
+    "sales",
+    "pricelist",
+    "upcoding",
+    "affordability",
+    "out of pocket",
+    "cost of",
+    "cost for",
+    "costs of",
+    "costs for",
+    "cost per",
+    "charge for",
+    "charges for",
 ];
 
 /// Remove characters that are invisible to a reader but split tokens:

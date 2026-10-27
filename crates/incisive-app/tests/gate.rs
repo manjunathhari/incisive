@@ -99,6 +99,50 @@ fn rule_table() -> Vec<(&'static str, Expect)> {
         ("Price of hernia mesh and laparoscopic stapler", Pass),
         ("Pay scale for pancreatic and bariatric surgeons", Pass),
         ("ICD-10 for pancreatic carcinoma resection", Pass),
+        // Commercial and fee vocabulary blocks the rule shortcut.
+        (
+            "Tariff for laparoscopic cholecystectomy and appendectomy",
+            Pass,
+        ),
+        ("GST on hernia mesh and laparoscopic stapler", Pass),
+        ("Quote for laparoscopic gastrectomy and splenectomy", Pass),
+        (
+            "Advertisement for laparoscopic hernia repair and cholecystectomy",
+            Pass,
+        ),
+        (
+            "Cost of laparoscopic cholecystectomy and hernia repair",
+            Pass,
+        ),
+        (
+            "Insurance coverage for bariatric and hernia mesh procedures",
+            Pass,
+        ),
+        (
+            "Surgeon fees for laparoscopic cholecystectomy and appendectomy",
+            Pass,
+        ),
+        ("Out-of-pocket expense for colectomy and anastomosis", Pass),
+        (
+            "Procurement tender for robotic colectomy stapler mesh",
+            Pass,
+        ),
+        (
+            "Compensation for colorectal and hepatobiliary surgeons",
+            Pass,
+        ),
+        ("DRG for colectomy and appendectomy", Pass),
+        (
+            "Business plan for hernia mesh startup with laparoscopic stapler",
+            Pass,
+        ),
+        // Ordinary clinical wording stays Medical by rule.
+        ("Leak rate after colectomy anastomosis", Medical),
+        ("Recurrence rate of hernia after mesh repair", Medical),
+        (
+            "Charge of the staple line in laparoscopic colectomy",
+            Medical,
+        ),
         // Clinical words that merely resemble admin words stay Medical.
         (
             "Billroth II reconstruction after distal gastrectomy for gastric carcinoma",
