@@ -26,8 +26,10 @@
 //!   passes: accepted gap; "c/o Ramesh" blocks because Ramesh is allowlisted). They also
 //!   block with a title, an age/sex marker after the name ("56M", "aged 56", "56 yrs/M";
 //!   a bare duration such as "20 years" is not an age), or a second name-candidate word.
-//!   `s/o`, `d/o`, "son of", "wife of" + a name candidate always block, unless the
-//!   capitalised phrase ends in a clinical head noun ("s/o Hollow Viscus Perforation").
+//!   `c/o` and `w/o` also block with a comma age ("c/o Puttaswamy, 56 yrs") unless a
+//!   duration word follows. `s/o`, `d/o`, "son of", "wife of" + a name candidate always
+//!   block, unless a clinical phrase follows (clinical words ending in a head noun, no
+//!   label colon: "s/o Sebaceous Cyst"; not "S/O MUNIYAPPA OCCUPATION: ...").
 //! - Digits are ASCII only; Devanagari-digit numbers are not scanned.
 //! - Unicode spaces (NBSP, narrow NBSP, thin space), en/em dashes and the
 //!   full-width `@` are accepted as separators; offsets stay on the original text.
@@ -1260,6 +1262,7 @@ const CLINICAL_WORDS: &[&str] = &[
     "preoperative",
     "findings",
     "impression",
+    "annular",
     // organs and further adjectives
     "stomach",
     "oesophagus",
@@ -1423,8 +1426,64 @@ const HEAD_NOUNS: &[&str] = &[
     "uterus",
 ];
 
-fn head_noun(k: &str) -> bool {
-    HEAD_NOUNS.contains(&k) || strong_medical(k)
+/// Case-sheet labels that end in clinical-looking suffixes but head a field, not a
+/// diagnosis ("DIAGNOSIS:", "Occupation", "Admission").
+const LABEL_STOP: &[&str] = &[
+    "diagnosis",
+    "prognosis",
+    "occupation",
+    "admission",
+    "religion",
+    "residence",
+    "address",
+];
+
+/// A word that can close a clinical phrase ("Cyst", "Malformation", "Appendicitis").
+/// "-ation" words (Station, Occupation) and field labels never do.
+fn exemption_head(k: &str) -> bool {
+    HEAD_NOUNS.contains(&k)
+        || k == "malformation"
+        || (strong_medical(k) && !k.ends_with("ation") && !LABEL_STOP.contains(&k))
+}
+
+/// True when the run of capitalised words after the first relation word is a clinical
+/// phrase: clinical words ending in a head noun, with no label colon. Walked in order.
+fn diagnosis_phrase(run: &[(&str, bool)]) -> bool {
+    for &(w, colon) in run {
+        if colon {
+            return false;
+        }
+        let k = word_key(w);
+        if exemption_head(&k) {
+            return true;
+        }
+        if !clinical_word(&k) {
+            return false;
+        }
+    }
+    false
+}
+
+static COMMA_AGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*,\s*([0-9]{2,3})\s*(?i:y|yrs?|years?)\b\.?").expect("comma age regex")
+});
+
+/// "c/o Puttaswamy, 56 yrs": a comma then an age, unless a duration word follows
+/// ("c/o Swelling, 10 years duration", "15 years back").
+fn comma_age_follows(rest: &str) -> bool {
+    let Some(m) = COMMA_AGE.find(rest) else {
+        return false;
+    };
+    let next: String = rest[m.end()..]
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .chars()
+        .take_while(|c| c.is_alphabetic())
+        .collect::<String>()
+        .to_lowercase();
+    !matches!(
+        next.as_str(),
+        "ago" | "back" | "before" | "since" | "duration" | "of" | "history"
+    )
 }
 
 fn not_name(k: &str) -> bool {
@@ -1496,6 +1555,9 @@ const GIVEN_NAMES: &[&str] = &[
     "arjun",
     "prashant",
     "ramaiah",
+    "nancy",
+    "soma",
+    "roma",
     // two-letter names (only reachable through this list)
     "om",
     // South Indian
@@ -1639,7 +1701,7 @@ fn next_cap_word(rest: &str) -> Option<&str> {
 /// s/o, d/o, h/o, w/o, c/o (and "son of" ...) + name.
 ///
 /// The first word must be a name candidate. `s/o`, `d/o` and the long forms then block
-/// unless a clinical head noun ends the phrase. `c/o` ("complains of"), `w/o` ("without")
+/// unless a clinical phrase follows (clinical words ending in a head noun, no label colon). `c/o` ("complains of"), `w/o` ("without")
 /// and `h/o` ("history of") are mostly clinical, so a bare word passes unless it is an
 /// allowlisted given name; they also block with a title, an age/sex after the name, or a
 /// second name-candidate word. "Late" counts as a title only before a name candidate.
@@ -1667,19 +1729,23 @@ fn relation_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
         return true;
     }
     if strict {
-        // "s/o Hollow Viscus Perforation": a clinical head noun ends the phrase.
-        return !run.iter().any(|w| head_noun(&word_key(w)));
+        // "s/o Sebaceous Cyst" is a clinical phrase; "S/O MUNIYAPPA OCCUPATION:" is not.
+        return !diagnosis_phrase(&run);
     }
-    // c/o, w/o, h/o: need more evidence than a bare word: an age/sex after it, or a
-    // second name word ("c/o Vishal Kumar") not closed by a clinical head noun
-    // ("h/o Ischemic Heart Disease").
+    // c/o, w/o, h/o: need more evidence than a bare word: an age/sex after it, a comma
+    // age for c/o and w/o ("c/o Puttaswamy, 56 yrs"), or a second name word
+    // ("c/o Vishal Kumar") that does not start a clinical phrase.
     age_follows(&text[e..])
-        || (run.first().is_some_and(|w2| name_candidate(&word_key(w2)))
-            && !run.iter().any(|w| head_noun(&word_key(w))))
+        || ((rel == "c" || rel == "w") && comma_age_follows(&text[e..]))
+        || (run
+            .first()
+            .is_some_and(|(w2, _)| name_candidate(&word_key(w2)))
+            && !diagnosis_phrase(&run))
 }
 
-/// Up to `n` capitalised words directly following, separated only by spaces/tabs.
-fn cap_run(rest: &str, n: usize) -> Vec<&str> {
+/// Up to `n` capitalised words directly following, separated only by spaces/tabs, each
+/// with whether a `:` follows it (a case-sheet label such as "DIAGNOSIS:").
+fn cap_run(rest: &str, n: usize) -> Vec<(&str, bool)> {
     let mut out = Vec::new();
     let mut pos = 0;
     while out.len() < n {
@@ -1688,7 +1754,8 @@ fn cap_run(rest: &str, n: usize) -> Vec<&str> {
         };
         let skipped = rest[pos..].len() - rest[pos..].trim_start_matches([' ', '\t']).len();
         pos += skipped + w.len();
-        out.push(w);
+        let colon = rest[pos..].trim_start_matches([' ', '\t']).starts_with(':');
+        out.push((w, colon));
     }
     out
 }

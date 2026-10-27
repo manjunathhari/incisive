@@ -193,6 +193,31 @@ const BLOCK: &[(&str, &[K])] = &[
     ("MRS SAROJAMMA, 67 F", &[K::PersonName]),
     ("call on 98450 12 345", &[K::Phone]),
     ("s/o Om", &[K::PersonName]),
+    // --- fix round 5
+    ("S/O MUNIYAPPA OCCUPATION: AGRICULTURIST", &[K::PersonName]),
+    (
+        "S/O NAGESH GOWDA DIAGNOSIS: RT INGUINAL HERNIA",
+        &[K::PersonName],
+    ),
+    ("D/O SHIVALINGAPPA DIAGNOSIS CA BREAST", &[K::PersonName]),
+    ("s/o Venkatappa Station Road, Hoskote", &[K::PersonName]),
+    (
+        "s/o Thimmaiah Admission Diagnosis Acute Appendicitis",
+        &[K::PersonName],
+    ),
+    ("Son of Muniswamy Diagnosis: SAIO", &[K::PersonName]),
+    (
+        "Wife of Chandrashekar Occupation Housewife",
+        &[K::PersonName],
+    ),
+    ("s/o Ramappa Station Road", &[K::PersonName]),
+    ("c/o Puttaswamy, 56 yrs", &[K::PersonName]),
+    ("c/o Puttaswamy, 56 Years, Male", &[K::PersonName]),
+    ("w/o Kariyappa, 48 yrs", &[K::PersonName]),
+    ("Patient Nancy admitted", &[K::PersonName]),
+    ("Pt Soma, 45F", &[K::PersonName]),
+    ("Patient Roma Devi", &[K::PersonName]),
+    ("Name: Nancy Thomas", &[K::PersonName]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -422,6 +447,23 @@ const PASS: &[&str] = &[
     "IP 500 MG CISPLATIN",
     "IP 1 g ceftriaxone",
     "HBV DNA 7800000000 IU/mL",
+    // --- fix round 5
+    "s/o Sebaceous Cyst",
+    "s/o Dermoid Cyst",
+    "s/o Intestinal Malrotation",
+    "s/o Arteriovenous Malformation",
+    "s/o Paget Disease",
+    "S/O CA RECTUM",
+    "Impression: s/o Acute Appendicitis",
+    "s/o Carcinoid Tumour",
+    "s/o Ovarian Torsion",
+    "c/o Giddiness, 2 years",
+    "c/o Pain Abdomen, 10 years",
+    "c/o Swelling, 10 years duration",
+    "c/o Dyspepsia, 12 years",
+    "c/o Heartburn, 15 years back",
+    "h/o Epilepsy, 12 yrs",
+    "CT s/o Annular Pancreas",
 ];
 
 #[test]
@@ -664,6 +706,47 @@ const ROUND4_PROBES: &[(&str, &[K])] = &[
     // 9. optional
     ("call on 98450 12 345", &[K::Phone]),
     ("s/o Om", &[K::PersonName]),
+    // --- round 5 probes
+    ("S/O MUNIYAPPA OCCUPATION: AGRICULTURIST", &[K::PersonName]),
+    (
+        "S/O NAGESH GOWDA DIAGNOSIS: RT INGUINAL HERNIA",
+        &[K::PersonName],
+    ),
+    ("D/O SHIVALINGAPPA DIAGNOSIS CA BREAST", &[K::PersonName]),
+    ("s/o Venkatappa Station Road, Hoskote", &[K::PersonName]),
+    (
+        "s/o Thimmaiah Admission Diagnosis Acute Appendicitis",
+        &[K::PersonName],
+    ),
+    ("Son of Muniswamy Diagnosis: SAIO", &[K::PersonName]),
+    (
+        "Wife of Chandrashekar Occupation Housewife",
+        &[K::PersonName],
+    ),
+    ("s/o Ramappa Station Road", &[K::PersonName]),
+    ("c/o Puttaswamy, 56 yrs", &[K::PersonName]),
+    ("c/o Puttaswamy, 56 Years, Male", &[K::PersonName]),
+    ("w/o Kariyappa, 48 yrs", &[K::PersonName]),
+    ("Patient Nancy admitted", &[K::PersonName]),
+    ("Pt Soma, 45F", &[K::PersonName]),
+    ("Patient Roma Devi", &[K::PersonName]),
+    ("Name: Nancy Thomas", &[K::PersonName]),
+    ("s/o Sebaceous Cyst", &[]),
+    ("s/o Dermoid Cyst", &[]),
+    ("s/o Intestinal Malrotation", &[]),
+    ("s/o Arteriovenous Malformation", &[]),
+    ("s/o Paget Disease", &[]),
+    ("S/O CA RECTUM", &[]),
+    ("Impression: s/o Acute Appendicitis", &[]),
+    ("s/o Carcinoid Tumour", &[]),
+    ("s/o Ovarian Torsion", &[]),
+    ("c/o Giddiness, 2 years", &[]),
+    ("c/o Pain Abdomen, 10 years", &[]),
+    ("c/o Swelling, 10 years duration", &[]),
+    ("c/o Dyspepsia, 12 years", &[]),
+    ("c/o Heartburn, 15 years back", &[]),
+    ("h/o Epilepsy, 12 yrs", &[]),
+    ("CT s/o Annular Pancreas", &[]),
 ];
 
 #[test]
