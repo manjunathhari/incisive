@@ -148,7 +148,7 @@ mod server {
     use crate::deid;
     use crate::gate::{self, GateError, Verdict};
     use crate::identity::{CurrentUser, IdentityRejection, Role, User};
-    use crate::runs::{RunMode, store};
+    use crate::runs::{RunMode, store, worker};
     use crate::server::AppState;
     use crate::spend::{self, CapCheck, SpendError};
 
@@ -435,7 +435,16 @@ mod server {
                     audit::accepted_detail(question),
                 )
                 .await?;
-                start_run(state, request_id, user, question, mode, alert).await
+                // Detached: if the client goes away, axum drops this future,
+                // but the run is still fully started or fully undone.
+                let (st, u, q) = (state.clone(), user.clone(), question.to_string());
+                tokio::spawn(async move { start_run(&st, request_id, &u, &q, mode, alert).await })
+                    .await
+                    .unwrap_or_else(|_| {
+                        // A panic in start_run: never an answer.
+                        tracing::error!(%request_id, "run start panicked");
+                        Err(AskFailure::Record)
+                    })
             }
             Verdict::NotMedical => Ok(AskOutcome::NotMedical {
                 message: decision.user_message().unwrap_or_default(),
@@ -472,17 +481,33 @@ mod server {
         let uid = Some(user.id);
         let limit = state.runs.for_mode(mode).limit_paise;
 
-        // 1-2. The active-run check and the insert are one atomic step.
-        let run_id = match store::create_run(&state.pool, user.id, question, mode, limit).await {
-            Ok(Ok(id)) => id,
-            Ok(Err(store::ActiveRunExists)) => {
-                return Ok(AskOutcome::RunInProgress {
-                    message: RUN_IN_PROGRESS_MESSAGE.to_string(),
-                });
-            }
-            Err(_) => {
-                tracing::error!(%request_id, "run could not be created");
-                return Err(AskFailure::Record);
+        // 1-2. The active-run check and the insert are one atomic step. If the
+        // user's active run is abandoned (stale heartbeat), self-heal: interrupt
+        // and release it, then try once more.
+        let mut healed = false;
+        let run_id = loop {
+            match store::create_run(&state.pool, user.id, question, mode, limit).await {
+                Ok(Ok(id)) => break id,
+                Ok(Err(store::ActiveRunExists)) if !healed => {
+                    healed = true;
+                    match worker::interrupt_and_release_stale(&state.pool).await {
+                        Ok(stale) if stale.iter().any(|&(_, u)| u == user.id) => continue,
+                        Ok(_) => {}
+                        Err(_) => tracing::warn!(%request_id, "stale run self-heal failed"),
+                    }
+                    return Ok(AskOutcome::RunInProgress {
+                        message: RUN_IN_PROGRESS_MESSAGE.to_string(),
+                    });
+                }
+                Ok(Err(store::ActiveRunExists)) => {
+                    return Ok(AskOutcome::RunInProgress {
+                        message: RUN_IN_PROGRESS_MESSAGE.to_string(),
+                    });
+                }
+                Err(_) => {
+                    tracing::error!(%request_id, "run could not be created");
+                    return Err(AskFailure::Record);
+                }
             }
         };
 

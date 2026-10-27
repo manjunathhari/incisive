@@ -900,36 +900,47 @@ async fn run_started_audit_failure_undoes_the_run() {
     // Make the `run_started` append fail for this user only.
     let tag = uuid::Uuid::new_v4().simple().to_string();
     let func = format!("incisive.fail_run_started_{tag}");
-    sqlx::query(&format!(
+    let ddl = |sql: String| {
+        let pool = pool.clone();
+        async move {
+            // Never wait long for the audit table's lock.
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL lock_timeout = '5s'")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(&sql).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    ddl(format!(
         "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
            IF NEW.user_id = {uid} AND NEW.event = 'run_started' THEN \
              RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END $$",
         uid = u.id
     ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(&format!(
+    .await;
+    ddl(format!(
         "CREATE TRIGGER fail_run_started_{tag} BEFORE INSERT ON incisive.audit \
          FOR EACH ROW EXECUTE FUNCTION {func}()"
     ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    .await;
 
+    // In its own task: a panic there still lets the trigger be dropped below.
     let st = state_with(pool.clone(), Arc::new(MustNotCall), true);
-    let r = run_ask(&st, &u, RULE_QUESTION, RunMode::Focused).await;
+    let user = u.clone();
+    let r = tokio::spawn(async move { run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await })
+        .await;
 
-    sqlx::query(&format!(
+    ddl(format!(
         "DROP TRIGGER fail_run_started_{tag} ON incisive.audit"
     ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(&format!("DROP FUNCTION {func}()"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    .await;
+    ddl(format!("DROP FUNCTION {func}()")).await;
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    };
 
     assert_eq!(r, Err(AskFailure::Record));
     let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM incisive.runs WHERE user_id = $1")

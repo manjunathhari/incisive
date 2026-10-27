@@ -7,7 +7,7 @@ use incisive_app::{
     db::{PgReadiness, lazy_pool, migrate_until_done},
     gate::{Classifier, ClaudeClassifier, OfflineClassifier},
     identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
-    runs::worker::{WorkerHandle, recover_until_done},
+    runs::worker::{WorkerHandle, recovery_loop},
     server::{AppState, build_router, install_panic_hook},
     spend::CapsConfig,
 };
@@ -15,8 +15,6 @@ use leptos::config::get_configuration;
 
 #[tokio::main]
 async fn main() {
-    // Runs created before this instant belong to an earlier process (restart recovery).
-    let boot = chrono::Utc::now();
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
@@ -56,15 +54,16 @@ async fn main() {
     };
     let migrated = Arc::new(AtomicBool::new(false));
     let (base, cap) = (Duration::from_secs(1), Duration::from_secs(30));
-    // Migrations first, then restart recovery (runs left queued/running by the
-    // previous process become interrupted and release their reservations), then
-    // the owner row (which needs the users table).
+    // Migrations first, then the owner row (which needs the users table) and
+    // run recovery: abandoned runs (stale heartbeat, by the database clock)
+    // become interrupted and release their reservations, at startup and then
+    // every minute. Live runs of other instances are left alone.
     tokio::spawn({
         let (pool, migrated) = (pool.clone(), migrated.clone());
         let (owner_email,) = (config.owner_email.clone(),);
         async move {
             migrate_until_done(pool.clone(), migrated, base, cap).await;
-            recover_until_done(pool.clone(), boot, base, cap).await;
+            tokio::spawn(recovery_loop(pool.clone(), base, cap));
             ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
         }
     });

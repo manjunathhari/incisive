@@ -3,28 +3,36 @@
 //! [`WorkerHandle::spawn`] starts a tokio task for one run; it is detached from
 //! the request that created the run, so closing the page does not stop it.
 //! The task:
-//! 1. loads the run and its user and moves it to `running` (a run that is
-//!    already finished, e.g. interrupted by recovery, is left alone);
-//! 2. runs the pipeline, catching panics (`Failed("panic")`, payload never
-//!    read) and enforcing the hard stop (`Failed("hard_stop")`);
-//! 3. saves the answer and sets the final status;
+//! 1. loads the run and its user and moves it to `running`, which stamps the
+//!    first heartbeat (a run that is already finished, e.g. interrupted by
+//!    recovery, is left alone);
+//! 2. runs the pipeline while a ticker refreshes the heartbeat every
+//!    [`HEARTBEAT_EVERY`] (the pipeline also beats between steps), enforcing
+//!    the hard stop (`Failed("hard_stop")`);
+//! 3. saves the answer (only while still `running`) and sets the final
+//!    status, retrying that write once; if it still fails the audit status is
+//!    `store_error` and self-heal / recovery clear the row later;
 //! 4. releases what is left of the reservation (charges stand);
 //! 5. audits `run_finished` with `{run_id, status, cost_paise, steps}`.
 //!
+//! A panic anywhere in the task ends the run as `failed`/`panic` with its
+//! reservation released; the payload is never read.
+//!
 //! A run whose row disappears mid-run (the user deleted it), or whose
-//! [`CancelFlag`] is set, is treated as cancelled: no answer is stored, the
-//! charges stand, the reservation is released and the audit status is
-//! `deleted`.
+//! [`CancelFlag`] is cancelled, ends as `deleted`: no answer is stored, the
+//! charges stand and the reservation is released. A run found interrupted by
+//! someone else (a heartbeat or the answer write affects no row) stops
+//! quietly: charges stand, the reservation is released, and no second
+//! `run_finished` is audited.
 //!
 //! Logs carry run ids and fixed kinds only, never the question or answer.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -44,18 +52,82 @@ fn default_pipeline(ctx: &RunContext) -> PipelineFuture<'_> {
     Box::pin(agent::run_pipeline(ctx))
 }
 
-/// Set when a run should stop (the user deleted it). The pipeline checks it
-/// between steps; the worker checks it when the pipeline returns.
+/// Refresh a live run's heartbeat at least this often (recovery treats 90 s
+/// without one as abandoned).
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(20);
+
+const LIVE: u8 = 0;
+const CANCELLED: u8 = 1;
+const LOST: u8 = 2;
+
+/// Set when a run should stop: the user deleted it ([`CancelFlag::cancel`]),
+/// or a heartbeat found it no longer running (interrupted elsewhere). The
+/// pipeline checks [`CancelFlag::is_cancelled`] between steps; the worker
+/// checks why when the pipeline returns.
 #[derive(Debug, Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(Arc<AtomicU8>);
 
 impl CancelFlag {
+    /// The user is deleting the run.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        let _ = self
+            .0
+            .compare_exchange(LIVE, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
     }
+    /// True once the run should stop, for either reason.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire) != LIVE
     }
+    fn mark_lost(&self) {
+        let _ = self
+            .0
+            .compare_exchange(LIVE, LOST, Ordering::AcqRel, Ordering::Acquire);
+    }
+    fn is_lost(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LOST
+    }
+}
+
+/// Refresh the run's heartbeat. False when the run is gone or no longer
+/// running (interrupted or deleted): the pipeline must stop, and the flag is
+/// set so the worker knows why. A database error counts as alive (the ticker
+/// retries); a truly dead run is caught by the next beat or the final writes.
+pub async fn heartbeat(ctx: &RunContext) -> bool {
+    beat(&ctx.state.pool, ctx.run_id, &ctx.cancel).await
+}
+
+async fn beat(pool: &PgPool, run_id: Uuid, cancel: &CancelFlag) -> bool {
+    match store::heartbeat(pool, run_id).await {
+        Ok(true) => true,
+        Ok(false) => {
+            cancel.mark_lost();
+            false
+        }
+        Err(_) => {
+            tracing::warn!(%run_id, "run heartbeat could not be stored");
+            true
+        }
+    }
+}
+
+/// Aborts the heartbeat ticker when the run ends, however it ends.
+struct Ticker(tokio::task::JoinHandle<()>);
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn start_ticker(pool: PgPool, run_id: Uuid, cancel: CancelFlag) -> Ticker {
+    Ticker(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(HEARTBEAT_EVERY).await;
+            if !beat(&pool, run_id, &cancel).await {
+                return;
+            }
+        }
+    }))
 }
 
 /// Starts run tasks and tracks them, so a run can be cancelled. Cheap to clone;
@@ -102,7 +174,12 @@ impl WorkerHandle {
         };
         tokio::spawn(async move {
             let _tracked = tracked;
-            execute(&state, run_id, cancel, pipeline).await;
+            let run = AssertUnwindSafe(execute(&state, run_id, cancel, pipeline));
+            // The payload is dropped unread: it could quote question text.
+            if run.catch_unwind().await.is_err() {
+                tracing::error!(%run_id, "run worker panicked");
+                after_panic(&state.pool, run_id).await;
+            }
         });
     }
 
@@ -132,6 +209,25 @@ enum End {
     Deleted,
     /// Already finished by someone else (restart recovery): release only.
     AlreadyFinished,
+}
+
+/// A panic outside the pipeline (or before its own boundary): fail the run,
+/// release its reservation and audit, as far as the database allows.
+async fn after_panic(pool: &PgPool, run_id: Uuid) {
+    let user_id = match store::load_question(pool, run_id).await {
+        Ok(Some((user_id, ..))) => Some(user_id),
+        _ => spend::reservation_owner(pool, run_id).await.ok().flatten(),
+    };
+    let Some(user_id) = user_id else { return };
+    let cost = store::run_cost(pool, run_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    let end = End::Status(RunStatus::Failed, Some("panic"));
+    // A second panic here is caught by tokio; the run is then left for
+    // self-heal / recovery.
+    finish(pool, run_id, user_id, end, cost).await;
 }
 
 /// True only when the run row is known to be gone. A failed check counts as
@@ -191,6 +287,7 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         }
     }
 
+    let _ticker = start_ticker(pool.clone(), run_id, cancel.clone());
     let ctx = RunContext {
         state: state.clone(),
         run_id,
@@ -228,6 +325,14 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
 /// Turn the pipeline's outcome into how the run ends, storing the answer.
 async fn decide(pool: &PgPool, ctx: &RunContext, outcome: PipelineOutcome) -> End {
     let run_id = ctx.run_id;
+    if ctx.cancel.is_lost() {
+        // A heartbeat found the run no longer running.
+        return if gone(pool, run_id).await {
+            End::Deleted
+        } else {
+            End::AlreadyFinished
+        };
+    }
     if ctx.cancel.is_cancelled() {
         // The user is deleting this run. If the row is still there, close it
         // so it no longer holds the user's active slot. Changed or not, the
@@ -252,7 +357,10 @@ async fn decide(pool: &PgPool, ctx: &RunContext, outcome: PipelineOutcome) -> En
         }
     };
     match store::save_answer(pool, run_id, &body).await {
-        Ok(()) => End::Status(status, None),
+        Ok(true) => End::Status(status, None),
+        // Not running any more: deleted, or interrupted by someone else.
+        Ok(false) if gone(pool, run_id).await => End::Deleted,
+        Ok(false) => End::AlreadyFinished,
         Err(_) if gone(pool, run_id).await => End::Deleted,
         Err(_) => {
             tracing::error!(%run_id, "run answer could not be stored");
@@ -264,16 +372,25 @@ async fn decide(pool: &PgPool, ctx: &RunContext, outcome: PipelineOutcome) -> En
 /// Store the final status, release the reservation's remainder and audit.
 async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise: i64) {
     let audited: Option<&'static str> = match end {
-        End::Status(status, kind) => match store::set_status(pool, run_id, status, kind).await {
-            Ok(true) => Some(status.as_str()),
-            Ok(false) if gone(pool, run_id).await => Some("deleted"),
-            // Finished by someone else (restart recovery), who audits it.
-            Ok(false) => None,
-            Err(_) => {
-                tracing::error!(%run_id, "run status could not be stored");
-                Some(RunStatus::Failed.as_str())
+        End::Status(status, kind) => {
+            let mut stored = store::set_status(pool, run_id, status, kind).await;
+            if stored.is_err() {
+                tracing::warn!(%run_id, "run status could not be stored; retrying once");
+                stored = store::set_status(pool, run_id, status, kind).await;
             }
-        },
+            match stored {
+                Ok(true) => Some(status.as_str()),
+                Ok(false) if gone(pool, run_id).await => Some("deleted"),
+                // Finished by someone else (restart recovery), who audits it.
+                Ok(false) => None,
+                Err(_) => {
+                    // The row stays active; once its heartbeat is stale,
+                    // self-heal or recovery interrupts it.
+                    tracing::error!(%run_id, "run status could not be stored");
+                    Some("store_error")
+                }
+            }
+        }
         End::Deleted => Some("deleted"),
         End::AlreadyFinished => None,
     };
@@ -297,20 +414,15 @@ async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise:
     }
 }
 
-/// Startup recovery. Every run left queued or running by an earlier process
-/// (created before `created_before`, this process's start) becomes
-/// `interrupted`: its charges stand, its reservation is released and
-/// `run_finished {status: interrupted}` is audited. Then any finished run that
-/// still holds a reservation (a release that failed earlier) is released.
-/// Returns how many runs were interrupted.
-pub async fn recover_stale_runs(
-    pool: &PgPool,
-    created_before: DateTime<Utc>,
-) -> sqlx::Result<usize> {
-    let marked = store::mark_stale_runs_interrupted(pool, created_before).await?;
+/// Interrupt every abandoned run ([`store::interrupt_stale_runs`]): release
+/// each one's reservation (its charges stand) and audit
+/// `run_finished {status: interrupted}`. Returns the runs interrupted.
+/// Shared by startup recovery and the self-heal in `run_ask`.
+pub async fn interrupt_and_release_stale(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
+    let marked = store::interrupt_stale_runs(pool).await?;
     for &(run_id, user_id) in &marked {
         if spend::release(pool, user_id, run_id).await.is_err() {
-            // The sweep below (or the next attempt) picks it up.
+            // The leaked-reservation sweep in recovery picks it up.
             tracing::error!(%run_id, "interrupted run's reservation could not be released");
         }
         let cost = store::run_cost(pool, run_id)
@@ -332,27 +444,36 @@ pub async fn recover_stale_runs(
             tracing::error!(%run_id, "run_finished audit append failed");
         }
     }
+    Ok(marked)
+}
+
+/// Recovery: interrupt abandoned runs (see [`interrupt_and_release_stale`]),
+/// then release any finished run that still holds a reservation (a release
+/// that failed earlier). Safe with several instances: live runs keep fresh
+/// heartbeats. Returns how many runs were interrupted.
+pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
+    let marked = interrupt_and_release_stale(pool).await?;
     for (run_id, user_id) in store::finished_runs_holding_reservation(pool).await? {
         spend::release(pool, user_id, run_id).await?;
     }
     Ok(marked.len())
 }
 
-/// [`recover_stale_runs`] with exponential backoff (`base`, doubling, capped
-/// at `cap`) until it succeeds.
-pub async fn recover_until_done(
-    pool: PgPool,
-    created_before: DateTime<Utc>,
-    base: Duration,
-    cap: Duration,
-) {
+/// How often recovery runs after startup, so a run abandoned by a crashed
+/// instance does not show as running until the next restart or send.
+pub const RECOVERY_EVERY: Duration = Duration::from_secs(60);
+
+/// [`recover_stale_runs`] at startup with exponential backoff (`base`,
+/// doubling, capped at `cap`) until it succeeds, then every [`RECOVERY_EVERY`].
+/// Never returns.
+pub async fn recovery_loop(pool: PgPool, base: Duration, cap: Duration) {
     let mut delay = base;
     let mut attempt: u32 = 1;
     loop {
-        match recover_stale_runs(&pool, created_before).await {
+        match recover_stale_runs(&pool).await {
             Ok(n) => {
                 tracing::info!(attempt, interrupted = n, "run recovery done");
-                return;
+                break;
             }
             Err(_) => {
                 // The error could carry stored values; the attempt number only.
@@ -361,6 +482,14 @@ pub async fn recover_until_done(
                 delay = (delay * 2).min(cap);
                 attempt = attempt.saturating_add(1);
             }
+        }
+    }
+    loop {
+        tokio::time::sleep(RECOVERY_EVERY).await;
+        match recover_stale_runs(&pool).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(interrupted = n, "abandoned runs interrupted"),
+            Err(_) => tracing::warn!("periodic run recovery failed; will retry"),
         }
     }
 }

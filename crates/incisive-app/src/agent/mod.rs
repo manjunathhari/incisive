@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::identity::User;
 use crate::runs::budget::RunBudget;
-use crate::runs::worker::CancelFlag;
+use crate::runs::worker::{self, CancelFlag};
 use crate::runs::{DepthSettings, RunMode, StepKind, store};
 use crate::server::AppState;
 
@@ -86,6 +86,10 @@ pub async fn run_pipeline(ctx: &RunContext) -> PipelineOutcome {
             .is_err()
         {
             return PipelineOutcome::Failed("store");
+        }
+        // Still ours? (Interrupted or deleted elsewhere: stop.)
+        if !worker::heartbeat(ctx).await {
+            return PipelineOutcome::Failed("interrupted");
         }
         tokio::time::sleep(Duration::ZERO).await;
     }

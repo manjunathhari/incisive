@@ -3,7 +3,6 @@
 //! Every read or delete that takes a `user_id` is scoped to that user, so
 //! another user's run id behaves exactly like a missing one.
 
-use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -72,8 +71,8 @@ pub async fn create_run(
     }
 }
 
-/// Move a run to `status`. `Running` stamps `started_at` (once); terminal
-/// statuses stamp `finished_at`. `error_kind` is stored as given.
+/// Move a run to `status`. `Running` stamps `started_at` (once) and the first
+/// heartbeat; terminal statuses stamp `finished_at`. `error_kind` is stored as given.
 ///
 /// A run already in a terminal status (done, partial, failed, interrupted) is
 /// never changed. Returns whether a row was updated.
@@ -87,6 +86,7 @@ pub async fn set_status(
     let r = sqlx::query(
         "UPDATE incisive.runs SET status = $2, error_kind = $3, \
            started_at = CASE WHEN $2 = 'running' THEN COALESCE(started_at, now()) ELSE started_at END, \
+           heartbeat_at = CASE WHEN $2 = 'running' THEN now() ELSE heartbeat_at END, \
            finished_at = CASE WHEN $2 IN ('queued','running') THEN NULL ELSE now() END \
          WHERE id = $1 AND status NOT IN ('done','partial','failed','interrupted')",
     )
@@ -128,21 +128,36 @@ pub async fn add_cost(pool: &PgPool, run_id: Uuid, paise: i64) -> sqlx::Result<(
     Ok(())
 }
 
-/// Store (or replace) the structured answer.
+/// Store (or replace) the structured answer, only while the run is `running`.
+/// Returns false (nothing stored) if the run is gone or no longer running,
+/// e.g. interrupted by recovery or deleted by the user.
 pub async fn save_answer(
     pool: &PgPool,
     run_id: Uuid,
     body: &serde_json::Value,
-) -> sqlx::Result<()> {
-    sqlx::query(
-        "INSERT INTO incisive.run_answers (run_id, body) VALUES ($1, $2) \
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "INSERT INTO incisive.run_answers (run_id, body) \
+         SELECT id, $2 FROM incisive.runs WHERE id = $1 AND status = 'running' \
          ON CONFLICT (run_id) DO UPDATE SET body = EXCLUDED.body",
     )
     .bind(run_id)
     .bind(body)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(r.rows_affected() > 0)
+}
+
+/// Refresh the run's heartbeat (database clock). False if the run is gone or
+/// no longer running: its worker must stop.
+pub async fn heartbeat(pool: &PgPool, run_id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE incisive.runs SET heartbeat_at = now() WHERE id = $1 AND status = 'running'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 /// The run with its steps and answer, only if it belongs to `user_id`.
@@ -247,21 +262,28 @@ pub async fn load_question(
     .transpose()
 }
 
-/// Startup recovery: every queued or running run created before
-/// `created_before` (the process start; its worker died with the old process)
-/// becomes `interrupted`, with `error_kind = 'interrupted'`. Runs created after
-/// it belong to this process and are left alone. Returns `(run_id, user_id)` of
-/// each so the caller can release their reservations.
-pub async fn mark_stale_runs_interrupted(
-    pool: &PgPool,
-    created_before: DateTime<Utc>,
-) -> sqlx::Result<Vec<(Uuid, i64)>> {
+/// A run stops being live after this long without a heartbeat (or, if
+/// queued, without being picked up).
+pub const STALE_AFTER_SECS: i32 = 90;
+
+/// Mark every abandoned run `interrupted` (`error_kind = 'interrupted'`), by
+/// the database clock: `running` with a heartbeat older than 90 s (or none),
+/// or `queued` for over 90 s with no heartbeat. Live runs, including another
+/// instance's, keep fresh heartbeats and are left alone. Returns
+/// `(run_id, user_id)` of each so the caller can release and audit them.
+/// Used by startup recovery and by the self-heal in `run_ask`.
+pub async fn interrupt_stale_runs(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
     sqlx::query_as(
         "UPDATE incisive.runs SET status = 'interrupted', error_kind = 'interrupted', \
            finished_at = now() \
-         WHERE status IN ('queued','running') AND created_at < $1 RETURNING id, user_id",
+         WHERE (status = 'running' \
+                AND COALESCE(heartbeat_at, started_at, created_at) \
+                    < now() - make_interval(secs => $1)) \
+            OR (status = 'queued' AND heartbeat_at IS NULL \
+                AND created_at < now() - make_interval(secs => $1)) \
+         RETURNING id, user_id",
     )
-    .bind(created_before)
+    .bind(f64::from(STALE_AFTER_SECS))
     .fetch_all(pool)
     .await
 }

@@ -1,6 +1,6 @@
 //! Run-store tests, gated on `TEST_DATABASE_URL`. Every test creates its own
 //! user (unique email), so tests running in parallel on one DB never share rows.
-//! The two global operations (`mark_stale_runs_interrupted`,
+//! The global operations (`interrupt_stale_runs`, recovery, self-heal,
 //! `delete_runs_older_than`) are asserted only on rows each test created.
 
 use claude_client::Usage;
@@ -9,8 +9,8 @@ use incisive_app::identity::User;
 use incisive_app::runs::budget::{BudgetError, RunBudget};
 use incisive_app::runs::store::{
     ActiveRunExists, add_cost, add_step, create_run, delete_all_runs, delete_run,
-    delete_runs_older_than, get_run_for_user, list_runs, load_question,
-    mark_stale_runs_interrupted, save_answer, set_status,
+    delete_runs_older_than, get_run_for_user, heartbeat, interrupt_stale_runs, list_runs,
+    load_question, save_answer, set_status,
 };
 use incisive_app::runs::{RunMode, RunStatus, StepKind};
 use incisive_app::spend::{CapCheck, CapsConfig, Prices, charge_call, release, reserve, totals};
@@ -20,7 +20,7 @@ use sqlx::PgPool;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// `mark_stale_runs_interrupted` is global: it would interrupt the queued/running
+/// `interrupt_stale_runs` is global: it would interrupt the queued/running
 /// runs of every concurrently running test. So every test holds the read side of
 /// this lock, and the stale-runs test alone takes the write side.
 static ACTIVE_RUNS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
@@ -55,6 +55,18 @@ async fn new_user(pool: &PgPool) -> i64 {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+/// Move a run timestamp column `secs` seconds into the past (DB clock).
+async fn backdate(pool: &PgPool, run: Uuid, column: &str, secs: i64) {
+    sqlx::query(&format!(
+        "UPDATE incisive.runs SET {column} = now() - make_interval(secs => $2) WHERE id = $1"
+    ))
+    .bind(run)
+    .bind(secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn count(pool: &PgPool, table: &str, run: Uuid) -> i64 {
@@ -97,12 +109,18 @@ async fn create_and_read_back() {
 
     add_cost(&pool, id, 12).await.unwrap();
     add_cost(&pool, id, 30).await.unwrap();
-    save_answer(&pool, id, &json!({"a": 1})).await.unwrap();
+    // An answer is stored only while the run is running.
+    assert!(
+        set_status(&pool, id, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    assert!(save_answer(&pool, id, &json!({"a": 1})).await.unwrap());
     let v = get_run_for_user(&pool, u, id).await.unwrap().unwrap();
     assert_eq!(v.summary.cost_paise, 42);
     assert_eq!(v.answer, Some(json!({"a": 1})));
     // saving again replaces
-    save_answer(&pool, id, &json!({"a": 2})).await.unwrap();
+    assert!(save_answer(&pool, id, &json!({"a": 2})).await.unwrap());
     let v = get_run_for_user(&pool, u, id).await.unwrap().unwrap();
     assert_eq!(v.answer, Some(json!({"a": 2})));
 
@@ -273,7 +291,12 @@ async fn delete_cascades_steps_and_answer() {
         .unwrap()
         .unwrap();
     add_step(&pool, id, StepKind::Frame, "a").await.unwrap();
-    save_answer(&pool, id, &json!({"x": 1})).await.unwrap();
+    assert!(
+        set_status(&pool, id, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    assert!(save_answer(&pool, id, &json!({"x": 1})).await.unwrap());
     assert_eq!(count(&pool, "run_steps", id).await, 1);
     assert_eq!(count(&pool, "run_answers", id).await, 1);
     assert!(delete_run(&pool, u, id).await.unwrap());
@@ -343,10 +366,12 @@ async fn stale_runs_marked_interrupted() {
     set_status(&pool, done, RunStatus::Done, None)
         .await
         .unwrap();
+    // Make the active two stale: queued for 2 minutes, last heartbeat 2 minutes ago.
+    backdate(&pool, queued, "created_at", 120).await;
+    backdate(&pool, running, "heartbeat_at", 120).await;
+    backdate(&pool, done, "created_at", 120).await;
 
-    let marked = mark_stale_runs_interrupted(&pool, chrono::Utc::now())
-        .await
-        .unwrap();
+    let marked = interrupt_stale_runs(&pool).await.unwrap();
     assert!(marked.contains(&(queued, u1)));
     assert!(marked.contains(&(running, u2)));
     assert!(!marked.iter().any(|(id, _)| *id == done));
@@ -400,9 +425,12 @@ async fn retention_deletes_only_older_than_365_days() {
             .await
             .unwrap()
             .unwrap();
-        set_status(&pool, id, RunStatus::Done, None).await.unwrap();
+        set_status(&pool, id, RunStatus::Running, None)
+            .await
+            .unwrap();
         add_step(&pool, id, StepKind::Frame, "s").await.unwrap();
-        save_answer(&pool, id, &json!({})).await.unwrap();
+        assert!(save_answer(&pool, id, &json!({})).await.unwrap());
+        set_status(&pool, id, RunStatus::Done, None).await.unwrap();
         sqlx::query(
             "UPDATE incisive.runs SET created_at = now() - make_interval(days => $2) WHERE id = $1",
         )
@@ -1143,7 +1171,7 @@ async fn restart_recovery_interrupts_and_releases() {
     let Some((pool, _guard)) = test_pool_exclusive().await else {
         return;
     };
-    // A running run and a queued run, each holding its reservation.
+    // A running run whose heartbeat stopped, and a queued run nobody picked up.
     let (u1, running) = reserved_run(&pool, 4000).await;
     assert!(
         set_status(&pool, running, RunStatus::Running, None)
@@ -1153,7 +1181,9 @@ async fn restart_recovery_interrupts_and_releases() {
     add_step(&pool, running, StepKind::Frame, "framing")
         .await
         .unwrap();
+    backdate(&pool, running, "heartbeat_at", 120).await;
     let (u2, queued) = reserved_run(&pool, 4000).await;
+    backdate(&pool, queued, "created_at", 120).await;
     // A finished run whose worker never released (e.g. a failed release).
     let (u3, leaked) = reserved_run(&pool, 4000).await;
     assert!(
@@ -1161,12 +1191,16 @@ async fn restart_recovery_interrupts_and_releases() {
             .await
             .unwrap()
     );
-    let cutoff = chrono::Utc::now();
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    // Created after this process started: not stale, left alone.
-    let (u4, fresh) = reserved_run(&pool, 4000).await;
+    // A live run (another instance's): fresh heartbeat, left alone.
+    let (u4, live) = reserved_run(&pool, 4000).await;
+    assert!(
+        set_status(&pool, live, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    backdate(&pool, live, "created_at", 600).await;
 
-    let n = recover_stale_runs(&pool, cutoff).await.unwrap();
+    let n = recover_stale_runs(&pool).await.unwrap();
     assert!(n >= 2, "{n}");
 
     for (uid, run) in [(u1, running), (u2, queued)] {
@@ -1183,16 +1217,357 @@ async fn restart_recovery_interrupts_and_releases() {
     assert_eq!(reservation(&pool, leaked).await, None);
     let v = get_run_for_user(&pool, u3, leaked).await.unwrap().unwrap();
     assert_eq!(v.summary.status, RunStatus::Done);
-    let v = get_run_for_user(&pool, u4, fresh).await.unwrap().unwrap();
-    assert_eq!(v.summary.status, RunStatus::Queued);
-    assert_eq!(reservation(&pool, fresh).await, Some(4000));
+    let v = get_run_for_user(&pool, u4, live).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Running);
+    assert_eq!(reservation(&pool, live).await, Some(4000));
     // Leave nothing active behind.
     assert!(
-        set_status(&pool, fresh, RunStatus::Failed, None)
+        set_status(&pool, live, RunStatus::Failed, None)
             .await
             .unwrap()
     );
-    release(&pool, u4, fresh).await.unwrap();
+    release(&pool, u4, live).await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_running_run_with_live_heartbeat_is_not_interrupted() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    // Old run, but its worker is alive (heartbeat 10 s ago).
+    backdate(&pool, run, "created_at", 3600).await;
+    backdate(&pool, run, "heartbeat_at", 10).await;
+    let marked = interrupt_stale_runs(&pool).await.unwrap();
+    assert!(!marked.iter().any(|(id, _)| *id == run));
+    // A heartbeat keeps it fresh.
+    assert!(heartbeat(&pool, run).await.unwrap());
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Running);
+    assert_eq!(reservation(&pool, run).await, Some(4000));
+    assert!(
+        set_status(&pool, run, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
+    release(&pool, uid, run).await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_heartbeat_run_is_interrupted_and_released() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    backdate(&pool, run, "heartbeat_at", 91).await;
+    recover_stale_runs(&pool).await.unwrap();
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Interrupted);
+    assert_eq!(reservation(&pool, run).await, None);
+    let ev = run_events(&pool, run).await;
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].1["status"], "interrupted");
+    // A heartbeat for an interrupted run changes nothing.
+    assert!(!heartbeat(&pool, run).await.unwrap());
+    // A second sweep finds nothing more to do for it.
+    let again = interrupt_stale_runs(&pool).await.unwrap();
+    assert!(!again.iter().any(|(id, _)| *id == run));
+}
+
+#[tokio::test]
+async fn queued_without_heartbeat_older_than_90s_is_interrupted() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    let (u_old, old) = reserved_run(&pool, 4000).await;
+    backdate(&pool, old, "created_at", 91).await;
+    let (u_new, new) = reserved_run(&pool, 4000).await;
+    backdate(&pool, new, "created_at", 60).await;
+    let marked = interrupt_stale_runs(&pool).await.unwrap();
+    assert!(marked.contains(&(old, u_old)));
+    assert!(!marked.iter().any(|(id, _)| *id == new));
+    let v = get_run_for_user(&pool, u_new, new).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Queued);
+    // Tidy: the caller of interrupt_stale_runs releases; do it here for both.
+    release(&pool, u_old, old).await.unwrap();
+    assert!(
+        set_status(&pool, new, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
+    release(&pool, u_new, new).await.unwrap();
+}
+
+#[tokio::test]
+async fn self_heal_replaces_stale_active_run_on_next_send() {
+    // Self-heal sweeps globally, like recovery.
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let user = new_user_with_cap(&pool, 100_000).await;
+    // A run stuck queued (its request died) for 2 minutes, holding a reservation.
+    let stuck = create_run(&pool, user.id, "q", RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    let c = reserve(&pool, &user, &big_global(), 4000, stuck, "run")
+        .await
+        .unwrap();
+    assert!(matches!(c, CapCheck::Ok { .. }));
+    backdate(&pool, stuck, "created_at", 120).await;
+
+    let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await);
+    assert_ne!(run, stuck);
+    wait_idle(&st, run).await;
+    poll_status(&pool, user.id, run, RunStatus::Done).await;
+
+    let v = get_run_for_user(&pool, user.id, stuck)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.summary.status, RunStatus::Interrupted);
+    assert_eq!(reservation(&pool, stuck).await, None);
+    let ev = run_events(&pool, stuck).await;
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].1["status"], "interrupted");
+}
+
+/// Run `body` with a per-test trigger on `table` (dropped afterwards, even if
+/// `body` panics). `when` is the trigger's condition, `act` its plpgsql action.
+async fn with_trigger<F, T>(pool: &PgPool, table: &str, when: &str, act: &str, body: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let tag = Uuid::new_v4().simple().to_string();
+    let func = format!("incisive.test_trig_{tag}");
+    let trig = format!("test_trig_{tag}");
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           IF {when} THEN {act} END IF; RETURN NEW; END $$"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {trig} BEFORE INSERT OR UPDATE ON {table} \
+         FOR EACH ROW EXECUTE FUNCTION {func}()"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // In its own task, so a panic is caught and the trigger still dropped.
+    let res = tokio::spawn(body).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP TRIGGER {trig} ON {table}"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP FUNCTION {func}()"))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    match res {
+        Ok(v) => v,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
+}
+
+#[tokio::test]
+async fn start_run_completes_even_if_request_future_is_dropped() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let user = new_user_with_cap(&pool, 100_000).await;
+    // Slow down this user's run insert, so the request can be dropped mid-start.
+    let when = format!("TG_OP = 'INSERT' AND NEW.user_id = {}", user.id);
+    let (st2, u2) = (st.clone(), user.clone());
+    with_trigger(
+        &pool,
+        "incisive.runs",
+        &when,
+        "PERFORM pg_sleep(0.5);",
+        async move {
+            let request = tokio::spawn(async move {
+                let _ = run_ask(&st2, &u2, RULE_QUESTION, RunMode::Focused).await;
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // The client goes away: axum drops the request future.
+            request.abort();
+            let _ = request.await;
+            // Let the start finish (or undo itself) after the drop.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        },
+    )
+    .await;
+
+    // Either the run started and finished, or nothing was left behind.
+    let runs = list_runs(&pool, user.id, 10).await.unwrap();
+    assert!(runs.len() <= 1, "{runs:?}");
+    if let Some(r) = runs.first() {
+        wait_idle(&st, r.id).await;
+        poll_status(&pool, user.id, r.id, RunStatus::Done).await;
+        assert_eq!(reservation(&pool, r.id).await, None);
+        let ev = run_events(&pool, r.id).await;
+        assert_eq!(ev.last().unwrap().1["status"], "done");
+    }
+    let reservations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM incisive.spend WHERE user_id = $1 AND kind = 'reservation'",
+    )
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservations, 0);
+    assert_eq!(runs.len(), 1, "with the start detached, the run goes ahead");
+}
+
+#[tokio::test]
+async fn save_answer_refused_when_not_running() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let u = new_user(&pool).await;
+    let id = create_run(&pool, u, "q", RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!save_answer(&pool, id, &json!({"a": 1})).await.unwrap());
+    assert!(
+        set_status(&pool, id, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    assert!(save_answer(&pool, id, &json!({"a": 2})).await.unwrap());
+    assert!(
+        set_status(&pool, id, RunStatus::Interrupted, Some("interrupted"))
+            .await
+            .unwrap()
+    );
+    assert!(!save_answer(&pool, id, &json!({"a": 3})).await.unwrap());
+    let v = get_run_for_user(&pool, u, id).await.unwrap().unwrap();
+    assert_eq!(v.answer, Some(json!({"a": 2})));
+    assert!(delete_run(&pool, u, id).await.unwrap());
+    assert!(!save_answer(&pool, id, &json!({"a": 4})).await.unwrap());
+    assert!(
+        !save_answer(&pool, Uuid::new_v4(), &json!({}))
+            .await
+            .unwrap()
+    );
+}
+
+/// Writes a step, then the run is interrupted (as another instance's recovery
+/// would); the pipeline's next heartbeat finds it gone and stops.
+fn interrupted_mid_run(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        let pool = &ctx.state.pool;
+        add_step(pool, ctx.run_id, StepKind::Frame, "framing")
+            .await
+            .unwrap();
+        let h = ctx.budget.try_hold(100).unwrap();
+        ctx.budget
+            .charge(pool, h, Uuid::new_v4(), "m-test", &usage(1000, 100))
+            .await
+            .unwrap();
+        assert!(
+            set_status(
+                pool,
+                ctx.run_id,
+                RunStatus::Interrupted,
+                Some("interrupted")
+            )
+            .await
+            .unwrap()
+        );
+        if !incisive_app::runs::worker::heartbeat(ctx).await {
+            return PipelineOutcome::Failed("interrupted");
+        }
+        PipelineOutcome::Done(json!({"should": "not happen"}))
+    })
+}
+
+#[tokio::test]
+async fn interrupted_run_stops_without_a_second_audit() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    st.worker.spawn_with(st.clone(), run, interrupted_mid_run);
+    wait_idle(&st, run).await;
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Interrupted);
+    assert!(v.answer.is_none());
+    assert_eq!(reservation(&pool, run).await, None);
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+    // Only the charge; whoever interrupted it audits run_finished, not the worker.
+    let ev: Vec<String> = run_events(&pool, run)
+        .await
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect();
+    assert_eq!(ev, ["charged"]);
+}
+
+#[tokio::test]
+async fn final_status_write_failure_audits_store_error() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    // Every attempt to mark this run done fails.
+    let when = format!("TG_OP = 'UPDATE' AND NEW.id = '{run}' AND NEW.status = 'done'");
+    let st2 = st.clone();
+    with_trigger(
+        &pool,
+        "incisive.runs",
+        &when,
+        "RAISE EXCEPTION 'injected status failure';",
+        async move {
+            st2.worker.spawn(st2.clone(), run);
+            wait_idle(&st2, run).await;
+        },
+    )
+    .await;
+    assert_eq!(reservation(&pool, run).await, None);
+    let ev = run_events(&pool, run).await;
+    let last = ev.last().unwrap();
+    assert_eq!(last.0, "run_finished");
+    assert_eq!(last.1["status"], "store_error");
+    // The row is left running; self-heal / recovery clear it once its heartbeat is stale.
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Running);
+    assert!(
+        set_status(&pool, run, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
