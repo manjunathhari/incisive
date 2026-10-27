@@ -15,6 +15,8 @@ pub mod gate;
 pub mod health;
 #[cfg(feature = "ssr")]
 pub mod identity;
+#[cfg(feature = "ssr")]
+pub mod lit;
 pub mod runs;
 #[cfg(feature = "ssr")]
 pub mod server;
