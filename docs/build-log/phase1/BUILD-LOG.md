@@ -168,7 +168,7 @@ Gate: the model's one-line reason is shown to the user; Stage D must render it a
 
 ## Stage C: Money and records ✅
 
-**Date:** 27 Oct 2026 · **Commits:** `c20cd6e..7021a58` (4 commits) · **GitHub CI:** tests passed on `7021a58` (run 40495376933). The container build for that run was cancelled because a later run superseded it, and the container build is covered by the Stage D run.
+**Date:** 27 Oct 2026 · **Commits:** `c20cd6e..7021a58` (4 commits) · **GitHub CI:** tests passed on `7021a58` (run 40495376933). The container build for that run was cancelled because a later run superseded it, and the container build is covered by the Stage D run. **Unresolved flake:** two runs with this same code (`4f71b1a`, and `72fb69b` which changed only the build log) failed in the test step. GitHub's logs could not be retrieved from the build environment. CI now reports failing test names directly. Suspects are being fixed in Stage E.
 
 ### What was built (plain English)
 - **Spending caps (Task 4).** Every question reserves its estimated cost *before* anything is spent, then settles to the real cost afterwards.
@@ -220,7 +220,7 @@ Gate: the model's one-line reason is shown to the user; Stage D must render it a
 
 ## Stage D: Ask pipeline and screens ✅
 
-**Date:** 27 Oct 2026 · **Commits:** `cd4f631..9011255` (2 commits, plus a CI reporting improvement `b530a7d`) · **GitHub CI:** CI_D_PLACEHOLDER
+**Date:** 27 Oct 2026 · **Commits:** `cd4f631..9011255` (2 commits, plus a CI reporting improvement `b530a7d`) · **GitHub CI:** run 40499245473 on `9011255`, all checks passed, including the container build with the browser (WASM) build of the new screens and the smoke test
 
 ### What was built (plain English)
 - **The question box.** You type a question and press Send, and you get one of these results:
