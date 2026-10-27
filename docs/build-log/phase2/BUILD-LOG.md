@@ -27,7 +27,7 @@ A running record of the Phase 2 build, updated after every stage.
 
 ## Stage A: Runs and history ✅
 
-**Date:** 27–28 Oct 2026 · **Commits:** `7fa8505..ed88396` · **GitHub CI:** CI_A_PLACEHOLDER
+**Date:** 27–28 Oct 2026 · **Commits:** `7fa8505..ed88396` · **GitHub CI:** run 40560436621 on `ed88396`, all checks passed (tests with Postgres, lint, security audit, container build including the browser (WASM) build, smoke test)
 
 ### What was built (plain English)
 - **Questions become "runs" that work in the background.**
