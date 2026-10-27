@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use quick_xml::Reader;
@@ -91,11 +92,26 @@ impl Pacer {
     }
 }
 
+/// Paces every network attempt to NCBI (retries and redirect hops included)
+/// through the client's per-attempt hook. Other hosts are not delayed.
+fn paced(client: AllowlistedClient, pacer: &Arc<Pacer>) -> AllowlistedClient {
+    let pacer = Arc::clone(pacer);
+    client.with_before_attempt(Arc::new(move |host: &str| {
+        let pacer = Arc::clone(&pacer);
+        let ncbi = host.eq_ignore_ascii_case("eutils.ncbi.nlm.nih.gov");
+        Box::pin(async move {
+            if ncbi {
+                pacer.wait().await;
+            }
+        })
+    }))
+}
+
 pub struct PubMed {
     client: AllowlistedClient,
     api_key: Option<SecretString>,
     email: Option<String>,
-    pacer: Pacer,
+    pacer: Arc<Pacer>,
 }
 
 impl fmt::Debug for PubMed {
@@ -111,11 +127,12 @@ impl fmt::Debug for PubMed {
 impl PubMed {
     pub fn new(client: AllowlistedClient, api_key: Option<SecretString>) -> Self {
         let gap = default_min_interval(api_key.is_some());
+        let pacer = Arc::new(Pacer::new(gap));
         Self {
-            client,
+            client: paced(client, &pacer),
             api_key,
             email: None,
-            pacer: Pacer::new(gap),
+            pacer,
         }
     }
 
@@ -127,7 +144,8 @@ impl PubMed {
 
     /// Overrides the pacing gap (tests).
     pub fn with_min_interval(mut self, gap: Duration) -> Self {
-        self.pacer = Pacer::new(gap);
+        self.pacer = Arc::new(Pacer::new(gap));
+        self.client = paced(self.client, &self.pacer);
         self
     }
 
@@ -164,7 +182,6 @@ impl PubMed {
                 ("retmode", "json"),
             ],
         );
-        self.pacer.wait().await;
         let body: ESearch = self.client.get_json(&url).await?;
         let r = body.esearchresult.ok_or(LitError::Parse)?;
         if r.error.is_some() {
@@ -187,7 +204,6 @@ impl PubMed {
         for chunk in pmids.chunks(SUMMARY_BATCH) {
             let joined = chunk.join(",");
             let url = self.url("esummary.fcgi", &[("id", &joined), ("retmode", "json")]);
-            self.pacer.wait().await;
             let body: serde_json::Value = self.client.get_json(&url).await?;
             out.extend(parse_esummary(&body, chunk)?);
         }
@@ -206,7 +222,6 @@ impl PubMed {
                 "efetch.fcgi",
                 &[("id", &joined), ("rettype", "abstract"), ("retmode", "xml")],
             );
-            self.pacer.wait().await;
             let xml = self.client.get_text(&url).await?;
             for rec in parse_efetch(&xml)? {
                 out.insert(rec.pmid.clone(), rec);
@@ -309,7 +324,10 @@ fn parse_esummary(body: &serde_json::Value, requested: &[String]) -> Result<Vec<
         let retracted = pub_types.iter().any(|t| is_retracted_type(t));
         papers.push(Paper {
             pmid: Some(uid.clone()),
-            pmcid: article_id("pmc").filter(|s| s.starts_with("PMC")),
+            pmcid: article_id("pmc")
+                .into_iter()
+                .chain(article_id("pmcid"))
+                .find_map(|v| extract_pmcid(&v)),
             doi: article_id("doi"),
             title: title.to_string(),
             authors,
@@ -325,6 +343,18 @@ fn parse_esummary(body: &serde_json::Value, requested: &[String]) -> Result<Vec<
         });
     }
     Ok(papers)
+}
+
+/// "PMC123" or the older "pmc-id: PMC123;" form -> "PMC123".
+fn extract_pmcid(v: &str) -> Option<String> {
+    let start = v.find("PMC")?;
+    let id: String = v[start..]
+        .chars()
+        .enumerate()
+        .take_while(|(i, c)| *i < 3 || c.is_ascii_digit())
+        .map(|(_, c)| c)
+        .collect();
+    (id.len() > 3).then_some(id)
 }
 
 fn leading_year(s: &str) -> Option<i32> {
@@ -368,6 +398,7 @@ pub fn parse_efetch(xml: &str) -> Result<Vec<FetchedRecord>, LitError> {
     let mut text = String::new();
     let mut label: Option<String> = None;
     let mut saw_root = false;
+    let mut skipped = 0usize;
 
     loop {
         let ev = reader.read_event().map_err(|_| LitError::Parse)?;
@@ -419,7 +450,10 @@ pub fn parse_efetch(xml: &str) -> Result<Vec<FetchedRecord>, LitError> {
                 let name = stack.pop().ok_or(LitError::Parse)?;
                 if name == "PubmedArticle" || name == "PubmedBookArticle" {
                     if let Some(b) = cur.take() {
-                        records.push(finish_record(b)?);
+                        match finish_record(b) {
+                            Some(r) => records.push(r),
+                            None => skipped += 1,
+                        }
                     }
                 } else {
                     finish_element(&name, &mut capture, &mut text, &mut label, &mut cur);
@@ -442,6 +476,7 @@ pub fn parse_efetch(xml: &str) -> Result<Vec<FetchedRecord>, LitError> {
                             "gt" => text.push('>'),
                             "quot" => text.push('"'),
                             "apos" => text.push('\''),
+                            "nbsp" => text.push(' '),
                             other => {
                                 // Unknown named entity (DTD-defined): keep it visible.
                                 text.push('&');
@@ -463,6 +498,9 @@ pub fn parse_efetch(xml: &str) -> Result<Vec<FetchedRecord>, LitError> {
     }
     if !stack.is_empty() || !saw_root {
         return Err(LitError::Parse);
+    }
+    if skipped > 0 {
+        tracing::debug!(skipped, "pubmed: efetch records without a PMID skipped");
     }
     Ok(records)
 }
@@ -532,8 +570,8 @@ fn collapse_ws(s: &str) -> String {
         .join(" ")
 }
 
-fn finish_record(b: Building) -> Result<FetchedRecord, LitError> {
-    let pmid = b.pmid.ok_or(LitError::Parse)?;
+fn finish_record(b: Building) -> Option<FetchedRecord> {
+    let pmid = b.pmid?;
     let abstract_text = if b.sections.is_empty() {
         None
     } else {
@@ -549,7 +587,7 @@ fn finish_record(b: Building) -> Result<FetchedRecord, LitError> {
         )
     };
     let retracted = b.retraction_comment || b.pub_types.iter().any(|t| is_retracted_type(t));
-    Ok(FetchedRecord {
+    Some(FetchedRecord {
         pmid,
         abstract_text,
         pub_types: b.pub_types,

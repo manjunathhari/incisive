@@ -51,7 +51,9 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
         .collect()
 }
 
-/// Upserts papers and stamps them as fetched now. Papers without a PMID have
+/// Upserts papers and stamps them as fetched now. A refresh never erases data:
+/// a missing `doi`, `abstract` or `oa_url` keeps the cached value, and
+/// `retracted` is sticky once set. Papers without a PMID have
 /// no cache key and are skipped.
 pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
@@ -65,10 +67,12 @@ pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
                (pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted, fetched_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now()) \
              ON CONFLICT (pmid) DO UPDATE SET \
-               doi = EXCLUDED.doi, title = EXCLUDED.title, authors = EXCLUDED.authors, \
+               doi = COALESCE(EXCLUDED.doi, incisive.paper_cache.doi), title = EXCLUDED.title, authors = EXCLUDED.authors, \
                journal = EXCLUDED.journal, year = EXCLUDED.year, pub_types = EXCLUDED.pub_types, \
-               abstract = EXCLUDED.abstract, oa_url = EXCLUDED.oa_url, \
-               retracted = EXCLUDED.retracted, fetched_at = now()",
+               abstract = COALESCE(EXCLUDED.abstract, incisive.paper_cache.abstract), \
+               oa_url = COALESCE(EXCLUDED.oa_url, incisive.paper_cache.oa_url), \
+               retracted = EXCLUDED.retracted OR incisive.paper_cache.retracted, \
+               fetched_at = now()",
         )
         .bind(pmid)
         .bind(&p.doi)

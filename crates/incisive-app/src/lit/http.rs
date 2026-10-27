@@ -15,6 +15,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -170,6 +172,11 @@ fn refuse(raw_or_host: &str) -> LitError {
     LitError::Disallowed(host)
 }
 
+/// Called with the (logical) host before every network attempt: first tries,
+/// retries and redirect hops alike. Lets a caller pace requests per host.
+pub type BeforeAttempt =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AllowlistedClient {
     http: reqwest::Client,
@@ -180,6 +187,7 @@ pub struct AllowlistedClient {
     #[cfg(any(test, feature = "test-util"))]
     timeout: Duration,
     backoff: Duration,
+    before_attempt: Option<BeforeAttempt>,
     /// Test only: every allowlisted request is sent here instead.
     #[cfg(any(test, feature = "test-util"))]
     base_override: Option<Url>,
@@ -196,6 +204,7 @@ impl AllowlistedClient {
             #[cfg(any(test, feature = "test-util"))]
             timeout: REQUEST_TIMEOUT,
             backoff: Duration::from_millis(500),
+            before_attempt: None,
             #[cfg(any(test, feature = "test-util"))]
             base_override: None,
         }
@@ -204,6 +213,13 @@ impl AllowlistedClient {
     /// Base backoff between retries; attempt n waits `n * backoff`.
     pub fn with_retry_backoff(mut self, backoff: Duration) -> Self {
         self.backoff = backoff;
+        self
+    }
+
+    /// Registers a hook awaited before every attempt (including retries and
+    /// redirect hops). Replaces any earlier hook on this client.
+    pub fn with_before_attempt(mut self, hook: BeforeAttempt) -> Self {
+        self.before_attempt = Some(hook);
         self
     }
 
@@ -309,6 +325,9 @@ impl AllowlistedClient {
         let wire = self.wire_url(logical);
         let mut attempt = 0u32;
         loop {
+            if let Some(hook) = &self.before_attempt {
+                hook(logical.host_str().unwrap_or_default()).await;
+            }
             let result = self.attempt(&wire, max).await;
             if is_transient_hop(&result) && attempt < MAX_RETRIES {
                 attempt += 1;

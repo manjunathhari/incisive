@@ -1181,3 +1181,178 @@ mod pubmed_tests {
             .unwrap();
     }
 }
+
+mod fix_round_1 {
+    use std::time::{Duration, Instant};
+
+    use incisive_app::db::{lazy_pool, migrate};
+    use incisive_app::lit::cache;
+    use incisive_app::lit::http::{AllowlistedClient, OaPolicy};
+    use incisive_app::lit::pubmed::{PubMed, parse_efetch};
+    use incisive_app::lit::{Paper, PaperSource};
+    use secrecy::SecretString;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn pubmed(server: &MockServer) -> PubMed {
+        let client = AllowlistedClient::new("Incisive/test", OaPolicy::default())
+            .with_base_override(server.uri())
+            .with_retry_backoff(Duration::from_millis(1));
+        PubMed::new(client, None)
+    }
+
+    #[tokio::test]
+    async fn retry_attempts_are_spaced_by_the_gap() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/entrez/eutils/esearch.fcgi"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/entrez/eutils/esearch.fcgi"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"esearchresult":{"count":"0","idlist":[]}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let gap = Duration::from_millis(200);
+        let pm = pubmed(&server).with_min_interval(gap);
+        // Use the first (immediate) call as the reference slot.
+        let t0 = Instant::now();
+        pm.search("x", 1).await.unwrap(); // attempt 1 (503) at ~0, attempt 2 at >= gap
+        assert!(
+            t0.elapsed() >= gap,
+            "retry was not paced: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn hostile_query_is_encoded_inside_term() {
+        let server = MockServer::start().await;
+        let hostile = r#"a&api_key=x "b" [mh]"#;
+        Mock::given(method("GET"))
+            .and(path("/entrez/eutils/esearch.fcgi"))
+            .and(query_param("term", hostile))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"esearchresult":{"count":"0","idlist":[]}}"#,
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        pubmed(&server).search(hostile, 3).await.unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let keys: Vec<String> = reqs[0]
+            .url
+            .query_pairs()
+            .map(|(k, _)| k.into_owned())
+            .collect();
+        assert!(!keys.contains(&"api_key".to_string()), "{keys:?}");
+        assert_eq!(keys.iter().filter(|k| *k == "term").count(), 1);
+        assert_eq!(
+            keys.len(),
+            6,
+            "db, term, retmax, sort, retmode, tool: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn record_without_pmid_is_skipped_rest_parses() {
+        let xml = r#"<PubmedArticleSet>
+<PubmedArticle><MedlineCitation><Article><Abstract><AbstractText>orphan</AbstractText></Abstract></Article></MedlineCitation></PubmedArticle>
+<PubmedArticle><MedlineCitation><PMID>5</PMID><Article><Abstract><AbstractText>kept&nbsp;ok</AbstractText></Abstract></Article></MedlineCitation></PubmedArticle>
+</PubmedArticleSet>"#;
+        let recs = parse_efetch(xml).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].pmid, "5");
+        assert_eq!(recs[0].abstract_text.as_deref(), Some("kept ok"));
+    }
+
+    #[tokio::test]
+    async fn pmcid_idtype_is_accepted() {
+        let server = MockServer::start().await;
+        let body = r#"{"result":{"uids":["1","2"],
+"1":{"uid":"1","title":"A","pubdate":"2020","articleids":[{"idtype":"pmcid","value":"pmc-id: PMC777;"}]},
+"2":{"uid":"2","title":"B","pubdate":"2020","articleids":[{"idtype":"pmc","value":"PMC888"},{"idtype":"pmcid","value":"pmc-id: PMC888;"}]}}}"#;
+        Mock::given(method("GET"))
+            .and(path("/entrez/eutils/esummary.fcgi"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let _ = SecretString::from("unused");
+        let ps = pubmed(&server)
+            .summaries(&["1".to_string(), "2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(ps[0].pmcid.as_deref(), Some("PMC777"));
+        assert_eq!(ps[1].pmcid.as_deref(), Some("PMC888"));
+    }
+
+    fn paper(pmid: &str) -> Paper {
+        Paper {
+            pmid: Some(pmid.into()),
+            pmcid: None,
+            doi: Some("10.1/x".into()),
+            title: "T".into(),
+            authors: vec![],
+            journal: None,
+            year: Some(2024),
+            pub_types: vec![],
+            abstract_text: Some("BACKGROUND: kept".into()),
+            oa_url: Some("https://europepmc.org/x".into()),
+            retracted: true,
+            source: PaperSource::PubMed,
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_cached_data_and_retraction_is_sticky() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("SKIP: TEST_DATABASE_URL not set");
+            return;
+        };
+        let pool = lazy_pool(&SecretString::from(url)).unwrap();
+        migrate(&pool).await.unwrap();
+        let id = format!("t6fix-{}", uuid::Uuid::new_v4().simple());
+        cache::put_many(&pool, &[paper(&id)]).await.unwrap();
+
+        // Summary-only refresh: no abstract, no oa_url, no doi, not retracted.
+        let mut refresh = paper(&id);
+        refresh.abstract_text = None;
+        refresh.oa_url = None;
+        refresh.doi = None;
+        refresh.retracted = false;
+        refresh.title = "T2".into();
+        cache::put_many(&pool, &[refresh]).await.unwrap();
+
+        let got = cache::get_many(&pool, std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].title, "T2", "fresh fields still update");
+        assert_eq!(got[0].abstract_text.as_deref(), Some("BACKGROUND: kept"));
+        assert_eq!(got[0].oa_url.as_deref(), Some("https://europepmc.org/x"));
+        assert_eq!(got[0].doi.as_deref(), Some("10.1/x"));
+        assert!(got[0].retracted, "retracted stays true once set");
+
+        // New non-null values do replace.
+        let mut upd = paper(&id);
+        upd.abstract_text = Some("NEW".into());
+        cache::put_many(&pool, &[upd]).await.unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(got[0].abstract_text.as_deref(), Some("NEW"));
+
+        sqlx::query("DELETE FROM incisive.paper_cache WHERE pmid = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
