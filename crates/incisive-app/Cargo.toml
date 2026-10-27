@@ -24,7 +24,7 @@ claude-client = { path = "../claude-client", optional = true }
 serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "uuid"], optional = true }
 serde = { version = "1", features = ["derive"] }
 regex = "1"
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"], optional = true }
@@ -32,6 +32,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 url = { version = "2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+uuid = { version = "1", features = ["serde"], optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -44,6 +46,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_r
 base64 = "0.22"
 wiremock = "0.6"
 claude-client = { path = "../claude-client" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = ["ssr"]
@@ -60,6 +64,8 @@ ssr = [
     "dep:jsonwebtoken",
     "dep:reqwest",
     "dep:url",
+    "dep:chrono",
+    "dep:uuid",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",

@@ -58,6 +58,8 @@ jobs:
           cid=$(docker run -d -p 8080:8080 \
             -e ANTHROPIC_API_KEY=x -e CLAUDE_MODEL=x \
             -e OWNER_EMAIL=owner@example.com \
+            -e MODEL_PRICES='{"x":{"input":1,"output":5}}' \
+            -e USD_INR=88 -e GLOBAL_MONTHLY_CAP_INR=10000 \
             -e IAP_AUDIENCE=/projects/0/locations/asia-south1/services/test \
             -e DATABASE_URL=postgres://u:p@127.0.0.1:1/x incisive-app:ci)
           cleanup() {

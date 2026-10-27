@@ -3,6 +3,8 @@
 use secrecy::SecretString;
 use std::fmt;
 
+use crate::spend::Prices;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
     Dev,
@@ -23,7 +25,22 @@ pub struct Config {
     pub owner_email: String,
     /// Cheap model for the medical-only gate. Defaults to `claude-haiku-5-5`.
     pub gate_model: String,
+    /// USD per million tokens, per model (`MODEL_PRICES`). Required in prod.
+    pub model_prices: Prices,
+    /// Exchange rate (`USD_INR`). Required in prod; 88 in dev.
+    pub usd_inr: f64,
+    /// Whole-app monthly budget in paise, from `GLOBAL_MONTHLY_CAP_INR` rupees.
+    pub global_monthly_cap_paise: i64,
 }
+
+/// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
+/// set `MODEL_PRICES` explicitly.
+const DEV_MODEL_PRICES: &str = r#"{
+  "claude-haiku-5-5": {"input": 1.0, "output": 5.0},
+  "claude-sonnet-5-5": {"input": 3.0, "output": 15.0}
+}"#;
+const DEV_USD_INR: f64 = 88.0;
+const DEV_GLOBAL_MONTHLY_CAP_INR: i64 = 10_000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError {
@@ -92,6 +109,56 @@ impl Config {
 
         let gate_model = lookup("GATE_MODEL").unwrap_or_else(|| "claude-haiku-5-5".to_string());
 
+        let model_prices = match (app_env, lookup("MODEL_PRICES")) {
+            (_, Some(json)) => Prices::from_json(&json).map_err(|e| ConfigError::Invalid {
+                var: "MODEL_PRICES",
+                reason: e
+                    .to_string()
+                    .trim_start_matches("invalid MODEL_PRICES: ")
+                    .to_string(),
+            })?,
+            (AppEnv::Dev, None) => {
+                Prices::from_json(DEV_MODEL_PRICES).expect("dev price table is valid")
+            }
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("MODEL_PRICES")),
+        };
+
+        let usd_inr = match (app_env, lookup("USD_INR")) {
+            (_, Some(v)) => {
+                let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
+                    var: "USD_INR",
+                    reason: e.to_string(),
+                })?;
+                if !rate.is_finite() || rate <= 0.0 {
+                    return Err(ConfigError::Invalid {
+                        var: "USD_INR",
+                        reason: "must be a positive number".to_string(),
+                    });
+                }
+                rate
+            }
+            (AppEnv::Dev, None) => DEV_USD_INR,
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("USD_INR")),
+        };
+
+        let global_cap_inr = match (app_env, lookup("GLOBAL_MONTHLY_CAP_INR")) {
+            (_, Some(v)) => v.parse::<i64>().map_err(|e| ConfigError::Invalid {
+                var: "GLOBAL_MONTHLY_CAP_INR",
+                reason: format!("expected whole rupees: {e}"),
+            })?,
+            (AppEnv::Dev, None) => DEV_GLOBAL_MONTHLY_CAP_INR,
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("GLOBAL_MONTHLY_CAP_INR")),
+        };
+        let global_monthly_cap_paise = match global_cap_inr.checked_mul(100) {
+            Some(p) if p > 0 => p,
+            _ => {
+                return Err(ConfigError::Invalid {
+                    var: "GLOBAL_MONTHLY_CAP_INR",
+                    reason: "must be a positive number of rupees".to_string(),
+                });
+            }
+        };
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
@@ -101,6 +168,9 @@ impl Config {
             iap_audience,
             owner_email,
             gate_model,
+            model_prices,
+            usd_inr,
+            global_monthly_cap_paise,
         })
     }
 }
@@ -202,6 +272,9 @@ mod tests {
         let err = Config::from_lookup(lookup(&prod)).unwrap_err();
         assert_eq!(err, ConfigError::Missing("IAP_AUDIENCE"));
         prod.push(("IAP_AUDIENCE", "/projects/1/apps/2"));
+        prod.push(("MODEL_PRICES", r#"{"m": {"input": 1, "output": 5}}"#));
+        prod.push(("USD_INR", "90"));
+        prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.iap_audience, "/projects/1/apps/2");
     }
@@ -218,6 +291,64 @@ mod tests {
         blank.push(("GATE_MODEL", "  "));
         let c = Config::from_lookup(lookup(&blank)).unwrap();
         assert_eq!(c.gate_model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn spend_settings_have_dev_defaults() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.usd_inr, 88.0);
+        assert_eq!(c.global_monthly_cap_paise, 1_000_000);
+        assert!(c.model_prices.get("claude-haiku-5-5").is_some());
+        assert!(c.model_prices.get("claude-sonnet-5-5").is_some());
+    }
+
+    #[test]
+    fn spend_settings_required_in_prod() {
+        let mut prod = full();
+        prod.push(("APP_ENV", "prod"));
+        prod.push(("IAP_AUDIENCE", "/projects/1/apps/2"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("MODEL_PRICES")
+        );
+        prod.push(("MODEL_PRICES", r#"{"m": {"input": 1, "output": 5}}"#));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("USD_INR")
+        );
+        prod.push(("USD_INR", "90"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("GLOBAL_MONTHLY_CAP_INR")
+        );
+        prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(c.usd_inr, 90.0);
+        assert_eq!(c.global_monthly_cap_paise, 500_000);
+        assert!(c.model_prices.get("claude-haiku-5-5").is_none());
+    }
+
+    #[test]
+    fn bad_spend_settings_name_the_variable() {
+        for (var, bad) in [
+            ("MODEL_PRICES", "not json"),
+            ("USD_INR", "abc"),
+            ("USD_INR", "0"),
+            ("USD_INR", "NaN"),
+            ("GLOBAL_MONTHLY_CAP_INR", "ten"),
+            ("GLOBAL_MONTHLY_CAP_INR", "0"),
+            ("GLOBAL_MONTHLY_CAP_INR", "-5"),
+            ("GLOBAL_MONTHLY_CAP_INR", "99999999999999999"),
+        ] {
+            let mut pairs = full();
+            pairs.push((var, bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { var: v, .. } if *v == var),
+                "{var}={bad}: {err:?}"
+            );
+            assert!(err.to_string().contains(var));
+        }
     }
 
     #[test]

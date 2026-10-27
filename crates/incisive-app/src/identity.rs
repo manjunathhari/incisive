@@ -37,7 +37,6 @@ const LEEWAY_SECS: u64 = 30;
 const KEY_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(300);
 /// With no keys at all (cold start, failed first fetch), retry this soon.
 const KEY_EMPTY_RETRY_INTERVAL: Duration = Duration::from_secs(10);
-const OWNER_DAILY_CAP_PAISE: i64 = 150_000;
 const NOT_SET_UP_MESSAGE: &str = "Your Google account is allowed in, but you haven't been set up in Incisive yet. Ask the owner to add you.";
 
 // ---- roles and users ----
@@ -112,15 +111,17 @@ pub async fn find_user(pool: &PgPool, email: &str) -> sqlx::Result<Option<User>>
 /// Make sure the owner exists, is the owner, and is active. Safe to call on every
 /// start. Caps are set only on first creation so later edits are not overwritten.
 pub async fn ensure_owner(pool: &PgPool, email: &str, display_name: &str) -> sqlx::Result<User> {
+    let (daily, monthly) = crate::spend::default_caps(Role::Owner);
     let row = sqlx::query(&format!(
         "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise, monthly_cap_paise) \
-         VALUES ($1, $2, 'owner', $3, NULL) \
+         VALUES ($1, $2, 'owner', $3, $4) \
          ON CONFLICT (email) DO UPDATE SET role = 'owner', active = TRUE \
          RETURNING {USER_COLUMNS}"
     ))
     .bind(email.trim().to_lowercase())
     .bind(display_name)
-    .bind(OWNER_DAILY_CAP_PAISE)
+    .bind(daily)
+    .bind(monthly)
     .fetch_one(pool)
     .await?;
     user_from_row(&row)
