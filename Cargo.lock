@@ -1265,6 +1265,7 @@ dependencies = [
  "leptos",
  "leptos_axum",
  "leptos_meta",
+ "regex",
  "reqwest 0.13.5",
  "secrecy",
  "serde",

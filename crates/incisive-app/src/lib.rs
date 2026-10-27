@@ -3,6 +3,7 @@ pub mod app;
 pub mod config;
 #[cfg(feature = "ssr")]
 pub mod db;
+pub mod deid;
 #[cfg(feature = "ssr")]
 pub mod health;
 #[cfg(feature = "ssr")]
