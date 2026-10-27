@@ -13,10 +13,10 @@
 //!
 //! Refusals are logged at warn level with the host only (never path or query).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::LOCATION;
 use serde::de::DeserializeOwned;
@@ -37,12 +37,19 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub const MAX_RETRIES: u32 = 2;
 /// Cap for `get_text` / `get_json` bodies (metadata responses, not full texts).
 pub const DEFAULT_MAX_BODY: usize = 8 * 1024 * 1024;
+/// Hard cap for any URL admitted through an OA grant (spec §5: 5 MB per full text).
+pub const FULL_TEXT_MAX: usize = 5 * 1024 * 1024;
+/// At most this many outstanding one-time grants; the oldest is dropped first.
+pub const MAX_GRANTS: usize = 1000;
+/// A grant unused for this long is void.
+pub const GRANT_TTL: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LitError {
     /// The URL (or a redirect hop) is not allowed. Carries the host only.
     Disallowed(String),
     TooLarge,
+    TooManyRedirects,
     Http(u16),
     Timeout,
     Parse,
@@ -55,6 +62,7 @@ impl fmt::Display for LitError {
         match self {
             LitError::Disallowed(h) => write!(f, "host not allowed: {h}"),
             LitError::TooLarge => write!(f, "response too large"),
+            LitError::TooManyRedirects => write!(f, "too many redirects"),
             LitError::Http(s) => write!(f, "http status {s}"),
             LitError::Timeout => write!(f, "request timed out"),
             LitError::Parse => write!(f, "could not parse response"),
@@ -75,23 +83,58 @@ pub fn default_user_agent() -> String {
 
 /// One-time grants for open-access full-text URLs. Cheap to clone; clones share
 /// state, and registration/consumption is atomic under a mutex, so parallel
-/// fetches can never use one grant twice.
-#[derive(Clone, Default, Debug)]
+/// fetches can never use one grant twice. The set is bounded (oldest dropped)
+/// and entries expire, so a long-lived app-wide policy cannot grow without limit.
+#[derive(Clone, Debug)]
 pub struct OaPolicy {
-    urls: Arc<Mutex<HashSet<String>>>,
+    urls: Arc<Mutex<HashMap<String, Instant>>>,
+    max: usize,
+    ttl: Duration,
+}
+
+impl Default for OaPolicy {
+    fn default() -> Self {
+        Self::with_limits(MAX_GRANTS, GRANT_TTL)
+    }
 }
 
 impl OaPolicy {
+    pub fn with_limits(max: usize, ttl: Duration) -> Self {
+        Self {
+            urls: Arc::default(),
+            max: max.max(1),
+            ttl,
+        }
+    }
+
     /// Registers one exact URL for a single fetch. Anything that is not a
     /// well-formed https URL is ignored (it would be refused at fetch anyway).
     pub fn allow_once(&self, url: &str) {
         if let Some(u) = parse_https_candidate(url) {
-            self.urls.lock().unwrap().insert(u.to_string());
+            self.insert(u.to_string());
         }
     }
 
+    fn insert(&self, key: String) {
+        let mut m = self.urls.lock().unwrap();
+        let now = Instant::now();
+        m.retain(|_, t| now.duration_since(*t) < self.ttl);
+        m.insert(key, now);
+        while m.len() > self.max {
+            let oldest = m.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => m.remove(&k),
+                None => break,
+            };
+        }
+    }
+
+    /// Consumes the grant for exactly this URL, if present and unexpired.
     fn take(&self, url: &Url) -> bool {
-        self.urls.lock().unwrap().remove(url.as_str())
+        match self.urls.lock().unwrap().remove(url.as_str()) {
+            Some(t) => t.elapsed() < self.ttl,
+            None => false,
+        }
     }
 }
 
@@ -193,23 +236,38 @@ impl AllowlistedClient {
     }
 
     /// Streams the body and aborts as soon as more than `max` bytes arrive.
+    /// A URL admitted through an OA grant is additionally clamped to
+    /// [`FULL_TEXT_MAX`], whatever `max` says.
     pub async fn get_bytes_capped(&self, url: &str, max: usize) -> Result<Vec<u8>, LitError> {
         // First hop: base allowlist, or consume the one-time OA grant.
-        let mut current = Url::parse(url).map_err(|_| refuse(url))?;
-        // The grant is consumed here, once; retries of this hop reuse `current`.
-        if !self.hop_allowed(&current)
-            && !(parse_https_candidate(current.as_str()).is_some() && self.oa.take(&current))
-        {
-            return Err(refuse(url));
+        let first = Url::parse(url).map_err(|_| refuse(url))?;
+        let mut granted = false;
+        if !self.hop_allowed(&first) {
+            if parse_https_candidate(first.as_str()).is_some() && self.oa.take(&first) {
+                granted = true;
+            } else {
+                return Err(refuse(url));
+            }
         }
+        let max = if granted { max.min(FULL_TEXT_MAX) } else { max };
+        let result = self.follow(first.clone(), max).await;
+        // A grant is spent by a definitive answer. If the fetch ended on a
+        // transient failure (retries exhausted), give it back so the caller can
+        // try again later.
+        if granted && is_transient(&result) {
+            self.oa.insert(first.to_string());
+        }
+        result
+    }
 
+    async fn follow(&self, mut current: Url, max: usize) -> Result<Vec<u8>, LitError> {
         let mut redirects = 0;
         loop {
             match self.fetch_hop(&current, max).await? {
                 Hop::Body(b) => return Ok(b),
                 Hop::Redirect(location) => {
                     if redirects >= MAX_REDIRECTS {
-                        return Err(LitError::Http(302));
+                        return Err(LitError::TooManyRedirects);
                     }
                     redirects += 1;
                     let next = current.join(&location).map_err(|_| refuse(&location))?;
@@ -252,11 +310,7 @@ impl AllowlistedClient {
         let mut attempt = 0u32;
         loop {
             let result = self.attempt(&wire, max).await;
-            let retryable = matches!(
-                result,
-                Err(LitError::Timeout) | Err(LitError::Http(500..=599))
-            );
-            if retryable && attempt < MAX_RETRIES {
+            if is_transient_hop(&result) && attempt < MAX_RETRIES {
                 attempt += 1;
                 tokio::time::sleep(self.backoff * attempt).await;
                 continue;
@@ -294,6 +348,21 @@ impl AllowlistedClient {
         }
         Ok(Hop::Body(body))
     }
+}
+
+fn is_transient_err(e: &LitError) -> bool {
+    matches!(
+        e,
+        LitError::Timeout | LitError::Network | LitError::Http(500..=599)
+    )
+}
+
+fn is_transient_hop(r: &Result<Hop, LitError>) -> bool {
+    r.as_ref().err().is_some_and(is_transient_err)
+}
+
+fn is_transient(r: &Result<Vec<u8>, LitError>) -> bool {
+    r.as_ref().err().is_some_and(is_transient_err)
 }
 
 enum Hop {

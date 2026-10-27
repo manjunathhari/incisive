@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use incisive_app::lit::http::{AllowlistedClient, LitError, OaPolicy};
+use incisive_app::lit::http::{AllowlistedClient, FULL_TEXT_MAX, LitError, OaPolicy};
 use incisive_app::lit::{Paper, PaperId, PaperSource};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -182,7 +182,7 @@ async fn redirects_between_allowed_hosts_are_followed_up_to_three_hops() {
     assert_eq!(c.get_text(&format!("{EUTILS}/a")).await.unwrap(), "end");
     // A fourth redirect is refused.
     let r = c.get_text(&format!("{EUTILS}/loop")).await;
-    assert!(matches!(r, Err(LitError::Http(302))), "{r:?}");
+    assert!(matches!(r, Err(LitError::TooManyRedirects)), "{r:?}");
 }
 
 #[tokio::test]
@@ -377,4 +377,172 @@ fn paper_key_prefers_pmid_then_lowercased_doi() {
     assert_eq!(PaperId::key(&paper(Some("123"), Some("10.1/ABC"))), "123");
     assert_eq!(PaperId::key(&paper(None, Some("10.1/ABC"))), "10.1/abc");
     assert_eq!(PaperId::key(&paper(None, None)), "title:t");
+}
+
+#[tokio::test]
+async fn first_hop_bypass_probes_are_refused() {
+    let server = MockServer::start().await;
+    let c = client(&server, OaPolicy::default());
+    for url in [
+        "https://eutils.ncbi.nlm.nih.gov./x",      // trailing dot
+        "https://\u{435}utils.ncbi.nlm.nih.gov/x", // Cyrillic e lookalike
+        "https://2130706433/x",                    // decimal IP
+        "https://0177.0.0.1/x",                    // octal IP
+        "https://0x7f.1/x",                        // hex IP
+    ] {
+        let r = c.get_text(url).await;
+        assert!(matches!(r, Err(LitError::Disallowed(_))), "{url}: {r:?}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redirect_location_probes() {
+    let server = MockServer::start().await;
+    for (from, loc) in [
+        ("/proto", "//evil.com/x"),
+        ("/userinfo", "https://user@www.ebi.ac.uk/x"),
+        ("/downgrade", "http://www.ebi.ac.uk/x"),
+        ("/rel", "/landed"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(from))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", loc))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/landed"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("landed"))
+        .mount(&server)
+        .await;
+    let c = client(&server, OaPolicy::default());
+    assert_eq!(
+        disallowed(c.get_text(&format!("{EUTILS}/proto")).await),
+        "evil.com"
+    );
+    for p in ["userinfo", "downgrade"] {
+        let r = c.get_text(&format!("{EUTILS}/{p}")).await;
+        assert!(matches!(r, Err(LitError::Disallowed(_))), "{p}: {r:?}");
+    }
+    // A relative Location resolves against the logical URL, is re-checked, and is followed.
+    assert_eq!(
+        c.get_text(&format!("{EUTILS}/rel")).await.unwrap(),
+        "landed"
+    );
+}
+
+#[tokio::test]
+async fn network_errors_are_retried_then_reported() {
+    // A server that accepts and immediately drops every connection.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let n = accepts.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((sock, _)) = listener.accept().await {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(sock);
+            }
+        }
+    });
+    let c = AllowlistedClient::new("Incisive/test", OaPolicy::default())
+        .with_base_override(format!("http://{addr}"))
+        .with_retry_backoff(Duration::from_millis(1));
+    let r = c.get_text(&format!("{EUTILS}/x")).await;
+    assert!(matches!(r, Err(LitError::Network)), "{r:?}");
+    assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn granted_url_is_capped_at_full_text_max() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; 6 * 1024 * 1024]))
+        .mount(&server)
+        .await;
+    assert_eq!(FULL_TEXT_MAX, 5 * 1024 * 1024);
+    let oa = OaPolicy::default();
+    oa.allow_once("https://europepmc.org/a.pdf");
+    oa.allow_once("https://europepmc.org/b.pdf");
+    let c = client(&server, oa);
+    // get_text allows 8 MB for base hosts, but a granted URL is clamped to 5 MB.
+    let r = c.get_text("https://europepmc.org/a.pdf").await;
+    assert!(matches!(r, Err(LitError::TooLarge)), "{r:?}");
+    // Even a larger explicit cap is clamped.
+    let r = c
+        .get_bytes_capped("https://europepmc.org/b.pdf", 10 * 1024 * 1024)
+        .await;
+    assert!(matches!(r, Err(LitError::TooLarge)), "{r:?}");
+    // A base host with the same body is fine under the 8 MB default.
+    assert_eq!(
+        c.get_text(&format!("{EUTILS}/x")).await.unwrap().len(),
+        6 * 1024 * 1024
+    );
+}
+
+#[tokio::test]
+async fn too_many_redirects_is_its_own_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(301).insert_header("location", "https://www.ebi.ac.uk/loop"),
+        )
+        .mount(&server)
+        .await;
+    let c = client(&server, OaPolicy::default());
+    let r = c.get_text(&format!("{EUTILS}/loop")).await;
+    assert!(matches!(r, Err(LitError::TooManyRedirects)), "{r:?}");
+}
+
+#[tokio::test]
+async fn grant_survives_an_exhausted_retryable_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(3)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pdf"))
+        .mount(&server)
+        .await;
+    let oa = OaPolicy::default();
+    oa.allow_once("https://europepmc.org/a.pdf");
+    let c = client(&server, oa);
+    let r = c.get_text("https://europepmc.org/a.pdf").await;
+    assert!(matches!(r, Err(LitError::Http(503))), "{r:?}");
+    // Not consumed by the failed fetch: a later attempt succeeds, once.
+    assert_eq!(
+        c.get_text("https://europepmc.org/a.pdf").await.unwrap(),
+        "pdf"
+    );
+    assert!(c.get_text("https://europepmc.org/a.pdf").await.is_err());
+}
+
+#[tokio::test]
+async fn grant_set_is_bounded_and_expires() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("pdf"))
+        .mount(&server)
+        .await;
+    // Capacity: the oldest grant is dropped.
+    let oa = OaPolicy::with_limits(2, Duration::from_secs(3600));
+    oa.allow_once("https://europepmc.org/1.pdf");
+    oa.allow_once("https://europepmc.org/2.pdf");
+    oa.allow_once("https://europepmc.org/3.pdf");
+    let c = client(&server, oa);
+    assert!(c.get_text("https://europepmc.org/1.pdf").await.is_err());
+    assert!(c.get_text("https://europepmc.org/2.pdf").await.is_ok());
+    assert!(c.get_text("https://europepmc.org/3.pdf").await.is_ok());
+    // TTL: an old grant is refused.
+    let oa = OaPolicy::with_limits(10, Duration::from_millis(20));
+    oa.allow_once("https://europepmc.org/old.pdf");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let c = client(&server, oa);
+    assert!(c.get_text("https://europepmc.org/old.pdf").await.is_err());
+    // Defaults.
+    assert_eq!(incisive_app::lit::http::MAX_GRANTS, 1000);
 }
