@@ -21,6 +21,8 @@ pub struct Config {
     pub iap_audience: String,
     /// Lower-cased email of the owner, bootstrapped at startup.
     pub owner_email: String,
+    /// Cheap model for the medical-only gate. Defaults to `claude-haiku-5-5`.
+    pub gate_model: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -88,6 +90,8 @@ impl Config {
         };
         let owner_email = required("OWNER_EMAIL")?.to_lowercase();
 
+        let gate_model = lookup("GATE_MODEL").unwrap_or_else(|| "claude-haiku-5-5".to_string());
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
@@ -96,6 +100,7 @@ impl Config {
             port,
             iap_audience,
             owner_email,
+            gate_model,
         })
     }
 }
@@ -199,6 +204,20 @@ mod tests {
         prod.push(("IAP_AUDIENCE", "/projects/1/apps/2"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.iap_audience, "/projects/1/apps/2");
+    }
+
+    #[test]
+    fn gate_model_defaults_and_can_be_overridden() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.gate_model, "claude-haiku-5-5");
+        let mut pairs = full();
+        pairs.push(("GATE_MODEL", " claude-gate-test "));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.gate_model, "claude-gate-test");
+        let mut blank = full();
+        blank.push(("GATE_MODEL", "  "));
+        let c = Config::from_lookup(lookup(&blank)).unwrap();
+        assert_eq!(c.gate_model, "claude-haiku-5-5");
     }
 
     #[test]

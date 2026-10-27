@@ -5,6 +5,8 @@ pub mod config;
 pub mod db;
 pub mod deid;
 #[cfg(feature = "ssr")]
+pub mod gate;
+#[cfg(feature = "ssr")]
 pub mod health;
 #[cfg(feature = "ssr")]
 pub mod identity;

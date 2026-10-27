@@ -1259,6 +1259,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "claude-client",
  "console_error_panic_hook",
  "http-body-util",
  "jsonwebtoken",
@@ -1277,6 +1278,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wasm-bindgen",
+ "wiremock",
 ]
 
 [[package]]

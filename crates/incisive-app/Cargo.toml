@@ -20,6 +20,7 @@ leptos_axum = { version = "0.8", optional = true }
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"], optional = true }
 async-trait = { version = "0.1", optional = true }
+claude-client = { path = "../claude-client", optional = true }
 serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
@@ -41,6 +42,8 @@ axum = "0.8"
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64 = "0.22"
+wiremock = "0.6"
+claude-client = { path = "../claude-client" }
 
 [features]
 default = ["ssr"]
@@ -49,6 +52,7 @@ ssr = [
     "dep:axum",
     "dep:tokio",
     "dep:async-trait",
+    "dep:claude-client",
     "dep:serde_json",
     "dep:tracing",
     "dep:tracing-subscriber",
