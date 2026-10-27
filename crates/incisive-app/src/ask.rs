@@ -22,13 +22,21 @@ pub const ACCEPTED_MESSAGE: &str = "Accepted. The evidence agent arrives in Phas
 pub const BLOCKED_MESSAGE: &str = "Incisive found details that could identify a patient. Please remove them and resend your question.";
 pub const RECORD_FAILED_MESSAGE: &str = "Incisive couldn't record this request. Please try again.";
 pub const OWNER_ONLY_MESSAGE: &str = "Only the Incisive owner can see the activity log.";
+pub const EMPTY_MESSAGE: &str = "Please type your clinical question.";
+pub const TOO_LONG_MESSAGE: &str =
+    "That question is too long for Incisive (4,000 characters max). Please shorten it.";
+/// Longest question accepted, in characters (Unicode scalar values, not bytes).
+pub const MAX_QUESTION_CHARS: usize = 4_000;
 
-/// One blocked span: kind, user-facing label and byte offsets. Never the text.
+/// One blocked span: kind, user-facing label and offsets. Never the text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingView {
     pub kind: FindingKind,
     pub label: String,
+    /// Start of the span as a UTF-8 **byte** offset into the question (not a
+    /// character index; JavaScript string indices differ for non-ASCII text).
     pub start: usize,
+    /// End of the span (exclusive), as a UTF-8 byte offset.
     pub end: usize,
 }
 
@@ -138,7 +146,8 @@ mod server {
     const ACTIVITY_DEFAULT: i64 = 50;
     const ACTIVITY_MAX: i64 = 500;
     const DETAIL_CHARS: usize = 160;
-    /// Bytes accepted on `POST /api/ask`; the gate refuses over 4,000 characters anyway.
+    /// Request body limit for `POST /api/ask` and the page/server-function routes.
+    /// A 4,000-character question is at most 16,000 bytes of UTF-8 before encoding.
     pub const ASK_BODY_LIMIT: usize = 64 * 1024;
 
     async fn record(
@@ -175,6 +184,19 @@ mod server {
         user: &User,
         question: &str,
     ) -> Result<AskOutcome, AskFailure> {
+        // 0. Input limits, before anything else: no scan, audit, reservation or
+        // gate. Nothing about the content is decided and the text goes nowhere.
+        if question.trim().is_empty() {
+            return Ok(AskOutcome::Unclear {
+                message: EMPTY_MESSAGE.to_string(),
+            });
+        }
+        if question.chars().count() > MAX_QUESTION_CHARS {
+            return Ok(AskOutcome::NotMedical {
+                message: TOO_LONG_MESSAGE.to_string(),
+            });
+        }
+
         let request_id = Uuid::new_v4();
         let uid = Some(user.id);
 

@@ -9,6 +9,7 @@ use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
 use leptos_axum::{LeptosRoutes, generate_route_list};
 use sqlx::PgPool;
+use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::app::{App, shell};
 use crate::ask::{ASK_BODY_LIMIT, activity_handler, ask_handler, me_handler};
@@ -76,6 +77,10 @@ pub fn build_router(
             },
         )
         .fallback(leptos_axum::file_and_error_handler(shell))
+        // Server functions (`/api/fn/*`) get the same cap as `POST /api/ask`. They
+        // read the raw body, which axum's `DefaultBodyLimit` does not cover, so the
+        // limit is enforced on the body itself (413 when exceeded).
+        .layer(RequestBodyLimitLayer::new(ASK_BODY_LIMIT))
         .with_state(leptos_options);
     health_routes(r).merge(api_routes(state)).merge(app)
 }

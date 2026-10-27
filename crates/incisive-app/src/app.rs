@@ -92,12 +92,14 @@ pub async fn ask_question(question: String) -> Result<AskOutcome, ServerFnError>
 pub async fn get_me() -> Result<MeView, ServerFnError> {
     use crate::identity::CurrentUser;
     let (state, user) = signed_in().await?;
-    // No status code here: this also runs while the page renders on the server,
-    // where setting it would change the page's own status.
-    let CurrentUser(user) = user.map_err(|r| ServerFnError::new(r.message()))?;
-    crate::ask::me_view(&state, &user)
-        .await
-        .map_err(|f| ServerFnError::new(f.message()))
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::ask::me_view(&state, &user).await.map_err(|f| {
+        set_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        ServerFnError::new(f.message())
+    })
 }
 
 /// The audit log (owner only). Same as `GET /api/activity`.
@@ -106,11 +108,20 @@ pub async fn get_activity() -> Result<ActivityView, ServerFnError> {
     use crate::ask::ActivityError;
     use crate::identity::CurrentUser;
     let (state, user) = signed_in().await?;
-    // Owner check here as well as on the JSON route. No status code (see get_me).
-    let CurrentUser(user) = user.map_err(|r| ServerFnError::new(r.message()))?;
+    // Owner check here as well as on the JSON route.
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
     crate::ask::activity_view(&state, &user, None)
         .await
-        .map_err(|e: ActivityError| ServerFnError::new(e.message()))
+        .map_err(|e| {
+            set_status(match e {
+                ActivityError::NotOwner => axum::http::StatusCode::FORBIDDEN,
+                ActivityError::Failed(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            });
+            ServerFnError::new(e.message())
+        })
 }
 
 #[cfg(feature = "ssr")]
@@ -133,8 +144,20 @@ async fn signed_in() -> Result<SignedIn, ServerFnError> {
     Ok((state, user))
 }
 
+/// Server-function URL prefix (see the `#[server]` attributes above).
+#[cfg(feature = "ssr")]
+const FN_PREFIX: &str = "/api/fn/";
+
+/// Set the HTTP status, but only when this is a direct server-function call
+/// (`/api/fn/...`). The same functions also run while a page renders on the
+/// server, and there the page's own status must stay as it is.
 #[cfg(feature = "ssr")]
 fn set_status(code: axum::http::StatusCode) {
+    let is_fn_call = use_context::<axum::http::request::Parts>()
+        .is_some_and(|p| p.uri.path().starts_with(FN_PREFIX));
+    if !is_fn_call {
+        return;
+    }
     if let Some(opts) = use_context::<leptos_axum::ResponseOptions>() {
         opts.set_status(code);
     }
@@ -214,6 +237,7 @@ fn AskPage() -> impl IntoView {
                 id="question"
                 name="question"
                 rows="6"
+                maxlength="4000"
                 placeholder="e.g. 52 y/o M, robotic LAR: does ICG angiography reduce anastomotic leak?"
                 prop:value=question
                 on:input=move |ev| set_question.set(event_target_value(&ev))
@@ -221,7 +245,10 @@ fn AskPage() -> impl IntoView {
             <p class="hint">
                 "Leave out names, phone numbers, exact dates, addresses and hospital IDs. Ages, sex and post-op day are fine."
             </p>
-            <button type="submit" disabled=move || pending.get()>
+            <button
+                type="submit"
+                disabled=move || pending.get() || question.with(|q| q.trim().is_empty())
+            >
                 {move || if pending.get() { "Checking…" } else { "Send" }}
             </button>
         </form>

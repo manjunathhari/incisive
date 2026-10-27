@@ -6,9 +6,8 @@
 //! `incisive.audit` and `incisive.spend` are shared by every test.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -455,33 +454,12 @@ async fn accepted_by_rule_needs_no_model_and_shows_alert() {
     assert_eq!((spend[0].0.as_str(), spend[0].4), ("charge", 0));
 }
 
-/// Collects everything written through `tracing` while the guard is held.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn question_text_never_persisted() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
+    // Database half only; tracing output is checked in tests/ask_logging.rs.
     let marker = format!("zqxmarker{}", uuid::Uuid::new_v4().simple());
     let u = make_user(&pool, "persist", Role::Surgeon, 30_000).await;
     let questions = [
@@ -527,14 +505,78 @@ async fn question_text_never_persisted() {
     assert_eq!((audit_hits, spend_hits), (0, 0));
     // accepted by model 3, refused by model 2, gate error 1, accepted by rule 2, blocked 1.
     assert_eq!(audit_for(&pool, u.id).await.len(), 3 + 2 + 1 + 2 + 1);
+}
 
-    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-    assert!(!logs.is_empty(), "the capture subscriber saw nothing");
-    assert!(
-        !logs.contains(&marker),
-        "question text reached tracing output"
+// ---------- input limits ----------
+
+#[tokio::test]
+async fn empty_and_oversized_questions_rejected_before_anything_else() {
+    // No database: if the pipeline touched the audit log, spend or the gate,
+    // these would fail (unreachable pool) or panic (MustNotCall).
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), true);
+    let user = User {
+        id: 1,
+        email: "x@example.com".into(),
+        display_name: "X".into(),
+        role: Role::Surgeon,
+        daily_cap_paise: 30_000,
+        monthly_cap_paise: None,
+        active: true,
+    };
+    for q in ["", "   \n\t  "] {
+        assert_eq!(
+            run_ask(&st, &user, q).await,
+            Ok(AskOutcome::Unclear {
+                message: "Please type your clinical question.".into()
+            }),
+            "{q:?}"
+        );
+    }
+    // Over 4,000 characters (counted as characters, not bytes), even with an identifier.
+    let long = format!("Mrs. Lakshmi ph 9845012345 {}", "é".repeat(4_000));
+    assert_eq!(
+        run_ask(&st, &user, &long).await,
+        Ok(AskOutcome::NotMedical {
+            message:
+                "That question is too long for Incisive (4,000 characters max). Please shorten it."
+                    .into()
+        })
     );
-    assert!(!logs.contains("9845012345"));
+    // Exactly 4,000 characters is allowed through to the next step (here: the
+    // unreachable audit log, so a record failure rather than a length refusal).
+    let exact = format!("Mrs. Lakshmi ph 9845012345 {}", "a".repeat(4_000 - 27));
+    assert_eq!(exact.chars().count(), 4_000);
+    assert_eq!(run_ask(&st, &user, &exact).await, Err(AskFailure::Record));
+}
+
+#[tokio::test]
+async fn empty_question_is_not_audited_or_charged() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "empty", Role::Surgeon, 30_000).await;
+    let app = || api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true));
+    let (_, b) = call(app(), ask_req(&u.email, "  ")).await;
+    assert_eq!(b["status"], "unclear");
+    let (_, b) = call(app(), ask_req(&u.email, &"a".repeat(4_001))).await;
+    assert_eq!(b["status"], "not_medical");
+    assert!(audit_for(&pool, u.id).await.is_empty());
+    assert!(spend_for(&pool, u.id).await.is_empty());
+}
+
+#[tokio::test]
+async fn server_function_body_limit_is_64_kib() {
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), true);
+    let body = format!("question={}", "a".repeat(70 * 1024));
+    let req = Request::post("/api/fn/ask")
+        .header("content-type", "application/x-www-form-urlencoded")
+        // Browsers and curl send it; the limit rejects on it before any work.
+        .header("content-length", body.len())
+        .header("x-dev-user-email", "x@example.com")
+        .body(Body::from(body))
+        .unwrap();
+    let (s, _) = call(router(st), req).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
@@ -716,6 +758,47 @@ async fn server_function_uses_the_same_pipeline() {
     assert_eq!(s, StatusCode::OK, "{b}");
     assert_eq!(b["status"], "blocked_identifiers", "{b}");
     assert_eq!(events(&audit_for(&pool, u.id).await), ["deid_blocked"]);
+}
+
+#[tokio::test]
+async fn server_function_ignores_dev_header_in_prod() {
+    // Prod: the dev header is not an identity. Rejected before any user lookup.
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), false);
+    let req = Request::post("/api/fn/ask")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-dev-user-email", "owner@example.com")
+        .body(Body::from("question=hello"))
+        .unwrap();
+    let res = router(st).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("You're not signed in to Incisive"), "{text}");
+}
+
+#[tokio::test]
+async fn server_function_activity_is_403_for_non_owner_page_stays_200() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let surgeon = make_user(&pool, "fn-act", Role::Surgeon, 30_000).await;
+    let app = || router(state_with(pool.clone(), Arc::new(MustNotCall), true));
+    let req = Request::post("/api/fn/activity")
+        .header("x-dev-user-email", &surgeon.email)
+        .body(Body::empty())
+        .unwrap();
+    let res = app().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // The same check while rendering the page must not change the page status.
+    let req = Request::get("/activity")
+        .header("x-dev-user-email", &surgeon.email)
+        .body(Body::empty())
+        .unwrap();
+    let res = app().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("Only the Incisive owner"));
 }
 
 #[tokio::test]
