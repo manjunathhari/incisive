@@ -14,9 +14,9 @@ Running record of the Phase 1 build. Updated after every task and every stage.
 |---|---|---|
 | A. Identity | 1 | ✅ complete (27 Oct) |
 | B. Safety filters | 2, 3 | ✅ complete (27 Oct) |
-| C. Money and records | 4, 5 | ⏳ in progress |
-| D. Ask pipeline and screens | 6 | ⬜ not started |
-| E. Production wiring and final review | 7 + review | ⬜ not started |
+| C. Money and records | 4, 5 | ✅ complete (27 Oct) |
+| D. Ask pipeline and screens | 6 | ✅ complete (27 Oct) |
+| E. Production wiring and final review | 7 + review | ⏳ in progress |
 
 ## Decisions made before the build (pre-flight rulings)
 
@@ -165,3 +165,104 @@ Gate: the model's one-line reason is shown to the user; Stage D must render it a
 
 ### Next stage
 **Stage C: Money and records.** Task 4 is the spending caps, in paise on Asia/Kolkata days and months. Task 5 is the tamper-evident audit log.
+
+## Stage C: Money and records ✅
+
+**Date:** 27 Oct 2026 · **Commits:** `c20cd6e..7021a58` (4 commits) · **GitHub CI:** tests passed on `7021a58` (run 40495376933). The container build for that run was cancelled because a later run superseded it, and the container build is covered by the Stage D run.
+
+### What was built (plain English)
+- **Spending caps (Task 4).** Every question reserves its estimated cost *before* anything is spent, then settles to the real cost afterwards.
+  - Money is stored as whole paise. "Today" and "this month" follow the Indian clock (midnight IST).
+  - There are three limits: your personal daily limit, a personal monthly limit (surgeons and fellows only), and an overall monthly budget for the whole app.
+  - When a limit would be crossed, the user sees a plain message ("You've reached today's Incisive limit (₹X). It resets at midnight IST.").
+  - At 80% of any limit, an alert line appears.
+- **Tamper-evident activity log (Task 5).** Every step of every request is written to a log where each entry carries a fingerprint of the one before it. If anyone edits or deletes a past entry, the chain shows "broken at #N".
+  - It never stores question text, identifiers, or the gate model's own wording. It stores only event types, finding kinds and positions, verdicts, token counts, paise, and a fingerprint of accepted questions.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 4. Spending caps | Approved first time; 1 hardening round | 1 | c20cd6e, 86dd553 |
+| 5. Activity log | Approved after 1 fix round | 1 | 4f71b1a, 7021a58 |
+
+### Tests
+- **Spending:** 16 tests. They cover:
+  - rounding up to the paisa, including float-noise cases
+  - an unknown model refused
+  - IST day and month rollover at 18:29 and 18:31 UTC
+  - the 80% alert, and the overall cap blocking everyone
+  - a request settled twice being charged once
+  - two simultaneous requests from the same user, and from two different users, racing for the last of a budget: exactly one wins
+- **Activity log:** 19 tests. They cover:
+  - fingerprints being stable
+  - an edited entry and a deleted middle entry both detected
+  - 50 simultaneous writes never forking the chain
+  - decimals rejected (see below)
+  - question text never appearing in stored details
+
+### Review findings (summary)
+- **Spending:** no serious issues. The hardening round made a repeated settlement harmless, documented that one request can overrun its estimate slightly, and added the two-user race test.
+- **Activity log:**
+  - The review caught that a very large decimal number comes back from the database in a different form, which would have made the log *falsely* report tampering. Decimals are now refused outright.
+  - The gate's model-written reason is no longer stored, because only the fixed rule wording is safe. The model is also told not to quote the question.
+
+### Decisions made during the stage (rulings)
+- **Lock order:** overall budget first, then the user. This prevents two requests from waiting on each other forever. *Cost if wrong:* none.
+- **Database permissions:** the log's protection is *detection* (the chain), not prevention. Supabase connects the app as the database owner, and an owner can't be stopped from editing. Deleting the *newest* entries can't be detected from the chain alone. A periodic external copy of the latest fingerprint would close this, and is logged as a follow-up.
+- **Fingerprint of accepted questions:** this is a plain SHA-256 hash, as planned. A short, guessable question could be confirmed by someone with database access. The follow-up is to key it with a server secret.
+- **A charge is dated when it is settled.** A request that straddles midnight IST counts towards the new day.
+
+### Known limitations / follow-ups
+- If the final settlement fails after a model call, the reservation stays open and counts against that user's limit. It has no automatic expiry yet.
+- The Activity page re-checks the whole chain on every load. That is fine at this size; a checkpoint is a later optimisation.
+
+---
+
+## Stage D: Ask pipeline and screens ✅
+
+**Date:** 27 Oct 2026 · **Commits:** `cd4f631..9011255` (2 commits, plus a CI reporting improvement `b530a7d`) · **GitHub CI:** CI_D_PLACEHOLDER
+
+### What was built (plain English)
+- **The question box.** You type a question and press Send, and you get one of these results:
+  - **Red:** "remove these and resend", listing *what kind* of identifier was found (e.g. "phone number", "name"). The text itself is never echoed back.
+  - **Amber:** "Incisive only answers medical and surgical questions", "Could you say a little more…", "I couldn't check this question just now", or "You've reached today's limit".
+  - **Green:** "Accepted. The evidence agent arrives in Phase 2." If you're near a limit, the alert line shows too.
+- **The order is fixed:** sign-in → identifier filter → spending reservation → medical gate → settle cost → log. Every step is written to the activity log under one request ID.
+- **Fail-closed everywhere.** If the log can't be written, the request is refused ("Incisive couldn't record this request"). An answer is never given without a record. If the gate's model has no price set, the question is refused rather than charged at zero.
+- **Activity page (owner only).** It shows time (IST), user, event and short detail, with a badge: "Chain verified ✓ (N entries)" or "Chain broken at #N". Others get "not allowed".
+- **"Signed in as …"** banner and a `/api/me` endpoint showing today's spend against your limit.
+- **Input limits.** Empty questions and questions over 4,000 characters are stopped immediately, at no cost and with no log entry. The box enforces the limit too, and Send is disabled while the box is empty.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 6. Ask pipeline, question box, Activity | Approved after 1 fix round | 1 | cd4f631, 9011255 |
+
+### Tests
+- 21 pipeline tests and 1 dedicated logging test. They cover:
+  - identifiers blocked before the gate is ever called
+  - refusals, unclear, gate failure and over-limit, each audited correctly
+  - the accepted path audited in order: gate → charge → accepted
+  - **question text never reaching the database or the server logs**
+  - the Activity page owner-only, on both routes
+  - the developer sign-in shortcut ignored in production
+  - log-write failure refusing the request
+- Full suite: **152 tests passing**, including when squeezed onto 2 CPUs with 16 tests at once, like GitHub's machines.
+
+### Review findings (summary)
+- The pipeline, failure handling, privacy and sign-in were judged sound on first review.
+- The one real problem: the "no question text in server logs" test could pass or fail depending on which other tests ran first, because of a quirk in the logging library. Even when it passed, it wasn't checking the pipeline's own messages. It now runs on its own and asserts that the pipeline's messages are present and contain no question text. It was proven to fail if the question is ever logged.
+- The implementer also caught a build bug that would have broken the production container: a library feature was enabled only for tests. It was fixed before it reached GitHub.
+
+### Decisions made during the stage (rulings)
+- **Spending is reserved before the gate**, because the gate call itself costs money.
+- **"52 y/o M, robotic LAR, ICG for leak?"** goes to the model check rather than being approved by keywords. Only "ICG" is on the specific-term list. That costs a fraction of a paisa and is safer.
+- **Sign-in rejections are logged** on the ask entry points (reason only, nothing identifying).
+- **Empty or over-long questions are not logged:** nothing was decided, and logging them would let anyone signed in write log rows without limit.
+
+### Known limitations / follow-ups
+- The question box and Activity page are verified by tests and the container build. The first real browser check happens on the live site after merge.
+- Offsets in the red-box data are byte positions (documented); the screen doesn't use them.
+
+### Next stage
+**Stage E: Production wiring and final review.** Deploy settings, a final whole-phase review, then merge on your go-ahead.
