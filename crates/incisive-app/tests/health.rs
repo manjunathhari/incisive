@@ -34,6 +34,8 @@ fn identity_state() -> incisive_app::server::AppState {
         },
         gate_model: "unused".into(),
         dev_mode: false,
+        runs: incisive_app::runs::RunsConfig::default(),
+        worker: incisive_app::runs::worker::WorkerHandle::default(),
     }
 }
 

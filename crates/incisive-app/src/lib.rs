@@ -1,3 +1,5 @@
+#[cfg(feature = "ssr")]
+pub mod agent;
 pub mod app;
 pub mod ask;
 #[cfg(feature = "ssr")]

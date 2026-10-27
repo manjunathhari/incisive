@@ -1,5 +1,6 @@
 //! Ask pipeline tests: identity -> identifier filter -> spend reservation -> gate
-//! -> settle -> accepted, every step audited under one request id.
+//! -> settle -> accepted -> run started, every step audited under one request id
+//! (the run's own events are audited under the run id).
 //!
 //! DB tests are gated on `TEST_DATABASE_URL`. Each test uses its own user (a
 //! random email), and reads back only that user's audit and spend rows, because
@@ -23,6 +24,8 @@ use incisive_app::ask::{AskFailure, AskOutcome, gate_estimate, run_ask};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::{Classifier, ClaudeClassifier, GateDecision, GateError, Verdict};
 use incisive_app::identity::{IapVerifier, JwkSource, Role, User};
+use incisive_app::runs::worker::WorkerHandle;
+use incisive_app::runs::{RunMode, RunsConfig};
 use incisive_app::server::{AppState, api_routes, build_router};
 use incisive_app::spend::{CapsConfig, ModelPrice, Prices, cost_paise};
 use leptos::config::LeptosOptions;
@@ -122,6 +125,8 @@ fn state_with(pool: PgPool, gate: Arc<dyn Classifier>, dev_mode: bool) -> AppSta
         },
         gate_model: GATE_MODEL.to_string(),
         dev_mode,
+        runs: RunsConfig::default(),
+        worker: WorkerHandle::default(),
     }
 }
 
@@ -205,6 +210,31 @@ async fn audit_for(pool: &PgPool, user_id: i64) -> Vec<(String, Option<uuid::Uui
 fn events(rows: &[(String, Option<uuid::Uuid>, Value)]) -> Vec<&str> {
     rows.iter().map(|r| r.0.as_str()).collect()
 }
+
+/// Wait (up to 5 s) for the worker's `run_finished` entry for `run_id`.
+async fn wait_run_finished(pool: &PgPool, run_id: uuid::Uuid) -> Value {
+    for _ in 0..500 {
+        let d: Option<Value> = sqlx::query_scalar(
+            "SELECT detail FROM incisive.audit WHERE request_id = $1 AND event = 'run_finished'",
+        )
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if let Some(d) = d {
+            return d;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run_id} did not finish within 5 s");
+}
+
+fn run_id_of(b: &Value) -> uuid::Uuid {
+    b["run_id"].as_str().expect("run_id").parse().unwrap()
+}
+
+const RUN_STARTED: &str =
+    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
 
 fn one_request_id(rows: &[(String, Option<uuid::Uuid>, Value)]) {
     let first = rows[0].1.expect("request id");
@@ -629,15 +659,32 @@ async fn accepted_path_audits_gate_charge_accepted_in_order() {
     let app = api_routes(state_with(pool.clone(), gate, true));
     let (s, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
     assert_eq!(s, StatusCode::OK, "{b}");
+    let run_id = run_id_of(&b);
     assert_eq!(
         b,
-        json!({"status": "accepted",
-               "message": "Accepted. The evidence agent arrives in Phase 2.",
+        json!({"status": "run_started",
+               "run_id": run_id,
+               "message": RUN_STARTED,
                "alert": null})
     );
-    let rows = audit_for(&pool, u.id).await;
-    assert_eq!(events(&rows), ["gate_decided", "charged", "accepted"]);
+    assert_eq!(wait_run_finished(&pool, run_id).await["status"], "done");
+    let all = audit_for(&pool, u.id).await;
+    // The worker's entry is filed under the run id; the ask's under one request id.
+    assert_eq!(
+        events(&all),
+        [
+            "gate_decided",
+            "charged",
+            "accepted",
+            "run_started",
+            "run_finished"
+        ]
+    );
+    assert_eq!(all[4].1, Some(run_id));
+    let rows = all[..4].to_vec();
     one_request_id(&rows);
+    assert_eq!(rows[3].2["run_id"], run_id.to_string());
+    assert_eq!(rows[3].2["mode"], "focused");
     // (812 * 1 + 37 * 5) / 1e6 USD * 88 * 100 = 8.7736 paise -> 9.
     assert_eq!(rows[1].2["paise"], 9);
     assert_eq!(rows[1].2["input_tokens"], 812);
@@ -659,18 +706,24 @@ async fn accepted_by_rule_needs_no_model_and_shows_alert() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    // A cap just above the estimate puts the reservation past 80%.
+    // A cap just above the Focused run's limit (4000) puts its reservation past 80%;
+    // the gate estimate alone stays far below it.
     let est = estimate_paise(RULE_QUESTION);
-    let cap = est * 100 / 85;
-    assert!(est <= cap && est * 100 >= cap * 80, "{est} / {cap}");
+    let cap = 4000 * 100 / 85;
+    assert!(est * 100 < cap * 80, "{est} / {cap}");
     let u = make_user(&pool, "rule-alert", Role::Surgeon, cap).await;
     let app = api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true));
     let (_, b) = call(app, ask_req(&u.email, RULE_QUESTION)).await;
-    assert_eq!(b["status"], "accepted", "{b}");
+    assert_eq!(b["status"], "run_started", "{b}");
     assert!(b["alert"].as_str().unwrap().contains("80%"), "{b}");
+    let run_id = run_id_of(&b);
+    wait_run_finished(&pool, run_id).await;
     let rows = audit_for(&pool, u.id).await;
-    assert_eq!(events(&rows), ["gate_decided", "accepted"]);
-    one_request_id(&rows);
+    assert_eq!(
+        events(&rows),
+        ["gate_decided", "accepted", "run_started", "run_finished"]
+    );
+    one_request_id(&rows[..3]);
     let spend = spend_for(&pool, u.id).await;
     assert_eq!(spend.len(), 1);
     assert_eq!((spend[0].0.as_str(), spend[0].4), ("charge", 0));
@@ -708,8 +761,12 @@ async fn question_text_never_persisted() {
     ];
     for (gate, q) in questions {
         let app = api_routes(state_with(pool.clone(), gate, true));
-        let (s, _) = call(app, ask_req(&u.email, &q)).await;
+        let (s, b) = call(app, ask_req(&u.email, &q)).await;
         assert_eq!(s, StatusCode::OK);
+        // One active run per user: let each run finish before the next question.
+        if b["status"] == "run_started" {
+            wait_run_finished(&pool, run_id_of(&b)).await;
+        }
     }
 
     let audit_hits: i64 =
@@ -725,9 +782,9 @@ async fn question_text_never_persisted() {
             .await
             .unwrap();
     assert_eq!((audit_hits, spend_hits), (0, 0));
-    // accepted by model 3, refused by model 2, bad gate answer 2 (charged +
-    // gate_failed), accepted by rule 2, blocked 1.
-    assert_eq!(audit_for(&pool, u.id).await.len(), 3 + 2 + 2 + 2 + 1);
+    // accepted by model 5 (+ run_started, run_finished), refused by model 2,
+    // bad gate answer 2 (charged + gate_failed), accepted by rule 4, blocked 1.
+    assert_eq!(audit_for(&pool, u.id).await.len(), 5 + 2 + 2 + 4 + 1);
 }
 
 // ---------- input limits ----------
@@ -748,7 +805,7 @@ async fn empty_and_oversized_questions_rejected_before_anything_else() {
     };
     for q in ["", "   \n\t  "] {
         assert_eq!(
-            run_ask(&st, &user, q).await,
+            run_ask(&st, &user, q, RunMode::Focused).await,
             Ok(AskOutcome::InvalidInput {
                 message: "Please type your clinical question.".into()
             }),
@@ -758,7 +815,7 @@ async fn empty_and_oversized_questions_rejected_before_anything_else() {
     // Over 4,000 characters (counted as characters, not bytes), even with an identifier.
     let long = format!("Mrs. Lakshmi ph 9845012345 {}", "é".repeat(4_000));
     assert_eq!(
-        run_ask(&st, &user, &long).await,
+        run_ask(&st, &user, &long, RunMode::Focused).await,
         Ok(AskOutcome::InvalidInput {
             message:
                 "That question is too long for Incisive (4,000 characters max). Please shorten it."
@@ -769,7 +826,10 @@ async fn empty_and_oversized_questions_rejected_before_anything_else() {
     // unreachable audit log, so a record failure rather than a length refusal).
     let exact = format!("Mrs. Lakshmi ph 9845012345 {}", "a".repeat(4_000 - 27));
     assert_eq!(exact.chars().count(), 4_000);
-    assert_eq!(run_ask(&st, &user, &exact).await, Err(AskFailure::Record));
+    assert_eq!(
+        run_ask(&st, &user, &exact, RunMode::Focused).await,
+        Err(AskFailure::Record)
+    );
 }
 
 #[tokio::test]
@@ -818,16 +878,74 @@ async fn audit_failure_fails_closed() {
         monthly_cap_paise: None,
         active: true,
     };
-    let r = run_ask(&st, &user, "Mrs. Lakshmi ph 9845012345").await;
+    let r = run_ask(&st, &user, "Mrs. Lakshmi ph 9845012345", RunMode::Focused).await;
     assert!(matches!(r, Err(AskFailure::Record)), "{r:?}");
-    let r = run_ask(&st, &user, RULE_QUESTION).await;
+    let r = run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await;
     assert!(r.is_err(), "{r:?}");
-    assert!(!matches!(r, Ok(AskOutcome::Accepted { .. })));
+    assert!(!matches!(r, Ok(AskOutcome::RunStarted { .. })));
 
     // The routes turn this into a 500 carrying this plain advice.
     assert_eq!(
         AskFailure::Record.message(),
         "Incisive couldn't record this request. Please try again."
+    );
+}
+
+#[tokio::test]
+async fn run_started_audit_failure_undoes_the_run() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "runstart-fail", Role::Surgeon, 30_000).await;
+    // Make the `run_started` append fail for this user only.
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let func = format!("incisive.fail_run_started_{tag}");
+    sqlx::query(&format!(
+        "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           IF NEW.user_id = {uid} AND NEW.event = 'run_started' THEN \
+             RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END $$",
+        uid = u.id
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER fail_run_started_{tag} BEFORE INSERT ON incisive.audit \
+         FOR EACH ROW EXECUTE FUNCTION {func}()"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let st = state_with(pool.clone(), Arc::new(MustNotCall), true);
+    let r = run_ask(&st, &u, RULE_QUESTION, RunMode::Focused).await;
+
+    sqlx::query(&format!(
+        "DROP TRIGGER fail_run_started_{tag} ON incisive.audit"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("DROP FUNCTION {func}()"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(r, Err(AskFailure::Record));
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM incisive.runs WHERE user_id = $1")
+        .bind(u.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "the run is deleted");
+    let spend = spend_for(&pool, u.id).await;
+    assert!(
+        spend.iter().all(|r| r.0 != "reservation"),
+        "the reservation is released: {spend:?}"
+    );
+    assert_eq!(
+        events(&audit_for(&pool, u.id).await),
+        ["gate_decided", "accepted"]
     );
 }
 
@@ -890,11 +1008,13 @@ async fn me_reports_name_role_and_spend() {
         let day = ist_today();
         let u = make_user(&pool, "me", Role::Surgeon, 30_000).await;
         let gate = Fixed::verdict(Verdict::Medical, "ok");
-        call(
+        let (_, started) = call(
             api_routes(state_with(pool.clone(), gate, true)),
             ask_req(&u.email, MODEL_QUESTION),
         )
         .await;
+        // Until the run ends its reservation counts too; afterwards only charges.
+        wait_run_finished(&pool, run_id_of(&started)).await;
         let req = Request::get("/api/me")
             .header("x-dev-user-email", &u.email)
             .body(Body::empty())

@@ -3,6 +3,7 @@
 //! Every read or delete that takes a `user_id` is scoped to that user, so
 //! another user's run id behaves exactly like a missing one.
 
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
@@ -246,13 +247,58 @@ pub async fn load_question(
     .transpose()
 }
 
-/// Startup recovery: every queued or running run (its worker died with the
-/// process) becomes `interrupted`. Returns `(run_id, user_id)` of each so the
-/// caller can release their reservations.
-pub async fn mark_stale_runs_interrupted(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
+/// Startup recovery: every queued or running run created before
+/// `created_before` (the process start; its worker died with the old process)
+/// becomes `interrupted`, with `error_kind = 'interrupted'`. Runs created after
+/// it belong to this process and are left alone. Returns `(run_id, user_id)` of
+/// each so the caller can release their reservations.
+pub async fn mark_stale_runs_interrupted(
+    pool: &PgPool,
+    created_before: DateTime<Utc>,
+) -> sqlx::Result<Vec<(Uuid, i64)>> {
     sqlx::query_as(
-        "UPDATE incisive.runs SET status = 'interrupted', finished_at = now() \
-         WHERE status IN ('queued','running') RETURNING id, user_id",
+        "UPDATE incisive.runs SET status = 'interrupted', error_kind = 'interrupted', \
+           finished_at = now() \
+         WHERE status IN ('queued','running') AND created_at < $1 RETURNING id, user_id",
+    )
+    .bind(created_before)
+    .fetch_all(pool)
+    .await
+}
+
+/// Whether the run row still exists (the user may delete it while it runs).
+pub async fn run_exists(pool: &PgPool, run_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM incisive.runs WHERE id = $1)")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// How many progress lines the run has (0 once it is deleted).
+pub async fn count_steps(pool: &PgPool, run_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) FROM incisive.run_steps WHERE run_id = $1")
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+}
+
+/// The run's recorded cost in paise, if the run exists.
+pub async fn run_cost(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar("SELECT cost_paise FROM incisive.runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Finished runs (any terminal status) that still hold a spend reservation,
+/// as `(run_id, user_id)`: a release that never happened. Startup recovery
+/// releases them.
+pub async fn finished_runs_holding_reservation(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
+    sqlx::query_as(
+        "SELECT r.id, r.user_id FROM incisive.runs r \
+         JOIN incisive.spend s ON s.request_id = r.id AND s.user_id = r.user_id \
+           AND s.kind = 'reservation' \
+         WHERE r.status IN ('done','partial','failed','interrupted')",
     )
     .fetch_all(pool)
     .await

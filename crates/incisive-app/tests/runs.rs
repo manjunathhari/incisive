@@ -344,7 +344,9 @@ async fn stale_runs_marked_interrupted() {
         .await
         .unwrap();
 
-    let marked = mark_stale_runs_interrupted(&pool).await.unwrap();
+    let marked = mark_stale_runs_interrupted(&pool, chrono::Utc::now())
+        .await
+        .unwrap();
     assert!(marked.contains(&(queued, u1)));
     assert!(marked.contains(&(running, u2)));
     assert!(!marked.iter().any(|(id, _)| *id == done));
@@ -363,6 +365,13 @@ async fn stale_runs_marked_interrupted() {
     assert_eq!(status(u1, queued).await, RunStatus::Interrupted);
     assert_eq!(status(u2, running).await, RunStatus::Interrupted);
     assert_eq!(status(u3, done).await, RunStatus::Done);
+    let kinds: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT error_kind FROM incisive.runs WHERE id = ANY($1) ORDER BY id")
+            .bind(vec![queued, running])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kinds, vec![Some("interrupted".to_string()); 2]);
     // interrupted runs no longer block a new run
     assert!(
         create_run(&pool, u1, "q", RunMode::Quick, 500)
@@ -836,4 +845,511 @@ fn can_afford_checks_the_limit() {
     assert!(!b.can_afford(101));
     assert!(b.can_afford(0));
     assert!(!b.can_afford(-1));
+}
+
+// ---------- worker: accepted questions become background runs ----------
+
+use incisive_app::agent::{PipelineFuture, PipelineOutcome, RunContext};
+use incisive_app::ask::{AskOutcome, run_ask};
+use incisive_app::gate::OfflineClassifier;
+use incisive_app::identity::{IapVerifier, JwkSource};
+use incisive_app::runs::RunsConfig;
+use incisive_app::runs::worker::{WorkerHandle, recover_stale_runs};
+use incisive_app::server::AppState;
+use std::sync::Arc;
+
+/// Decided Medical by rule, so the offline gate (no model) accepts it.
+const RULE_QUESTION: &str =
+    "52 y/o M, robotic LAR, ICG for leak? Evidence on anastomotic resection";
+const RUN_STARTED: &str =
+    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
+const RUN_IN_PROGRESS: &str = "You already have a question running.";
+
+fn app_state(pool: PgPool) -> AppState {
+    AppState {
+        pool,
+        verifier: Arc::new(IapVerifier::new(
+            "aud".into(),
+            JwkSource::Static(serde_json::from_str(r#"{"keys":[]}"#).unwrap()),
+        )),
+        gate: Arc::new(OfflineClassifier),
+        prices: prices(),
+        usd_inr: 88.0,
+        caps: big_global(),
+        gate_model: "m-test".into(),
+        dev_mode: true,
+        runs: RunsConfig::default(),
+        worker: WorkerHandle::default(),
+    }
+}
+
+async fn new_user_with_cap(pool: &PgPool, daily_cap: i64) -> User {
+    let email = format!("runs-{}@example.com", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise) \
+         VALUES ($1, 'T', 'surgeon', $2)",
+    )
+    .bind(&email)
+    .bind(daily_cap)
+    .execute(pool)
+    .await
+    .unwrap();
+    incisive_app::identity::find_user(pool, &email)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// Wait (up to 5 s) until the worker has completely finished with `run`.
+async fn wait_idle(st: &AppState, run: Uuid) {
+    for _ in 0..500 {
+        if !st.worker.is_running(run) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} did not finish within 5 s");
+}
+
+/// Poll the store (up to 5 s) until the run reaches `want`.
+async fn poll_status(pool: &PgPool, uid: i64, run: Uuid, want: RunStatus) {
+    for _ in 0..500 {
+        let v = get_run_for_user(pool, uid, run).await.unwrap().unwrap();
+        if v.summary.status == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} never reached {want:?}");
+}
+
+async fn run_events(pool: &PgPool, run: Uuid) -> Vec<(String, serde_json::Value)> {
+    sqlx::query_as("SELECT event, detail FROM incisive.audit WHERE request_id = $1 ORDER BY seq")
+        .bind(run)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn error_kind(pool: &PgPool, run: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT error_kind FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn started(outcome: Result<AskOutcome, incisive_app::ask::AskFailure>) -> Uuid {
+    match outcome {
+        Ok(AskOutcome::RunStarted {
+            run_id, message, ..
+        }) => {
+            assert_eq!(message, RUN_STARTED);
+            run_id
+        }
+        other => panic!("expected RunStarted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn accepted_question_starts_a_run_and_finishes() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let user = new_user_with_cap(&pool, 100_000).await;
+
+    let outcome = run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await;
+    let wire = serde_json::to_value(outcome.as_ref().unwrap()).unwrap();
+    let run = started(outcome);
+    assert_eq!(
+        wire,
+        json!({"status": "run_started", "run_id": run, "message": RUN_STARTED, "alert": null})
+    );
+    poll_status(&pool, user.id, run, RunStatus::Done).await;
+    wait_idle(&st, run).await;
+
+    let v = get_run_for_user(&pool, user.id, run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.summary.mode, RunMode::Focused);
+    let kinds: Vec<StepKind> = v.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            StepKind::Frame,
+            StepKind::Search,
+            StepKind::Screen,
+            StepKind::Retrieve,
+            StepKind::Extract,
+            StepKind::Write,
+            StepKind::Check,
+            StepKind::Present
+        ]
+    );
+    assert_eq!(v.answer, Some(json!({"placeholder": true})));
+    assert_eq!(error_kind(&pool, run).await, None);
+
+    // The ask's own events, then the worker's under the run id.
+    let events: Vec<String> = audit_rows(&pool, user.id)
+        .await
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect();
+    assert_eq!(
+        events,
+        ["gate_decided", "accepted", "run_started", "run_finished"]
+    );
+    let rows = audit_rows(&pool, user.id).await;
+    assert_eq!(
+        rows[2].1,
+        json!({"run_id": run.to_string(), "mode": "focused"})
+    );
+    let finished = run_events(&pool, run).await;
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        finished[0].1,
+        json!({"run_id": run.to_string(), "status": "done", "cost_paise": 0, "steps": 8})
+    );
+
+    // Quick mode skips Retrieve.
+    let quick = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Quick).await);
+    poll_status(&pool, user.id, quick, RunStatus::Done).await;
+    wait_idle(&st, quick).await;
+    let v = get_run_for_user(&pool, user.id, quick)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.summary.mode, RunMode::Quick);
+    assert_eq!(v.steps.len(), 7);
+    assert!(v.steps.iter().all(|s| s.kind != StepKind::Retrieve));
+    let limit: i64 = sqlx::query_scalar("SELECT limit_paise FROM incisive.runs WHERE id = $1")
+        .bind(quick)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(limit, 500);
+}
+
+#[tokio::test]
+async fn second_question_while_running_gets_run_in_progress() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let user = new_user_with_cap(&pool, 100_000).await;
+    // An active run already holds the user's one slot.
+    let first = create_run(&pool, user.id, "q", RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let outcome = run_ask(&st, &user, RULE_QUESTION, RunMode::Focused)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        AskOutcome::RunInProgress {
+            message: RUN_IN_PROGRESS.into()
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap(),
+        json!({"status": "run_in_progress", "message": RUN_IN_PROGRESS})
+    );
+    let runs = list_runs(&pool, user.id, 10).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, first);
+    // No run reservation was taken.
+    let reservations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM incisive.spend WHERE user_id = $1 AND kind = 'reservation'",
+    )
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservations, 0);
+    let events: Vec<String> = audit_rows(&pool, user.id)
+        .await
+        .into_iter()
+        .map(|(e, _)| e)
+        .collect();
+    assert!(!events.contains(&"run_started".to_string()), "{events:?}");
+    // Leave nothing active behind.
+    assert!(
+        set_status(&pool, first, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn run_reservation_released_at_end() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let user = new_user_with_cap(&pool, 100_000).await;
+    let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await);
+    wait_idle(&st, run).await;
+    poll_status(&pool, user.id, run, RunStatus::Done).await;
+
+    assert_eq!(reservation(&pool, run).await, None);
+    let charged: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(paise), 0)::BIGINT FROM incisive.spend WHERE user_id = $1 AND kind = 'charge'",
+    )
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let t = totals(&pool, user.id).await.unwrap();
+    assert_eq!(t.today_paise, charged);
+}
+
+#[tokio::test]
+async fn over_cap_for_run_limit_creates_no_run() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    // Room for the gate estimate and a Quick run, not a Focused one (4000).
+    let user = new_user_with_cap(&pool, 1_000).await;
+    let outcome = run_ask(&st, &user, RULE_QUESTION, RunMode::Focused)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, AskOutcome::OverCap { .. }), "{outcome:?}");
+    assert!(list_runs(&pool, user.id, 10).await.unwrap().is_empty());
+    let reservations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM incisive.spend WHERE user_id = $1 AND kind = 'reservation'",
+    )
+    .bind(user.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reservations, 0);
+    let rows = audit_rows(&pool, user.id).await;
+    let events: Vec<&str> = rows.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(events, ["gate_decided", "accepted", "cap_blocked"]);
+    assert_eq!(rows[2].1, json!({"estimate_paise": 4000}));
+
+    // A Quick run (500) still fits.
+    let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Quick).await);
+    wait_idle(&st, run).await;
+}
+
+#[tokio::test]
+async fn restart_recovery_interrupts_and_releases() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    // A running run and a queued run, each holding its reservation.
+    let (u1, running) = reserved_run(&pool, 4000).await;
+    assert!(
+        set_status(&pool, running, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    add_step(&pool, running, StepKind::Frame, "framing")
+        .await
+        .unwrap();
+    let (u2, queued) = reserved_run(&pool, 4000).await;
+    // A finished run whose worker never released (e.g. a failed release).
+    let (u3, leaked) = reserved_run(&pool, 4000).await;
+    assert!(
+        set_status(&pool, leaked, RunStatus::Done, None)
+            .await
+            .unwrap()
+    );
+    let cutoff = chrono::Utc::now();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Created after this process started: not stale, left alone.
+    let (u4, fresh) = reserved_run(&pool, 4000).await;
+
+    let n = recover_stale_runs(&pool, cutoff).await.unwrap();
+    assert!(n >= 2, "{n}");
+
+    for (uid, run) in [(u1, running), (u2, queued)] {
+        poll_status(&pool, uid, run, RunStatus::Interrupted).await;
+        assert_eq!(error_kind(&pool, run).await.as_deref(), Some("interrupted"));
+        assert_eq!(reservation(&pool, run).await, None);
+        let ev = run_events(&pool, run).await;
+        let finished: Vec<_> = ev.iter().filter(|(e, _)| e == "run_finished").collect();
+        assert_eq!(finished.len(), 1, "{ev:?}");
+        assert_eq!(finished[0].1["status"], "interrupted");
+        assert_eq!(finished[0].1["cost_paise"], 0);
+    }
+    assert_eq!(run_events(&pool, running).await[0].1["steps"], 1);
+    assert_eq!(reservation(&pool, leaked).await, None);
+    let v = get_run_for_user(&pool, u3, leaked).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Done);
+    let v = get_run_for_user(&pool, u4, fresh).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Queued);
+    assert_eq!(reservation(&pool, fresh).await, Some(4000));
+    // Leave nothing active behind.
+    assert!(
+        set_status(&pool, fresh, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
+    release(&pool, u4, fresh).await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_finishes_with_no_client_connected() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let user = new_user_with_cap(&pool, 100_000).await;
+    let worker = {
+        // Everything request-scoped is dropped at the end of this block.
+        let st = app_state(pool.clone());
+        let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await);
+        (st.worker.clone(), run)
+    };
+    let (handle, run) = worker;
+    poll_status(&pool, user.id, run, RunStatus::Done).await;
+    for _ in 0..500 {
+        if !handle.is_running(run) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!handle.is_running(run));
+    assert_eq!(reservation(&pool, run).await, None);
+}
+
+fn panicking(_ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async { panic!("{}", MARKER) })
+}
+
+#[tokio::test]
+async fn worker_panic_marks_run_failed_and_releases() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    st.worker.spawn_with(st.clone(), run, panicking);
+    wait_idle(&st, run).await;
+    poll_status(&pool, uid, run, RunStatus::Failed).await;
+    assert_eq!(error_kind(&pool, run).await.as_deref(), Some("panic"));
+    assert_eq!(reservation(&pool, run).await, None);
+    let ev = run_events(&pool, run).await;
+    assert_eq!(ev.last().unwrap().0, "run_finished");
+    assert_eq!(ev.last().unwrap().1["status"], "failed");
+    // The worker survives: the next run on the same handle completes.
+    let user = full_user(&pool, uid).await;
+    let next = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Quick).await);
+    wait_idle(&st, next).await;
+    poll_status(&pool, uid, next, RunStatus::Done).await;
+}
+
+/// Charges one call, deletes its own run (as the user would), then tries to write.
+fn deletes_itself(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        let pool = &ctx.state.pool;
+        add_step(pool, ctx.run_id, StepKind::Frame, "framing")
+            .await
+            .unwrap();
+        let h = ctx.budget.try_hold(100).unwrap();
+        ctx.budget
+            .charge(pool, h, Uuid::new_v4(), "m-test", &usage(1000, 100))
+            .await
+            .unwrap();
+        assert!(delete_run(pool, ctx.user.id, ctx.run_id).await.unwrap());
+        match add_step(pool, ctx.run_id, StepKind::Search, "searching").await {
+            Ok(_) => PipelineOutcome::Done(json!({"should": "not happen"})),
+            Err(_) => PipelineOutcome::Failed("store"),
+        }
+    })
+}
+
+#[tokio::test]
+async fn run_deleted_mid_run_counts_as_cancelled() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    st.worker.spawn_with(st.clone(), run, deletes_itself);
+    wait_idle(&st, run).await;
+
+    assert!(get_run_for_user(&pool, uid, run).await.unwrap().is_none());
+    assert_eq!(count(&pool, "run_answers", run).await, 0);
+    // The charge stands; the rest of the reservation is released.
+    let c = charges(&pool, uid).await;
+    assert_eq!(c.len(), 1);
+    assert!(c[0].0 > 0);
+    assert_eq!(reservation(&pool, run).await, None);
+    let ev = run_events(&pool, run).await;
+    let last = ev.last().unwrap();
+    assert_eq!(last.0, "run_finished");
+    assert_eq!(last.1["status"], "deleted");
+    assert_eq!(last.1["cost_paise"], c[0].0);
+}
+
+/// Writes one step, then waits (up to 5 s) to be cancelled.
+fn waits_for_cancel(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        add_step(&ctx.state.pool, ctx.run_id, StepKind::Frame, "framing")
+            .await
+            .unwrap();
+        for _ in 0..500 {
+            if ctx.cancel.is_cancelled() {
+                return PipelineOutcome::Failed("cancelled");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        PipelineOutcome::Done(json!({"not": "cancelled"}))
+    })
+}
+
+#[tokio::test]
+async fn cancel_stops_the_worker_and_releases() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    assert!(!st.worker.cancel(run), "nothing to cancel yet");
+    st.worker.spawn_with(st.clone(), run, waits_for_cancel);
+    for _ in 0..500 {
+        if count(&pool, "run_steps", run).await == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(st.worker.cancel(run));
+    wait_idle(&st, run).await;
+
+    assert_eq!(count(&pool, "run_answers", run).await, 0);
+    assert_eq!(reservation(&pool, run).await, None);
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Failed);
+    assert_eq!(error_kind(&pool, run).await.as_deref(), Some("cancelled"));
+    let ev = run_events(&pool, run).await;
+    assert_eq!(ev.last().unwrap().1["status"], "deleted");
+}
+
+#[tokio::test]
+async fn already_finished_run_is_left_alone() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    // Interrupted by recovery before the worker got to it.
+    assert!(
+        set_status(&pool, run, RunStatus::Interrupted, Some("interrupted"))
+            .await
+            .unwrap()
+    );
+    st.worker.spawn(st.clone(), run);
+    wait_idle(&st, run).await;
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Interrupted);
+    assert!(v.steps.is_empty());
+    assert_eq!(reservation(&pool, run).await, None);
+    assert!(run_events(&pool, run).await.is_empty());
 }

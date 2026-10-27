@@ -18,6 +18,8 @@ use crate::config::AppEnv;
 use crate::gate::Classifier;
 use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
+use crate::runs::RunsConfig;
+use crate::runs::worker::WorkerHandle;
 use crate::spend::{CapsConfig, Prices};
 
 /// Everything a request needs. Also provided as Leptos context to server functions.
@@ -32,6 +34,10 @@ pub struct AppState {
     pub gate_model: String,
     /// `APP_ENV=dev`: the `x-dev-user-email` header is trusted. Never in prod.
     pub dev_mode: bool,
+    /// Per-depth run limits (`RUN_LIMITS`).
+    pub runs: RunsConfig,
+    /// Starts and cancels background runs.
+    pub worker: WorkerHandle,
 }
 
 impl FromRef<AppState> for IdentityState {

@@ -3,6 +3,7 @@
 use secrecy::SecretString;
 use std::fmt;
 
+use crate::runs::RunsConfig;
 use crate::spend::Prices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,8 @@ pub struct Config {
     pub usd_inr: f64,
     /// Whole-app monthly budget in paise, from `GLOBAL_MONTHLY_CAP_INR` rupees.
     pub global_monthly_cap_paise: i64,
+    /// Per-depth run limits (`RUN_LIMITS`, optional; defaults otherwise).
+    pub runs: RunsConfig,
 }
 
 /// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
@@ -182,6 +185,14 @@ impl Config {
             }
         };
 
+        let runs = match lookup("RUN_LIMITS") {
+            None => RunsConfig::default(),
+            Some(json) => RunsConfig::from_json(&json).map_err(|reason| ConfigError::Invalid {
+                var: "RUN_LIMITS",
+                reason,
+            })?,
+        };
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
@@ -194,6 +205,7 @@ impl Config {
             model_prices,
             usd_inr,
             global_monthly_cap_paise,
+            runs,
         })
     }
 }
@@ -455,6 +467,84 @@ mod tests {
                 "{var}={bad}: {err:?}"
             );
             assert!(err.to_string().contains(var));
+        }
+    }
+
+    #[test]
+    fn run_limits_json_parses_and_bad_value_names_variable() {
+        use crate::runs::{DepthSettings, RunsConfig};
+        // Unset: the Global Constraints defaults.
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.runs, RunsConfig::default());
+        assert_eq!(
+            c.runs.quick,
+            DepthSettings {
+                refinements: 1,
+                screen_n: 20,
+                use_n: 5,
+                full_text: false,
+                limit_paise: 500,
+                time_limit_s: 300,
+            }
+        );
+        assert_eq!(
+            c.runs.focused,
+            DepthSettings {
+                refinements: 3,
+                screen_n: 100,
+                use_n: 10,
+                full_text: true,
+                limit_paise: 4000,
+                time_limit_s: 300,
+            }
+        );
+
+        // Partial override: only the named fields change.
+        let mut pairs = full();
+        pairs.push((
+            "RUN_LIMITS",
+            r#"{"focused": {"limit_paise": 6000, "screen_n": 150}, "quick": {"refinements": 2}}"#,
+        ));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.runs.focused.limit_paise, 6000);
+        assert_eq!(c.runs.focused.screen_n, 150);
+        assert_eq!(c.runs.focused.use_n, 10);
+        assert_eq!(c.runs.quick.refinements, 2);
+        assert_eq!(c.runs.quick.limit_paise, 500);
+        assert_eq!(
+            c.runs.for_mode(crate::runs::RunMode::Focused).limit_paise,
+            6000
+        );
+
+        for bad in [
+            "not json",
+            "[]",
+            r#"{"deep": {}}"#,
+            r#"{"quick": 5}"#,
+            r#"{"quick": {"limit_paise": 0}}"#,
+            r#"{"quick": {"limit_paise": -5}}"#,
+            r#"{"quick": {"limit_paise": 1.5}}"#,
+            r#"{"focused": {"time_limit_s": 0}}"#,
+            r#"{"focused": {"screen_n": 0}}"#,
+            r#"{"focused": {"use_n": 0}}"#,
+            r#"{"focused": {"refinements": 300}}"#,
+            r#"{"focused": {"full_text": "yes"}}"#,
+            r#"{"focused": {"limit_rupees": 40}}"#,
+        ] {
+            let mut pairs = full();
+            pairs.push(("RUN_LIMITS", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ConfigError::Invalid {
+                        var: "RUN_LIMITS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            assert!(err.to_string().contains("RUN_LIMITS"), "{err}");
         }
     }
 

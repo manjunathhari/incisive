@@ -1307,6 +1307,7 @@ dependencies = [
  "chrono",
  "claude-client",
  "console_error_panic_hook",
+ "futures-util",
  "hex",
  "http-body-util",
  "incisive-app",

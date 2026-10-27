@@ -14,6 +14,7 @@ use leptos_router::{
 };
 
 use crate::ask::{ActivityView, AskOutcome, MeView};
+use crate::runs::RunMode;
 
 const STYLE: &str = r#"
 :root { --fg:#1d232b; --muted:#5b6672; --bg:#f7f8fa; --card:#fff; --line:#d9dee4;
@@ -66,9 +67,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 // ---------- server functions (same pipeline as the JSON routes) ----------
 
-/// Ask a question. Same pipeline as `POST /api/ask`.
+/// Ask a question. Same pipeline as `POST /api/ask`; `mode` defaults to Focused.
 #[server(prefix = "/api/fn", endpoint = "ask")]
-pub async fn ask_question(question: String) -> Result<AskOutcome, ServerFnError> {
+pub async fn ask_question(
+    question: String,
+    #[server(default)] mode: RunMode,
+) -> Result<AskOutcome, ServerFnError> {
     use crate::identity::CurrentUser;
     let (state, user) = signed_in().await?;
     let user = match user {
@@ -79,7 +83,7 @@ pub async fn ask_question(question: String) -> Result<AskOutcome, ServerFnError>
             return Err(ServerFnError::new(rejection.message()));
         }
     };
-    crate::ask::run_ask(&state, &user, &question)
+    crate::ask::run_ask(&state, &user, &question, mode)
         .await
         .map_err(|f| {
             set_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
@@ -228,6 +232,7 @@ fn AskPage() -> impl IntoView {
         ev.prevent_default();
         action.dispatch(AskQuestion {
             question: question.get_untracked(),
+            mode: RunMode::default(),
         });
     };
     view! {
@@ -278,14 +283,15 @@ fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
             | AskOutcome::NotMedical { message }
             | AskOutcome::Unclear { message }
             | AskOutcome::OverCap { message }
-            | AskOutcome::GateUnavailable { message },
+            | AskOutcome::GateUnavailable { message }
+            | AskOutcome::RunInProgress { message },
         ) => view! {
             <div class="box amber" role="status">
                 <p>{message}</p>
             </div>
         }
         .into_any(),
-        Ok(AskOutcome::Accepted { message, alert }) => view! {
+        Ok(AskOutcome::RunStarted { message, alert, .. }) => view! {
             <div class="box green" role="status">
                 <p>{message}</p>
                 {alert.map(|a| view! { <p>{a}</p> })}

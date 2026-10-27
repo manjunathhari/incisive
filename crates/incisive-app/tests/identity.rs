@@ -187,6 +187,8 @@ fn state_with(env: AppEnv, pool: sqlx::PgPool, verifier: IapVerifier) -> AppStat
         },
         gate_model: "unused".into(),
         dev_mode: env == AppEnv::Dev,
+        runs: incisive_app::runs::RunsConfig::default(),
+        worker: incisive_app::runs::worker::WorkerHandle::default(),
     }
 }
 

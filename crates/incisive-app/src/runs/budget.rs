@@ -23,7 +23,7 @@ const WRAP_UP_PERCENT: i128 = 70;
 /// ... or once this much time has passed.
 const WRAP_UP_AFTER: Duration = Duration::from_secs(180);
 /// Past this the run is failed.
-const HARD_STOP_AFTER: Duration = Duration::from_secs(360);
+pub const HARD_STOP_AFTER: Duration = Duration::from_secs(360);
 
 #[derive(Debug)]
 pub enum BudgetError {

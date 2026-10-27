@@ -501,6 +501,17 @@ pub async fn release(pool: &PgPool, user_id: i64, run_id: Uuid) -> sqlx::Result<
     Ok(released.unwrap_or(0))
 }
 
+/// The user holding the reservation made under `request_id`, if one remains.
+/// Lets a worker release a run's reservation after the run row is gone.
+pub async fn reservation_owner(pool: &PgPool, request_id: Uuid) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar(
+        "SELECT user_id FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation' LIMIT 1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// The global advisory lock, then the user's (the order [`reserve`] uses).
 async fn lock_spend(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

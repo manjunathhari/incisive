@@ -59,6 +59,7 @@ use uuid::Uuid;
 
 use crate::deid::Finding;
 use crate::gate::GateDecision;
+use crate::runs::RunMode;
 
 /// Advisory-lock namespace for audit appends (key 0). Distinct from
 /// `spend::LOCK_NS_SPEND_GLOBAL` / `LOCK_NS_SPEND_USER`.
@@ -82,6 +83,9 @@ pub enum Event {
     CapBlocked,
     Accepted,
     Charged,
+    RunStarted,
+    RunFinished,
+    RunDeleted,
 }
 
 impl Event {
@@ -94,6 +98,9 @@ impl Event {
             Event::CapBlocked => "cap_blocked",
             Event::Accepted => "accepted",
             Event::Charged => "charged",
+            Event::RunStarted => "run_started",
+            Event::RunFinished => "run_finished",
+            Event::RunDeleted => "run_deleted",
         }
     }
 
@@ -106,6 +113,9 @@ impl Event {
             "cap_blocked" => Event::CapBlocked,
             "accepted" => Event::Accepted,
             "charged" => Event::Charged,
+            "run_started" => Event::RunStarted,
+            "run_finished" => Event::RunFinished,
+            "run_deleted" => Event::RunDeleted,
             _ => return None,
         })
     }
@@ -251,6 +261,33 @@ pub fn charged_detail(model: Option<&str>, usage: Option<&Usage>, paise: i64) ->
         "output_tokens": usage.map(|u| u.output_tokens),
         "paise": paise,
     })
+}
+
+/// The run id and its depth. Never the question.
+pub fn run_started_detail(run_id: Uuid, mode: RunMode) -> Value {
+    json!({ "run_id": run_id.to_string(), "mode": mode.as_str() })
+}
+
+/// How a run ended: a fixed status word (`done`, `partial`, `failed`,
+/// `interrupted`, `deleted`), what it cost and how many progress lines it wrote.
+/// Never the question or the answer.
+pub fn run_finished_detail(
+    run_id: Uuid,
+    status: &'static str,
+    cost_paise: i64,
+    steps: i64,
+) -> Value {
+    json!({
+        "run_id": run_id.to_string(),
+        "status": status,
+        "cost_paise": cost_paise,
+        "steps": steps,
+    })
+}
+
+/// The deleted run's id only.
+pub fn run_deleted_detail(run_id: Uuid) -> Value {
+    json!({ "run_id": run_id.to_string() })
 }
 
 /// A fixed reason kind only (e.g. `not_signed_in`): never headers, tokens or email.
