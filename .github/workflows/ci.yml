@@ -80,3 +80,5 @@ jobs:
           [ "$code" = "503" ] || { echo "::error::/ready returned $code, expected 503"; exit 1; }
           curl -fsS localhost:8080/ | grep -q 'Cut to the evidence.' \
             || { echo "::error::home page missing tagline"; exit 1; }
+          curl -fsS localhost:8080/ | grep -q '<textarea id="question"' \
+            || { echo "::error::home page missing question box"; exit 1; }

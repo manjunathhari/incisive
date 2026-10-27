@@ -1,4 +1,5 @@
 pub mod app;
+pub mod ask;
 #[cfg(feature = "ssr")]
 pub mod audit;
 #[cfg(feature = "ssr")]

@@ -12,10 +12,12 @@ use base64::Engine;
 use http_body_util::BodyExt;
 use incisive_app::config::AppEnv;
 use incisive_app::db::{lazy_pool, migrate};
+use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{
-    IapVerifier, IdentityError, IdentityState, JwkSource, Role, ensure_owner, find_user,
-    identity_routes,
+    IapVerifier, IdentityError, JwkSource, Role, ensure_owner, find_user,
 };
+use incisive_app::server::{AppState, api_routes};
+use incisive_app::spend::{CapsConfig, Prices};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, jwk::JwkSet};
 use secrecy::SecretString;
 use serde_json::json;
@@ -173,8 +175,23 @@ async fn garbage_rejected() {
 
 // ---- router level ----
 
-fn state(env: AppEnv, pool: sqlx::PgPool) -> IdentityState {
-    IdentityState::new(verifier(), pool, env)
+fn state_with(env: AppEnv, pool: sqlx::PgPool, verifier: IapVerifier) -> AppState {
+    AppState {
+        pool,
+        verifier: std::sync::Arc::new(verifier),
+        gate: std::sync::Arc::new(OfflineClassifier),
+        prices: Prices::default(),
+        usd_inr: 88.0,
+        caps: CapsConfig {
+            global_monthly_paise: 1_000_000,
+        },
+        gate_model: "unused".into(),
+        dev_mode: env == AppEnv::Dev,
+    }
+}
+
+fn state(env: AppEnv, pool: sqlx::PgPool) -> AppState {
+    state_with(env, pool, verifier())
 }
 
 fn unused_pool() -> sqlx::PgPool {
@@ -197,7 +214,7 @@ async fn call(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value
 
 #[tokio::test]
 async fn missing_header_is_401() {
-    let app = identity_routes(state(AppEnv::Prod, unused_pool()));
+    let app = api_routes(state(AppEnv::Prod, unused_pool()));
     let (s, b) = call(app, Request::get("/api/me").body(Body::empty()).unwrap()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert_eq!(b, json!({"error": "not_signed_in"}));
@@ -205,7 +222,7 @@ async fn missing_header_is_401() {
 
 #[tokio::test]
 async fn invalid_jwt_is_401() {
-    let app = identity_routes(state(AppEnv::Prod, unused_pool()));
+    let app = api_routes(state(AppEnv::Prod, unused_pool()));
     let req = Request::get("/api/me")
         .header("x-goog-iap-jwt-assertion", "garbage")
         .body(Body::empty())
@@ -217,7 +234,7 @@ async fn invalid_jwt_is_401() {
 
 #[tokio::test]
 async fn unverified_email_header_ignored() {
-    let app = identity_routes(state(AppEnv::Prod, unused_pool()));
+    let app = api_routes(state(AppEnv::Prod, unused_pool()));
     let req = Request::get("/api/me")
         .header(
             "x-goog-authenticated-user-email",
@@ -238,7 +255,7 @@ async fn dev_header_works_only_in_dev() {
             .unwrap()
     };
     // Prod: header ignored, no database touched.
-    let (s, _) = call(identity_routes(state(AppEnv::Prod, unused_pool())), req()).await;
+    let (s, _) = call(api_routes(state(AppEnv::Prod, unused_pool())), req()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // Dev: header is honoured (needs a database to find the user).
@@ -252,9 +269,10 @@ async fn dev_header_works_only_in_dev() {
         .header("x-dev-user-email", "Dev-Header@Example.com")
         .body(Body::empty())
         .unwrap();
-    let (s, b) = call(identity_routes(state(AppEnv::Dev, pool)), req).await;
+    let (s, b) = call(api_routes(state(AppEnv::Dev, pool)), req).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(b["email"], owner.email);
+    assert_eq!(b["display_name"], owner.display_name);
+    assert_eq!(b["role"], "owner");
 }
 
 // ---- database gated ----
@@ -294,7 +312,7 @@ async fn verified_but_unknown_user_is_403_not_set_up() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    let app = identity_routes(state(AppEnv::Prod, pool));
+    let app = api_routes(state(AppEnv::Prod, pool));
     let (s, b) = call(app, iap_req(&good_token("nobody-known@example.com"))).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     assert_eq!(b["error"], "not_set_up");
@@ -310,7 +328,7 @@ async fn inactive_user_is_403() {
         return;
     };
     insert_user(&pool, "inactive-user@example.com", false).await;
-    let app = identity_routes(state(AppEnv::Prod, pool));
+    let app = api_routes(state(AppEnv::Prod, pool));
     let (s, b) = call(app, iap_req(&good_token("Inactive-User@example.com"))).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     assert_eq!(b["error"], "not_set_up");
@@ -322,11 +340,13 @@ async fn active_user_gets_through() {
         return;
     };
     insert_user(&pool, "active-user@example.com", true).await;
-    let app = identity_routes(state(AppEnv::Prod, pool.clone()));
+    let app = api_routes(state(AppEnv::Prod, pool.clone()));
     let (s, b) = call(app, iap_req(&good_token("active-user@example.com"))).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(b["email"], "active-user@example.com");
+    assert_eq!(b["display_name"], "T");
     assert_eq!(b["role"], "surgeon");
+    assert_eq!(b["daily_cap_paise"], 30000);
+    assert!(b["today_paise"].is_i64());
     let u = find_user(&pool, "ACTIVE-user@example.com")
         .await
         .unwrap()
@@ -409,7 +429,7 @@ async fn keys_unavailable_is_503() {
         AUD.to_string(),
         JwkSource::Remote("http://127.0.0.1:1/keys".parse().unwrap()),
     );
-    let app = identity_routes(IdentityState::new(verifier, unused_pool(), AppEnv::Prod));
+    let app = api_routes(state_with(AppEnv::Prod, unused_pool(), verifier));
     let (s, b) = call(app, iap_req(&good_token("a@b.com"))).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(

@@ -12,9 +12,11 @@ pub enum AppEnv {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // anthropic_api_key and claude_model are consumed by the claude-client wiring in a later task
+#[allow(dead_code)] // claude_model is consumed by the evidence agent in Phase 2
 pub struct Config {
-    pub anthropic_api_key: SecretString,
+    /// Required in prod. Optional in dev: without it the gate's model call fails
+    /// closed and only rule-decided questions get through.
+    pub anthropic_api_key: Option<SecretString>,
     pub claude_model: String,
     pub database_url: SecretString,
     pub app_env: AppEnv,
@@ -76,7 +78,13 @@ impl Config {
         };
         let required = |var: &'static str| lookup(var).ok_or(ConfigError::Missing(var));
 
-        let anthropic_api_key = SecretString::from(required("ANTHROPIC_API_KEY")?);
+        // Missing key: allowed only in dev (checked before anything else so a
+        // missing key is still the first error reported outside dev).
+        let anthropic_api_key = match lookup("ANTHROPIC_API_KEY") {
+            Some(k) => Some(SecretString::from(k)),
+            None if lookup("APP_ENV").as_deref() == Some("dev") => None,
+            None => return Err(ConfigError::Missing("ANTHROPIC_API_KEY")),
+        };
         let claude_model = required("CLAUDE_MODEL")?;
         let database_url = SecretString::from(required("DATABASE_URL")?);
 
@@ -217,6 +225,33 @@ mod tests {
         ]))
         .unwrap_err();
         assert_eq!(err, ConfigError::Missing("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn api_key_optional_only_in_dev() {
+        let without = |env: &'static str| -> Vec<(&'static str, &'static str)> {
+            let mut v: Vec<_> = full()
+                .into_iter()
+                .filter(|(k, _)| *k != "ANTHROPIC_API_KEY" && *k != "APP_ENV")
+                .collect();
+            v.push(("APP_ENV", env));
+            v
+        };
+        let dev = Config::from_lookup(lookup(&without("dev"))).unwrap();
+        assert!(dev.anthropic_api_key.is_none());
+        let mut prod = without("prod");
+        prod.extend([
+            ("IAP_AUDIENCE", "/projects/1/apps/2"),
+            ("MODEL_PRICES", r#"{"m":{"input":1,"output":5}}"#),
+            ("USD_INR", "88"),
+            ("GLOBAL_MONTHLY_CAP_INR", "10000"),
+        ]);
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("ANTHROPIC_API_KEY")
+        );
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(c.anthropic_api_key.is_some());
     }
 
     #[test]

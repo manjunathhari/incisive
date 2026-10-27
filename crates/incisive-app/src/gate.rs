@@ -96,6 +96,27 @@ pub trait Classifier: Send + Sync {
     async fn classify(&self, question: &str) -> Result<GateDecision, GateError>;
 }
 
+impl GateError {
+    /// Fixed kind for the audit log.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            GateError::Unavailable => "unavailable",
+            GateError::BadResponse => "bad_response",
+        }
+    }
+}
+
+/// Dev-only stand-in when no API key is configured: every model call fails
+/// closed (`Unavailable`). Rule-decided questions still work.
+pub struct OfflineClassifier;
+
+#[async_trait]
+impl Classifier for OfflineClassifier {
+    async fn classify(&self, _question: &str) -> Result<GateDecision, GateError> {
+        Err(GateError::Unavailable)
+    }
+}
+
 // ---------- rules ----------
 
 /// Specific clinical terms: procedures, diseases, anatomy and study designs.

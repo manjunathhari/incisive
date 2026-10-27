@@ -11,11 +11,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{FromRef, FromRequestParts},
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
-    routing::get,
 };
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
@@ -323,6 +322,43 @@ pub enum IdentityRejection {
     Internal,
 }
 
+impl IdentityRejection {
+    /// Fixed kind for the audit log and the JSON `error` field.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            IdentityRejection::NotSignedIn => "not_signed_in",
+            IdentityRejection::KeysUnavailable => "sign_in_check_unavailable",
+            IdentityRejection::NotSetUp => "not_set_up",
+            IdentityRejection::Internal => "internal",
+        }
+    }
+
+    pub fn status(&self) -> StatusCode {
+        match self {
+            IdentityRejection::NotSignedIn => StatusCode::UNAUTHORIZED,
+            IdentityRejection::KeysUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            IdentityRejection::NotSetUp => StatusCode::FORBIDDEN,
+            IdentityRejection::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Plain advice for the page.
+    pub fn message(&self) -> &'static str {
+        match self {
+            IdentityRejection::NotSignedIn => {
+                "You're not signed in to Incisive. Reload the page and sign in with your Google account."
+            }
+            IdentityRejection::KeysUnavailable => {
+                "Sign-in could not be checked just now. Please try again in a moment."
+            }
+            IdentityRejection::NotSetUp => NOT_SET_UP_MESSAGE,
+            IdentityRejection::Internal => {
+                "Incisive couldn't check who you are just now. Please try again in a moment."
+            }
+        }
+    }
+}
+
 impl IntoResponse for IdentityRejection {
     fn into_response(self) -> Response {
         match self {
@@ -406,25 +442,4 @@ where
             }
         }
     }
-}
-
-#[derive(Serialize)]
-struct Me {
-    email: String,
-    display_name: String,
-    role: Role,
-}
-
-async fn me(CurrentUser(u): CurrentUser) -> Json<Me> {
-    Json(Me {
-        email: u.email,
-        display_name: u.display_name,
-        role: u.role,
-    })
-}
-
-/// `GET /api/me`: who the app thinks you are. Also the extractor's integration point
-/// until the full application state arrives.
-pub fn identity_routes(state: IdentityState) -> Router {
-    Router::new().route("/api/me", get(me)).with_state(state)
 }

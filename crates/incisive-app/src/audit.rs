@@ -253,6 +253,21 @@ pub fn charged_detail(model: Option<&str>, usage: Option<&Usage>, paise: i64) ->
     })
 }
 
+/// A fixed reason kind only (e.g. `not_signed_in`): never headers, tokens or email.
+pub fn identity_rejected_detail(reason: &'static str) -> Value {
+    json!({ "reason": reason })
+}
+
+/// The estimate that did not fit. The cap itself is on the user row.
+pub fn cap_blocked_detail(estimate_paise: i64) -> Value {
+    json!({ "estimate_paise": estimate_paise })
+}
+
+/// A fixed error kind only: `unavailable`, `bad_response` or `unpriced_model`.
+pub fn gate_failed_detail(error_kind: &'static str) -> Value {
+    json!({ "error_kind": error_kind })
+}
+
 // ---------- storage ----------
 
 /// Table names are interpolated into SQL (so tests can use a scratch copy);

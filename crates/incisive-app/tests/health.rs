@@ -13,8 +13,8 @@ use incisive_app::server::build_router;
 use leptos::config::LeptosOptions;
 use tower::ServiceExt;
 
-fn identity_state() -> incisive_app::identity::IdentityState {
-    use incisive_app::identity::{IapVerifier, IdentityState, JwkSource};
+fn identity_state() -> incisive_app::server::AppState {
+    use incisive_app::identity::{IapVerifier, JwkSource};
     let pool = incisive_app::db::lazy_pool(&secrecy::SecretString::from(
         "postgres://u:p@127.0.0.1:1/none".to_string(),
     ))
@@ -23,7 +23,18 @@ fn identity_state() -> incisive_app::identity::IdentityState {
         "aud".into(),
         JwkSource::Static(serde_json::from_str(r#"{"keys":[]}"#).unwrap()),
     );
-    IdentityState::new(verifier, pool, incisive_app::config::AppEnv::Prod)
+    incisive_app::server::AppState {
+        pool,
+        verifier: Arc::new(verifier),
+        gate: Arc::new(incisive_app::gate::OfflineClassifier),
+        prices: incisive_app::spend::Prices::default(),
+        usd_inr: 88.0,
+        caps: incisive_app::spend::CapsConfig {
+            global_monthly_paise: 1,
+        },
+        gate_model: "unused".into(),
+        dev_mode: false,
+    }
 }
 
 struct AlwaysUp;

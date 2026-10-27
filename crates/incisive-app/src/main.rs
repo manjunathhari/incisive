@@ -1,11 +1,14 @@
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
+use claude_client::Client;
 use incisive_app::{
-    config::Config,
+    config::{AppEnv, Config},
     db::{PgReadiness, lazy_pool, migrate_until_done},
-    identity::{IAP_JWK_URL, IapVerifier, IdentityState, JwkSource, ensure_owner_until_done},
-    server::build_router,
+    gate::{Classifier, ClaudeClassifier, OfflineClassifier},
+    identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
+    server::{AppState, build_router},
+    spend::CapsConfig,
 };
 use leptos::config::get_configuration;
 
@@ -27,7 +30,7 @@ async fn main() {
         }
     };
 
-    if config.app_env == incisive_app::config::AppEnv::Dev {
+    if config.app_env == AppEnv::Dev {
         tracing::warn!(
             "APP_ENV=dev: the x-dev-user-email identity header is enabled; never use in production"
         );
@@ -62,11 +65,44 @@ async fn main() {
         config.iap_audience.clone(),
         JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
     );
-    let identity = IdentityState::new(verifier, pool.clone(), config.app_env);
+
+    // The gate. No network at startup; the key is never logged. Config only lets
+    // the key be absent in dev, where every model call then fails closed.
+    let gate: Arc<dyn Classifier> = match config.anthropic_api_key.clone() {
+        Some(key) => Arc::new(ClaudeClassifier::new(
+            Arc::new(Client::new(key)),
+            config.gate_model.clone(),
+        )),
+        None => {
+            tracing::warn!(
+                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable"
+            );
+            Arc::new(OfflineClassifier)
+        }
+    };
+    if config.model_prices.get(&config.gate_model).is_none() {
+        tracing::warn!(
+            gate_model = %config.gate_model,
+            "GATE_MODEL has no entry in MODEL_PRICES; every question will fail closed"
+        );
+    }
+
+    let state = AppState {
+        pool: pool.clone(),
+        verifier: Arc::new(verifier),
+        gate,
+        prices: config.model_prices.clone(),
+        usd_inr: config.usd_inr,
+        caps: CapsConfig {
+            global_monthly_paise: config.global_monthly_cap_paise,
+        },
+        gate_model: config.gate_model.clone(),
+        dev_mode: config.app_env == AppEnv::Dev,
+    };
 
     let app = build_router(
         Arc::new(PgReadiness::new(pool, migrated)),
-        identity,
+        state,
         leptos_options.clone(),
     );
     let listener = tokio::net::TcpListener::bind(leptos_options.site_addr)
