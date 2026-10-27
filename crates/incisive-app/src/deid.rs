@@ -40,15 +40,19 @@
 //!   (allowlisted given names always; clinical words never). It does not block after a
 //!   non-person qualifier ("Brand name:", "Drug name:", "Trial name:"), for a placeholder
 //!   value ("Name: Unknown"), or without a separator ("NAME OF SURGERY: ...").
-//! - Digits are ASCII only. Any other numeral (Devanagari, Kannada, full-width ...),
-//!   any Unicode format character (zero-width space, soft hyphen, bidi controls ...),
-//!   anything in the Halfwidth/Fullwidth Forms block and look-alike separators are
-//!   blocked as `UnusualCharacters` (rejected, never normalised). Exceptions: a short
-//!   superscript/subscript unit mark ("kg/m\u{B2}", "\u{D7}10\u{2079}/L", "SpO\u{2082}"), one
-//!   vulgar fraction, and look-alike dashes that are not between two digits.
-//!   Zero-width joiners used in some Indic scripts are therefore blocked too.
+//! - Characters are checked against an allowlist (ruling R-F3; Incisive is English-only
+//!   for now): printable ASCII, Latin and Greek letters (up to two combining marks on a
+//!   letter), a fixed set of clinical symbols, superscript/subscript unit marks
+//!   ("kg/m\u{B2}", "\u{D7}10\u{2079}/L", "Ca\u{B2}\u{207A}"), and en/em dash, U+2010/U+2011, minus,
+//!   middle dot, NBSP and narrow NBSP only away from digits. Everything else is blocked
+//!   as `UnusualCharacters` (rejected, never normalised): other scripts, look-alike
+//!   spaces/dashes/colons/dots, invisible characters, Roman numeral characters, emoji.
+//!   Accepted over-blocks: en-dash ranges ("65000\u{2013}80000") and non-Latin text.
+//!   Because marks are allowed on letters, the identifier rules also run on the text
+//!   with marks removed (detection only).
 //! - Unicode spaces (NBSP, narrow NBSP, thin space), en/em dashes and the
-//!   full-width `@` are accepted as separators; offsets stay on the original text.
+//!   full-width `@` are still accepted as separators by the identifier rules (they
+//!   are also flagged by the allowlist next to digits); offsets stay on the original text.
 
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -96,9 +100,10 @@ pub fn describe(kind: FindingKind) -> &'static str {
 /// Extra advice for the user, for kinds where removing the span is not enough.
 pub fn hint(kind: FindingKind) -> Option<&'static str> {
     match kind {
-        FindingKind::UnusualCharacters => {
-            Some("please retype the question without copy-pasted special characters")
-        }
+        FindingKind::UnusualCharacters => Some(
+            "please retype the question without copy-pasted special characters \
+                 (use plain hyphens, colons and spaces)",
+        ),
         _ => None,
     }
 }
@@ -2190,53 +2195,78 @@ fn run_rule(r: &Rule, text: &str, ctx: &[Finding], out: &mut Vec<Finding>) {
     }
 }
 
-// ---------- hidden and look-alike characters ----------
+// ---------- character allowlist (ruling R-F3) ----------
 
-/// Unicode general category Cf (format), from the regex crate's Unicode tables.
-static FORMAT_CHAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\p{Cf}$").expect("Cf pattern compiles"));
+/// A letter of the Latin or Greek script (regex crate Unicode tables).
+static LATIN_GREEK_LETTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[\p{L}&&[\p{Script=Latin}\p{Script=Greek}]]$").expect("letter class compiles")
+});
+/// Any combining mark.
+static MARK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{M}$").expect("mark class compiles"));
 
-fn is_format(c: char) -> bool {
+fn one_char_matches(re: &Regex, c: char) -> bool {
     let mut buf = [0u8; 4];
-    FORMAT_CHAR.is_match(c.encode_utf8(&mut buf))
+    re.is_match(c.encode_utf8(&mut buf))
 }
 
-/// Look-alike slashes, colons and dots: flagged wherever they appear.
-fn lookalike_separator(c: char) -> bool {
+/// Rule 2: a Latin or Greek letter, outside the Halfwidth/Fullwidth Forms and
+/// Mathematical Alphanumeric Symbols blocks.
+fn allowed_letter(c: char) -> bool {
+    !c.is_ascii()
+        && !('\u{FF00}'..='\u{FFEF}').contains(&c)
+        && !('\u{1D400}'..='\u{1D7FF}').contains(&c)
+        && one_char_matches(&LATIN_GREEK_LETTER, c)
+}
+
+fn is_mark(c: char) -> bool {
+    !c.is_ascii() && one_char_matches(&MARK, c)
+}
+
+/// Rule 4: symbols allowed anywhere (superscript/subscript digits and
+/// fractions are decided separately, see [`unit_mark`]).
+fn allowed_symbol(c: char) -> bool {
     matches!(
         c,
-        '\u{2215}' | '\u{2044}' | '\u{29F8}' | '\u{2236}' | '\u{FE55}' | '\u{FE13}' | '\u{2027}'
+        '\u{B0}' | '\u{B1}' | '\u{D7}' | '\u{F7}' | '\u{B5}' | '\u{2265}' | '\u{2264}'
+            | '\u{2260}' | '\u{2248}' | '\u{223C}' | '\u{2192}' | '\u{2190}' | '\u{2191}'
+            | '\u{2193}' | '\u{2019}' | '\u{2018}' | '\u{201C}' | '\u{201D}' | '\u{2022}'
+            | '\u{2026}' | '\u{AE}' | '\u{2122}' | '\u{A9}' | '\u{A7}' | '\u{20AC}' | '\u{A3}'
+            | '\u{20B9}' | '\u{2030}'
+            // superscript and subscript signs
+            | '\u{207A}' | '\u{207B}' | '\u{208A}' | '\u{208B}'
     )
 }
 
-/// Look-alike dashes, flagged only between two digits. En and em dashes
-/// (U+2013, U+2014) are left out: the phone and date rules already accept them
-/// as separators, and "65000\u{2013}80000" style ranges must pass.
-fn lookalike_dash(c: char) -> bool {
+/// Rule 5: allowed only when neither neighbour is an ASCII digit.
+fn contextual(c: char) -> bool {
     matches!(
         c,
-        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2015}' | '\u{2212}'
+        '\u{2013}'
+            | '\u{2014}'
+            | '\u{2010}'
+            | '\u{2011}'
+            | '\u{2212}'
+            | '\u{B7}'
+            | '\u{A0}'
+            | '\u{202F}'
     )
 }
 
 /// Superscript and subscript digits (as in "kg/m\u{B2}", "\u{D7}10\u{2079}/L", "SpO\u{2082}").
 fn script_digit(c: char) -> bool {
-    matches!(c, '\u{B2}' | '\u{B3}' | '\u{B9}' | '\u{2070}'..='\u{2079}' | '\u{2080}'..='\u{2089}')
+    matches!(c, '\u{B2}' | '\u{B3}' | '\u{B9}' | '\u{2070}' | '\u{2074}'..='\u{2079}' | '\u{2080}'..='\u{2089}')
 }
 
-/// Vulgar fractions ("1\u{BD} hours").
+/// The three allowed vulgar fractions ("1\u{BD} hours").
 fn vulgar_fraction(c: char) -> bool {
-    matches!(c, '\u{BC}'..='\u{BE}' | '\u{2150}'..='\u{215F}' | '\u{2189}')
+    matches!(c, '\u{BC}'..='\u{BE}')
 }
 
-fn odd_numeral(c: char) -> bool {
-    c.is_numeric() && !c.is_ascii_digit()
-}
-
-/// A short run of non-ASCII numerals that reads as a unit or an exponent, not
-/// as digits of a number: one or two superscript/subscript digits after a letter,
-/// a closing bracket, a superscript sign or an exact "10" ("m\u{B2}",
-/// "\u{D7}10\u{B9}\u{B2}/L", "SpO\u{2082}"), or one vulgar fraction. Never when
+/// A short run of superscript/subscript digits or one fraction that reads as a
+/// unit or an exponent, not as digits of a number: one or two script digits
+/// after a letter, a closing bracket, a superscript sign or an exact "10"
+/// ("m\u{B2}", "\u{D7}10\u{B9}\u{B2}/L", "SpO\u{2082}", "Ca\u{B2}\u{207A}"), or one fraction. Never when
 /// another digit follows, so "98450\u{2079}2345" is still flagged.
 fn unit_mark(text: &str, start: usize, end: usize) -> bool {
     let run: Vec<char> = text[start..end].chars().collect();
@@ -2255,62 +2285,117 @@ fn unit_mark(text: &str, start: usize, end: usize) -> bool {
     }
     run.len() == 1
         && vulgar_fraction(run[0])
-        && !before.chars().next_back().is_some_and(odd_numeral)
+        && !before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_numeric() && !c.is_ascii_digit())
 }
 
-/// Every maximal run of hidden or look-alike characters (ruling R-F1: such text
-/// is rejected, never normalised, so nothing can slip past the rules above):
-/// (a) Unicode format characters (Cf: zero-width, soft hyphen, word joiner, BOM,
-/// bidi controls ...); (b) numerals other than ASCII 0-9 (full-width, Devanagari,
-/// Kannada ...), except a short unit mark (see [`unit_mark`]); (c) the
-/// Halfwidth and Fullwidth Forms block; (d) look-alike separators, and look-alike
-/// dashes between digits.
+/// Every maximal run of characters outside the allowlist (ruling R-F3: such text
+/// is rejected, never normalised). Incisive is English-only for now, so the
+/// allowlist is:
+/// 1. printable ASCII, tab, newline and carriage return;
+/// 2. Latin and Greek letters (not full-width or mathematical forms);
+/// 3. up to two combining marks directly after such a letter ("cafe\u{301}");
+/// 4. a fixed set of clinical symbols, and superscript/subscript digits and
+///    the fractions \u{BD} \u{BC} \u{BE} when they read as a unit mark (see [`unit_mark`]);
+/// 5. en/em dash, U+2010, U+2011, minus sign, middle dot, NBSP and narrow NBSP,
+///    only when neither neighbour is an ASCII digit.
+///
+/// Everything else (other scripts, other spaces, dashes, colons and dots,
+/// controls, default-ignorables, Roman numeral characters, emoji ...) is flagged.
 fn unusual_characters(text: &str) -> Vec<Finding> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let flagged = |i: usize| -> bool {
-        let c = chars[i].1;
-        if is_format(c) || lookalike_separator(c) || ('\u{FF00}'..='\u{FFEF}').contains(&c) {
-            return true;
-        }
-        if lookalike_dash(c) {
-            let digit = |j: Option<usize>| {
-                j.and_then(|j| chars.get(j))
-                    .is_some_and(|(_, c)| c.is_numeric())
-            };
-            return digit(i.checked_sub(1)) && digit(Some(i + 1));
-        }
-        odd_numeral(c)
+    let digit_at = |j: Option<usize>| {
+        j.and_then(|j| chars.get(j))
+            .is_some_and(|(_, c)| c.is_ascii_digit())
     };
-    let mut out = Vec::new();
+    let mut allowed = vec![false; chars.len()];
+    let mut unit_candidate = vec![false; chars.len()];
+    for (i, &(_, c)) in chars.iter().enumerate() {
+        allowed[i] = if c.is_ascii() {
+            matches!(c, ' '..='~' | '\t' | '\n' | '\r')
+        } else if allowed_letter(c) || allowed_symbol(c) {
+            true
+        } else if contextual(c) {
+            !digit_at(i.checked_sub(1)) && !digit_at(Some(i + 1))
+        } else if is_mark(c) {
+            // At most two marks, directly after an allowed Latin/Greek letter.
+            let mut j = i;
+            let mut marks = 0;
+            while j > 0 && is_mark(chars[j - 1].1) {
+                j -= 1;
+                marks += 1;
+            }
+            marks < 2 && j > 0 && allowed_letter_or_ascii_letter(chars[j - 1].1)
+        } else {
+            unit_candidate[i] = script_digit(c) || vulgar_fraction(c);
+            false
+        };
+    }
+    // Superscript/subscript digits and fractions: decided per maximal run.
     let mut i = 0;
     while i < chars.len() {
-        if !flagged(i) {
+        if !unit_candidate[i] {
             i += 1;
             continue;
         }
         let mut j = i;
-        while j < chars.len() && flagged(j) {
+        while j < chars.len() && unit_candidate[j] {
             j += 1;
         }
-        let start = chars[i].0;
         let end = chars.get(j).map_or(text.len(), |(b, _)| *b);
-        let all_numerals = text[start..end].chars().all(odd_numeral);
-        if !(all_numerals && unit_mark(text, start, end)) {
-            out.push(Finding {
-                kind: FindingKind::UnusualCharacters,
-                start,
-                end,
-            });
+        if unit_mark(text, chars[i].0, end) {
+            allowed[i..j].iter_mut().for_each(|a| *a = true);
         }
+        i = j;
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if allowed[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < chars.len() && !allowed[j] {
+            j += 1;
+        }
+        out.push(Finding {
+            kind: FindingKind::UnusualCharacters,
+            start: chars[i].0,
+            end: chars.get(j).map_or(text.len(), |(b, _)| *b),
+        });
         i = j;
     }
     out
 }
 
-/// Scan `text` for patient identifiers. Findings are sorted by `start`;
-/// overlapping findings are merged into one (kind of the earliest/longest).
-pub fn scan(text: &str) -> Vec<Finding> {
-    let mut found: Vec<Finding> = unusual_characters(text);
+fn allowed_letter_or_ascii_letter(c: char) -> bool {
+    c.is_ascii_alphabetic() || allowed_letter(c)
+}
+
+/// `text` without combining marks, and for each byte of the result (plus its
+/// end) the matching byte offset in `text`. Marks are allowed on letters, so
+/// "Mrs\u{301}. Lakshmi" must also be scanned as "Mrs. Lakshmi"; this is
+/// detection only, the question is never rewritten.
+fn without_marks(text: &str) -> (String, Vec<usize>) {
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len() + 1);
+    for (b, c) in text.char_indices() {
+        if is_mark(c) {
+            continue;
+        }
+        out.push(c);
+        map.extend(std::iter::repeat_n(b, c.len_utf8()));
+    }
+    map.push(text.len());
+    (out, map)
+}
+
+/// The identifier rules (not the character allowlist) over `text`.
+fn rule_findings(text: &str) -> Vec<Finding> {
+    let mut found: Vec<Finding> = Vec::new();
     for r in RULES.iter().filter(|r| !r.deferred) {
         run_rule(r, text, &[], &mut found);
     }
@@ -2322,6 +2407,22 @@ pub fn scan(text: &str) -> Vec<Finding> {
     addr.sort_by_key(|f| f.start);
     for r in RULES.iter().filter(|r| r.deferred) {
         run_rule(r, text, &addr, &mut found);
+    }
+    found
+}
+
+/// Scan `text` for patient identifiers. Findings are sorted by `start`;
+/// overlapping findings are merged into one (kind of the earliest/longest).
+pub fn scan(text: &str) -> Vec<Finding> {
+    let mut found: Vec<Finding> = unusual_characters(text);
+    found.extend(rule_findings(text));
+    if text.chars().any(is_mark) {
+        let (bare, map) = without_marks(text);
+        found.extend(rule_findings(&bare).into_iter().map(|f| Finding {
+            kind: f.kind,
+            start: map[f.start],
+            end: map[f.end],
+        }));
     }
     found.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut merged: Vec<Finding> = Vec::with_capacity(found.len());

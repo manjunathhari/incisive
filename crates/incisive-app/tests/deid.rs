@@ -296,6 +296,76 @@ const BLOCK: &[(&str, &[K])] = &[
     // Ordinary en/em dashes between digits are handled by the phone and date rules.
     ("ph 98450\u{2013}12345", &[K::Phone]),
     ("DOB 12\u{2013}03\u{2013}1971", &[K::CalendarDate]),
+    // --- R-F3 allowlist: leaks found by the re-review
+    // invisible characters that are not Cf. Where a kind other than
+    // UnusualCharacters is expected, the flagged character sits inside an
+    // identifier the rules also find (marks: via the mark-free rescan; NBSP and
+    // full-width @: accepted separators) and the merged finding takes its kind.
+    ("ph 98450\u{34F}12345", &[K::Phone]),
+    ("ph 98450\u{FE0F}12345", &[K::Phone]),
+    ("ph 98450\u{115F}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{3164}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2800}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{1}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{7F}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{85}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{332}12345", &[K::Phone]),
+    ("ph 98450\u{20E3}12345", &[K::Phone]),
+    // a mark on a letter is allowed, so the identifier rules also scan the
+    // text without marks: the name is found
+    ("Mrs\u{301}. Lakshmi", &[K::PersonName]),
+    ("UHID\u{301}: MH-2231", &[K::HospitalId]),
+    ("Mrs.\u{301} Lakshmi", &[K::PersonName]),
+    // look-alike colons
+    ("UHID\u{A789} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{2D0} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{589} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{5C3} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{FE30} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{703} MH-2231", &[K::UnusualCharacters]),
+    ("UHID\u{2E35} MH-2231", &[K::UnusualCharacters]),
+    // non-ASCII dashes next to a digit
+    ("UHID MH\u{2013}2231", &[K::UnusualCharacters]),
+    ("UHID MH\u{2011}2231", &[K::UnusualCharacters]),
+    ("UHID MH\u{2212}2231", &[K::UnusualCharacters]),
+    ("UHID MH\u{2010}2231", &[K::UnusualCharacters]),
+    ("UHID MH\u{2014}2231", &[K::UnusualCharacters]),
+    // separators
+    ("DOB 12\u{B7}03\u{B7}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{2024}03\u{2024}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{3002}03\u{3002}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{2571}03\u{2571}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{3033}03\u{3033}1971", &[K::UnusualCharacters]),
+    ("DOB 12\u{338}03\u{338}1971", &[K::UnusualCharacters]),
+    ("ph 98450\u{FE63}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2E3A}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2E3B}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{FE58}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2043}12345", &[K::UnusualCharacters]),
+    // look-alike spaces between digits
+    ("ph 98450\u{2007}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{2002}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{3000}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{205F}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{1680}12345", &[K::UnusualCharacters]),
+    ("ph 98450\u{A0}12345", &[K::Phone]),
+    ("ph 98450\u{202F}12345", &[K::Phone]),
+    // @ variants and mixed-script look-alikes
+    ("ramesh\u{FE6B}gmail.com", &[K::UnusualCharacters]),
+    ("ramesh\u{FF20}gmail.com", &[K::Email]),
+    ("\u{41C}rs. Lakshmi", &[K::UnusualCharacters]),
+    ("PAN \u{1D400}\u{1D401}CDE1234F", &[K::UnusualCharacters]),
+    // other scripts, Roman numeral characters, emoji (accepted over-blocks)
+    (
+        "\u{0930}\u{094B}\u{0917}\u{0940} 52",
+        &[K::UnusualCharacters],
+    ),
+    ("Clavien-Dindo \u{2162}a", &[K::UnusualCharacters]),
+    ("leak? \u{1F914}", &[K::UnusualCharacters]),
+    ("10\u{2153} cm", &[K::UnusualCharacters]),
+    // ranges with an en dash between digits: fail-closed over-block (retype with "-")
+    ("platelets 65000\u{2013}80000", &[K::UnusualCharacters]),
+    ("40\u{2013}60 mg", &[K::UnusualCharacters]),
 ];
 
 /// Ordinary clinical text that must pass untouched.
@@ -449,7 +519,7 @@ const PASS: &[&str] = &[
     "Flat 2 cm lesion",
     "IP 500 mg cisplatin",
     "Mr. Kocher manoeuvre was done",
-    "platelets 65000\u{2013}80000",
+    "platelets 65000-80000",
     "65000-80000/cumm",
     "Approximately 250000 procedures",
     "Overall 234567 admissions",
@@ -475,7 +545,7 @@ const PASS: &[&str] = &[
     "S/O ACUTE APPENDICITIS",
     "c/o Mild pain at port site",
     "MRCP s/o Choledocholithiasis",
-    "platelets 65000\u{2013}80000",
+    "platelets 65000-80000",
     "Platelets 85000-120000/cumm",
     "65000-80000/cumm",
     "Overall 120000 robotic cases",
@@ -581,16 +651,40 @@ const PASS: &[&str] = &[
     "mean 12 \u{B1} 3",
     "HbA1c 7.2 %, SpO\u{2082} 94%",
     "ICG in robotic low anterior resection \u{2014} evidence for leak?",
-    "dose 5\u{2013}10 mg",
-    "temperature \u{2212}2 \u{B0}C",
+    "dose 5-10 mg",
+    "temperature -2 \u{B0}C",
     "\u{3B2}\u{2010}blocker",
     "mild \u{2010} moderate",
-    "pain \u{2015} worse",
+    "pain - worse",
     "\u{201C}leak\u{201D} \u{2026} \u{2018}rates\u{2019}",
     "\u{2022} item one",
     "\u{2192} next step",
-    "Ki\u{2011}67 index",
-    "\u{0930}\u{094B}\u{0917}\u{0940} 52 \u{0935}\u{0930}\u{094D}\u{0937}",
+    "Ki-67 index",
+    // --- R-F3 allowlist
+    "caf\u{E9}-au-lait spots",
+    "cafe\u{301}-au-lait spots",
+    "m\u{B2}",
+    "\u{D7}10\u{2079}/L",
+    "SpO\u{2082}",
+    "Ca\u{B2}\u{207A}",
+    "HCO\u{2083}\u{207B}",
+    "Ki-67",
+    "\u{3B1}-fetoprotein",
+    "TNM 8\u{1D57}\u{2B0} edition",
+    "\u{20B9}300",
+    "\u{2022} bullet point",
+    "resection \u{2014} evidence",
+    "mild\u{2013}moderate pain",
+    "\u{3B2}\u{2011}blocker",
+    "5 \u{2013} 10 mg",
+    "pros\u{B7}cons",
+    "\u{A0}leading NBSP and word\u{202F}gap",
+    "\u{B0} \u{B1} \u{D7} \u{F7} \u{B5} \u{2265} \u{2264} \u{2260} \u{2248} \u{223C}",
+    "\u{2192} \u{2190} \u{2191} \u{2193} \u{2018}x\u{2019} \u{201C}y\u{201D} \u{2026}",
+    "\u{BC} dose, \u{BE} dose, \u{AE} \u{2122} \u{A9} \u{A7}3 \u{20AC}5 \u{A3}5 3\u{2030}",
+    "na\u{EF}ve, Sj\u{F6}gren, Ménétrier, \u{C6}, stra\u{DF}e",
+    "\u{394}T, \u{3A3}, \u{3C0}",
+    "tab\tand\nnewline\r\n",
 ];
 
 #[test]
@@ -632,13 +726,13 @@ fn offsets_point_at_the_match() {
     assert_eq!(&t[f[0].start..f[0].end], "9845012345");
 
     // Non-ASCII text before the match: offsets are bytes, not chars.
-    let t = "रोगी Mrs. Lakshmi";
+    let t = "αβγ é Mrs. Lakshmi";
     let f = scan(t);
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].kind, K::PersonName);
     assert_eq!(&t[f[0].start..f[0].end], "Mrs. Lakshmi");
 
-    let t = "रोगी का फोन 080-2502 4444 है, ईमेल a@b.in";
+    let t = "Ménétrier αβ 080-2502 4444 é, email a@b.in";
     for f in scan(t) {
         assert!(t.is_char_boundary(f.start) && t.is_char_boundary(f.end));
     }
@@ -716,7 +810,10 @@ fn every_kind_has_a_label() {
     );
     assert_eq!(
         hint(K::UnusualCharacters),
-        Some("please retype the question without copy-pasted special characters")
+        Some(
+            "please retype the question without copy-pasted special characters \
+             (use plain hyphens, colons and spaces)"
+        )
     );
     assert_eq!(hint(K::Phone), None);
     assert_eq!(
@@ -743,6 +840,41 @@ fn unusual_characters_flag_each_maximal_run() {
     let f = scan(t);
     assert_eq!(f.len(), 1);
     assert_eq!(&t[f[0].start..f[0].end], "\u{2010}");
+}
+
+#[test]
+fn marks_only_after_latin_or_greek_letters_at_most_two() {
+    assert!(scan("cafe\u{301}").is_empty());
+    assert!(scan("a\u{301}\u{302}b").is_empty());
+    let t = "a\u{301}\u{302}\u{303}b";
+    let f = scan(t);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(&t[f[0].start..f[0].end], "\u{303}");
+    for t in ["1\u{301}", "-\u{301}", "\u{301}a", " \u{301}"] {
+        assert_eq!(kinds(t), [K::UnusualCharacters], "{t:?}");
+    }
+}
+
+#[test]
+fn contextual_characters_only_away_from_digits() {
+    for c in [
+        '\u{2013}', '\u{2014}', '\u{2010}', '\u{2011}', '\u{2212}', '\u{B7}', '\u{A0}', '\u{202F}',
+    ] {
+        assert!(scan(&format!("a{c}b")).is_empty(), "U+{:04X}", c as u32);
+        assert!(scan(&format!("a {c} b")).is_empty(), "U+{:04X}", c as u32);
+        for t in [format!("1{c}a"), format!("a{c}1"), format!("1{c}1")] {
+            assert_eq!(kinds(&t), [K::UnusualCharacters], "{t:?}");
+        }
+    }
+}
+
+#[test]
+fn superscripts_extending_a_number_are_flagged() {
+    assert_eq!(
+        kinds("ph 98450\u{B9}\u{B2}\u{B3}\u{2074}\u{2075}"),
+        [K::UnusualCharacters]
+    );
+    assert_eq!(kinds("m\u{B2}5"), [K::UnusualCharacters]);
 }
 
 #[test]

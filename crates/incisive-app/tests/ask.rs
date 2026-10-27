@@ -306,7 +306,8 @@ async fn hidden_characters_blocked_before_gate() {
     assert_eq!(
         b["message"],
         "Incisive found details that could identify a patient. Please remove them and resend \
-         your question. Please retype the question without copy-pasted special characters."
+         your question. Please retype the question without copy-pasted special characters \
+         (use plain hyphens, colons and spaces)."
     );
     let rows = audit_for(&pool, u.id).await;
     assert_eq!(events(&rows), ["deid_blocked"]);
