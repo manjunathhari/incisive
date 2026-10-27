@@ -66,25 +66,36 @@ impl GateDecision {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the gate could not decide. Never carries question text.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateError {
     /// The classifier could not be reached or refused the request.
-    Unavailable,
-    /// The classifier answered, but not in the strict format we require.
-    BadResponse,
+    /// `maybe_billed` is false for an HTTP error status (Anthropic does not
+    /// bill failed requests) or a connection that never opened, and true when
+    /// the request may have been processed: a timeout or other transport error
+    /// after sending, or a success status whose body could not be decoded.
+    Unavailable { maybe_billed: bool },
+    /// The classifier answered (and was billed for `usage`), but not in the
+    /// strict format we require.
+    BadResponse { model: String, usage: Usage },
 }
+
+pub const GATE_ERROR_MESSAGE: &str =
+    "I couldn't check this question just now. Please try again in a moment.";
 
 impl GateError {
     pub fn user_message(&self) -> &'static str {
-        "I couldn't check this question just now. Please try again in a moment."
+        GATE_ERROR_MESSAGE
     }
 }
 
 impl std::fmt::Display for GateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GateError::Unavailable => f.write_str("gate classifier unavailable"),
-            GateError::BadResponse => f.write_str("gate classifier returned an unusable answer"),
+            GateError::Unavailable { .. } => f.write_str("gate classifier unavailable"),
+            GateError::BadResponse { .. } => {
+                f.write_str("gate classifier returned an unusable answer")
+            }
         }
     }
 }
@@ -100,8 +111,8 @@ impl GateError {
     /// Fixed kind for the audit log.
     pub fn kind(&self) -> &'static str {
         match self {
-            GateError::Unavailable => "unavailable",
-            GateError::BadResponse => "bad_response",
+            GateError::Unavailable { .. } => "unavailable",
+            GateError::BadResponse { .. } => "bad_response",
         }
     }
 }
@@ -113,7 +124,9 @@ pub struct OfflineClassifier;
 #[async_trait]
 impl Classifier for OfflineClassifier {
     async fn classify(&self, _question: &str) -> Result<GateDecision, GateError> {
-        Err(GateError::Unavailable)
+        Err(GateError::Unavailable {
+            maybe_billed: false,
+        })
     }
 }
 
@@ -477,17 +490,23 @@ struct RawVerdict {
 }
 
 /// Accept one JSON object, optionally wrapped in a single code fence.
-fn parse_verdict(text: &str) -> Result<RawVerdict, GateError> {
+fn parse_verdict(text: &str) -> Option<RawVerdict> {
     let mut body = text.trim();
     if let Some(rest) = body.strip_prefix("```") {
         let rest = rest.strip_prefix("json").unwrap_or(rest);
-        body = rest
-            .trim()
-            .strip_suffix("```")
-            .ok_or(GateError::BadResponse)?
-            .trim();
+        body = rest.trim().strip_suffix("```")?.trim();
     }
-    serde_json::from_str(body).map_err(|_| GateError::BadResponse)
+    serde_json::from_str(body).ok()
+}
+
+/// Whether a failed call may still have been billed. See [`GateError::Unavailable`].
+fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
+    use claude_client::ClaudeError::*;
+    match e {
+        Api { .. } | RateLimited { .. } | Overloaded => false,
+        Decode { status, .. } => (200..300).contains(status),
+        Transport(t) => !t.is_connect(),
+    }
 }
 
 #[async_trait]
@@ -515,7 +534,9 @@ impl Classifier for ClaudeClassifier {
                 http_status = ?error_status(&e),
                 "gate classifier call failed"
             );
-            GateError::Unavailable
+            GateError::Unavailable {
+                maybe_billed: maybe_billed(&e),
+            }
         })?;
         let text: String = resp
             .content
@@ -525,9 +546,14 @@ impl Classifier for ClaudeClassifier {
                 _ => None,
             })
             .collect();
-        let raw = parse_verdict(&text).inspect_err(|_| {
+        let Some(raw) = parse_verdict(&text) else {
             tracing::warn!("gate classifier returned an unparseable answer");
-        })?;
+            // The call was billed: keep the usage so the caller can charge it.
+            return Err(GateError::BadResponse {
+                model: self.model.clone(),
+                usage: resp.usage,
+            });
+        };
         Ok(GateDecision {
             verdict: raw.verdict,
             reason: sanitise_reason(&raw.reason),

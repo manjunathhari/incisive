@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use claude_client::{Client, RetryPolicy};
+use claude_client::{Client, RetryPolicy, Usage};
 use incisive_app::gate::{
     Classifier, ClaudeClassifier, GATE_POLICY, GateDecision, GateError, Verdict, check,
     rule_prefilter,
@@ -271,6 +271,104 @@ fn classifier(server: &MockServer) -> ClaudeClassifier {
     ClaudeClassifier::new(fast_client(server), "gate-test-model")
 }
 
+const NOT_BILLED: GateError = GateError::Unavailable {
+    maybe_billed: false,
+};
+const MAYBE_BILLED: GateError = GateError::Unavailable { maybe_billed: true };
+
+fn bad_response(input_tokens: u32, output_tokens: u32) -> GateError {
+    GateError::BadResponse {
+        model: "gate-test-model".into(),
+        usage: Usage {
+            input_tokens,
+            output_tokens,
+        },
+    }
+}
+
+#[tokio::test]
+async fn truncated_answer_is_bad_response_with_usage() {
+    // A long reason hits max_tokens: the answer is cut off but still billed.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "content": [{"type": "text", "text": "{\"verdict\":\"medical\",\"reason\":\"Because it is a long"}],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 700, "output_tokens": 150}
+        })))
+        .mount(&server)
+        .await;
+    let err = classifier(&server).classify("q").await.unwrap_err();
+    assert_eq!(err, bad_response(700, 150));
+}
+
+#[tokio::test]
+async fn timeout_is_unavailable_and_maybe_billed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            reply(r#"{"verdict":"medical","reason":"ok"}"#).set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let client = Client::with_base_url(
+        SecretString::from("sk-test".to_string()),
+        server.uri().parse().unwrap(),
+    )
+    .with_request_timeout(Duration::from_millis(100))
+    .with_retry_policy(RetryPolicy {
+        max_attempts: 1,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+    });
+    let c = ClaudeClassifier::new(Arc::new(client), "gate-test-model");
+    assert_eq!(c.classify("q").await.unwrap_err(), MAYBE_BILLED);
+}
+
+#[tokio::test]
+async fn connection_refused_is_not_billed() {
+    // Nothing listens on port 1: the request never left.
+    let client = Client::with_base_url(
+        SecretString::from("sk-test".to_string()),
+        "http://127.0.0.1:1".parse().unwrap(),
+    )
+    .with_retry_policy(RetryPolicy {
+        max_attempts: 1,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+    });
+    let c = ClaudeClassifier::new(Arc::new(client), "gate-test-model");
+    assert_eq!(c.classify("q").await.unwrap_err(), NOT_BILLED);
+}
+
+#[tokio::test]
+async fn undecodable_success_is_maybe_billed_and_error_status_is_not() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        classifier(&server).classify("q").await.unwrap_err(),
+        MAYBE_BILLED
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        classifier(&server).classify("q").await.unwrap_err(),
+        NOT_BILLED
+    );
+}
+
 #[tokio::test]
 async fn parses_medical() {
     let server = MockServer::start().await;
@@ -323,7 +421,7 @@ async fn unknown_label_is_bad_response() {
     let server = MockServer::start().await;
     serve_text(&server, r#"{"verdict":"maybe","reason":"Hmm."}"#).await;
     let err = classifier(&server).classify("q").await.unwrap_err();
-    assert_eq!(err, GateError::BadResponse);
+    assert_eq!(err, bad_response(40, 12));
 }
 
 #[tokio::test]
@@ -343,7 +441,7 @@ async fn prose_answer_is_bad_response() {
         let server = MockServer::start().await;
         serve_text(&server, text).await;
         let err = classifier(&server).classify("q").await.unwrap_err();
-        assert_eq!(err, GateError::BadResponse, "{text:?}");
+        assert_eq!(err, bad_response(40, 12), "{text:?}");
     }
 }
 
@@ -359,7 +457,7 @@ async fn no_text_block_is_bad_response() {
         .mount(&server)
         .await;
     let err = classifier(&server).classify("q").await.unwrap_err();
-    assert_eq!(err, GateError::BadResponse);
+    assert_eq!(err, bad_response(1, 0));
 }
 
 #[tokio::test]
@@ -374,7 +472,8 @@ async fn overloaded_is_unavailable() {
         .mount(&server)
         .await;
     let err = classifier(&server).classify("q").await.unwrap_err();
-    assert_eq!(err, GateError::Unavailable);
+    // Anthropic does not bill failed requests.
+    assert_eq!(err, NOT_BILLED);
 }
 
 #[tokio::test]
@@ -471,17 +570,13 @@ async fn check_falls_through_to_model_when_rules_pass() {
 
 #[tokio::test]
 async fn gate_fails_closed() {
-    for err in [GateError::Unavailable, GateError::BadResponse] {
-        let r = check("hello", &Fake(Err(err))).await;
+    for err in [NOT_BILLED, MAYBE_BILLED, bad_response(10, 150)] {
+        let r = check("hello", &Fake(Err(err.clone()))).await;
         assert_eq!(r.unwrap_err(), err);
     }
     // Rules never turn an error into Medical either: a rule-decided question
     // does not consult the classifier, and an undecided one propagates.
-    assert!(
-        check("hello", &Fake(Err(GateError::Unavailable)))
-            .await
-            .is_err()
-    );
+    assert!(check("hello", &Fake(Err(NOT_BILLED))).await.is_err());
 }
 
 // ---------- user-facing messages ----------
@@ -508,14 +603,16 @@ fn user_messages() {
             .as_deref(),
         Some("Could you say a little more about the clinical question? Which operation?")
     );
-    assert_eq!(
-        GateError::Unavailable.user_message(),
-        "I couldn't check this question just now. Please try again in a moment."
-    );
-    assert_eq!(
-        GateError::BadResponse.user_message(),
-        GateError::Unavailable.user_message()
-    );
+    for e in [NOT_BILLED, MAYBE_BILLED, bad_response(1, 2)] {
+        assert_eq!(
+            e.user_message(),
+            "I couldn't check this question just now. Please try again in a moment."
+        );
+    }
+    // Kinds and Display carry no question text, only fixed words.
+    assert_eq!(NOT_BILLED.kind(), "unavailable");
+    assert_eq!(MAYBE_BILLED.kind(), "unavailable");
+    assert_eq!(bad_response(1, 2).kind(), "bad_response");
 }
 
 #[test]
@@ -601,6 +698,6 @@ async fn client_errors_are_unavailable_and_not_retried() {
             .mount(&server)
             .await;
         let err = classifier(&server).classify("q").await.unwrap_err();
-        assert_eq!(err, GateError::Unavailable, "{status}");
+        assert_eq!(err, NOT_BILLED, "{status}");
     }
 }

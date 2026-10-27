@@ -17,19 +17,22 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use claude_client::Usage;
+use claude_client::{Client, RetryPolicy, Usage};
 use http_body_util::BodyExt;
-use incisive_app::ask::{AskFailure, AskOutcome, run_ask};
+use incisive_app::ask::{AskFailure, AskOutcome, GATE_ESTIMATE, run_ask};
 use incisive_app::db::{lazy_pool, migrate};
-use incisive_app::gate::{Classifier, GateDecision, GateError, Verdict};
+use incisive_app::gate::{Classifier, ClaudeClassifier, GateDecision, GateError, Verdict};
 use incisive_app::identity::{IapVerifier, JwkSource, Role, User};
 use incisive_app::server::{AppState, api_routes, build_router};
-use incisive_app::spend::{CapsConfig, ModelPrice, Prices};
+use incisive_app::spend::{CapsConfig, ModelPrice, Prices, cost_paise};
 use leptos::config::LeptosOptions;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use std::time::Duration;
 use tower::ServiceExt;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const GATE_MODEL: &str = "fake-gate-model";
 /// Needs the model: two generic words only, no specific terms, no rule match.
@@ -381,10 +384,14 @@ async fn gate_failure_fails_closed() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    for (tag, err, kind) in [
-        ("gatefail-u", GateError::Unavailable, "unavailable"),
-        ("gatefail-b", GateError::BadResponse, "bad_response"),
-    ] {
+    // Not billed (an HTTP error status): settled to zero, no `charged` entry.
+    for (tag, err, kind) in [(
+        "gatefail-u",
+        GateError::Unavailable {
+            maybe_billed: false,
+        },
+        "unavailable",
+    )] {
         let u = make_user(&pool, tag, Role::Surgeon, 30_000).await;
         let app = api_routes(state_with(pool.clone(), Fixed::error(err), true));
         let (s, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
@@ -402,6 +409,156 @@ async fn gate_failure_fails_closed() {
         assert_eq!(spend.len(), 1, "{spend:?}");
         assert_eq!((spend[0].0.as_str(), spend[0].4), ("charge", 0));
     }
+}
+
+fn bad_response(model: &str, input_tokens: u32, output_tokens: u32) -> GateError {
+    GateError::BadResponse {
+        model: model.to_string(),
+        usage: Usage {
+            input_tokens,
+            output_tokens,
+        },
+    }
+}
+
+/// The priced gate estimate for `question`, as `run_ask` reserves it.
+fn estimate_paise(question: &str) -> i64 {
+    let _ = question;
+    cost_paise(&prices(), 88.0, GATE_MODEL, &GATE_ESTIMATE).unwrap()
+}
+
+#[tokio::test]
+async fn bad_gate_answer_is_charged_at_real_cost() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "badresp", Role::Surgeon, 30_000).await;
+    let gate = Fixed::error(bad_response(GATE_MODEL, 812, 150));
+    let app = api_routes(state_with(pool.clone(), gate, true));
+    let (s, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["status"], "gate_unavailable", "{b}");
+    assert_eq!(
+        b["message"],
+        "I couldn't check this question just now. Please try again in a moment."
+    );
+    let rows = audit_for(&pool, u.id).await;
+    assert_eq!(events(&rows), ["charged", "gate_failed"]);
+    one_request_id(&rows);
+    // (812 * 1 + 150 * 5) / 1e6 USD * 88 * 100 = 13.7456 paise -> 14.
+    assert_eq!(
+        rows[0].2,
+        json!({"model": GATE_MODEL, "input_tokens": 812, "output_tokens": 150, "paise": 14})
+    );
+    assert_eq!(rows[1].2, json!({"error_kind": "bad_response"}));
+    assert_eq!(
+        spend_for(&pool, u.id).await,
+        vec![(
+            "charge".to_string(),
+            Some(GATE_MODEL.to_string()),
+            Some(812),
+            Some(150),
+            14
+        )]
+    );
+}
+
+#[tokio::test]
+async fn bad_gate_answer_with_unpriced_model_charges_the_estimate() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "badresp-unpriced", Role::Surgeon, 30_000).await;
+    let gate = Fixed::error(bad_response("no-price-model", 812, 150));
+    let app = api_routes(state_with(pool.clone(), gate, true));
+    let (_, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
+    assert_eq!(b["status"], "gate_unavailable", "{b}");
+    let rows = audit_for(&pool, u.id).await;
+    assert_eq!(events(&rows), ["charged", "gate_failed"]);
+    let est = estimate_paise(MODEL_QUESTION);
+    assert!(est > 0);
+    assert_eq!(rows[0].2["paise"], est);
+    let spend = spend_for(&pool, u.id).await;
+    assert_eq!(spend.len(), 1, "{spend:?}");
+    assert_eq!((spend[0].0.as_str(), spend[0].4), ("charge", est));
+}
+
+fn wiremock_gate(server: &MockServer, timeout: Duration) -> Arc<dyn Classifier> {
+    let client = Client::with_base_url(
+        SecretString::from("sk-test".to_string()),
+        server.uri().parse().unwrap(),
+    )
+    .with_request_timeout(timeout)
+    .with_retry_policy(RetryPolicy {
+        max_attempts: 3,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+    });
+    Arc::new(ClaudeClassifier::new(Arc::new(client), GATE_MODEL))
+}
+
+#[tokio::test]
+async fn gate_timeout_settles_the_estimate() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "timeout", Role::Surgeon, 30_000).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+        .mount(&server)
+        .await;
+    let gate = wiremock_gate(&server, Duration::from_millis(100));
+    let app = api_routes(state_with(pool.clone(), gate, true));
+    let (_, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
+    assert_eq!(b["status"], "gate_unavailable", "{b}");
+    let rows = audit_for(&pool, u.id).await;
+    assert_eq!(events(&rows), ["charged", "gate_failed"]);
+    let est = estimate_paise(MODEL_QUESTION);
+    assert_eq!(
+        rows[0].2,
+        json!({"model": GATE_MODEL, "input_tokens": null, "output_tokens": null, "paise": est})
+    );
+    assert_eq!(rows[1].2, json!({"error_kind": "unavailable"}));
+    assert_eq!(
+        spend_for(&pool, u.id).await,
+        vec![(
+            "charge".to_string(),
+            Some(GATE_MODEL.to_string()),
+            None,
+            None,
+            est
+        )]
+    );
+}
+
+#[tokio::test]
+async fn gate_overloaded_settles_zero() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "overloaded", Role::Surgeon, 30_000).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(529).set_body_json(json!({
+            "type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}
+        })))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let gate = wiremock_gate(&server, Duration::from_secs(30));
+    let app = api_routes(state_with(pool.clone(), gate, true));
+    let (_, b) = call(app, ask_req(&u.email, MODEL_QUESTION)).await;
+    assert_eq!(b["status"], "gate_unavailable", "{b}");
+    let rows = audit_for(&pool, u.id).await;
+    assert_eq!(events(&rows), ["gate_failed"]);
+    assert_eq!(rows[0].2, json!({"error_kind": "unavailable"}));
+    assert_eq!(
+        spend_for(&pool, u.id).await,
+        vec![("charge".to_string(), None, None, None, 0)]
+    );
 }
 
 #[tokio::test]
@@ -512,7 +669,7 @@ async fn question_text_never_persisted() {
             format!("{MODEL_QUESTION} {marker}"),
         ),
         (
-            Fixed::error(GateError::BadResponse),
+            Fixed::error(bad_response(GATE_MODEL, 812, 150)),
             format!("{MODEL_QUESTION} {marker}"),
         ),
         (
@@ -543,8 +700,9 @@ async fn question_text_never_persisted() {
             .await
             .unwrap();
     assert_eq!((audit_hits, spend_hits), (0, 0));
-    // accepted by model 3, refused by model 2, gate error 1, accepted by rule 2, blocked 1.
-    assert_eq!(audit_for(&pool, u.id).await.len(), 3 + 2 + 1 + 2 + 1);
+    // accepted by model 3, refused by model 2, bad gate answer 2 (charged +
+    // gate_failed), accepted by rule 2, blocked 1.
+    assert_eq!(audit_for(&pool, u.id).await.len(), 3 + 2 + 2 + 2 + 1);
 }
 
 // ---------- input limits ----------

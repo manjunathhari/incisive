@@ -133,7 +133,7 @@ mod server {
     use super::*;
     use crate::audit::{self, ChainStatus, Event};
     use crate::deid;
-    use crate::gate::{self, Verdict};
+    use crate::gate::{self, GateError, Verdict};
     use crate::identity::{CurrentUser, IdentityRejection, Role, User};
     use crate::server::AppState;
     use crate::spend::{self, CapCheck, SpendError};
@@ -185,16 +185,6 @@ mod server {
             }
         }
         message
-    }
-
-    /// Best effort: turn an open reservation into a zero charge.
-    async fn release(state: &AppState, user_id: i64, request_id: Uuid) {
-        if spend::settle(&state.pool, user_id, request_id, None, None, 0)
-            .await
-            .is_err()
-        {
-            tracing::error!(%request_id, "could not release spend reservation");
-        }
     }
 
     /// The whole pipeline after identity. Never returns `Accepted` unless every
@@ -269,7 +259,7 @@ mod server {
                 )
                 .await?;
                 return Ok(AskOutcome::GateUnavailable {
-                    message: gate::GateError::Unavailable.user_message().to_string(),
+                    message: gate::GATE_ERROR_MESSAGE.to_string(),
                 });
             }
         };
@@ -307,6 +297,44 @@ mod server {
         let decision = match gate::check(question, state.gate.as_ref()).await {
             Ok(d) => d,
             Err(e) => {
+                // What the failed call may have cost (ruling R-F2): the real usage
+                // of a billed but unusable answer; the estimate when the request
+                // may have been processed; zero for an HTTP error status.
+                let (model, usage, paise) = match &e {
+                    GateError::BadResponse { model, usage } => {
+                        let paise = spend::cost_paise(&state.prices, state.usd_inr, model, usage)
+                            .unwrap_or_else(|_| {
+                                tracing::warn!(%request_id, "gate usage could not be priced; charging the estimate");
+                                estimate
+                            });
+                        (Some(model.as_str()), Some(usage), paise)
+                    }
+                    GateError::Unavailable { maybe_billed: true } => {
+                        (Some(state.gate_model.as_str()), None, estimate)
+                    }
+                    GateError::Unavailable {
+                        maybe_billed: false,
+                    } => (None, None, 0),
+                };
+                let settled = spend::settle(&state.pool, user.id, request_id, model, usage, paise)
+                    .await
+                    .map_err(|_| {
+                        tracing::error!(%request_id, "spend settle failed");
+                        AskFailure::Record
+                    });
+                // Audit a charge only when one was booked.
+                let charged = if settled.is_ok() && paise > 0 {
+                    record(
+                        state,
+                        request_id,
+                        uid,
+                        Event::Charged,
+                        audit::charged_detail(model, usage, paise),
+                    )
+                    .await
+                } else {
+                    Ok(())
+                };
                 let logged = record(
                     state,
                     request_id,
@@ -315,7 +343,8 @@ mod server {
                     audit::gate_failed_detail(e.kind()),
                 )
                 .await;
-                release(state, user.id, request_id).await;
+                settled?;
+                charged?;
                 logged?;
                 return Ok(AskOutcome::GateUnavailable {
                     message: e.user_message().to_string(),

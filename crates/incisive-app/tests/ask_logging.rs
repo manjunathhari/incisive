@@ -181,7 +181,13 @@ async fn question_text_never_reaches_tracing() {
         (
             state(
                 pool.clone(),
-                Arc::new(Fake(Err(GateError::BadResponse))),
+                Arc::new(Fake(Err(GateError::BadResponse {
+                    model: PRICED.to_string(),
+                    usage: claude_client::Usage {
+                        input_tokens: 10,
+                        output_tokens: 150,
+                    },
+                }))),
                 PRICED,
             ),
             q(MODEL_QUESTION),
