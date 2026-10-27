@@ -1,8 +1,12 @@
 pub mod app;
 #[cfg(feature = "ssr")]
+pub mod config;
+#[cfg(feature = "ssr")]
 pub mod db;
 #[cfg(feature = "ssr")]
 pub mod health;
+#[cfg(feature = "ssr")]
+pub mod identity;
 #[cfg(feature = "ssr")]
 pub mod server;
 

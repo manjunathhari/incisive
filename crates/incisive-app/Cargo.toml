@@ -24,6 +24,10 @@ serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
+url = { version = "2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
@@ -34,6 +38,8 @@ serde_json = "1"
 async-trait = "0.1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+base64 = "0.22"
 
 [features]
 default = ["ssr"]
@@ -46,6 +52,10 @@ ssr = [
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:sqlx",
+    "dep:serde",
+    "dep:jsonwebtoken",
+    "dep:reqwest",
+    "dep:url",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",

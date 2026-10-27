@@ -1,10 +1,10 @@
-mod config;
-
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 use incisive_app::{
+    config::Config,
     db::{PgReadiness, lazy_pool, migrate_until_done},
+    identity::{IAP_JWK_URL, IapVerifier, IdentityState, JwkSource, ensure_owner_until_done},
     server::build_router,
 };
 use leptos::config::get_configuration;
@@ -19,7 +19,7 @@ async fn main() {
         )
         .init();
 
-    let config = match config::Config::from_env() {
+    let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -41,15 +41,26 @@ async fn main() {
         }
     };
     let migrated = Arc::new(AtomicBool::new(false));
-    tokio::spawn(migrate_until_done(
-        pool.clone(),
-        migrated.clone(),
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    ));
+    let (base, cap) = (Duration::from_secs(1), Duration::from_secs(30));
+    // Migrations first, then the owner row (which needs the users table).
+    tokio::spawn({
+        let (pool, migrated) = (pool.clone(), migrated.clone());
+        let (owner_email,) = (config.owner_email.clone(),);
+        async move {
+            migrate_until_done(pool.clone(), migrated, base, cap).await;
+            ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
+        }
+    });
+
+    let verifier = IapVerifier::new(
+        config.iap_audience.clone(),
+        JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
+    );
+    let identity = IdentityState::new(verifier, pool.clone(), config.app_env);
 
     let app = build_router(
         Arc::new(PgReadiness::new(pool, migrated)),
+        identity,
         leptos_options.clone(),
     );
     let listener = tokio::net::TcpListener::bind(leptos_options.site_addr)

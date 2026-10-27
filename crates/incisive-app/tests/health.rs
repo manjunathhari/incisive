@@ -13,6 +13,19 @@ use incisive_app::server::build_router;
 use leptos::config::LeptosOptions;
 use tower::ServiceExt;
 
+fn identity_state() -> incisive_app::identity::IdentityState {
+    use incisive_app::identity::{IapVerifier, IdentityState, JwkSource};
+    let pool = incisive_app::db::lazy_pool(&secrecy::SecretString::from(
+        "postgres://u:p@127.0.0.1:1/none".to_string(),
+    ))
+    .unwrap();
+    let verifier = IapVerifier::new(
+        "aud".into(),
+        JwkSource::Static(serde_json::from_str(r#"{"keys":[]}"#).unwrap()),
+    );
+    IdentityState::new(verifier, pool, incisive_app::config::AppEnv::Prod)
+}
+
 struct AlwaysUp;
 struct AlwaysDown;
 struct Hangs;
@@ -102,7 +115,11 @@ async fn readyz_times_out_as_down() {
 #[tokio::test]
 async fn home_page_shows_name_and_tagline() {
     let opts = LeptosOptions::builder().output_name("incisive-app").build();
-    let (status, body) = get(build_router(Arc::new(AlwaysUp), opts), "/").await;
+    let (status, body) = get(
+        build_router(Arc::new(AlwaysUp), identity_state(), opts),
+        "/",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Incisive"));
     assert!(body.contains("Cut to the evidence."));

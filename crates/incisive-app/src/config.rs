@@ -17,6 +17,10 @@ pub struct Config {
     pub database_url: SecretString,
     pub app_env: AppEnv,
     pub port: u16,
+    /// IAP JWT audience. Required in prod; empty in dev when unset.
+    pub iap_audience: String,
+    /// Lower-cased email of the owner, bootstrapped at startup.
+    pub owner_email: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,12 +80,21 @@ impl Config {
             })?,
         };
 
+        let iap_audience = match (app_env, lookup("IAP_AUDIENCE")) {
+            (_, Some(a)) => a,
+            (AppEnv::Dev, None) => String::new(),
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("IAP_AUDIENCE")),
+        };
+        let owner_email = required("OWNER_EMAIL")?.to_lowercase();
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
             database_url,
             app_env,
             port,
+            iap_audience,
+            owner_email,
         })
     }
 }
@@ -106,6 +119,7 @@ mod tests {
             ("ANTHROPIC_API_KEY", "sk-test-123"),
             ("CLAUDE_MODEL", "claude-test"),
             ("DATABASE_URL", DB),
+            ("OWNER_EMAIL", "Owner@Example.com"),
         ]
     }
 
@@ -142,6 +156,31 @@ mod tests {
         let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { var: "PORT", .. }));
         assert!(err.to_string().starts_with("invalid value for PORT: "));
+    }
+
+    #[test]
+    fn owner_email_required_and_lowercased() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.owner_email, "owner@example.com");
+        let pairs: Vec<_> = full()
+            .into_iter()
+            .filter(|(k, _)| *k != "OWNER_EMAIL")
+            .collect();
+        let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("OWNER_EMAIL"));
+    }
+
+    #[test]
+    fn iap_audience_required_in_prod_optional_in_dev() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.iap_audience, "");
+        let mut prod = full();
+        prod.push(("APP_ENV", "prod"));
+        let err = Config::from_lookup(lookup(&prod)).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("IAP_AUDIENCE"));
+        prod.push(("IAP_AUDIENCE", "/projects/1/apps/2"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(c.iap_audience, "/projects/1/apps/2");
     }
 
     #[test]
