@@ -838,28 +838,29 @@ async fn prod_mode_ignores_dev_header() {
         return;
     };
     let u = make_user(&pool, "prod", Role::Owner, 30_000).await;
-    let count = || async {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM incisive.audit WHERE event = 'identity_rejected'",
-        )
+    // A rejection has no user and a fresh request id, so scope the check to
+    // rows appended after this point (the log is shared with other tests).
+    let before: i64 = sqlx::query_scalar("SELECT COALESCE(max(seq), 0) FROM incisive.audit")
         .fetch_one(&pool)
         .await
-        .unwrap()
-    };
-    let before = count().await;
+        .unwrap();
     let app = api_routes(state_with(pool.clone(), Arc::new(MustNotCall), false));
     let (s, b) = call(app, ask_req(&u.email, RULE_QUESTION)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert_eq!(b["error"], "not_signed_in");
     assert!(audit_for(&pool, u.id).await.is_empty());
-    assert!(count().await > before, "identity rejection is audited");
-    let latest: Value = sqlx::query_scalar(
-        "SELECT detail FROM incisive.audit WHERE event = 'identity_rejected' ORDER BY seq DESC LIMIT 1",
+    let mine: Vec<(Option<i64>, Value)> = sqlx::query_as(
+        "SELECT user_id, detail FROM incisive.audit \
+         WHERE event = 'identity_rejected' AND seq > $1 ORDER BY seq",
     )
-    .fetch_one(&pool)
+    .bind(before)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(latest, json!({"reason": "not_signed_in"}));
+    assert!(
+        mine.contains(&(None, json!({"reason": "not_signed_in"}))),
+        "identity rejection is audited: {mine:?}"
+    );
 
     // /api/me and /api/activity ignore it too.
     for path in ["/api/me", "/api/activity"] {
@@ -872,33 +873,48 @@ async fn prod_mode_ignores_dev_header() {
     }
 }
 
+/// The IST calendar day containing now.
+fn ist_today() -> chrono::NaiveDate {
+    (chrono::Utc::now() + chrono::Duration::minutes(5 * 60 + 30)).date_naive()
+}
+
 #[tokio::test]
 async fn me_reports_name_role_and_spend() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    let u = make_user(&pool, "me", Role::Surgeon, 30_000).await;
-    let gate = Fixed::verdict(Verdict::Medical, "ok");
-    call(
-        api_routes(state_with(pool.clone(), gate, true)),
-        ask_req(&u.email, MODEL_QUESTION),
-    )
-    .await;
-    let req = Request::get("/api/me")
-        .header("x-dev-user-email", &u.email)
-        .body(Body::empty())
-        .unwrap();
-    let (s, b) = call(
-        api_routes(state_with(pool, Arc::new(MustNotCall), true)),
-        req,
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(
-        b,
-        json!({"display_name": "Dr me", "role": "surgeon",
-               "today_paise": 9, "daily_cap_paise": 30_000})
-    );
+    // `today_paise` is for the current IST day, read from the clock. If the run
+    // straddles IST midnight (18:30 UTC), retry once with a fresh user.
+    for attempt in 0.. {
+        let day = ist_today();
+        let u = make_user(&pool, "me", Role::Surgeon, 30_000).await;
+        let gate = Fixed::verdict(Verdict::Medical, "ok");
+        call(
+            api_routes(state_with(pool.clone(), gate, true)),
+            ask_req(&u.email, MODEL_QUESTION),
+        )
+        .await;
+        let req = Request::get("/api/me")
+            .header("x-dev-user-email", &u.email)
+            .body(Body::empty())
+            .unwrap();
+        let (s, b) = call(
+            api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true)),
+            req,
+        )
+        .await;
+        if ist_today() != day {
+            assert_eq!(attempt, 0, "IST day changed twice during one test");
+            continue;
+        }
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            b,
+            json!({"display_name": "Dr me", "role": "surgeon",
+                   "today_paise": 9, "daily_cap_paise": 30_000})
+        );
+        break;
+    }
 }
 
 #[tokio::test]
@@ -931,10 +947,35 @@ async fn activity_is_owner_only() {
     assert_eq!(s, StatusCode::OK, "{b}");
     let entries = b["entries"].as_array().unwrap();
     assert!(entries.len() <= 50 && !entries.is_empty());
+    // Newest first, consecutive sequence numbers.
+    let seqs: Vec<i64> = entries.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] > w[1]), "{seqs:?}");
+
+    // Other tests append to the shared log concurrently, so the owner's entry
+    // may already have dropped out of the newest 50. Find it by its seq with
+    // the largest window that still reaches back to it.
+    let my_seq: i64 = sqlx::query_scalar(
+        "SELECT seq FROM incisive.audit WHERE user_id = $1 ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(owner.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (_, b) = call(
+        app(),
+        Request::get("/api/activity?limit=500")
+            .header("x-dev-user-email", &owner.email)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let entries = b["entries"].as_array().unwrap();
+    assert!(entries.len() <= 500);
     let mine = entries
         .iter()
-        .find(|e| e["user_email"] == owner.email.as_str())
-        .expect("owner's own entry is listed");
+        .find(|e| e["seq"] == my_seq)
+        .unwrap_or_else(|| panic!("seq {my_seq} not in the newest 500 entries"));
+    assert_eq!(mine["user_email"], owner.email.as_str());
     assert_eq!(mine["event"], "gate_decided");
     assert!(
         mine["time_ist"].as_str().unwrap().ends_with("IST"),

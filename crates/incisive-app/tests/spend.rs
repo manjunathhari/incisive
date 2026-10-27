@@ -352,7 +352,15 @@ async fn settle_replaces_reservation() {
             Some(150)
         )]
     );
-    let after = totals_at(&pool, u.id, now).await.unwrap();
+    // The charge row takes the database clock; read the totals for its own
+    // instant so a run straddling IST midnight still compares like with like.
+    let charged_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT at FROM incisive.spend WHERE request_id = $1")
+            .bind(rid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let after = totals_at(&pool, u.id, charged_at).await.unwrap();
     assert_eq!(after.today_paise, before.today_paise - 500 + 16);
 
     // No model call happened: zero-paise charge, no model or tokens.
@@ -477,24 +485,42 @@ async fn totals_cover_reservations_and_charges_for_current_periods() {
     assert_eq!((t.today_paise, t.month_paise), (200, 500));
 }
 
+/// The IST calendar day containing `t`.
+fn ist_day(t: chrono::DateTime<Utc>) -> chrono::NaiveDate {
+    (t + chrono::Duration::minutes(5 * 60 + 30)).date_naive()
+}
+
 #[tokio::test]
 async fn totals_now_wrapper_sees_fresh_reservation() {
     let Some(pool) = test_pool().await else {
         return;
     };
     let u = make_user(&pool, "totals-now", 1_000_000, None).await;
-    sqlx::query("DELETE FROM incisive.spend WHERE user_id = $1")
-        .bind(u.id)
-        .execute(&pool)
-        .await
-        .unwrap();
     let caps = big_global();
-    let out = incisive_app::spend::reserve(&pool, &u, &caps, 123, Uuid::new_v4(), "ask")
-        .await
-        .unwrap();
-    assert!(is_ok(&out));
-    let t = incisive_app::spend::totals(&pool, u.id).await.unwrap();
-    assert_eq!((t.today_paise, t.month_paise), (123, 123));
+    // The wrappers read the clock themselves, so a run that straddles IST
+    // midnight (18:30 UTC) would see the reservation on "yesterday". Retry
+    // once in that case; two straddles in a row are impossible.
+    for attempt in 0.. {
+        sqlx::query("DELETE FROM incisive.spend WHERE user_id = $1")
+            .bind(u.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let day = ist_day(Utc::now());
+        let out = incisive_app::spend::reserve(&pool, &u, &caps, 123, Uuid::new_v4(), "ask")
+            .await
+            .unwrap();
+        assert!(is_ok(&out));
+        let t = incisive_app::spend::totals(&pool, u.id).await.unwrap();
+        if ist_day(Utc::now()) != day {
+            assert_eq!(attempt, 0, "IST day changed twice during one test");
+            continue;
+        }
+        assert_eq!(t.today_paise, 123);
+        // The month changes with the day only on the 1st; same reasoning.
+        assert_eq!(t.month_paise, 123);
+        break;
+    }
     sqlx::query("DELETE FROM incisive.spend WHERE user_id = $1")
         .bind(u.id)
         .execute(&pool)

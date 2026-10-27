@@ -14,7 +14,7 @@ use incisive_app::config::AppEnv;
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{
-    IapVerifier, IdentityError, JwkSource, Role, ensure_owner, find_user,
+    IapVerifier, IdentityError, JwkFetch, JwkSource, Role, ensure_owner, find_user,
 };
 use incisive_app::server::{AppState, api_routes};
 use incisive_app::spend::{CapsConfig, Prices};
@@ -402,9 +402,45 @@ async fn counting_listener() -> (
     (addr, n)
 }
 
+/// Fails every fetch and counts the attempts. No sockets: with Tokio's paused
+/// clock, real I/O lets the runtime auto-advance time (past reqwest's 5 s
+/// timeout and the 10 s retry interval), which made this test flaky.
+struct FailingFetch(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl JwkFetch for FailingFetch {
+    async fn fetch(&self) -> Result<JwkSet, ()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(())
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn empty_cache_retries_after_short_interval() {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fetch = std::sync::Arc::new(FailingFetch(AtomicUsize::new(0)));
+    let v = IapVerifier::new(AUD.to_string(), JwkSource::Fetch(fetch.clone()));
+    let hits = || fetch.0.load(Ordering::SeqCst);
+    let t = good_token("a@b.com");
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits(), 1);
+    // Within the short interval: no new fetch.
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits(), 1);
+    // After it: one more attempt, long before the 5-minute throttle.
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits(), 2);
+    // And again only after another full interval.
+    tokio::time::advance(std::time::Duration::from_secs(9)).await;
+    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
+    assert_eq!(hits(), 2);
+}
+
+#[tokio::test]
+async fn remote_fetch_failure_is_keys_unavailable() {
+    // The real HTTP path (real clock): a server that closes the connection.
     let (addr, hits) = counting_listener().await;
     let v = IapVerifier::new(
         AUD.to_string(),
@@ -412,15 +448,7 @@ async fn empty_cache_retries_after_short_interval() {
     );
     let t = good_token("a@b.com");
     assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    // Within the short interval: no new fetch.
-    tokio::time::advance(std::time::Duration::from_secs(5)).await;
-    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-    // After it: one more attempt, long before the 5-minute throttle.
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
-    assert_eq!(v.verify(&t).await, Err(IdentityError::KeysUnavailable));
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

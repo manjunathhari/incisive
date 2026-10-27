@@ -551,9 +551,21 @@ async fn unknown_event_text_is_reported_broken() {
 
 #[tokio::test]
 async fn concurrent_appends_never_fork() {
-    let Some(pool) = test_pool().await else {
+    let Some(shared) = test_pool().await else {
         return;
     };
+    // Own pool: 50 appends queue on one advisory lock, so a waiting task can
+    // hold a connection for a while. The shared pool's 3 s acquire timeout
+    // made this flaky on a busy 2-CPU runner; 30 s keeps it a real
+    // concurrency test (all 50 still race) without timing out.
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&url)
+        .await
+        .expect("dedicated pool");
+    drop(shared);
     let s = Scratch::new(&pool).await;
     let mut handles = Vec::new();
     for i in 0..50i64 {

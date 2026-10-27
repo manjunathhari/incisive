@@ -174,6 +174,15 @@ pub enum JwkSource {
     Remote(Url),
     /// Fixed key set, for tests.
     Static(JwkSet),
+    /// A custom fetcher, cached and throttled exactly like `Remote`. Test seam:
+    /// lets cache timing be tested without sockets.
+    Fetch(Arc<dyn JwkFetch>),
+}
+
+/// Loads a key set. `Err(())` means "could not load"; no detail is kept.
+#[async_trait::async_trait]
+pub trait JwkFetch: Send + Sync {
+    async fn fetch(&self) -> Result<JwkSet, ()>;
 }
 
 struct KeyCache {
@@ -200,7 +209,7 @@ impl IapVerifier {
                 set: Some(set.clone()),
                 last_fetch: Some(Instant::now()),
             },
-            JwkSource::Remote(_) => KeyCache {
+            JwkSource::Remote(_) | JwkSource::Fetch(_) => KeyCache {
                 set: None,
                 last_fetch: None,
             },
@@ -249,9 +258,9 @@ impl IapVerifier {
         if let Some(jwk) = cache.set.as_ref().and_then(|s| s.find(kid)) {
             return Ok(jwk.clone());
         }
-        let JwkSource::Remote(url) = &self.source else {
+        if matches!(self.source, JwkSource::Static(_)) {
             return Err(IdentityError::Invalid("unknown key id"));
-        };
+        }
         let min_interval = if cache.set.is_some() {
             KEY_REFRESH_MIN_INTERVAL
         } else {
@@ -266,7 +275,13 @@ impl IapVerifier {
             });
         }
         cache.last_fetch = Some(Instant::now());
-        match self.fetch(url).await {
+        let fetched = match &self.source {
+            JwkSource::Remote(url) => self.fetch(url).await,
+            JwkSource::Fetch(f) => f.fetch().await,
+            // Returned above; kept so this match needs no panic path.
+            JwkSource::Static(_) => return Err(IdentityError::Invalid("unknown key id")),
+        };
+        match fetched {
             Ok(set) => cache.set = Some(set),
             Err(()) => {
                 tracing::warn!("could not fetch IAP signing keys");

@@ -30,6 +30,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Apply the migrations once, before any test binary starts, so parallel
+      # tests never race the first migration on the empty CI database. This
+      # reuses an existing test (no extra tool, no reliance on binary order);
+      # every later migrate() call is then a no-op.
+      - name: apply migrations to the CI database
+        run: cargo test -p incisive-app --test db migrations_apply_and_ready_is_true -- --exact
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       # --no-fail-fast runs every test binary; failing tests and panic lines are
       # also emitted as annotations so they are readable without the raw log.
       - name: cargo test --workspace
