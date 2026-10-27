@@ -131,6 +131,21 @@ impl Config {
             (AppEnv::Prod, None) => return Err(ConfigError::Missing("MODEL_PRICES")),
         };
 
+        // Every model the app calls must be priced, or spend cannot be recorded. In prod
+        // that is a startup error; in dev it is only a warning (see main.rs).
+        if app_env == AppEnv::Prod {
+            for (name, model) in [("GATE_MODEL", &gate_model), ("CLAUDE_MODEL", &claude_model)] {
+                if model_prices.get(model).is_none() {
+                    return Err(ConfigError::Invalid {
+                        var: "MODEL_PRICES",
+                        reason: format!(
+                            "no entry for {name} `{model}`; add it to MODEL_PRICES or change {name}"
+                        ),
+                    });
+                }
+            }
+        }
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -197,6 +212,8 @@ mod tests {
     }
 
     const DB: &str = "postgres://user:hunter2pw@host/db";
+    /// Prices for the default gate model and the `CLAUDE_MODEL` used by `full()`.
+    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-test": {"input": 3, "output": 15}}"#;
 
     fn full() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -242,7 +259,7 @@ mod tests {
         let mut prod = without("prod");
         prod.extend([
             ("IAP_AUDIENCE", "/projects/1/apps/2"),
-            ("MODEL_PRICES", r#"{"m":{"input":1,"output":5}}"#),
+            ("MODEL_PRICES", PROD_PRICES),
             ("USD_INR", "88"),
             ("GLOBAL_MONTHLY_CAP_INR", "10000"),
         ]);
@@ -307,7 +324,7 @@ mod tests {
         let err = Config::from_lookup(lookup(&prod)).unwrap_err();
         assert_eq!(err, ConfigError::Missing("IAP_AUDIENCE"));
         prod.push(("IAP_AUDIENCE", "/projects/1/apps/2"));
-        prod.push(("MODEL_PRICES", r#"{"m": {"input": 1, "output": 5}}"#));
+        prod.push(("MODEL_PRICES", PROD_PRICES));
         prod.push(("USD_INR", "90"));
         prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
@@ -346,7 +363,7 @@ mod tests {
             Config::from_lookup(lookup(&prod)).unwrap_err(),
             ConfigError::Missing("MODEL_PRICES")
         );
-        prod.push(("MODEL_PRICES", r#"{"m": {"input": 1, "output": 5}}"#));
+        prod.push(("MODEL_PRICES", PROD_PRICES));
         assert_eq!(
             Config::from_lookup(lookup(&prod)).unwrap_err(),
             ConfigError::Missing("USD_INR")
@@ -360,7 +377,62 @@ mod tests {
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.usd_inr, 90.0);
         assert_eq!(c.global_monthly_cap_paise, 500_000);
-        assert!(c.model_prices.get("claude-haiku-5-5").is_none());
+        assert!(c.model_prices.get("claude-haiku-5-5").is_some());
+    }
+
+    fn prod_with(prices: &'static str) -> Vec<(&'static str, &'static str)> {
+        let mut prod = full();
+        prod.extend([
+            ("APP_ENV", "prod"),
+            ("IAP_AUDIENCE", "/projects/1/apps/2"),
+            ("MODEL_PRICES", prices),
+            ("USD_INR", "90"),
+            ("GLOBAL_MONTHLY_CAP_INR", "5000"),
+        ]);
+        prod
+    }
+
+    #[test]
+    fn prod_requires_gate_model_priced() {
+        // CLAUDE_MODEL (`claude-test`) is priced; the default gate model is not.
+        let err = Config::from_lookup(lookup(&prod_with(
+            r#"{"claude-test": {"input": 3, "output": 15}}"#,
+        )))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "MODEL_PRICES",
+                ..
+            }
+        ));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MODEL_PRICES") && msg.contains("GATE_MODEL"),
+            "{msg}"
+        );
+        assert!(msg.contains("claude-haiku-5-5"), "{msg}");
+    }
+
+    #[test]
+    fn prod_requires_claude_model_priced() {
+        let err = Config::from_lookup(lookup(&prod_with(
+            r#"{"claude-haiku-5-5": {"input": 1, "output": 5}}"#,
+        )))
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MODEL_PRICES") && msg.contains("CLAUDE_MODEL"),
+            "{msg}"
+        );
+        assert!(msg.contains("claude-test"), "{msg}");
+    }
+
+    #[test]
+    fn dev_allows_unpriced_models() {
+        let mut pairs = full();
+        pairs.push(("MODEL_PRICES", r#"{"other": {"input": 1, "output": 5}}"#));
+        assert!(Config::from_lookup(lookup(&pairs)).is_ok());
     }
 
     #[test]

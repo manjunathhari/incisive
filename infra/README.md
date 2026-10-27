@@ -90,7 +90,8 @@ use the USD equivalent of Rs 500 (for example `--budget-amount=6USD`).
 ## 6. GitHub repository variables
 
 In GitHub: repo `manjunathhari/incisive` > Settings > Secrets and variables > Actions > **Variables**
-(variables, not secrets; none are sensitive). Create all four:
+(variables, not secrets; none are sensitive). Create these four now; the six Phase 1
+settings are in section 10 and the deploy refuses to run until they are set too:
 
 | Variable | Value |
 |---|---|
@@ -168,3 +169,83 @@ accepted questions, verdicts, models, tokens and paise; the gate's reason is sto
 only for rule decisions (static text), never for model decisions. `detail` may not
 contain floating-point numbers (rejected on append). Follow-up: the question hash is
 unsalted; an HMAC with a server secret would be stronger.
+
+## 10. Phase 1 deploy settings and colleague onboarding
+
+Six more repository variables (same place as section 6). The Deploy workflow fails
+fast, naming any that is empty, and fails if `MODEL_PRICES` is not valid JSON. The app
+also refuses to start in prod if `GATE_MODEL` or `CLAUDE_MODEL` has no entry in
+`MODEL_PRICES`.
+
+| Variable | What it is | Example shape |
+|---|---|---|
+| `IAP_AUDIENCE` | JWT audience the app checks on every request | `/projects/<PROJECT_NUMBER>/locations/asia-south1/services/incisive-app` |
+| `OWNER_EMAIL` | Your Google account; created as the owner at startup | `you@gmail.com` |
+| `GATE_MODEL` | Cheap model for the medical-only gate | `claude-haiku-5-5` |
+| `MODEL_PRICES` | USD per million tokens, per model (JSON) | see below |
+| `USD_INR` | Rupees per US dollar, used to cost each call | `92` |
+| `GLOBAL_MONTHLY_CAP_INR` | Whole-app monthly budget in whole rupees | `<about 90% of your monthly Max API credit in rupees>` |
+
+**`IAP_AUDIENCE`.** With IAP enabled directly on the Cloud Run service (section 8) it is
+`/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE>`, here
+`/projects/<PROJECT_NUMBER>/locations/asia-south1/services/incisive-app`. The project
+number is `gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)'`.
+To confirm the exact string, open Google Cloud console → Security → Identity-Aware
+Proxy, find `incisive-app`, click the three-dot menu → **Get JWT audience code**, and
+copy the value.
+
+**`MODEL_PRICES`.** One JSON object, keyed by model id. Take the numbers from
+Anthropic's pricing page (https://www.anthropic.com/pricing); do not guess them.
+Every model the app calls (`GATE_MODEL` and `CLAUDE_MODEL`) needs an entry:
+
+```json
+{
+  "claude-haiku-5-5":  {"input": <input USD per million tokens>, "output": <output USD per million tokens>},
+  "claude-sonnet-5-5": {"input": <input USD per million tokens>, "output": <output USD per million tokens>}
+}
+```
+
+The deploy passes this through an env-vars file, so the commas and quotes in the JSON
+are safe. Paste it as a single value in the GitHub variable.
+
+**`USD_INR`.** Use the current rate rounded up (for example, if it is 91.3, enter
+`92`), so the app slightly overestimates rupee spend rather than under.
+
+**`GLOBAL_MONTHLY_CAP_INR`.** About 90% of your monthly Max API credit, converted to
+whole rupees, so the cap trips before the credit runs out.
+
+**`GATE_MODEL`.** `claude-haiku-5-5` unless you have a reason to change it. If you
+change it, add the new model to `MODEL_PRICES`.
+
+**Local runs** need `APP_ENV=dev` (this relaxes the prod-only variables and trusts the
+`x-dev-user-email` header). The container image defaults to `APP_ENV=prod`.
+
+### Adding a colleague
+
+1. Add them as a test user on the OAuth consent screen (Google Auth Platform →
+   Audience → Test users) if the app is still in testing mode.
+2. Grant them access through IAP (the **IAP-secured Web App User** role):
+
+```bash
+gcloud iap web add-iam-policy-binding --region=asia-south1 \
+  --resource-type=cloud-run --service=incisive-app \
+  --member=user:<EMAIL> --role=roles/iap.httpsResourceAccessor
+```
+
+3. Add them to `incisive.users`. The email must be lower case (a CHECK constraint
+   enforces it). Caps are in paise and match the app's defaults
+   (`spend::default_caps`):
+
+| Role | `daily_cap_paise` | `monthly_cap_paise` |
+|---|---|---|
+| `surgeon` | 30000 | 300000 |
+| `fellow` | 15000 | 150000 |
+
+```sql
+INSERT INTO incisive.users (email, display_name, role, daily_cap_paise, monthly_cap_paise)
+VALUES ('colleague@example.com', 'Dr Colleague', 'surgeon', 30000, 300000);
+-- fellow: 'fellow', 15000, 150000
+```
+
+Without the `incisive.users` row they can sign in through IAP but the app refuses them.
+To suspend someone, `UPDATE incisive.users SET active = false WHERE email = '...';`.

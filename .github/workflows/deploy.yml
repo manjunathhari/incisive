@@ -29,15 +29,26 @@ jobs:
           WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
           DEPLOY_SA: ${{ vars.DEPLOY_SA }}
           CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+          IAP_AUDIENCE: ${{ vars.IAP_AUDIENCE }}
+          OWNER_EMAIL: ${{ vars.OWNER_EMAIL }}
+          GATE_MODEL: ${{ vars.GATE_MODEL }}
+          MODEL_PRICES: ${{ vars.MODEL_PRICES }}
+          USD_INR: ${{ vars.USD_INR }}
+          GLOBAL_MONTHLY_CAP_INR: ${{ vars.GLOBAL_MONTHLY_CAP_INR }}
         run: |
           missing=0
-          for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL; do
+          for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL IAP_AUDIENCE OWNER_EMAIL \
+                   GATE_MODEL MODEL_PRICES USD_INR GLOBAL_MONTHLY_CAP_INR; do
             if [ -z "${!v}" ]; then
-              echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md step 6)"
+              echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md sections 6 and 10)"
               missing=1
             fi
           done
-          exit $missing
+          [ "$missing" -eq 0 ] || exit 1
+          if ! printf '%s' "$MODEL_PRICES" | python3 -m json.tool >/dev/null 2>&1; then
+            echo "::error::vars.MODEL_PRICES is not valid JSON (see infra/README.md section 10)"
+            exit 1
+          fi
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -49,12 +60,38 @@ jobs:
       - run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
       - run: docker build -t "$IMAGE" .
       - run: docker push "$IMAGE"
-      - run: |
+      - name: Deploy to Cloud Run
+        env:
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+          IAP_AUDIENCE: ${{ vars.IAP_AUDIENCE }}
+          OWNER_EMAIL: ${{ vars.OWNER_EMAIL }}
+          GATE_MODEL: ${{ vars.GATE_MODEL }}
+          MODEL_PRICES: ${{ vars.MODEL_PRICES }}
+          USD_INR: ${{ vars.USD_INR }}
+          GLOBAL_MONTHLY_CAP_INR: ${{ vars.GLOBAL_MONTHLY_CAP_INR }}
+        run: |
+          set -euo pipefail
+          # MODEL_PRICES is JSON and contains commas, which `--set-env-vars=A=x,B=y`
+          # would split. Use an env-vars file instead, with each value written as a
+          # JSON string (a JSON string is a valid YAML double-quoted scalar), so
+          # commas and quotes survive. Values come from `env:`, never from inline
+          # expressions in the script.
+          envfile="$(mktemp)"
+          trap 'rm -f "$envfile"' EXIT
+          python3 - "$envfile" <<'PY'
+          import json, os, sys
+          names = ["CLAUDE_MODEL", "IAP_AUDIENCE", "OWNER_EMAIL", "GATE_MODEL",
+                   "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR"]
+          lines = [f"APP_ENV: {json.dumps('prod')}"]
+          lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
+          open(sys.argv[1], "w").write("\n".join(lines) + "\n")
+          PY
           gcloud run deploy incisive-app --image="$IMAGE" --region=asia-south1 \
-            --project=${{ vars.PROJECT_ID }} \
-            --service-account=incisive-run@${{ vars.PROJECT_ID }}.iam.gserviceaccount.com \
+            --project="$PROJECT_ID" \
+            --service-account="incisive-run@${PROJECT_ID}.iam.gserviceaccount.com" \
             --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest \
-            --set-env-vars=APP_ENV=prod,CLAUDE_MODEL=${{ vars.CLAUDE_MODEL }} \
+            --env-vars-file="$envfile" \
             --timeout=3600 --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi \
             --cpu-throttling --no-allow-unauthenticated
           # Access is gated by Google sign-in (Identity-Aware Proxy), enabled once on the
