@@ -56,4 +56,7 @@ jobs:
             --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest \
             --set-env-vars=APP_ENV=prod,CLAUDE_MODEL=${{ vars.CLAUDE_MODEL }} \
             --timeout=3600 --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi \
-            --cpu-throttling --allow-unauthenticated
+            --cpu-throttling --no-allow-unauthenticated
+          # Access is gated by Google sign-in (Identity-Aware Proxy), enabled once on the
+          # service (infra/README.md section 8). The IAP setting persists across deploys;
+          # --no-allow-unauthenticated guarantees a deploy can never reopen the service.

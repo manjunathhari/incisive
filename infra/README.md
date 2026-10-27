@@ -114,3 +114,33 @@ A push to `main` runs CI; when it succeeds, the Deploy workflow builds, pushes
 6. Secrets hygiene: search the Cloud Run logs for `sk-ant` and expect no results;
    `gcloud run services describe incisive-app --region=asia-south1` must show
    `ANTHROPIC_API_KEY` and `DATABASE_URL` as Secret Manager references (`secretKeyRef`), not values.
+
+## 8. Google sign-in (Identity-Aware Proxy)
+
+Only listed Google accounts can open the app; everyone else is refused by Google
+before a request reaches the container. The deploy workflow uses
+`--no-allow-unauthenticated`, so a deploy can never reopen the service.
+
+First-time setup (in a project without an organization, Google requires the
+console for this step because it creates the OAuth client):
+
+1. Cloud Run → `incisive-app` → **Security** tab → **Require authentication** →
+   tick **Identity-Aware Proxy (IAP)** → **Save** (enable the IAP API if prompted).
+2. Let IAP call the service, and allow the owner's account:
+
+```bash
+gcloud run services add-iam-policy-binding incisive-app --region=asia-south1 \
+  --member=serviceAccount:service-<PROJECT_NUMBER>@gcp-sa-iap.iam.gserviceaccount.com \
+  --role=roles/run.invoker
+gcloud iap web add-iam-policy-binding --region=asia-south1 \
+  --resource-type=cloud-run --service=incisive-app \
+  --member=user:<EMAIL> --role=roles/iap.httpsResourceAccessor
+```
+
+3. Check: `gcloud run services describe incisive-app --region=asia-south1` shows
+   `Iap Enabled: true`; opening the URL in a private window asks for Google sign-in;
+   a non-listed account is refused.
+
+To add a colleague later, repeat the second command with their Google email.
+After this, the section 7 checks are done in a signed-in browser
+(`curl` without a Google identity token gets the sign-in redirect).
