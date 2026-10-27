@@ -2241,7 +2241,53 @@ mod epmc_unpaywall_tests {
             .await
             .unwrap();
         assert_eq!(got[0].pmcid.as_deref(), Some("PMC556"));
-        // oa_is_pdf is recovered from the stored URL's shape.
+        // A PDF link with no `.pdf` in it keeps its flag through the cache.
+        a.oa_url = Some("https://x.example/download?id=1".into());
+        a.oa_is_pdf = true;
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert_eq!(
+            got[0].oa_url.as_deref(),
+            Some("https://x.example/download?id=1")
+        );
+        assert!(got[0].oa_is_pdf);
+        // A refresh with no link keeps both the link and its flag.
+        a.oa_url = None;
+        a.oa_is_pdf = false;
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert_eq!(
+            got[0].oa_url.as_deref(),
+            Some("https://x.example/download?id=1")
+        );
+        assert!(got[0].oa_is_pdf);
+        // A new link replaces the old flag (html now).
+        a.oa_url = Some("https://x.example/page".into());
+        cache::put_many(&pool, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert!(!got[0].oa_is_pdf);
+        // Rows from before the migration fall back to the URL shape.
+        sqlx::query("UPDATE incisive.paper_cache SET oa_url = 'https://x.example/old.pdf', oa_is_pdf = FALSE WHERE pmid = $1")
+            .bind(&pmid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let got = cache::get_many(&pool, std::slice::from_ref(&pmid))
+            .await
+            .unwrap();
+        assert!(got[0].oa_is_pdf);
         a.oa_url = Some("https://x.example/paper.pdf".into());
         cache::put_many(&pool, std::slice::from_ref(&a))
             .await

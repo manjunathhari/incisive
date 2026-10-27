@@ -3,7 +3,8 @@
 //! pruned after 90.
 //!
 //! The table has no source column, so a cached paper always comes back with
-//! `source: PubMed`. `pmcid` was added by migration 0007.
+//! `source: PubMed`. `pmcid` was added by migration 0007 and `oa_is_pdf` by 0008. `oa_is_pdf`
+//! follows `oa_url`: replaced together, kept together.
 
 use sqlx::{PgPool, Row};
 
@@ -21,7 +22,7 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT pmid, pmcid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted \
+        "SELECT pmid, pmcid, doi, title, authors, journal, year, pub_types, abstract, oa_url, oa_is_pdf, retracted \
          FROM incisive.paper_cache \
          WHERE pmid = ANY($1) AND fetched_at > now() - make_interval(days => $2)",
     )
@@ -32,9 +33,12 @@ pub async fn get_many(pool: &PgPool, pmids: &[String]) -> sqlx::Result<Vec<Paper
     rows.into_iter()
         .map(|r| {
             let authors: String = r.try_get("authors")?;
-            // Only the URL is stored; whether it is a PDF is recovered from its shape.
+            // The stored flag; the URL-shape guess only covers rows written
+            // before migration 0008 (which default the flag to false).
             let oa_url: Option<String> = r.try_get("oa_url")?;
-            let oa_is_pdf = oa_url.as_deref().is_some_and(url_is_pdf);
+            let stored_pdf: bool = r.try_get("oa_is_pdf")?;
+            let oa_is_pdf =
+                oa_url.is_some() && (stored_pdf || oa_url.as_deref().is_some_and(url_is_pdf));
             Ok(Paper {
                 pmid: Some(r.try_get("pmid")?),
                 pmcid: r.try_get("pmcid")?,
@@ -68,13 +72,15 @@ pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
         let authors = serde_json::to_string(&p.authors).unwrap_or_else(|_| "[]".into());
         sqlx::query(
             "INSERT INTO incisive.paper_cache \
-               (pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted, pmcid, fetched_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) \
+               (pmid, doi, title, authors, journal, year, pub_types, abstract, oa_url, retracted, pmcid, oa_is_pdf, fetched_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now()) \
              ON CONFLICT (pmid) DO UPDATE SET \
                doi = COALESCE(EXCLUDED.doi, incisive.paper_cache.doi), \
                pmcid = COALESCE(EXCLUDED.pmcid, incisive.paper_cache.pmcid), title = EXCLUDED.title, authors = EXCLUDED.authors, \
                journal = EXCLUDED.journal, year = EXCLUDED.year, pub_types = EXCLUDED.pub_types, \
                abstract = COALESCE(EXCLUDED.abstract, incisive.paper_cache.abstract), \
+               oa_is_pdf = CASE WHEN EXCLUDED.oa_url IS NOT NULL THEN EXCLUDED.oa_is_pdf \
+                                ELSE incisive.paper_cache.oa_is_pdf END, \
                oa_url = COALESCE(EXCLUDED.oa_url, incisive.paper_cache.oa_url), \
                retracted = EXCLUDED.retracted OR incisive.paper_cache.retracted, \
                fetched_at = now()",
@@ -90,6 +96,7 @@ pub async fn put_many(pool: &PgPool, papers: &[Paper]) -> sqlx::Result<()> {
         .bind(&p.oa_url)
         .bind(p.retracted)
         .bind(&p.pmcid)
+        .bind(p.oa_is_pdf)
         .execute(&mut *tx)
         .await?;
     }
