@@ -187,16 +187,52 @@ const NON_MEDICAL_PHRASES: &[&str] = &[
 /// question "medical by rule", even with clinical words present; the model
 /// decides. Whole-word phrases.
 const ADMIN_PHRASES: &[&str] = &[
+    // Listed as exact forms, not a "bill" prefix, which would hit "Billroth".
+    "bill",
+    "bills",
+    "billed",
     "billing",
-    "reimbursement",
-    "invoice",
-    "cpt code",
-    "icd code",
+    "billable",
+    "code",
+    "codes",
+    "coded",
     "coding",
+    "cpt",
+    "icd",
+    "invoice",
+    "invoices",
+    "invoiced",
+    "invoicing",
     "revenue",
+    "revenues",
+    "claim",
+    "claims",
+    "reimburse",
+    "reimbursed",
+    "reimbursement",
+    "reimbursements",
     "salary",
+    "salaries",
+    "pay",
+    "pays",
+    "paid",
+    "payment",
+    "payments",
+    "price",
+    "prices",
+    "pricing",
+    "priced",
+    "cost estimate",
+    "package cost",
+    "funding",
+    "funded",
+    "ipo",
+    "earnings",
+    "profit",
+    "profits",
+    "profitable",
     "tax",
-    "insurance claim",
+    "taxes",
     "market",
     "markets",
     "invest",
@@ -204,7 +240,9 @@ const ADMIN_PHRASES: &[&str] = &[
     "investment",
     "investments",
     "investor",
+    "investors",
     "valuation",
+    "valuations",
     "share",
     "shares",
     "stock",
@@ -216,6 +254,19 @@ const ADMIN_PHRASES: &[&str] = &[
     "jobs",
     "cover letter",
 ];
+
+/// Remove characters that are invisible to a reader but split tokens:
+/// soft hyphen, zero-width characters and the byte-order mark.
+fn strip_invisible(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{00AD}' | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}'
+            )
+        })
+        .collect()
+}
 
 fn tokens(lower: &str) -> Vec<&str> {
     lower
@@ -264,7 +315,7 @@ pub fn rule_prefilter(question: &str) -> Option<GateDecision> {
             "That question is too long; please shorten it to under 4,000 characters.",
         ));
     }
-    let lower = trimmed.to_lowercase();
+    let lower = strip_invisible(trimmed).to_lowercase();
     let words = tokens(&lower);
     let specific = stem_hits(&words, SPECIFIC_STEMS)
         + SPECIFIC_PHRASES
@@ -399,18 +450,23 @@ fn error_status(e: &claude_client::ClaudeError) -> Option<u16> {
     }
 }
 
-/// Stop the question from closing our `<question>` wrapper early.
+/// Stop the question from opening or closing our `<question>` wrapper.
 fn neutralise_close_tag(question: &str) -> String {
-    const TAG: &str = "</question>";
-    let lower = question.to_ascii_lowercase();
-    let mut out = String::with_capacity(question.len());
+    let once = replace_ci(question, "</question>", "< /question>");
+    replace_ci(&once, "<question>", "< question>")
+}
+
+/// ASCII case-insensitive replace of every occurrence of `tag`.
+fn replace_ci(text: &str, tag: &str, with: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    for (i, _) in lower.match_indices(TAG) {
-        out.push_str(&question[last..i]);
-        out.push_str("< /question>");
-        last = i + TAG.len();
+    for (i, _) in lower.match_indices(tag) {
+        out.push_str(&text[last..i]);
+        out.push_str(with);
+        last = i + tag.len();
     }
-    out.push_str(&question[last..]);
+    out.push_str(&text[last..]);
     out
 }
 
