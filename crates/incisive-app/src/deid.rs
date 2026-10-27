@@ -196,12 +196,108 @@ const LAB_WORDS: &[&str] = &[
     "wcc",
     "neutrophils",
     "lymphocytes",
+    "leucocytes",
+    "leukocytes",
 ];
 
 const UNIT_PREFIXES: &[&str] = &[
-    "/", "cells", "cell", "iu", "units", "unit", "mg", "ml", "mm", "cc", "mcg", "ug", "ng", "pg",
-    "cu", "per", "%", "\u{b5}", "\u{3bc}", "copies", "patients", "cases", "rupees",
+    "/\u{b5}", "/\u{3bc}", "/ul", "/cumm", "/mm", "/cu", "cells", "cell", "iu", "units", "unit",
+    "mg", "ml", "mm", "cc", "mcg", "ug", "ng", "pg", "cu", "per", "%", "\u{b5}", "\u{3bc}",
+    "copies", "patients", "cases", "rupees",
 ];
+
+/// Narrower lab list for phone-vs-range vetoes ("platelets 65000-80000").
+const PHONE_VETO_WORDS: &[&str] = &[
+    "platelets",
+    "platelet",
+    "plt",
+    "plts",
+    "count",
+    "wbc",
+    "tlc",
+    "iu",
+    "cells",
+    "cumm",
+    "ferritin",
+    "afp",
+    "cea",
+    "dimer",
+    "d-dimer",
+    "load",
+    "copies",
+    "esr",
+    "crp",
+    "ldh",
+    "lipase",
+    "amylase",
+    "creatinine",
+    "glucose",
+    "wcc",
+    "neutrophils",
+    "lymphocytes",
+    "leucocytes",
+    "leukocytes",
+];
+
+const PHONE_UNIT_PREFIXES: &[&str] = &[
+    "/cumm", "/mm", "/\u{b5}", "/\u{3bc}", "/ul", "/cu", "cells", "per ", "iu", "units", "mg",
+    "ml", "%",
+];
+
+fn phone_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let (s, e) = span(c);
+    if inside_longer_number(text, s, e) {
+        return false;
+    }
+    let lab_before = text[..s].split_whitespace().rev().take(3).any(|t| {
+        let k = t
+            .trim_matches(|ch: char| ch.is_ascii_punctuation())
+            .to_lowercase();
+        PHONE_VETO_WORDS.contains(&k.as_str())
+    });
+    if lab_before {
+        return false;
+    }
+    let hi = ceil_boundary(text, e + 12);
+    let rest = text[e..hi].trim_start().to_lowercase();
+    !PHONE_UNIT_PREFIXES.iter().any(|u| rest.starts_with(u))
+}
+
+const UNITS_AFTER_NUMBER: &[&str] = &["mm", "cm", "m", "mg", "ml", "g", "kg", "%"];
+
+/// True when the text right after `e` is a measurement unit ("8 mm", "2 cm", "500 mg").
+fn unit_follows(text: &str, e: usize) -> bool {
+    let hi = ceil_boundary(text, e + 8);
+    let rest = text[e..hi].trim_start().to_lowercase();
+    UNITS_AFTER_NUMBER.iter().any(|u| {
+        rest.strip_prefix(u)
+            .is_some_and(|r| !r.chars().next().is_some_and(|c| c.is_alphabetic()))
+    })
+}
+
+fn no_unit_after(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let (_, e) = span(c);
+    !unit_follows(text, e)
+}
+
+/// "Case No. 2, A 60-year-old..." is a numbered case, not an address.
+fn numbered_label_ok(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let (s, _) = span(c);
+    let prev: String = text[..s]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_alphabetic())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
+        .to_lowercase();
+    !matches!(
+        prev.as_str(),
+        "case" | "table" | "fig" | "figure" | "group" | "arm" | "study" | "patient"
+    )
+}
 
 const PIN_LABELS: &[&str] = &[
     "pin",
@@ -253,13 +349,28 @@ fn pin_check(text: &str, c: &Captures, addr: &[Finding]) -> bool {
     }
     // Followed by a unit means this is a measurement (bounded lookahead).
     let hi = ceil_boundary(text, e + 16);
-    let rest = text[e..hi].trim_start().to_lowercase();
+    let rest_full = &text[e..hi];
+    let rest = rest_full.trim_start().to_lowercase();
     if UNIT_PREFIXES.iter().any(|u| rest.starts_with(u)) {
         return false;
     }
     // Address cue: a pin label, a place word right before, or an address nearby.
     if pin_label_before(text, s) {
         return true;
+    }
+    // "250000 procedures": a following lowercase word (other than a landmark word) is prose.
+    let word: String = rest_full
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_alphabetic())
+        .collect();
+    if word.chars().next().is_some_and(|ch| ch.is_lowercase())
+        && !matches!(
+            word.as_str(),
+            "near" | "opp" | "opposite" | "behind" | "next" | "nr"
+        )
+    {
+        return false;
     }
     let lo = floor_boundary(text, s.saturating_sub(40));
     if PLACE_BEFORE.is_match(&text[lo..s]) {
@@ -368,6 +479,17 @@ const PROC_WORDS: &[&str] = &[
     "anastomosis",
     "resection",
     "myotomy",
+    "manoeuvre",
+    "maneuver",
+    "incision",
+    "triangle",
+    "syndrome",
+    "test",
+    "point",
+    "ligament",
+    "node",
+    "nodes",
+    "line",
     "technique",
     "disease",
     "stage",
@@ -624,7 +746,94 @@ fn name_check_titled(text: &str, c: &Captures, _: &[Finding]) -> bool {
 
 fn name_check_context(_: &str, c: &Captures, _: &[Finding]) -> bool {
     let w = word_key(c.name("name").map_or("", |m| m.as_str()));
-    !EPONYMS.contains(&w.as_str()) && !NOT_NAMES.contains(&w.as_str())
+    !EPONYMS.contains(&w.as_str()) && !NOT_NAMES.contains(&w.as_str()) && !strong_medical(&w)
+}
+
+/// Suffixes that make a word a diagnosis/procedure/finding, never a name.
+const STRONG_SUFFIXES: &[&str] = &[
+    "itis", "oma", "osis", "ectomy", "emia", "aemia", "uria", "rrhoea", "rrhea", "rrhage",
+    "rrhoids", "ation", "graphy", "scopy", "pathy", "plasty", "otomy", "ostomy", "ancy", "ncy",
+];
+
+/// Broader suffixes; also match some real names (Gopal, Sonia), so used sparingly.
+const WEAK_SUFFIXES: &[&str] = &[
+    "ness", "ing", "less", "ent", "ive", "al", "ia", "sis", "gia", "ism", "ion", "ure",
+];
+
+/// Imaging / report-heading words that follow "MR", "CT" etc.
+const IMAGING_WORDS: &[&str] = &[
+    "abdomen", "pelvis", "liver", "brain", "spine", "chest", "knee", "neck", "rectum", "pancreas",
+    "contrast", "imaging", "scan", "study", "score", "protocol", "with", "without", "and", "for",
+    "the", "grade",
+];
+
+fn strong_medical(k: &str) -> bool {
+    STRONG_SUFFIXES.iter().any(|s| k.ends_with(s))
+}
+
+fn imaging_word(k: &str) -> bool {
+    IMAGING_WORDS.contains(&k) || k.starts_with("angio") || k.ends_with("gram")
+}
+
+/// Strong or weak medical-looking word (diagnosis, finding, imaging term, eponym).
+fn medical_word(k: &str) -> bool {
+    strong_medical(k)
+        || WEAK_SUFFIXES.iter().any(|s| k.ends_with(s))
+        || EPONYMS.contains(&k)
+        || NOT_NAMES.contains(&k)
+        || imaging_word(k)
+}
+
+fn name_check_caps_title(_: &str, c: &Captures, _: &[Finding]) -> bool {
+    let w = word_key(c.name("name").map_or("", |m| m.as_str()));
+    !strong_medical(&w) && !imaging_word(&w) && !TITLE_COMMON.contains(&w.as_str())
+}
+
+static AGE_SEX_AFTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[,\s]*(?:[0-9]{1,3}\s*[MF]\b|[0-9]{1,3}\s*(?:y|yr|yrs|yo|years)\b)")
+        .expect("age regex")
+});
+
+/// s/o, d/o, w/o, c/o, h/o + word. "c/o", "w/o", "h/o" are mostly clinical
+/// ("complains of", "without", "history of"), so they need extra evidence.
+fn relation_check(text: &str, c: &Captures, _: &[Finding]) -> bool {
+    let rel = c
+        .name("rel")
+        .map_or(String::new(), |m| m.as_str().to_lowercase());
+    let titled = c
+        .name("title")
+        .is_some_and(|m| !m.as_str().trim().is_empty());
+    let w1 = c.name("w1").map_or("", |m| m.as_str());
+    let k1 = word_key(w1);
+    let (_, e) = span(c);
+    if titled {
+        return !strong_medical(&k1);
+    }
+    if rel == "d" {
+        return !strong_medical(&k1);
+    }
+    if rel == "s" {
+        return !medical_word(&k1);
+    }
+    // c/o, w/o, h/o: age-sex follows the name.
+    let hi = ceil_boundary(text, e + 24);
+    if !strong_medical(&k1) && AGE_SEX_AFTER.is_match(&text[e..hi]) {
+        return true;
+    }
+    if rel == "h" {
+        return false;
+    }
+    // A second capitalised, non-medical word ("Suresh Kumar").
+    if let Some(w2) = c.name("w2") {
+        let w2 = w2.as_str().trim();
+        let k2 = word_key(w2);
+        let title_case = w2.chars().skip(1).all(|ch| ch.is_lowercase());
+        if title_case && !medical_word(&k1) && !medical_word(&k2) {
+            return true;
+        }
+    }
+    // Whole name in capitals.
+    w1.chars().all(|ch| ch.is_uppercase()) && !medical_word(&k1)
 }
 
 // ---------- address ----------
@@ -652,12 +861,16 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         // Aadhaar: 12 digits, first 2-9, 4-4-4 with space/hyphen/dot or contiguous.
         rule(Aadhaar, r"\b[2-9]\d{3}$A\d{4}$A\d{4}\b", standalone_number),
         // PAN: AAAAA9999A.
-        rule(Pan, r"\b[A-Z]{5}\d{4}[A-Z]\b", always),
+        rule(
+            Pan,
+            r"\b[A-Z]{5}\d{4}[A-Z]\b|(?i:\bPAN\b)(?i:\s*(?:no|number)\b)?\.?[\s:#\-]*[A-Za-z]{5}\d{4}[A-Za-z]\b",
+            always,
+        ),
         // Indian mobile: optional +91 / 91 / 0, 10 digits starting 6-9.
         rule(
             Phone,
             r"(?:\+91$H?|\b91$H|\b0)?(?:[6-9]\d{4}$H?\d{5}|[6-9]\d{2}$H\d{3}$H\d{4}|[6-9]\d{3}$H\d{3}$H\d{3}|[6-9]\d$H\d{3}$H\d{5})\b",
-            standalone_number,
+            phone_check,
         ),
         // Landline with STD code (0-prefixed, or +91 prefixed).
         rule(
@@ -707,7 +920,7 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             r"(?i)\b(?:(?:UHID|MRN|IPD|Patient\s*ID)(?:\s*(?:no|number)\b)?|(?:MRD?|IP|OP|Reg(?:istration)?\.?|Hosp(?:ital)?\.?)\s*(?:no|number)\b)\.?\s*[:#.\-\x{2013}]*\s*#?\s*(?:[A-Za-z]{1,6}[\-/ ]?)?\d[A-Za-z0-9/\-]*",
             always,
         ),
-        rule(HospitalId, r"\bIP\s+\d+(?:/\d+)?\b", always),
+        rule(HospitalId, r"\bIP\s+\d+(?:/\d+)?\b", no_unit_after),
         // Names: title + capitalised word (eponyms only exempt in procedure context).
         rule(
             PersonName,
@@ -718,32 +931,36 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         rule(
             PersonName,
             r"\b(?:MR|MRS|SHRI|SMT|KUMARI)\b\.?\s*(?P<name>[A-Z]{3,})\b",
-            name_check_titled,
+            name_check_caps_title,
         ),
         // Names: patient-context word + capitalised word.
         rule(
             PersonName,
-            r"\b(?:[Pp]atient|[Pp]t|[Nn]ame|named|called)\b\.?(?:\s*[:,\-\x{2013}\x{2014}]\s*|\s+)(?:(?:is|was)\s+)?(?P<name>[A-Z][a-z]{2,})\b",
+            r"\b(?:[Pp]atient|[Pp]t|[Nn]ame|named|called)\b\.?(?:\s*[:,]\s*|\s+[\-\x{2013}\x{2014}]\s*|\s*[\x{2013}\x{2014}]\s+|\s+)(?:(?:is|was)\s+)?(?P<name>[A-Z][a-z]{2,})\b",
             name_check_context,
         ),
         // Relations: s/o, w/o, d/o, c/o + name.
         rule(
             PersonName,
-            r"(?i:\b[sdwc]/o\b)\.?\s*(?:(?:Mr|Mrs|Shri|Smt)\.?\s*)?(?P<name>[A-Z][A-Za-z]{2,})",
-            name_check_context,
+            r"(?i:\b(?P<rel>[sdwch])/o\b)\.?[ \t]*(?P<title>(?i:(?:sri|shri|smt|mr|mrs|ms)\b\.?[ \t]*)?)(?P<w1>[A-Z][A-Za-z]{2,})(?P<w2>[ \t]+[A-Z][A-Za-z]{2,})?",
+            relation_check,
         ),
         // Addresses.
         rule(
             Address,
             r"(?i)\b(?:door|flat|house|plot)\s*(?:no\.?|number|#)\s*[A-Za-z]?\d[A-Za-z0-9/\-]*",
-            always,
+            no_unit_after,
         ),
         rule(
             Address,
             r"\b(?:Door|Flat|House|Plot)\s+\d[A-Za-z0-9/\-]*",
-            always,
+            no_unit_after,
         ),
-        rule(Address, r"\bNo\.\s*\d+[A-Za-z]?,\s*[A-Z]", always),
+        rule(
+            Address,
+            r"\bNo\.\s*\d+[A-Za-z]?,\s*[A-Z]",
+            numbered_label_ok,
+        ),
         rule(Address, r"\bSector\s+\d{1,3}\b", always),
         rule(
             Address,
