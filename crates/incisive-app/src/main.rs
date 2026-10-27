@@ -7,7 +7,7 @@ use incisive_app::{
     db::{PgReadiness, lazy_pool, migrate_until_done},
     gate::{Classifier, ClaudeClassifier, OfflineClassifier},
     identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
-    server::{AppState, build_router},
+    server::{AppState, build_router, install_panic_hook},
     spend::CapsConfig,
 };
 use leptos::config::get_configuration;
@@ -21,6 +21,8 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    // After the subscriber, so the hook's single error line is logged as JSON.
+    install_panic_hook();
 
     let config = match Config::from_env() {
         Ok(c) => c,

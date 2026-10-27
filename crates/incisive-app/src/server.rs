@@ -9,6 +9,7 @@ use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
 use leptos_axum::{LeptosRoutes, generate_route_list};
 use sqlx::PgPool;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::app::{App, shell};
@@ -47,6 +48,44 @@ impl FromRef<AppState> for IdentityState {
     }
 }
 
+/// Body of the 500 returned when a request handler panics.
+pub const PANIC_BODY: &str = "Incisive hit an unexpected error. Please try again.";
+
+/// A fixed 500 for a panicking request. The payload is dropped unread: a
+/// str-slicing panic message embeds part of the string, which could be
+/// question text.
+fn panic_response(_payload: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        PANIC_BODY,
+    )
+        .into_response()
+}
+
+type PanicHandler = fn(Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response;
+
+/// Catches handler panics and answers with [`PANIC_BODY`].
+pub fn catch_panic_layer() -> CatchPanicLayer<PanicHandler> {
+    CatchPanicLayer::custom(panic_response as PanicHandler)
+}
+
+/// Process-wide panic hook: logs only where the panic happened (file:line) at
+/// error level, never the payload.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        tracing::error!(%location, "panic");
+    }));
+}
+
 /// `GET /api/me`, `POST /api/ask`, `GET /api/activity`.
 pub fn api_routes(state: AppState) -> Router {
     Router::new()
@@ -82,5 +121,8 @@ pub fn build_router(
         // limit is enforced on the body itself (413 when exceeded).
         .layer(RequestBodyLimitLayer::new(ASK_BODY_LIMIT))
         .with_state(leptos_options);
-    health_routes(r).merge(api_routes(state)).merge(app)
+    health_routes(r)
+        .merge(api_routes(state))
+        .merge(app)
+        .layer(catch_panic_layer())
 }
