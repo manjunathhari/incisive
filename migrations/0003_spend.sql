@@ -15,3 +15,6 @@ CREATE TABLE incisive.spend (
 );
 
 CREATE INDEX spend_user_at_idx ON incisive.spend (user_id, at);
+
+-- One charge per request: makes `settle` idempotent (a retry cannot double-charge).
+CREATE UNIQUE INDEX spend_charge_request_uniq ON incisive.spend (request_id) WHERE kind = 'charge';

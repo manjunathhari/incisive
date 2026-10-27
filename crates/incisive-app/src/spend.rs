@@ -8,6 +8,11 @@
 //! Money is never a float in the database; floats appear only in price config
 //! and the one conversion in [`cost_paise`], which rounds up.
 //!
+//! Overshoot: a reservation is an estimate. The actual charge recorded by
+//! [`settle`] can exceed it and land past a cap. That overrun is bounded by one
+//! request's difference between estimate and actual, and the next `reserve`
+//! sees it (charges count toward every total) and blocks accordingly.
+//!
 //! Lock ordering (deadlock-free): inside one transaction always take the GLOBAL
 //! advisory lock first, then the per-user lock. Both are transaction-scoped
 //! `pg_advisory_xact_lock(namespace, key)` with two int4 keys, so user ids can
@@ -267,6 +272,10 @@ pub async fn reserve_at(
     purpose: &str,
     now: DateTime<Utc>,
 ) -> sqlx::Result<CapCheck> {
+    if estimate_paise < 0 {
+        tracing::warn!(%request_id, purpose, "negative spend estimate; treating as zero");
+    }
+    debug_assert!(estimate_paise >= 0, "negative spend estimate");
     let estimate = estimate_paise.max(0);
     let mut tx = pool.begin().await?;
 
@@ -349,6 +358,12 @@ pub async fn reserve_at(
 }
 
 /// Replace the request's reservation with its actual charge, atomically.
+///
+/// Idempotent: at most one charge exists per `request_id` (partial unique index),
+/// so a repeated settle neither double-charges nor errors.
+///
+/// The charge may exceed the reservation and land past the cap; the overrun is
+/// bounded by one request's estimate error and the next `reserve` accounts for it.
 /// Pass `model: None, usage: None, paise: 0` when no model call happened.
 pub async fn settle(
     pool: &PgPool,
@@ -367,11 +382,20 @@ pub async fn settle(
     .bind(user_id)
     .fetch_optional(&mut *tx)
     .await?;
+    if paise < 0 {
+        tracing::warn!(%request_id, "negative settle amount; recording zero");
+    }
+    debug_assert!(paise >= 0, "negative settle amount");
+    if purpose.is_none() {
+        // Ids and purpose only: never question text.
+        tracing::warn!(%request_id, purpose = "unreserved", "settle found no reservation");
+    }
     let tokens = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
     sqlx::query(
         "INSERT INTO incisive.spend \
          (user_id, kind, purpose, model, input_tokens, output_tokens, paise, request_id) \
-         VALUES ($1, 'charge', $2, $3, $4, $5, $6, $7)",
+         VALUES ($1, 'charge', $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (request_id) WHERE kind = 'charge' DO NOTHING",
     )
     .bind(user_id)
     .bind(purpose.unwrap_or_else(|| "unreserved".to_string()))

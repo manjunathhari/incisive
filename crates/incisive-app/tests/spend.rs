@@ -56,6 +56,28 @@ fn cost_rounds_up_to_paisa() {
 }
 
 #[test]
+fn rounding_snap_ignores_float_noise_but_not_real_fractions() {
+    // 25,000 tokens at $1/Mtok and 88 INR/USD is exactly 220 paise, but the
+    // naive f64 product is 220.00000000000003, which a bare ceil() makes 221.
+    let naive = (25_000.0_f64 * 1.0 / 1_000_000.0) * 88.0 * 100.0;
+    assert!(naive > 220.0 && naive.ceil() == 221.0, "premise: {naive}");
+    assert_eq!(
+        cost_paise(&prices(), 88.0, "m-test", &usage(25_000, 0)).unwrap(),
+        220
+    );
+    // Another noisy case (naive 880.0000000000001).
+    assert_eq!(
+        cost_paise(&prices(), 88.0, "m-test", &usage(100_000, 0)).unwrap(),
+        880
+    );
+    // A genuine fraction (220.01 paise) still rounds up.
+    assert_eq!(
+        cost_paise(&prices(), 88.004, "m-test", &usage(25_000, 0)).unwrap(),
+        221
+    );
+}
+
+#[test]
 fn unknown_model_fails_closed() {
     let err = cost_paise(&prices(), 88.0, "mystery-model", &usage(10, 10)).unwrap_err();
     assert_eq!(err, SpendError::UnknownModel("mystery-model".to_string()));
@@ -478,4 +500,83 @@ async fn totals_now_wrapper_sees_fresh_reservation() {
         .execute(&pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn settling_twice_records_exactly_one_charge() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "settle-twice", 100_000, None).await;
+    let rid = Uuid::new_v4();
+    assert!(is_ok(
+        &reserve_at(&pool, &u, &big_global(), 500, rid, "ask", Utc::now())
+            .await
+            .unwrap()
+    ));
+    settle(
+        &pool,
+        u.id,
+        rid,
+        Some("m-test"),
+        Some(&usage(1000, 150)),
+        16,
+    )
+    .await
+    .unwrap();
+    settle(
+        &pool,
+        u.id,
+        rid,
+        Some("m-test"),
+        Some(&usage(1000, 150)),
+        16,
+    )
+    .await
+    .unwrap();
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT kind, paise FROM incisive.spend WHERE request_id = $1")
+            .bind(rid)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![("charge".to_string(), 16)]);
+    sqlx::query("DELETE FROM incisive.spend WHERE user_id = $1")
+        .bind(u.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn different_users_racing_the_global_cap_do_not_overshoot() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let year = 2059;
+    clean_year(&pool, year).await;
+    let a = make_user(&pool, "race-global-a", 1_000_000, None).await;
+    let b = make_user(&pool, "race-global-b", 1_000_000, None).await;
+    let caps = CapsConfig {
+        global_monthly_paise: 10_000,
+    };
+    for round in 0..5 {
+        // A fresh IST month each round keeps rounds independent.
+        let now = Utc
+            .with_ymd_and_hms(year, 1 + round as u32, 15, 12, 0, 0)
+            .unwrap();
+        let (p1, p2, a1, b1) = (pool.clone(), pool.clone(), a.clone(), b.clone());
+        let t1 = tokio::spawn(async move {
+            reserve_at(&p1, &a1, &caps, 6_000, Uuid::new_v4(), "ask", now).await
+        });
+        let t2 = tokio::spawn(async move {
+            reserve_at(&p2, &b1, &caps, 6_000, Uuid::new_v4(), "ask", now).await
+        });
+        let (r1, r2) = (t1.await.unwrap().unwrap(), t2.await.unwrap().unwrap());
+        assert_eq!(
+            [&r1, &r2].iter().filter(|c| is_ok(c)).count(),
+            1,
+            "exactly one of two 60% global reservations may pass: {r1:?} {r2:?}"
+        );
+    }
 }
