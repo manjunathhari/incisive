@@ -13,8 +13,8 @@ Running record of the Phase 1 build. Updated after every task and every stage.
 | Stage | Tasks | Status |
 |---|---|---|
 | A. Identity | 1 | ✅ complete (27 Oct) |
-| B. Safety filters | 2, 3 | ⏳ in progress |
-| C. Money and records | 4, 5 | ⬜ not started |
+| B. Safety filters | 2, 3 | ✅ complete (27 Oct) |
+| C. Money and records | 4, 5 | ⏳ in progress |
 | D. Ask pipeline and screens | 6 | ⬜ not started |
 | E. Production wiring and final review | 7 + review | ⬜ not started |
 
@@ -89,3 +89,79 @@ Deferred minor items (logged for the final review): key-cache lock held during t
 
 ### Next stage
 **Stage B: Safety filters.** Task 2 is the patient-identifier filter, which runs locally; Task 3 is the medical-only gate.
+
+## Stage B: Safety filters ✅
+
+**Date:** 27 Oct 2026 · **Branch:** `phase1-safety-core` · **Commits:** `2a87358..fcc56d8` (11 commits) · **GitHub CI:** CI_PLACEHOLDER
+
+### What was built (plain English)
+- **Patient-identifier filter (Task 2).** Every question is scanned *on our own server, before anything is sent anywhere*. If it contains something that could identify a patient, it is stopped and the user is told exactly what to remove. Nothing is sent to Claude and the question text is never stored.
+  - **Blocked:** UHID/IP/MRN-style numbers, Aadhaar, PAN, Indian phone numbers, email addresses, street addresses and PIN codes, exact calendar dates (DOA/DOD, "12/10/2026"), and names in patient context ("Patient Ramesh Kumar", "NAME: RAMAKKA", "S/O MUNIYAPPA", "W/O Kariyappa, 48 yrs", "Smt. Gowramma").
+  - **Allowed, as you decided:** ages, sex, and relative time ("65-year-old male", "POD 3", "6 weeks after surgery"), plus eponyms and clinical shorthand ("Whipple", "Billroth II", "s/o acute appendicitis", "c/o pain abdomen, 10 years", "Couinaud segment 4b").
+- **Medical-only gate (Task 3).** After the identifier filter, each question is classified as **medical**, **not medical** or **unclear**.
+  - A quick keyword check settles the obvious cases for free. For example, "ICG in robotic low anterior resection — evidence for leak?" is medical and "bitcoin price tomorrow" is not.
+  - Everything else goes to a small, cheap Claude model (Haiku, configurable), which returns a strict one-line verdict.
+  - Billing, coding, finance, admin and non-medical questions are refused politely. "Unclear" gets one clarifying prompt instead of a refusal.
+  - **It fails closed.** If the check can't run (API down, odd reply), the question is *not* answered: "I couldn't check this question just now. Please try again in a moment."
+
+### How to see it / what changes for the user
+Nothing visible on the live site yet. These filters are wired into the Ask screen in Stage D and go live when Phase 1 is merged.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 2. Patient-identifier filter | Approved after 5 review rounds plus 1 final scoped fix (cap ruling) | 5 + 1 | 2a87358 … 703e5c2 |
+| 3. Medical-only gate | Approved after 3 fix rounds | 3 | bcb4534 … fcc56d8 |
+
+### Tests
+- **Identifier filter:** about 190 "must block" rows and 240 "must pass" rows of real-world Indian case-sheet and surgical text, plus about 130 adversarial probes in a regression corpus that every future change must keep passing.
+- **Gate:** 21 tests.
+  - A rule table of clinical, billing, finance, admin and trick questions.
+  - Strict parsing of the model's reply: prose, two objects, unknown labels, extra fields, wrong case and odd code fences are all rejected.
+  - Retry and fail-closed behaviour when the API is overloaded (529) or rejects the request (4xx).
+  - The request uses the configured gate model with a 150-token limit.
+  - Rules run before the model, so there is no API call when a rule decides.
+- **Full suite:** green locally against Postgres 16 + pgvector, and on GitHub.
+
+### Review findings (summary)
+**Identifier filter.** This was the hardest piece of Phase 1. Indian clinical shorthand collides with identifier patterns: "s/o" means both "son of" and "suggestive of", "c/o" means both "care of" and "complains of", and many surnames end like diagnoses. Five review rounds, each with adversarial probing, pushed in both directions:
+- **Leaks fixed:**
+  - "son of" names before a header word ("S/O NAGESH GOWDA DIAGNOSIS: …")
+  - "56 years of age" after a c/o name
+  - upper-case case-sheet headers ("NAME: RAMAKKA", "PATIENT NAME: …")
+  - phone numbers next to lab words
+  - PIN codes in prose
+- **False blocks fixed:**
+  - "s/o Sebaceous Cyst", "Intestinal Malrotation", "Signet Ring Cell Carcinoma"
+  - Couinaud segments, lab ranges and units, "Lt"/"Late" titles
+- **Final approach:** a clinical-word list plus a list of common Indian given names decides the ambiguous cases. A fresh, more capable model did rounds 4–5.
+
+**Gate.** The first version let general words ("surgical", "robotic", "patient") approve a question by keyword alone, so "robotic surgery market size and investment returns" would have skipped the check. It also refused "cryptorchidism" because it contains "crypto". The fixes:
+- Only specific clinical terms (procedures, diseases, anatomy, study designs) count toward approval.
+- Words match whole, not as fragments.
+- Billing, coding, finance, insurance, pay and marketing vocabulary always sends the question to the model check.
+- Invisible-character tricks ("Bil­ling") are stripped first.
+- A question can't break out of its "treat this as data" wrapper.
+
+### Decisions made during the stage (rulings)
+- **Month-year is allowed** ("operated in March 2024"). Your policy blocks *exact* dates. Note: the US HIPAA "Safe Harbor" standard is stricter and would block month-year too. *Cost if wrong:* a month-year of surgery slightly narrows who a patient could be. **Tell me if you want month-year blocked.**
+- **"s/o" or "d/o" plus a capitalised name always blocks**, unless what follows is clearly a clinical phrase. A bare "c/o X" or "w/o X" passes when X isn't a known given name, because these usually mean "complains of" or "without". *Cost if wrong:* a bare first name like "W/O MUNIRAJU" can pass.
+- **Review cap on Task 2:** after the 5th round, three real leaks remained. Because this is patient privacy, I did not park them. One tightly scoped fix went in, and I verified it myself (26 probes, all correct) instead of running a 6th review round.
+- **Gate deviation accepted:** a question with billing or finance wording is never approved by keyword alone; it always goes to the model. *Cost:* a fraction of a paisa per such question.
+- **Configuration faults fail closed:** a rejected API request (e.g. a wrong `GATE_MODEL`) shows the user "try again in a moment". The server log records the real cause.
+- **The gate's keyword list is best-effort.** It can only *skip* the model for clearly clinical questions; it never refuses a clinical question. Misspellings ("B1lling") are a known residual, caught by the model check and by the medical-only answering agent.
+
+### Known limitations / follow-ups
+Identifier filter gaps, all documented:
+- a name followed directly by a diagnosis with no comma or label ("S/O MUNIYAPPA HERNIA")
+- "Bengaluru 560038 patients" (a place word plus a count)
+- relative fields given as a bare label ("Husband: Nagaraju", "Guardian: …"); "Husband Name:" and "Father's Name:" do block
+- **places written without a PIN code** ("R/o Hoskote", "Village/Taluk/Dist"), which need a separate place-name rule; proposed as a follow-up
+- "Surname: RAO"
+- "Sector 2" over-blocks
+- when two findings overlap, only the first kind is reported
+
+Gate: the model's one-line reason is shown to the user; Stage D must render it as plain text.
+
+### Next stage
+**Stage C: Money and records.** Task 4 is the spending caps, in paise on Asia/Kolkata days and months. Task 5 is the tamper-evident audit log.
