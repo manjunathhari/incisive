@@ -39,7 +39,7 @@ jobs:
           missing=0
           for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL IAP_AUDIENCE OWNER_EMAIL \
                    GATE_MODEL MODEL_PRICES USD_INR GLOBAL_MONTHLY_CAP_INR; do
-            if [ -z "${!v}" ]; then
+            if [ -z "${!v//[[:space:]]/}" ]; then
               echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md sections 6 and 10)"
               missing=1
             fi
@@ -47,6 +47,14 @@ jobs:
           [ "$missing" -eq 0 ] || exit 1
           if ! printf '%s' "$MODEL_PRICES" | python3 -m json.tool >/dev/null 2>&1; then
             echo "::error::vars.MODEL_PRICES is not valid JSON (see infra/README.md section 10)"
+            exit 1
+          fi
+          if ! [[ "$USD_INR" =~ ^[[:space:]]*[0-9]+(\.[0-9]+)?[[:space:]]*$ ]]; then
+            echo "::error::vars.USD_INR must be a positive number, e.g. 92 (see infra/README.md section 10)"
+            exit 1
+          fi
+          if ! [[ "$GLOBAL_MONTHLY_CAP_INR" =~ ^[[:space:]]*[1-9][0-9]*[[:space:]]*$ ]]; then
+            echo "::error::vars.GLOBAL_MONTHLY_CAP_INR must be whole rupees, e.g. 9000 (see infra/README.md section 10)"
             exit 1
           fi
       - uses: actions/checkout@v4
