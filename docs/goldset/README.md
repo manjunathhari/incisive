@@ -105,6 +105,15 @@ The first build takes several minutes. Then each question takes up to about
 landmarks found, cost, time; never the question text) and rewrites the report
 after every question, so stopping it part-way keeps what is done.
 
+If a run goes past its time limit and the database still shows it as
+working, the runner cancels it. Its row then reads `failed (runner_timeout)`.
+In the database the run itself is marked `failed (cancelled)`, and the
+activity (audit) log records it as `deleted`, because cancelling uses the same
+path as a user deleting a running question. The charges stand and the unused
+reservation is released. If a cancelled run has not finished 15 minutes
+later, the runner stops the whole set with a message. The report written so
+far stays on disk.
+
 Options:
 
 | Option | What it does |
@@ -143,7 +152,7 @@ One row per question:
 | Missed | Which landmarks were not found (by PMID, DOI or title hint). |
 | Refs | References in the final answer. |
 | Cite resolve | References the draft cited that the Check step verified in PubMed or Europe PMC, as verified/drafted (%). References that fail are removed before the answer is shown, so a lower number means Check caught something, not that a bad citation reached you. |
-| Refs re-checked | After the run, the runner looks every reference in the final answer up again by itself, separately from Incisive's own Check step: in PubMed by PMID, or in Europe PMC by DOI when there is no PMID (free lookups, no Claude calls). A reference passes when the record is found, is not retracted and has the same title (ignoring case and punctuation). Shown as passed/total (%). This must be 100%; anything else is shown as **FLAG** with the reason for each failing reference (for example `ref 2 (PMID 123): title differs`) and should be reported. "—" means there was no answer to check. |
+| Refs re-checked | After the run, the runner looks every reference in the final answer up again by itself, separately from Incisive's own Check step: in PubMed by PMID, or in Europe PMC by DOI when there is no PMID (free lookups, no Claude calls). A reference passes when the record is found, is not retracted (by PubMed's retraction type or a retraction notice), has the same title (ignoring case and punctuation) and, when both sides have a DOI, the same DOI. Shown as passed/total (%). This must be 100%; anything else is shown as **FLAG** with the reason for each failing reference (for example `ref 2 (PMID 123): title differs`) and should be reported. "—" means there was no answer to check. |
 | Claims drafted | Claims in the first draft of the answer. |
 | Claims removed | Claims the Check step removed (unsupported, or left with no verified reference). |
 | Cost | What the run cost in rupees (the run's recorded cost). |

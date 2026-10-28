@@ -399,14 +399,14 @@ async fn recheck_finds_a_title_mismatch_by_pmid() {
     let c = recheck_refs(&lit, &refs).await;
     assert_eq!((c.resolved, c.total), (1, 2));
     assert_eq!(c.problems, ["ref 2 (PMID 41871586): title differs"]);
-    // One esummary batch; Europe PMC not asked.
+    // One esummary and one efetch batch; Europe PMC not asked.
     let reqs = server.received_requests().await.unwrap();
-    assert!(
-        reqs.iter()
-            .all(|r| r.url.path() == "/entrez/eutils/esummary.fcgi"),
-        "{reqs:?}"
+    let mut paths: Vec<&str> = reqs.iter().map(|r| r.url.path()).collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        ["/entrez/eutils/efetch.fcgi", "/entrez/eutils/esummary.fcgi"]
     );
-    assert_eq!(reqs.len(), 1);
 
     let rows = [goldset::Row {
         recheck: Some(c),
@@ -469,4 +469,58 @@ fn failed_row() -> goldset::Row {
         cost_paise: 0,
         wall: Duration::from_secs(1),
     }
+}
+
+#[tokio::test]
+async fn recheck_flags_a_doi_from_another_paper() {
+    let server = icg_server().await;
+    let lit = literature(&server);
+    // PMID and title of the ICG RCT, but the meta-analysis's DOI.
+    let refs = [reference(
+        1,
+        Some("40042831"),
+        Some("10.1016/S2468-1253(25)00373-5"),
+        "Indocyanine Green Fluorescence Imaging in Prevention of Colorectal Anastomotic Leakage: A Randomized Clinical Trial.",
+    )];
+    let c = recheck_refs(&lit, &refs).await;
+    assert_eq!((c.resolved, c.total), (0, 1));
+    assert_eq!(c.problems, ["ref 1 (PMID 40042831): DOI differs"]);
+
+    // With its own DOI (other case, resolver prefix) it resolves.
+    let refs = [reference(
+        1,
+        Some("40042831"),
+        Some("https://doi.org/10.1001/JAMASURG.2025.0006"),
+        "Indocyanine Green Fluorescence Imaging in Prevention of Colorectal Anastomotic Leakage: A Randomized Clinical Trial.",
+    )];
+    assert!(recheck_refs(&lit, &refs).await.all_resolved());
+}
+
+#[tokio::test]
+async fn recheck_flags_a_retraction_only_efetch_reports() {
+    // esummary does not flag it (no "Retracted Publication" pub type); the
+    // efetch record carries a RetractionIn notice.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        "/entrez/eutils/esummary.fcgi",
+        fixture("agent", "pubmed_esummary_retracted_unflagged.json"),
+    )
+    .await;
+    mount(
+        &server,
+        "/entrez/eutils/efetch.fcgi",
+        fixture("lit", "pubmed_efetch_retracted.xml"),
+    )
+    .await;
+    let lit = literature(&server);
+    let refs = [reference(
+        1,
+        Some("35422152"),
+        Some("10.1177/03915603221088721"),
+        "Laser technology in urologic oncology.",
+    )];
+    let c = recheck_refs(&lit, &refs).await;
+    assert_eq!((c.resolved, c.total), (0, 1));
+    assert_eq!(c.problems, ["ref 1 (PMID 35422152): retracted"]);
 }

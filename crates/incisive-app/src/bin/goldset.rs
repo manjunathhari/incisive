@@ -499,7 +499,9 @@ fn is_supabase(host: &str) -> bool {
         || h.ends_with(".supabase.com")
 }
 
-fn check_host(raw: &str, allow_remote: Option<&str>) -> Result<(), String> {
+/// `source` says where the host came from ("DATABASE_URL", "PGHOSTADDR",
+/// "PGHOST", or the host sqlx resolves), for the refusal message.
+fn check_host(raw: &str, source: &str, allow_remote: Option<&str>) -> Result<(), String> {
     let host = raw.trim().trim_matches(['[', ']']).to_ascii_lowercase();
     // No host, or a Unix socket directory: this machine.
     if host.is_empty() || host.starts_with('/') {
@@ -507,7 +509,7 @@ fn check_host(raw: &str, allow_remote: Option<&str>) -> Result<(), String> {
     }
     if is_supabase(&host) {
         return Err(format!(
-            "refusing to run: DATABASE_URL points at Supabase ({host}), which holds production data. \
+            "refusing to run: {source} points at Supabase ({host}), which holds production data. \
              The gold-set runner never runs against Supabase; use a local database."
         ));
     }
@@ -521,7 +523,7 @@ fn check_host(raw: &str, allow_remote: Option<&str>) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "refusing to run: DATABASE_URL host {host} is not local (localhost, 127.0.0.1 or ::1). \
+        "refusing to run: {source} host {host} is not local (localhost, 127.0.0.1 or ::1). \
          If it is a disposable database, pass --allow-remote-db {host}."
     ))
 }
@@ -553,38 +555,66 @@ pub fn check_target(
     if !matches!(url.scheme(), "postgres" | "postgresql") {
         return Err(not_url());
     }
-    let mut hosts: Vec<String> = url
+    let mut hosts: Vec<(&str, String)> = url
         .query_pairs()
         .filter(|(k, _)| k == "host" || k == "hostaddr")
-        .map(|(_, v)| v.into_owned())
+        .map(|(_, v)| ("DATABASE_URL", v.into_owned()))
         .collect();
     if let Some(h) = url.host_str().filter(|h| !h.is_empty()) {
-        hosts.push(h.to_string());
+        hosts.push(("DATABASE_URL", h.to_string()));
     }
     for var in ["PGHOSTADDR", "PGHOST"] {
         if let Some(h) = pg_env(var).filter(|h| !h.trim().is_empty()) {
-            hosts.push(h);
+            hosts.push((var, h));
         }
     }
-    for raw in &hosts {
+    for (source, raw) in &hosts {
         for h in raw.split(',') {
-            check_host(h, allow_remote)?;
+            check_host(h, source, allow_remote)?;
         }
     }
-    check_effective_host(database_url, allow_remote)
+    check_effective_host(database_url, pg_env, allow_remote)
 }
 
-/// The host sqlx will connect to, from `PgConnectOptions::from_str` (offline;
-/// it applies the process's `PG*` defaults the same way a real connection
-/// does). A Unix socket is local.
-pub fn check_effective_host(database_url: &str, allow_remote: Option<&str>) -> Result<(), String> {
-    let opts = PgConnectOptions::from_str(database_url.trim()).map_err(|_| {
-        "refusing to run: DATABASE_URL could not be read as a database address".to_string()
-    })?;
+/// The host sqlx will connect to. When the URL names a host (an authority,
+/// even an empty one, or a `host=` / `hostaddr=` parameter) sqlx takes it from
+/// the URL: that is read with `PgConnectOptions::from_str` (offline). When it
+/// does not, sqlx falls back to `PGHOSTADDR`, then `PGHOST`, then localhost;
+/// those are taken from `pg_env` (the process environment in `main`), so the
+/// result does not depend on the caller's shell in tests. A Unix socket is
+/// local.
+pub fn check_effective_host(
+    database_url: &str,
+    pg_env: &dyn Fn(&str) -> Option<String>,
+    allow_remote: Option<&str>,
+) -> Result<(), String> {
+    let unreadable =
+        || "refusing to run: DATABASE_URL could not be read as a database address".to_string();
+    let url = url::Url::parse(database_url.trim()).map_err(|_| unreadable())?;
+    let url_names_host = url.host_str().is_some()
+        || url
+            .query_pairs()
+            .any(|(k, _)| k == "host" || k == "hostaddr");
+    if !url_names_host {
+        let from_env = ["PGHOSTADDR", "PGHOST"].into_iter().find_map(|var| {
+            pg_env(var)
+                .filter(|h| !h.trim().is_empty())
+                .map(|h| (var, h))
+        });
+        return match from_env {
+            Some((var, h)) => check_host(&h, var, allow_remote),
+            None => Ok(()), // localhost
+        };
+    }
+    let opts = PgConnectOptions::from_str(database_url.trim()).map_err(|_| unreadable())?;
     if opts.get_socket().is_some() {
         return Ok(());
     }
-    check_host(opts.get_host(), allow_remote)
+    check_host(
+        opts.get_host(),
+        "DATABASE_URL (as the database library reads it)",
+        allow_remote,
+    )
 }
 
 // ---------- running ----------
@@ -613,6 +643,14 @@ pub async fn ensure_goldset_user(pool: &PgPool, daily_cap_paise: i64) -> sqlx::R
 /// Past this much time on one question, the wait for a cancelled run logs
 /// progress (once a minute).
 const SLOW_WAIT_LOG: Duration = Duration::from_secs(420);
+
+/// How long to wait for a cancelled run's worker before giving up on the
+/// whole set.
+const STUCK_AFTER: Duration = Duration::from_secs(15 * 60);
+
+/// The row detail for a run whose worker did not finish after cancelling;
+/// the runner then stops the set.
+pub const STUCK_KIND: &str = "runner_stuck";
 
 const TERMINAL: [&str; 4] = ["done", "partial", "failed", "interrupted"];
 
@@ -660,16 +698,29 @@ fn mismatch(r: &Reference, live: &Paper) -> Option<&'static str> {
         Some("retracted")
     } else if !same_title(&r.title, &live.title) {
         Some("title differs")
+    } else if let (Some(ours), Some(theirs)) = (
+        r.doi
+            .as_deref()
+            .map(normalise_doi)
+            .filter(|d| !d.is_empty()),
+        live.doi
+            .as_deref()
+            .map(normalise_doi)
+            .filter(|d| !d.is_empty()),
+    ) && ours != theirs
+    {
+        Some("DOI differs")
     } else {
         None
     }
 }
 
 /// Look every final reference up again, independently of the pipeline's
-/// Check step: PubMed esummary for those with a PMID (one batch), Europe PMC
-/// (`DOI:"…"`) for DOI-only ones. A reference resolves when the record is
-/// found, is not retracted and has the same title ([`normalise_title`]). No
-/// Claude calls; nothing is charged.
+/// Check step: PubMed esummary and efetch for those with a PMID (one batch
+/// each), Europe PMC (`DOI:"…"`) for DOI-only ones. A reference resolves when
+/// the record is found, is not retracted (esummary pub type or efetch
+/// retraction notice), has the same title ([`normalise_title`]) and, when
+/// both sides carry a DOI, the same DOI. No Claude calls; nothing is charged.
 pub async fn recheck_refs(lit: &Literature, refs: &[Reference]) -> Recheck {
     let pmid_of = |r: &Reference| {
         r.pmid
@@ -679,10 +730,15 @@ pub async fn recheck_refs(lit: &Literature, refs: &[Reference]) -> Recheck {
             .map(str::to_string)
     };
     let pmids: Vec<String> = refs.iter().filter_map(pmid_of).collect();
-    let live = if pmids.is_empty() {
-        Ok(Vec::new())
+    let (live, details) = if pmids.is_empty() {
+        (Ok(Vec::new()), Ok(Default::default()))
     } else {
-        lit.pubmed.summaries(&pmids).await
+        // esummary flags retraction by pub type only; efetch also by a
+        // `RetractionIn` comment. Either counts.
+        (
+            lit.pubmed.summaries(&pmids).await,
+            lit.pubmed.details(&pmids).await,
+        )
     };
     let mut out = Recheck {
         total: refs.len(),
@@ -698,7 +754,14 @@ pub async fn recheck_refs(lit: &Literature, refs: &[Reference]) -> Recheck {
                     .find(|p| p.pmid.as_deref() == Some(pmid.as_str()))
                 {
                     None => Some(format!("{label}: not found in PubMed")),
-                    Some(p) => mismatch(r, p).map(|why| format!("{label}: {why}")),
+                    Some(p) => match &details {
+                        Err(_) => Some(format!("{label}: PubMed retraction lookup failed")),
+                        Ok(d) => match d.get(&pmid) {
+                            None => Some(format!("{label}: retraction status unknown")),
+                            Some(rec) if rec.retracted => Some(format!("{label}: retracted")),
+                            Some(_) => mismatch(r, p).map(|why| format!("{label}: {why}")),
+                        },
+                    },
                 },
             }
         } else if let Some(doi) = r
@@ -820,8 +883,14 @@ pub async fn run_question(
             // run is closed, its reservation released and its cost final
             // before the next question starts.
             state.worker.cancel(run_id);
+            let cancelled_at = Instant::now();
             let mut next_log = SLOW_WAIT_LOG;
             while state.worker.is_running(run_id) {
+                if cancelled_at.elapsed() >= STUCK_AFTER {
+                    // The set stops here (see `run`); the cost is provisional.
+                    let cost = run_cost(&state.pool, run_id).await;
+                    return Row::failed(q, STUCK_KIND, cost, started.elapsed());
+                }
                 if started.elapsed() >= next_log {
                     eprintln!(
                         "    still waiting for the cancelled run to finish ({}s)",
@@ -1091,9 +1160,19 @@ async fn run() -> Result<(), String> {
             rupees(row.cost_paise),
             duration(row.wall)
         );
+        let stuck = row.detail.as_deref() == Some(STUCK_KIND);
         rows.push(row);
         // After every question, so an interrupted session keeps its results.
         write(&rows)?;
+        if stuck {
+            return Err(format!(
+                "stopping: question `{}` was cancelled after its time limit, but its run did not finish \
+                 within 15 minutes. The report so far is in {}. Its run of {GOLDSET_EMAIL} may still \
+                 be active (with its reservation) in the local database; restart the runner later.",
+                q.id.trim(),
+                args.out.display()
+            ));
+        }
     }
     write(&rows)?;
     eprintln!("goldset: report written to {}", args.out.display());
@@ -1509,26 +1588,61 @@ question = "Laparoscopic versus open mesh repair for inguinal hernia?"
 
     #[test]
     fn effective_host_is_what_sqlx_would_use() {
+        let no_env = |_: &str| -> Option<String> { None };
         // From sqlx's own parse of the URL.
         assert_eq!(
-            check_effective_host("postgres://u@127.0.0.1:55434/postgres", None),
+            check_effective_host("postgres://u@127.0.0.1:55434/postgres", &no_env, None),
             Ok(())
         );
         assert_eq!(
-            check_effective_host("postgres:///db?host=/var/run/postgresql", None),
+            check_effective_host("postgres:///db?host=/var/run/postgresql", &no_env, None),
             Ok(())
         );
-        assert!(check_effective_host("postgres://u:pw@db.example.org/db", None).is_err());
+        assert!(check_effective_host("postgres://u:pw@db.example.org/db", &no_env, None).is_err());
         assert!(
-            check_effective_host("postgres://u@localhost/db?host=db.x.supabase.co", None).is_err()
+            check_effective_host(
+                "postgres://u@localhost/db?host=db.x.supabase.co",
+                &no_env,
+                None
+            )
+            .is_err()
         );
         assert!(
-            check_effective_host("postgres://u@db.x.supabase.co/db", Some("db.x.supabase.co"))
-                .is_err()
+            check_effective_host(
+                "postgres://u@db.x.supabase.co/db",
+                &no_env,
+                Some("db.x.supabase.co")
+            )
+            .is_err()
         );
         assert_eq!(
-            check_effective_host("postgres://u@db.example.org/db", Some("db.example.org")),
+            check_effective_host(
+                "postgres://u@db.example.org/db",
+                &no_env,
+                Some("db.example.org")
+            ),
             Ok(())
         );
+        // No host in the URL: the injected PGHOSTADDR wins over PGHOST, as in
+        // sqlx; nothing from the real environment is read.
+        let env = |k: &str| match k {
+            "PGHOSTADDR" => Some("203.0.113.5".to_string()),
+            "PGHOST" => Some("localhost".to_string()),
+            _ => None,
+        };
+        let err = check_effective_host("postgres:db", &env, None).unwrap_err();
+        assert!(err.contains("PGHOSTADDR host 203.0.113.5"), "{err}");
+        assert_eq!(
+            check_effective_host("postgres:db", &env, Some("203.0.113.5")),
+            Ok(())
+        );
+        assert_eq!(check_effective_host("postgres:db", &no_env, None), Ok(()));
+        // Where a refused host came from is named.
+        let err =
+            check_target(Some("dev"), "postgres://u@db.example.org/db", &no_env, None).unwrap_err();
+        assert!(err.contains("DATABASE_URL host db.example.org"), "{err}");
+        let pghost = |k: &str| (k == "PGHOST").then(|| "db.x.supabase.co".to_string());
+        let err = check_target(Some("dev"), "postgres:db", &pghost, None).unwrap_err();
+        assert!(err.contains("PGHOST points at Supabase"), "{err}");
     }
 }
