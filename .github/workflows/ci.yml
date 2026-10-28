@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
+
+# Actions minutes are limited on a private repository: a newer push to the same
+# branch cancels the run still in progress, and docs-only changes don't run CI.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
