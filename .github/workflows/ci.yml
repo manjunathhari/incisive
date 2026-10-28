@@ -47,8 +47,11 @@ jobs:
           cargo test --workspace --no-fail-fast 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            grep -E -- "--- FAILED|panicked at|^thread '.*' panicked|assertion|left:|right:" test.log \
+            grep -E -- "--- FAILED|panicked at|^thread '.*' panicked|assertion|left:|right:|exceeded|test result: FAILED|error: test failed|error(\[E[0-9]+\])?:|process didn't exit successfully|No space left|signal: " test.log \
               | head -40 | while IFS= read -r line; do echo "::error::${line//%/%25}"; done
+            # Also surface the tail of the log, so a failure with no matching
+            # line (a crash, linker error, or OOM) is still readable.
+            tail -n 25 test.log | while IFS= read -r line; do echo "::warning::${line//%/%25}"; done
           fi
           exit "$status"
         env:
