@@ -12,8 +12,9 @@
 //! (Ruling R-13c). Once it is reached, the remaining gathering steps are
 //! skipped (one Note line) and the run goes straight to Write and Check
 //! with what it has; the trail says "search stopped early (cost limit / time
-//! limit)". A step that stops itself (Screen between batches, Extract between
-//! papers, each reporting how much it left unread) marks the same.
+//! limit)". A step that stops itself (Screen and Extract check it before
+//! launching each batch or paper, up to 4 / 3 of which run at once, Fix B;
+//! each reports how much it left unread) marks the same.
 //! `OverBudget` from a gathering step wraps up the same way ("cost limit").
 //!
 //! The finish reserve is what Write and Check (at `MAX_CLAIMS`) would hold

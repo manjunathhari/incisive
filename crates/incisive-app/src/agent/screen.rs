@@ -29,11 +29,17 @@
 //!   (whitespace collapsed, at most [`MAX_REASON`] (80) characters, never an
 //!   echo of the question) and kept in [`Screened::excluded_notes`] for
 //!   debugging only; it is never shown.
+//! * **Concurrency** (Fix B): up to [`SCREEN_CONCURRENCY`] (4) batches are
+//!   in flight at once (`bounded`); results are used in batch order, so the
+//!   outcome and the step lines are the same as one batch after another.
+//!   Every call still takes its own hold first.
 //! * A batch that fails (`Llm`, or `Parse` after the wrapper's own retry) is
 //!   "not assessed" and screening goes on. `OverBudget`, or the wrap-up point
-//!   (checked between batches), stops screening: what is left is "not
-//!   assessed (stopped early)" and the step returns what it has. `Cancelled`
-//!   and fatal errors propagate.
+//!   (checked before each batch is launched, once one has been), stops
+//!   launching: batches in flight finish; what was never sent is "not
+//!   assessed (stopped early)" and the step returns what it has. A hold that
+//!   does not fit beside the batches in flight waits for one to settle.
+//!   `Cancelled` and fatal errors propagate.
 //! * Included records are ranked by [`EvidenceLevel`], then year (newest
 //!   first, unknown last), then their original (database relevance) order.
 //!
@@ -42,11 +48,11 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::Instant;
 
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::bounded::{self, Outcome};
 use super::frame::Pico;
 use super::llm::{Effort, OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, MAX_STEP_LINE, RunContext, add_line, clip, contains_question};
@@ -55,6 +61,8 @@ use crate::runs::StepKind;
 
 /// Records per `screen` call.
 pub const BATCH: usize = 10;
+/// Screening batches in flight at once (Fix B).
+pub const SCREEN_CONCURRENCY: usize = 4;
 /// Characters of an abstract shown to the model.
 pub const MAX_ABSTRACT: usize = 3_000;
 /// Characters of a title shown to the model.
@@ -493,6 +501,10 @@ fn summary_line(total: usize, included: usize, excluded: &[(String, u32)]) -> St
 
 // ---------- the step ----------
 
+/// One screening batch: its first record's position, its records with their
+/// ids, its prompt and how many of its records have no abstract.
+type Batch<'a> = (usize, Vec<(String, &'a Paper)>, String, u32);
+
 /// Screen `papers` against `pico` (see the module docs).
 pub async fn screen(
     ctx: &RunContext,
@@ -520,46 +532,56 @@ pub async fn screen(
     let mut stopped = 0u32;
     let mut notes: Vec<(String, String)> = Vec::new();
 
-    let mut start = 0;
-    while start < pending.len() {
-        let end = (start + BATCH).min(pending.len());
-        if ctx.cancel.is_cancelled() {
-            return Err(StepError::Cancelled);
-        }
-        if start > 0 && ctx.budget.should_wrap_up(Instant::now()) {
-            tracing::info!(%run_id, step = "screen", screened = start, "wrap-up reached; screening stopped");
-            stopped = u32::try_from(pending.len() - start).unwrap_or(u32::MAX);
-            break;
-        }
-        let records: Vec<(String, &Paper)> = pending[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (format!("p-{}", start + i + 1), p))
-            .collect();
-        let n = u32::try_from(records.len()).unwrap_or(u32::MAX);
-        let (prompt, batch_title_only) = batch_prompt(pico, &records);
+    // Every batch's records (ids numbered across batches) and prompt, built
+    // up front so the calls in flight can borrow them.
+    let batches: Vec<Batch> = (0..pending.len())
+        .step_by(BATCH)
+        .map(|start| {
+            let end = (start + BATCH).min(pending.len());
+            let records: Vec<(String, &Paper)> = pending[start..end]
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (format!("p-{}", start + i + 1), p))
+                .collect();
+            let (prompt, batch_title_only) = batch_prompt(pico, &records);
+            (start, records, prompt, batch_title_only)
+        })
+        .collect();
 
-        let reply: Value = match call.structured(SYSTEM, &prompt, &SCHEMA, MAX_TOKENS).await {
-            Ok(v) => v,
-            Err(e @ (StepError::Llm | StepError::Parse)) => {
+    // Up to SCREEN_CONCURRENCY batches in flight; outcomes come back in
+    // batch order (see `bounded`).
+    let outcomes = bounded::run(
+        &ctx.budget,
+        &ctx.cancel,
+        "screen",
+        SCREEN_CONCURRENCY,
+        batches.len(),
+        |b| Some(call.start_structured::<Value>(SYSTEM, &batches[b].2, &SCHEMA, MAX_TOKENS)),
+        |_, _| {},
+    )
+    .await?;
+
+    for ((start, records, _, batch_title_only), outcome) in batches.iter().zip(outcomes) {
+        let start = *start;
+        let n = u32::try_from(records.len()).unwrap_or(u32::MAX);
+        let reply = match outcome {
+            Outcome::Done(Ok(v)) => v,
+            Outcome::Done(Err(e)) => {
                 tracing::warn!(%run_id, step = "screen", error_kind = e.kind(), records = n, "screening batch failed; not assessed");
                 failed += n;
                 failed_batches += 1;
-                start = end;
                 continue;
             }
-            Err(StepError::OverBudget) => {
-                tracing::info!(%run_id, step = "screen", screened = start, "over budget; screening stopped");
-                stopped = u32::try_from(pending.len() - start).unwrap_or(u32::MAX);
-                break;
+            // Wrap-up point or budget: not read.
+            Outcome::Stopped | Outcome::Skipped => {
+                stopped += n;
+                continue;
             }
-            Err(e) => return Err(e),
         };
         let Some(verdicts) = verdict_list(reply) else {
             tracing::warn!(%run_id, step = "screen", records = n, "screening reply held no verdict list; not assessed");
             failed += n;
             failed_batches += 1;
-            start = end;
             continue;
         };
         title_only += batch_title_only;
@@ -609,7 +631,9 @@ pub async fn screen(
         } else {
             tally.add(REASON_NOT_ASSESSED, unassessed);
         }
-        start = end;
+    }
+    if stopped > 0 {
+        tracing::info!(%run_id, step = "screen", stopped, "screening stopped early");
     }
     tally.add(REASON_NOT_ASSESSED, failed);
     tally.add(REASON_STOPPED, stopped);

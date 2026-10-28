@@ -28,6 +28,7 @@
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 #[cfg(any(test, feature = "test-util"))]
@@ -202,12 +203,23 @@ impl LlmClient for Client {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+type Scripted = Result<MessagesResponse, ClaudeError>;
+
 /// Test double: queued replies in order, every request recorded, and an error
 /// once the queue is empty.
+///
+/// A reply queued after [`ScriptedLlm::when`] is keyed: it answers only a
+/// request whose user text contains the needle (keyed replies first, in the
+/// order queued). Steps that run calls concurrently (Fix B) use keys, since
+/// the order their requests arrive in is not fixed.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
 pub struct ScriptedLlm {
-    replies: Mutex<VecDeque<Result<MessagesResponse, ClaudeError>>>,
+    replies: Mutex<VecDeque<Scripted>>,
+    keyed: Mutex<Vec<(String, Scripted)>>,
+    next_key: Option<String>,
+    slow: Vec<(String, std::time::Duration)>,
     requests: Mutex<Vec<MessagesRequest>>,
     delay: std::time::Duration,
 }
@@ -218,11 +230,33 @@ impl ScriptedLlm {
         ScriptedLlm::default()
     }
 
-    fn push(self, r: Result<MessagesResponse, ClaudeError>) -> ScriptedLlm {
-        self.replies
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(r);
+    fn push(mut self, r: Scripted) -> ScriptedLlm {
+        match self.next_key.take() {
+            Some(k) => self
+                .keyed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((k, r)),
+            None => self
+                .replies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(r),
+        }
+        self
+    }
+
+    /// Requests whose user text contains `needle` take `extra` longer, so a
+    /// test can fix which of several concurrent calls finishes first.
+    pub fn slow(mut self, needle: &str, extra: std::time::Duration) -> ScriptedLlm {
+        self.slow.push((needle.to_string(), extra));
+        self
+    }
+
+    /// Key the next queued reply: it answers only a request whose user text
+    /// contains `needle`.
+    pub fn when(mut self, needle: &str) -> ScriptedLlm {
+        self.next_key = Some(needle.to_string());
         self
     }
 
@@ -289,9 +323,10 @@ impl ScriptedLlm {
             .clone()
     }
 
-    /// Replies not yet used.
+    /// Replies not yet used (keyed ones included).
     pub fn remaining(&self) -> usize {
         self.replies.lock().unwrap_or_else(|e| e.into_inner()).len()
+            + self.keyed.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -303,8 +338,30 @@ impl LlmClient for ScriptedLlm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(req.clone());
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
+        let user: String = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let extra = self
+            .slow
+            .iter()
+            .filter(|(k, _)| user.contains(k.as_str()))
+            .map(|(_, d)| *d)
+            .sum::<std::time::Duration>();
+        let delay = self.delay + extra;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        {
+            let mut keyed = self.keyed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = keyed.iter().position(|(k, _)| user.contains(k.as_str())) {
+                return keyed.remove(i).1;
+            }
         }
         self.replies
             .lock()
@@ -512,7 +569,10 @@ pub fn hold_estimate(
 /// symbol-heavy input) can need more than a token per three bytes, so a call
 /// can cost more than its hold. The overshoot is bounded per call (the real
 /// charge is still booked, and holds are checked before every call), so the
-/// run can pass its limit by at most one call's excess.
+/// run can pass its limit by at most the excess of the calls in flight
+/// together: one call's, or up to 4 screening / 3 extraction calls' when
+/// those steps run concurrently (Fix B). Output is never underestimated
+/// (`max_tokens` is held in full), so the excess is input tokens only.
 pub fn estimate_usage(prompt_bytes: usize, max_tokens: u32) -> Usage {
     let input = prompt_bytes.div_ceil(3).saturating_add(50);
     Usage {
@@ -755,23 +815,42 @@ impl LlmCall {
         schema: &OutputSchema,
         max_tokens: u32,
     ) -> Result<T, StepError> {
-        let reply = self.reply(system, user, Some(schema), max_tokens).await?;
-        match read_structured(&reply) {
-            Ok(v) => return Ok(v),
-            Err(fault) => log_unreadable(
-                self,
-                &reply,
-                fault,
-                "reply had no usable JSON; retrying once",
-            ),
-        }
-        let retry_user = format!("{user}{SCHEMA_NUDGE}");
-        let reply = self
-            .reply(system, &retry_user, Some(schema), max_tokens)
-            .await?;
-        read_structured(&reply).map_err(|fault| {
-            log_unreadable(self, &reply, fault, "reply had no usable JSON after retry");
-            StepError::Parse
+        self.start_structured(system, user, schema, max_tokens)?
+            .await
+    }
+
+    /// [`LlmCall::structured`] in two phases, for steps that run several
+    /// items at once (Fix B): the first call is started **now**
+    /// ([`LlmCall::start`]: cancel check, hold taken, call spawned), and the
+    /// returned future waits for it, reads it and makes the one retry if
+    /// needed. An error here means no call was made.
+    pub fn start_structured<'a, T: DeserializeOwned + 'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+        schema: &'a OutputSchema,
+        max_tokens: u32,
+    ) -> Result<impl Future<Output = Result<T, StepError>> + 'a, StepError> {
+        let first = self.start(system, user, Some(schema), max_tokens)?;
+        Ok(async move {
+            let reply = first.wait().await?;
+            match read_structured(&reply) {
+                Ok(v) => return Ok(v),
+                Err(fault) => log_unreadable(
+                    self,
+                    &reply,
+                    fault,
+                    "reply had no usable JSON; retrying once",
+                ),
+            }
+            let retry_user = format!("{user}{SCHEMA_NUDGE}");
+            let reply = self
+                .reply(system, &retry_user, Some(schema), max_tokens)
+                .await?;
+            read_structured(&reply).map_err(|fault| {
+                log_unreadable(self, &reply, fault, "reply had no usable JSON after retry");
+                StepError::Parse
+            })
         })
     }
 
@@ -801,6 +880,22 @@ impl LlmCall {
         schema: Option<&OutputSchema>,
         max_tokens: u32,
     ) -> Result<Reply, StepError> {
+        self.start(system, user, schema, max_tokens)?.wait().await
+    }
+
+    /// Start one logical call (see [`LlmCall::reply`]) without waiting for
+    /// it: check the cancel flag, hold the estimate against the run's budget
+    /// and spawn the call and its charge. Synchronous, so when it returns
+    /// `Ok` the hold is already counted: a step launching several calls in
+    /// a row decides each launch with the earlier ones' holds in force
+    /// (Fix B). Over budget or cancelled: no call is made.
+    pub fn start(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&OutputSchema>,
+        max_tokens: u32,
+    ) -> Result<Started, StepError> {
         let run_id = self.budget.run_id();
         if self.cancel.is_cancelled() {
             return Err(StepError::Cancelled);
@@ -832,16 +927,43 @@ impl LlmCall {
             estimate_usage,
             call_id: Uuid::new_v4(),
         };
-        // Owned by the spawned task: dropping this await does not stop it.
-        match tokio::spawn(task.run(hold)).await {
+        // Owned by the spawned task: dropping the `Started` (or the future
+        // awaiting it) does not stop it.
+        Ok(Started {
+            handle: tokio::spawn(task.run(hold)),
+            budget: self.budget.clone(),
+            pool: self.pool.clone(),
+            step: self.step,
+            estimate,
+        })
+    }
+}
+
+/// A Claude call already launched by [`LlmCall::start`]: its hold is taken
+/// and the call and its charge run in their own task. Dropping this does not
+/// stop the call; its charge is still booked.
+#[must_use = "the call runs regardless; wait() gives its reply"]
+pub struct Started {
+    handle: tokio::task::JoinHandle<Result<Reply, StepError>>,
+    budget: Arc<RunBudget>,
+    pool: PgPool,
+    step: &'static str,
+    estimate: i64,
+}
+
+impl Started {
+    /// The call's reply (see [`LlmCall::reply`]).
+    pub async fn wait(self) -> Result<Reply, StepError> {
+        match self.handle.await {
             Ok(r) => r,
             Err(_) => {
                 // The task panicked (its hold was dropped while unwinding).
                 // Claude may have been called and billed, with no charge
                 // booked: count the estimate so the headroom is not reused,
                 // and fail closed (Ruling: JoinError is Unrecorded).
-                self.budget.count_unbooked(estimate);
-                tracing::error!(%run_id, step = self.step, paise = estimate, "claude call task failed; estimate counted as unbooked, reconcile manually");
+                let run_id = self.budget.run_id();
+                self.budget.count_unbooked(self.estimate);
+                tracing::error!(%run_id, step = self.step, paise = self.estimate, "claude call task failed; estimate counted as unbooked, reconcile manually");
                 self.budget.release_if_finished(&self.pool).await;
                 Err(StepError::Unrecorded)
             }
