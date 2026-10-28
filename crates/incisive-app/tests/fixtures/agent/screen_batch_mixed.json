@@ -1,0 +1,6 @@
+[
+  {"id": "p-1", "include": true, "code": "relevant", "reason": "Randomised trial of ICG angiography in colorectal resection"},
+  {"id": "p-2", "include": false, "code": "population", "reason": "Paediatric patients, not adults"},
+  {"id": "p-2", "include": true, "reason": "Duplicate verdict, must be ignored"},
+  {"id": "p-9", "include": true, "reason": "Not in this batch, must be ignored"}
+]

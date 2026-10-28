@@ -1,0 +1,1 @@
+{"header": {"type": "esearch", "version": "0.3"}, "esearchresult": {"count": "1", "retmax": "1", "retstart": "0", "idlist": ["99999901"], "translationset": [], "querytranslation": "(\"indocyanine green\"[Title/Abstract] OR \"ICG\"[Title/Abstract]) AND \"anastomotic leak\"[Title/Abstract] AND \"colorectal\"[Title/Abstract]"}}

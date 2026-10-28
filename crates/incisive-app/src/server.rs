@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     Router,
@@ -7,17 +7,21 @@ use axum::{
 };
 use leptos::config::LeptosOptions;
 use leptos::prelude::provide_context;
-use leptos_axum::{LeptosRoutes, generate_route_list};
+use leptos_axum::{AxumRouteListing, LeptosRoutes, generate_route_list};
 use sqlx::PgPool;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 
+use crate::agent::{AgentLlm, Literature};
 use crate::app::{App, shell};
 use crate::ask::{ASK_BODY_LIMIT, activity_handler, ask_handler, me_handler};
 use crate::config::AppEnv;
 use crate::gate::Classifier;
 use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
+use crate::runs::RunsConfig;
+use crate::runs::api as runs_api;
+use crate::runs::worker::WorkerHandle;
 use crate::spend::{CapsConfig, Prices};
 
 /// Everything a request needs. Also provided as Leptos context to server functions.
@@ -32,6 +36,16 @@ pub struct AppState {
     pub gate_model: String,
     /// `APP_ENV=dev`: the `x-dev-user-email` header is trusted. Never in prod.
     pub dev_mode: bool,
+    /// Per-depth run limits (`RUN_LIMITS`).
+    pub runs: RunsConfig,
+    /// Starts and cancels background runs.
+    pub worker: WorkerHandle,
+    /// The evidence agent's Claude client and models. `None` only in dev
+    /// without `ANTHROPIC_API_KEY`: every run then fails closed
+    /// (`error_kind` "no_api_key").
+    pub llm: Option<Arc<AgentLlm>>,
+    /// The literature clients (one allowlisted HTTP client, shared OA policy).
+    pub lit: Arc<Literature>,
 }
 
 impl FromRef<AppState> for IdentityState {
@@ -105,7 +119,7 @@ fn same_origin(origin: &str, authority: &str) -> bool {
     o_host.eq_ignore_ascii_case(a.host()) && o_port == a_port
 }
 
-/// `POST /api/ask` and `POST /api/fn/*`: when an `Origin` header is present it
+/// `POST /api/ask`, `POST /api/fn/*` and `DELETE /api/runs[/*]`: when an `Origin` header is present it
 /// must match the request's host and port, or the request is refused with 403
 /// before identity, audit or spend. A missing `Origin` is allowed (curl and
 /// server-side clients omit it).
@@ -116,8 +130,11 @@ async fn same_origin_check(
     use axum::http::{Method, StatusCode, header};
     use axum::response::IntoResponse;
     let path = req.uri().path();
-    let guarded =
-        req.method() == Method::POST && (path == "/api/ask" || path.starts_with("/api/fn/"));
+    let guarded = match *req.method() {
+        Method::POST => path == "/api/ask" || path.starts_with("/api/fn/"),
+        Method::DELETE => path == "/api/runs" || path.starts_with("/api/runs/"),
+        _ => false,
+    };
     if guarded && let Some(origin) = req.headers().get(header::ORIGIN) {
         // HTTP/2 carries the host in the URI authority instead of a Host header.
         let authority = req
@@ -145,7 +162,7 @@ async fn same_origin_check(
     next.run(req).await
 }
 
-/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`.
+/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`, and the run routes.
 pub fn api_routes(state: AppState) -> Router {
     Router::new()
         .route("/api/me", get(me_handler))
@@ -154,8 +171,25 @@ pub fn api_routes(state: AppState) -> Router {
             post(ask_handler).layer(DefaultBodyLimit::max(ASK_BODY_LIMIT)),
         )
         .route("/api/activity", get(activity_handler))
+        .route(
+            "/api/runs",
+            get(runs_api::list_handler).delete(runs_api::delete_all_handler),
+        )
+        .route(
+            "/api/runs/{id}",
+            get(runs_api::get_handler).delete(runs_api::delete_handler),
+        )
         .layer(axum::middleware::from_fn(same_origin_check))
         .with_state(state)
+}
+
+/// The app's route list, generated once per process. Generating it renders the
+/// app with Leptos' resource loading suppressed through a process-global flag,
+/// so any page render in flight elsewhere at that moment would wait forever on
+/// its resources. Generating once (before any router can serve) avoids that.
+fn route_list() -> Vec<AxumRouteListing> {
+    static ROUTES: OnceLock<Vec<AxumRouteListing>> = OnceLock::new();
+    ROUTES.get_or_init(|| generate_route_list(App)).clone()
 }
 
 pub fn build_router(
@@ -163,7 +197,7 @@ pub fn build_router(
     state: AppState,
     leptos_options: LeptosOptions,
 ) -> Router {
-    let routes = generate_route_list(App);
+    let routes = route_list();
     let context_state = state.clone();
     let app: Router = Router::new()
         .leptos_routes_with_context(

@@ -3,22 +3,26 @@
 //!
 //! Order (each step audited under one shared request id):
 //! identity (by the caller) -> identifier filter -> spend reservation for the gate
-//! estimate -> medical gate -> settle -> accepted.
+//! estimate -> medical gate -> settle -> accepted -> run created, its cost limit
+//! reserved, `run_started` audited -> the background worker takes over.
 //!
 //! The identifier filter runs before anything leaves the app. The question text
 //! is never stored or logged: the audit log gets finding kinds, offsets, lengths,
 //! a SHA-256, verdicts and money; `tracing` calls here carry ids and fixed kinds
 //! only. If any audit append fails, the request fails closed ([`AskFailure`]):
-//! nothing is answered without a record.
+//! nothing is answered without a record, and no run or reservation is left behind.
 //!
 //! The types below are shared with the browser build; the pipeline itself is
 //! server-only.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::deid::FindingKind;
 
-pub const ACCEPTED_MESSAGE: &str = "Accepted. The evidence agent arrives in Phase 2.";
+pub const RUN_STARTED_MESSAGE: &str =
+    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
+pub const RUN_IN_PROGRESS_MESSAGE: &str = "You already have a question running.";
 pub const BLOCKED_MESSAGE: &str = "Incisive found details that could identify a patient. Please remove them and resend your question.";
 pub const RECORD_FAILED_MESSAGE: &str = "Incisive couldn't record this request. Please try again.";
 pub const OWNER_ONLY_MESSAGE: &str = "Only the Incisive owner can see the activity log.";
@@ -63,9 +67,15 @@ pub enum AskOutcome {
     OverCap {
         message: String,
     },
-    Accepted {
+    /// Accepted: a background run is answering it.
+    RunStarted {
+        run_id: Uuid,
         message: String,
         alert: Option<String>,
+    },
+    /// Accepted by the gate, but the user already has a run queued or running.
+    RunInProgress {
+        message: String,
     },
 }
 
@@ -90,6 +100,10 @@ pub struct MeView {
     pub role: String,
     pub today_paise: i64,
     pub daily_cap_paise: i64,
+    /// Cost limit of a Quick run in paise (`RUN_LIMITS`), for the toggle's hint.
+    pub quick_limit_paise: i64,
+    /// Cost limit of a Focused run in paise (`RUN_LIMITS`).
+    pub focused_limit_paise: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,13 +146,13 @@ mod server {
     use claude_client::Usage;
     use serde::Deserialize;
     use serde_json::json;
-    use uuid::Uuid;
 
     use super::*;
     use crate::audit::{self, ChainStatus, Event};
     use crate::deid;
     use crate::gate::{self, GateError, Verdict};
     use crate::identity::{CurrentUser, IdentityRejection, Role, User};
+    use crate::runs::{RunMode, store, worker};
     use crate::server::AppState;
     use crate::spend::{self, CapCheck, SpendError};
 
@@ -196,12 +210,13 @@ mod server {
         message
     }
 
-    /// The whole pipeline after identity. Never returns `Accepted` unless every
-    /// step, including its audit entry, succeeded.
+    /// The whole pipeline after identity. Never returns `RunStarted` unless every
+    /// step, including its audit entries, succeeded.
     pub async fn run_ask(
         state: &AppState,
         user: &User,
         question: &str,
+        mode: RunMode,
     ) -> Result<AskOutcome, AskFailure> {
         // 0. Input limits, before anything else: no scan, audit, reservation or
         // gate. Nothing about the content is decided and the text goes nowhere.
@@ -424,10 +439,16 @@ mod server {
                     audit::accepted_detail(question),
                 )
                 .await?;
-                Ok(AskOutcome::Accepted {
-                    message: ACCEPTED_MESSAGE.to_string(),
-                    alert,
-                })
+                // Detached: if the client goes away, axum drops this future,
+                // but the run is still fully started or fully undone.
+                let (st, u, q) = (state.clone(), user.clone(), question.to_string());
+                tokio::spawn(async move { start_run(&st, request_id, &u, &q, mode, alert).await })
+                    .await
+                    .unwrap_or_else(|_| {
+                        // A panic in start_run: never an answer.
+                        tracing::error!(%request_id, "run start panicked");
+                        Err(AskFailure::Record)
+                    })
             }
             Verdict::NotMedical => Ok(AskOutcome::NotMedical {
                 message: decision.user_message().unwrap_or_default(),
@@ -436,6 +457,119 @@ mod server {
                 message: decision.user_message().unwrap_or_default(),
             }),
         }
+    }
+
+    /// Undo a run that must not go ahead: delete it, then release its
+    /// reservation (if one was taken). Either failing is a record failure.
+    async fn undo_run(state: &AppState, user: &User, run_id: Uuid) -> Result<(), AskFailure> {
+        let deleted = store::delete_run(&state.pool, user.id, run_id).await;
+        let released = spend::release(&state.pool, user.id, run_id).await;
+        if deleted.is_err() || released.is_err() {
+            tracing::error!(%run_id, "abandoned run could not be undone");
+            return Err(AskFailure::Record);
+        }
+        Ok(())
+    }
+
+    /// After the gate says Medical: create the run (one active run per user,
+    /// enforced by the database), reserve its full cost limit under the run id,
+    /// audit `run_started`, then hand it to the background worker.
+    ///
+    /// Public only for the gold-set runner (`src/bin/goldset.rs`), which
+    /// starts its runs through this same path (the questions are the owner's,
+    /// so the gate is not consulted). Not for request handlers: use
+    /// [`run_ask`].
+    ///
+    /// This does **not** check the question. Callers must first apply the
+    /// checks `run_ask` makes before anything else: reject an empty question
+    /// or one longer than [`MAX_QUESTION_CHARS`], and refuse any question in
+    /// which `deid::scan` finds an identifier.
+    #[doc(hidden)]
+    pub async fn start_run(
+        state: &AppState,
+        request_id: Uuid,
+        user: &User,
+        question: &str,
+        mode: RunMode,
+        gate_alert: Option<String>,
+    ) -> Result<AskOutcome, AskFailure> {
+        let uid = Some(user.id);
+        let limit = state.runs.for_mode(mode).limit_paise;
+
+        // 1-2. The active-run check and the insert are one atomic step. If the
+        // user's active run is abandoned (stale heartbeat), self-heal: interrupt
+        // and release it, then try once more.
+        let mut healed = false;
+        let run_id = loop {
+            match store::create_run(&state.pool, user.id, question, mode, limit).await {
+                Ok(Ok(id)) => break id,
+                Ok(Err(store::ActiveRunExists)) if !healed => {
+                    healed = true;
+                    match worker::interrupt_and_release_stale(&state.pool).await {
+                        Ok(stale) if stale.iter().any(|&(_, u)| u == user.id) => continue,
+                        Ok(_) => {}
+                        Err(_) => tracing::warn!(%request_id, "stale run self-heal failed"),
+                    }
+                    return Ok(AskOutcome::RunInProgress {
+                        message: RUN_IN_PROGRESS_MESSAGE.to_string(),
+                    });
+                }
+                Ok(Err(store::ActiveRunExists)) => {
+                    return Ok(AskOutcome::RunInProgress {
+                        message: RUN_IN_PROGRESS_MESSAGE.to_string(),
+                    });
+                }
+                Err(_) => {
+                    tracing::error!(%request_id, "run could not be created");
+                    return Err(AskFailure::Record);
+                }
+            }
+        };
+
+        // 3. Reserve the run's whole cost limit.
+        let alert = match spend::reserve(&state.pool, user, &state.caps, limit, run_id, "run").await
+        {
+            Ok(CapCheck::Ok { alert }) => alert.or(gate_alert),
+            Ok(CapCheck::Blocked { message }) => {
+                undo_run(state, user, run_id).await?;
+                record(
+                    state,
+                    request_id,
+                    uid,
+                    Event::CapBlocked,
+                    audit::cap_blocked_detail(limit),
+                )
+                .await?;
+                return Ok(AskOutcome::OverCap { message });
+            }
+            Err(_) => {
+                tracing::error!(%request_id, %run_id, "run reservation failed");
+                undo_run(state, user, run_id).await?;
+                return Err(AskFailure::Record);
+            }
+        };
+
+        // 4. Audit it. Fail closed: no run and no reservation without a record.
+        if let Err(f) = record(
+            state,
+            request_id,
+            uid,
+            Event::RunStarted,
+            audit::run_started_detail(run_id, mode),
+        )
+        .await
+        {
+            undo_run(state, user, run_id).await?;
+            return Err(f);
+        }
+
+        // 5. The worker owns it from here.
+        state.worker.spawn(state.clone(), run_id);
+        Ok(AskOutcome::RunStarted {
+            run_id,
+            message: RUN_STARTED_MESSAGE.to_string(),
+            alert,
+        })
     }
 
     /// Audit a failed sign-in on an ask entry point: the fixed kind only.
@@ -465,6 +599,8 @@ mod server {
             role: user.role.as_str().to_string(),
             today_paise: totals.today_paise,
             daily_cap_paise: user.daily_cap_paise,
+            quick_limit_paise: state.runs.quick.limit_paise,
+            focused_limit_paise: state.runs.focused.limit_paise,
         })
     }
 
@@ -578,6 +714,9 @@ mod server {
     #[derive(Deserialize)]
     pub struct AskRequest {
         pub question: String,
+        /// `quick` or `focused` (the default).
+        #[serde(default)]
+        pub mode: RunMode,
     }
 
     /// `POST /api/ask`.
@@ -603,7 +742,7 @@ mod server {
             )
                 .into_response();
         };
-        match run_ask(&state, &user, &req.question).await {
+        match run_ask(&state, &user, &req.question, req.mode).await {
             Ok(outcome) => Json(outcome).into_response(),
             Err(f) => failure_response(f),
         }

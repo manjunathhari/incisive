@@ -3,6 +3,8 @@
 use secrecy::SecretString;
 use std::fmt;
 
+use crate::agent::llm::AgentModels;
+use crate::runs::RunsConfig;
 use crate::spend::Prices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,17 @@ pub struct Config {
     pub usd_inr: f64,
     /// Whole-app monthly budget in paise, from `GLOBAL_MONTHLY_CAP_INR` rupees.
     pub global_monthly_cap_paise: i64,
+    /// Per-depth run limits (`RUN_LIMITS`, optional; defaults otherwise).
+    pub runs: RunsConfig,
+    /// Contact address sent to Unpaywall (required there) and NCBI (`UNPAYWALL_EMAIL`).
+    /// Required in prod; an obviously fake address in dev.
+    pub unpaywall_email: String,
+    /// Model per agent step (`AGENT_MODELS`, optional JSON; missing keys take defaults).
+    pub agent_models: AgentModels,
+    /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
+    /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
+    /// never logged.
+    pub ncbi_api_key: Option<SecretString>,
 }
 
 /// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
@@ -41,6 +54,8 @@ const DEV_MODEL_PRICES: &str = r#"{
   "claude-haiku-5-5": {"input": 1.0, "output": 5.0},
   "claude-sonnet-5-5": {"input": 3.0, "output": 15.0}
 }"#;
+/// DEV ONLY. `.invalid` can never resolve, so a dev run cannot pose as a real contact.
+const DEV_UNPAYWALL_EMAIL: &str = "dev@example.invalid";
 const DEV_USD_INR: f64 = 88.0;
 const DEV_GLOBAL_MONTHLY_CAP_INR: i64 = 10_000;
 
@@ -146,6 +161,26 @@ impl Config {
             }
         }
 
+        let agent_models = match lookup("AGENT_MODELS") {
+            None => AgentModels::default(),
+            Some(json) => AgentModels::from_json(&json).map_err(|reason| ConfigError::Invalid {
+                var: "AGENT_MODELS",
+                reason,
+            })?,
+        };
+        if app_env == AppEnv::Prod {
+            for (step, model) in agent_models.entries() {
+                if model_prices.get(model).is_none() {
+                    return Err(ConfigError::Invalid {
+                        var: "MODEL_PRICES",
+                        reason: format!(
+                            "no entry for AGENT_MODELS {step} `{model}`; add it to MODEL_PRICES or change AGENT_MODELS"
+                        ),
+                    });
+                }
+            }
+        }
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -182,6 +217,28 @@ impl Config {
             }
         };
 
+        let runs = match lookup("RUN_LIMITS") {
+            None => RunsConfig::default(),
+            Some(json) => RunsConfig::from_json(&json).map_err(|reason| ConfigError::Invalid {
+                var: "RUN_LIMITS",
+                reason,
+            })?,
+        };
+
+        let unpaywall_email = match (app_env, lookup("UNPAYWALL_EMAIL")) {
+            (_, Some(e)) => {
+                if !e.contains('@') || e.chars().any(char::is_whitespace) {
+                    return Err(ConfigError::Invalid {
+                        var: "UNPAYWALL_EMAIL",
+                        reason: "expected an email address".to_string(),
+                    });
+                }
+                e
+            }
+            (AppEnv::Dev, None) => DEV_UNPAYWALL_EMAIL.to_string(),
+            (AppEnv::Prod, None) => return Err(ConfigError::Missing("UNPAYWALL_EMAIL")),
+        };
+
         Ok(Config {
             anthropic_api_key,
             claude_model,
@@ -194,6 +251,10 @@ impl Config {
             model_prices,
             usd_inr,
             global_monthly_cap_paise,
+            runs,
+            unpaywall_email,
+            agent_models,
+            ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
 }
@@ -213,7 +274,7 @@ mod tests {
 
     const DB: &str = "postgres://user:hunter2pw@host/db";
     /// Prices for the default gate model and the `CLAUDE_MODEL` used by `full()`.
-    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-test": {"input": 3, "output": 15}}"#;
+    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-test": {"input": 3, "output": 15}}"#;
 
     fn full() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -327,6 +388,11 @@ mod tests {
         prod.push(("MODEL_PRICES", PROD_PRICES));
         prod.push(("USD_INR", "90"));
         prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.iap_audience, "/projects/1/apps/2");
     }
@@ -374,6 +440,11 @@ mod tests {
             ConfigError::Missing("GLOBAL_MONTHLY_CAP_INR")
         );
         prod.push(("GLOBAL_MONTHLY_CAP_INR", "5000"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
         let c = Config::from_lookup(lookup(&prod)).unwrap();
         assert_eq!(c.usd_inr, 90.0);
         assert_eq!(c.global_monthly_cap_paise, 500_000);
@@ -456,6 +527,118 @@ mod tests {
             );
             assert!(err.to_string().contains(var));
         }
+    }
+
+    #[test]
+    fn run_limits_json_parses_and_bad_value_names_variable() {
+        use crate::runs::{DepthSettings, RunsConfig};
+        // Unset: the Global Constraints defaults.
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.runs, RunsConfig::default());
+        assert_eq!(
+            c.runs.quick,
+            DepthSettings {
+                refinements: 1,
+                screen_n: 20,
+                use_n: 5,
+                full_text: false,
+                limit_paise: 1500,
+                time_limit_s: 300,
+            }
+        );
+        assert_eq!(
+            c.runs.focused,
+            DepthSettings {
+                refinements: 3,
+                screen_n: 100,
+                use_n: 10,
+                full_text: true,
+                limit_paise: 4000,
+                time_limit_s: 300,
+            }
+        );
+
+        // Partial override: only the named fields change.
+        let mut pairs = full();
+        pairs.push((
+            "RUN_LIMITS",
+            r#"{"focused": {"limit_paise": 6000, "screen_n": 150}, "quick": {"refinements": 2}}"#,
+        ));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.runs.focused.limit_paise, 6000);
+        assert_eq!(c.runs.focused.screen_n, 150);
+        assert_eq!(c.runs.focused.use_n, 10);
+        assert_eq!(c.runs.quick.refinements, 2);
+        assert_eq!(c.runs.quick.limit_paise, 1500);
+        assert_eq!(
+            c.runs.for_mode(crate::runs::RunMode::Focused).limit_paise,
+            6000
+        );
+
+        for bad in [
+            "not json",
+            "[]",
+            r#"{"deep": {}}"#,
+            r#"{"quick": 5}"#,
+            r#"{"quick": {"limit_paise": 0}}"#,
+            r#"{"quick": {"limit_paise": -5}}"#,
+            r#"{"quick": {"limit_paise": 1.5}}"#,
+            r#"{"focused": {"time_limit_s": 0}}"#,
+            r#"{"focused": {"screen_n": 0}}"#,
+            r#"{"focused": {"use_n": 0}}"#,
+            r#"{"focused": {"refinements": 300}}"#,
+            r#"{"focused": {"full_text": "yes"}}"#,
+            r#"{"focused": {"limit_rupees": 40}}"#,
+        ] {
+            let mut pairs = full();
+            pairs.push(("RUN_LIMITS", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ConfigError::Invalid {
+                        var: "RUN_LIMITS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            assert!(err.to_string().contains("RUN_LIMITS"), "{err}");
+        }
+    }
+
+    #[test]
+    fn unpaywall_email_required_in_prod() {
+        // Dev: an obviously fake default.
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.unpaywall_email, "dev@example.invalid");
+        // Prod: missing (or blank) is an error that names the variable.
+        let mut prod = prod_with(PROD_PRICES);
+        let err = Config::from_lookup(lookup(&prod)).unwrap_err();
+        assert_eq!(err, ConfigError::Missing("UNPAYWALL_EMAIL"));
+        assert!(err.to_string().contains("UNPAYWALL_EMAIL"));
+        prod.push(("UNPAYWALL_EMAIL", "   "));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap_err(),
+            ConfigError::Missing("UNPAYWALL_EMAIL")
+        );
+        // Set: used as given (trimmed).
+        prod.pop();
+        prod.push(("UNPAYWALL_EMAIL", " ops@example.org "));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(c.unpaywall_email, "ops@example.org");
+        // Dev may override too; a value that is not an address names the variable.
+        let mut dev = full();
+        dev.push(("UNPAYWALL_EMAIL", "not-an-address"));
+        let err = Config::from_lookup(lookup(&dev)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Invalid {
+                var: "UNPAYWALL_EMAIL",
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("UNPAYWALL_EMAIL"));
     }
 
     #[test]

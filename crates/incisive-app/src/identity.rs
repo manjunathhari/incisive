@@ -107,6 +107,16 @@ pub async fn find_user(pool: &PgPool, email: &str) -> sqlx::Result<Option<User>>
     row.as_ref().map(user_from_row).transpose()
 }
 
+pub async fn find_user_by_id(pool: &PgPool, id: i64) -> sqlx::Result<Option<User>> {
+    let row = sqlx::query(&format!(
+        "SELECT {USER_COLUMNS} FROM incisive.users WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(user_from_row).transpose()
+}
+
 /// Make sure the owner exists, is the owner, and is active. Safe to call on every
 /// start. Caps are set only on first creation so later edits are not overwritten.
 pub async fn ensure_owner(pool: &PgPool, email: &str, display_name: &str) -> sqlx::Result<User> {

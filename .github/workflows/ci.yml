@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
+
+# Actions minutes are limited on a private repository: a newer push to the same
+# branch cancels the run still in progress, and docs-only changes don't run CI.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -23,6 +31,12 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
+      # The hosted runner ships ~14 GB free; Rust test builds need more. Remove
+      # preinstalled toolchains this job never uses.
+      - name: free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,8 +61,11 @@ jobs:
           cargo test --workspace --no-fail-fast 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            grep -E -- "--- FAILED|panicked at|^thread '.*' panicked|assertion|left:|right:" test.log \
+            grep -E -- "--- FAILED|panicked at|^thread '.*' panicked|assertion|left:|right:|exceeded|test result: FAILED|error: test failed|error(\[E[0-9]+\])?:|process didn't exit successfully|No space left|signal: " test.log \
               | head -40 | while IFS= read -r line; do echo "::error::${line//%/%25}"; done
+            # Also surface the tail of the log, so a failure with no matching
+            # line (a crash, linker error, or OOM) is still readable.
+            tail -n 25 test.log | while IFS= read -r line; do echo "::warning::${line//%/%25}"; done
           fi
           exit "$status"
         env:
@@ -82,7 +99,7 @@ jobs:
             -e APP_ENV=prod \
             -e ANTHROPIC_API_KEY=sk-ant-FAKE-smoke-test-not-a-real-key \
             -e CLAUDE_MODEL=claude-sonnet-5-5 -e GATE_MODEL=claude-haiku-5-5 \
-            -e OWNER_EMAIL=owner@example.com \
+            -e OWNER_EMAIL=owner@example.com -e UNPAYWALL_EMAIL=ci@example.invalid \
             -e MODEL_PRICES='{"claude-haiku-5-5":{"input":1,"output":5},"claude-sonnet-5-5":{"input":3,"output":15}}' \
             -e USD_INR=88 -e GLOBAL_MONTHLY_CAP_INR=10000 \
             -e IAP_AUDIENCE=/projects/0/locations/asia-south1/services/test \

@@ -13,6 +13,24 @@
 //! request's difference between estimate and actual, and the next `reserve`
 //! sees it (charges count toward every total) and blocks accordingly.
 //!
+//! Run overshoots (Phase 2), each bounded and accepted:
+//! * **Deleting an active run** (final review M-4). `runs::api::delete_one`
+//!   releases the whole reservation at once (Ruling R-1b), even while the
+//!   worker still has Claude calls in flight. Their late charges then book
+//!   with no reservation behind them. If the worker is on another instance it
+//!   notices the deletion only at its next heartbeat (up to 20 s) and may
+//!   start further calls meanwhile, while the user can already start a new
+//!   run in the freed slot. The overrun is bounded by the deleted run's limit.
+//! * **Unbooked spend** (final review M-3). A Claude call that was billed but
+//!   whose charge could not be booked (`StepError::Unrecorded`) is counted in
+//!   the run's local budget only (`RunBudget::count_unbooked`). The worker
+//!   keeps just what in-flight calls hold when it releases the reservation,
+//!   so that cost then appears in neither the ledger nor a reservation, and
+//!   the caps do not count it until it is reconciled by hand from the error
+//!   log (`... estimate counted as unbooked, reconcile manually`). It needs a
+//!   ledger write to fail twice for one call, and is bounded by that call's
+//!   estimate.
+//!
 //! Lock ordering (deadlock-free): inside one transaction always take the GLOBAL
 //! advisory lock first, then the per-user lock. Both are transaction-scoped
 //! `pg_advisory_xact_lock(namespace, key)` with two int4 keys, so user ids can
@@ -407,4 +425,166 @@ pub async fn settle(
     .execute(&mut *tx)
     .await?;
     tx.commit().await
+}
+
+/// Charge one Claude call of a run, and shrink the run's reservation by the
+/// same amount (floored at zero), in one transaction.
+///
+/// Takes the same locks in the same order as [`reserve`] (global, then user).
+/// Idempotent per `call_id`: a replay inserts no second charge and does not
+/// shrink the reservation again. Safe if the reservation is already gone
+/// (released, or never made): the charge is still recorded. The real cost is
+/// always recorded in full, even beyond the reservation.
+///
+/// Returns whether a new charge row was inserted (false on a replay). A replay
+/// whose user or amount differs from the stored charge is logged (ids only) and
+/// changes nothing.
+///
+/// Charges are dated at settle time (now), not at reservation time, so a run
+/// that crosses IST midnight counts in the new day. This is accepted.
+pub async fn charge_call(
+    pool: &PgPool,
+    user_id: i64,
+    run_id: Uuid,
+    call_id: Uuid,
+    model: &str,
+    usage: &Usage,
+    paise: i64,
+) -> sqlx::Result<bool> {
+    if paise < 0 {
+        tracing::warn!(%run_id, %call_id, "negative call charge; recording zero");
+    }
+    debug_assert!(paise >= 0, "negative call charge");
+    let paise = paise.max(0);
+    let tokens = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+    let mut tx = pool.begin().await?;
+    lock_spend(&mut tx, user_id).await?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO incisive.spend \
+         (user_id, kind, purpose, model, input_tokens, output_tokens, paise, request_id) \
+         VALUES ($1, 'charge', $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (request_id) WHERE kind = 'charge' DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(format!("run:{run_id}"))
+    .bind(model)
+    .bind(tokens(usage.input_tokens))
+    .bind(tokens(usage.output_tokens))
+    .bind(paise)
+    .bind(call_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if inserted {
+        sqlx::query(
+            "UPDATE incisive.spend SET paise = paise - LEAST(paise, $3) \
+             WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation'",
+        )
+        .bind(run_id)
+        .bind(user_id)
+        .bind(paise)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        let existing: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT user_id, paise FROM incisive.spend WHERE request_id = $1 AND kind = 'charge'",
+        )
+        .bind(call_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some_and(|(u, p)| u != user_id || p != paise) {
+            tracing::warn!(%run_id, %call_id, "charge replay differs from the stored charge");
+        }
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// Delete the run's remaining reservation and return the paise released
+/// (0 if there is none, so a second call is harmless).
+pub async fn release(pool: &PgPool, user_id: i64, run_id: Uuid) -> sqlx::Result<i64> {
+    let mut tx = pool.begin().await?;
+    lock_spend(&mut tx, user_id).await?;
+    let released: Option<i64> = sqlx::query_scalar(
+        "DELETE FROM incisive.spend \
+         WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation' RETURNING paise",
+    )
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(released.unwrap_or(0))
+}
+
+/// Release the run's reservation except `keep` paise, which stay reserved for
+/// Claude calls still in flight (Ruling R-8d); returns the paise released.
+/// With `keep <= 0` this is [`release`]. Their late charges consume what is
+/// kept, and the last one releases the rest (`RunBudget::release_if_finished`).
+pub async fn release_keeping(
+    pool: &PgPool,
+    user_id: i64,
+    run_id: Uuid,
+    keep: i64,
+) -> sqlx::Result<i64> {
+    if keep <= 0 {
+        return release(pool, user_id, run_id).await;
+    }
+    let mut tx = pool.begin().await?;
+    lock_spend(&mut tx, user_id).await?;
+    let before: Option<i64> = sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend \
+         WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation'",
+    )
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(before) = before else {
+        tx.commit().await?;
+        return Ok(0);
+    };
+    let after = before.min(keep);
+    sqlx::query(
+        "UPDATE incisive.spend SET paise = $3 \
+         WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation'",
+    )
+    .bind(run_id)
+    .bind(user_id)
+    .bind(after)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(before - after)
+}
+
+/// The user holding the reservation made under `request_id`, if one remains.
+/// Lets a worker release a run's reservation after the run row is gone.
+pub async fn reservation_owner(pool: &PgPool, request_id: Uuid) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar(
+        "SELECT user_id FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation' LIMIT 1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The global advisory lock, then the user's (the order [`reserve`] uses).
+async fn lock_spend(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(LOCK_NS_SPEND_GLOBAL)
+        .bind(0_i32)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(LOCK_NS_SPEND_USER)
+        .bind((user_id & 0x7fff_ffff) as i32)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }

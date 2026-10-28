@@ -93,6 +93,10 @@ fn state(pool: PgPool, gate: Arc<dyn Classifier>, gate_model: &str) -> AppState 
         },
         gate_model: gate_model.to_string(),
         dev_mode: true,
+        runs: incisive_app::runs::RunsConfig::default(),
+        worker: incisive_app::runs::worker::WorkerHandle::default(),
+        llm: None,
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 
@@ -146,7 +150,7 @@ async fn question_text_never_reaches_tracing() {
                 PRICED,
             ),
             q(MODEL_QUESTION),
-            "accepted",
+            "run_started",
         ),
         // Identifiers blocked.
         (

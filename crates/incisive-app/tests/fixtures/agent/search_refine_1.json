@@ -1,0 +1,5 @@
+{
+  "accept": false,
+  "query": "(\"indocyanine green\"[tiab] OR ICG[tiab]) AND \"anastomotic leak\"[tiab] AND colorectal[tiab] AND randomized controlled trial[pt]",
+  "reason": "Narrow to randomised trials"
+}

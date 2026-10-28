@@ -12,6 +12,13 @@ name = "incisive-app"
 path = "src/main.rs"
 required-features = ["ssr"]
 
+# The gold-set runner (docs/goldset/README.md): runs the owner's questions as
+# real budgeted runs against a local database and writes a markdown report.
+[[bin]]
+name = "goldset"
+path = "src/bin/goldset.rs"
+required-features = ["ssr"]
+
 [dependencies]
 secrecy = "0.10"
 leptos = { version = "0.8" }
@@ -33,11 +40,21 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 url = { version = "2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
-uuid = { version = "1", features = ["serde", "v4"], optional = true }
+# Copy-to-clipboard on the run page; the Edit & re-run fragment; the remembered
+# Quick/Focused choice (browser only).
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "Location", "History", "Storage"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"], optional = true }
+# `v4` (random ids) is enabled by `ssr` only: the browser build just deserializes ids.
+uuid = { version = "1", features = ["serde"], optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
 tower-http = { version = "0.6", default-features = false, features = ["limit", "catch-panic"], optional = true }
+# `catch_unwind` for the run worker (a panicking pipeline fails its run, not the process).
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+# PubMed efetch XML (abstracts, retraction notices).
+quick-xml = { version = "0.42", optional = true }
+# The gold-set runner's questions file.
+toml = { version = "1", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -45,11 +62,13 @@ http-body-util = "0.1"
 serde_json = "1"
 async-trait = "0.1"
 axum = "0.8"
-tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "test-util", "sync"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 base64 = "0.22"
 wiremock = "0.6"
 claude-client = { path = "../claude-client" }
+# The same reqwest the Claude client uses, to build a real timeout error in tests.
+reqwest-claude = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 incisive-app = { path = ".", features = ["test-util"] }
@@ -58,7 +77,8 @@ incisive-app = { path = ".", features = ["test-util"] }
 default = ["ssr"]
 # Test-only helpers (scratch-table audit variants). Enabled by the self dev-dependency; never by default.
 test-util = ["ssr"]
-hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook"]
+# The run view types (`runs`) are shared with the browser: serde_json, chrono and uuid are needed here too.
+hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys", "dep:serde_json", "dep:chrono", "dep:uuid"]
 ssr = [
     "dep:axum",
     "dep:tokio",
@@ -73,9 +93,13 @@ ssr = [
     "dep:url",
     "dep:chrono",
     "dep:uuid",
+    "uuid/v4",
     "dep:sha2",
     "dep:hex",
     "dep:tower-http",
+    "dep:futures-util",
+    "dep:quick-xml",
+    "dep:toml",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",
@@ -85,6 +109,8 @@ ssr = [
 
 [package.metadata.leptos]
 output-name = "incisive-app"
+# The server binary; `goldset` is a local tool and is never part of the site.
+bin-target = "incisive-app"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 site-addr = "127.0.0.1:8080"

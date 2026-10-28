@@ -1,0 +1,5 @@
+{
+  "accept": false,
+  "query": "(\"indocyanine green\"[mh] OR ICG[tiab]) AND \"anastomotic leak\"[tiab] AND (colorectal[tiab] OR rectal[tiab]) AND (randomized controlled trial[pt] OR meta-analysis[pt])",
+  "reason": "Include rectal resections"
+}

@@ -1,0 +1,22 @@
+-- Index for the reservation lookups on incisive.spend (Phase 2 final review M-9).
+--
+-- Every run charge and release finds the run's reservation by
+--   request_id = $1 [AND user_id = $2] AND kind = 'reservation'
+-- (spend::charge_call, spend::release, spend::release_keeping,
+-- spend::reservation_owner) while holding the global spend advisory lock, and
+-- recovery joins runs to their reservations on the same columns every minute
+-- (store::finished_runs_holding_reservation, store::orphaned_run_reservations).
+-- Only charge rows had a request_id index (spend_charge_request_uniq), so each
+-- of these was a sequential scan, growing with ~30 charge rows per run.
+--
+-- A partial index over reservation rows only: few rows (one per active run or
+-- gate call), so it stays tiny. Not UNIQUE: the reservation's uniqueness is not
+-- a Phase 1 invariant to impose on existing data here.
+--
+-- Locking: a plain (non-CONCURRENTLY) build, inside sqlx's migration
+-- transaction, takes a SHARE lock on incisive.spend, so writes (reserve,
+-- charge, release) wait while it builds. The table is small (thousands of rows
+-- at current use), so the build takes well under a second; that brief pause is
+-- acceptable. CONCURRENTLY cannot run inside a transaction.
+CREATE INDEX IF NOT EXISTS spend_reservation_request_idx
+    ON incisive.spend (request_id) WHERE kind = 'reservation';

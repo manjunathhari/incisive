@@ -3,14 +3,36 @@ use std::time::Duration;
 
 use claude_client::Client;
 use incisive_app::{
+    agent::{AgentLlm, Literature},
     config::{AppEnv, Config},
     db::{PgReadiness, lazy_pool, migrate_until_done},
     gate::{Classifier, ClaudeClassifier, OfflineClassifier},
     identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
+    lit::http::{AllowlistedClient, OaPolicy, default_user_agent},
+    runs::worker::{WorkerHandle, recovery_loop},
     server::{AppState, build_router, install_panic_hook},
     spend::CapsConfig,
 };
 use leptos::config::get_configuration;
+
+/// Retention: runs older than 12 months are deleted at startup (after
+/// migrations) and then daily, together with the paper-cache prune (entries
+/// older than 90 days). Logs counts only.
+async fn retention_loop(pool: sqlx::PgPool) {
+    let mut every = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+    loop {
+        // The first tick completes at once: the startup pass.
+        every.tick().await;
+        match incisive_app::runs::store::delete_runs_older_than(&pool, 365).await {
+            Ok(deleted) => tracing::info!(deleted, "run retention pass"),
+            Err(_) => tracing::error!("run retention pass failed"),
+        }
+        match incisive_app::lit::cache::prune(&pool).await {
+            Ok(pruned) => tracing::info!(pruned, "paper cache prune"),
+            Err(_) => tracing::error!("paper cache prune failed"),
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -53,12 +75,17 @@ async fn main() {
     };
     let migrated = Arc::new(AtomicBool::new(false));
     let (base, cap) = (Duration::from_secs(1), Duration::from_secs(30));
-    // Migrations first, then the owner row (which needs the users table).
+    // Migrations first, then the owner row (which needs the users table) and
+    // run recovery: abandoned runs (stale heartbeat, by the database clock)
+    // become interrupted and release their reservations, at startup and then
+    // every minute. Live runs of other instances are left alone.
     tokio::spawn({
         let (pool, migrated) = (pool.clone(), migrated.clone());
         let (owner_email,) = (config.owner_email.clone(),);
         async move {
             migrate_until_done(pool.clone(), migrated, base, cap).await;
+            tokio::spawn(recovery_loop(pool.clone(), base, cap));
+            tokio::spawn(retention_loop(pool.clone()));
             ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
         }
     });
@@ -68,20 +95,45 @@ async fn main() {
         JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
     );
 
-    // The gate. No network at startup; the key is never logged. Config only lets
-    // the key be absent in dev, where every model call then fails closed.
-    let gate: Arc<dyn Classifier> = match config.anthropic_api_key.clone() {
-        Some(key) => Arc::new(ClaudeClassifier::new(
-            Arc::new(Client::new(key)),
+    // The gate and the agent share one Claude client. No network at startup;
+    // the key is never logged. Config only lets the key be absent in dev,
+    // where every model call then fails closed (runs fail as "no_api_key").
+    let claude: Option<Arc<Client>> = config
+        .anthropic_api_key
+        .clone()
+        .map(|key| Arc::new(Client::new(key)));
+    let gate: Arc<dyn Classifier> = match &claude {
+        Some(client) => Arc::new(ClaudeClassifier::new(
+            client.clone(),
             config.gate_model.clone(),
         )),
         None => {
             tracing::warn!(
-                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable"
+                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable, and runs fail closed"
             );
             Arc::new(OfflineClassifier)
         }
     };
+    let llm = claude.map(|client| {
+        Arc::new(AgentLlm {
+            client,
+            models: config.agent_models.clone(),
+        })
+    });
+    // One allowlisted client and one open-access policy for all literature
+    // calls. With the optional NCBI key PubMed is paced at 10 requests a
+    // second, else 3. Only whether a key is set is logged, never the key.
+    let oa = OaPolicy::default();
+    tracing::info!(
+        ncbi_api_key = config.ncbi_api_key.is_some(),
+        "literature clients configured"
+    );
+    let lit = Arc::new(Literature::new(
+        AllowlistedClient::new(default_user_agent(), oa.clone()),
+        oa,
+        config.ncbi_api_key.clone(),
+        Some(config.unpaywall_email.clone()),
+    ));
     if config.model_prices.get(&config.gate_model).is_none() {
         tracing::warn!(
             gate_model = %config.gate_model,
@@ -100,6 +152,10 @@ async fn main() {
         },
         gate_model: config.gate_model.clone(),
         dev_mode: config.app_env == AppEnv::Dev,
+        runs: config.runs,
+        worker: WorkerHandle::default(),
+        llm,
+        lit,
     };
 
     let app = build_router(

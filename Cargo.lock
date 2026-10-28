@@ -321,6 +321,7 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -1306,6 +1307,7 @@ dependencies = [
  "chrono",
  "claude-client",
  "console_error_panic_hook",
+ "futures-util",
  "hex",
  "http-body-util",
  "incisive-app",
@@ -1314,7 +1316,9 @@ dependencies = [
  "leptos_axum",
  "leptos_meta",
  "leptos_router",
+ "quick-xml",
  "regex",
+ "reqwest 0.12.28",
  "reqwest 0.13.5",
  "secrecy",
  "serde",
@@ -1322,6 +1326,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tokio",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
@@ -1329,6 +1334,7 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen",
+ "web-sys",
  "wiremock",
 ]
 
@@ -2178,6 +2184,15 @@ dependencies = [
  "quote",
  "syn 3.0.9",
  "version_check",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

@@ -1,0 +1,173 @@
+# Incisive gold set: 20 benchmark questions (owner-supplied, 28 Oct 2026).
+# Answer keys: docs/goldset/answer-keys.md. Every PMID and DOI below was checked
+# against PubMed on 28 Oct 2026. Q10-Q12 landmarks were curated by Claude from PubMed
+# (the source marked them "curation needed") and need the owner's confirmation.
+
+[[q]]
+id = "Q1"
+question = "In patients undergoing curative resection for rectal cancer, does robotic-assisted surgery significantly reduce conversion to open surgery compared with conventional laparoscopy? Discuss the primary endpoint, absolute conversion rates, statistical significance, and clinical implications."
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "21912876", doi = "10.1007/s00384-011-1313-6", title_hint = "An international, multicentre, prospective, randomised, controlled, unblinded, parallel-group trial of robotic" },
+]
+
+[[q]]
+id = "Q2"
+question = "Compare robotic and laparoscopic total mesorectal excision (TME) for middle and low rectal cancer. What does the evidence show regarding circumferential resection margin positivity, completeness of TME, postoperative complications, and long-term oncological outcomes?"
+landmarks = [
+  { pmid = "36087608", doi = "10.1016/S2468-1253(22)00248-5", title_hint = "Robotic versus laparoscopic surgery for middle and low rectal cancer (REAL)" },
+  { pmid = "36594748", doi = "10.1097/SLA.0000000000005788", title_hint = "Comparison of Laparoscopic Versus Robot-Assisted Surgery for Rectal Cancers" },
+  { pmid = "42929021", doi = "10.1093/bjs/znag114", title_hint = "Long-term oncological outcomes of robotic versus laparoscopic total mesorectal excision" },
+]
+
+[[q]]
+id = "Q3"
+question = "Does robotic rectal cancer surgery improve postoperative urinary function, sexual function, bowel function, or quality of life compared with laparoscopic surgery? Evaluate evidence strength and distinguish statistical significance from clinically meaningful benefit."
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "36087608", doi = "10.1016/S2468-1253(22)00248-5", title_hint = "Robotic versus laparoscopic surgery for middle and low rectal cancer (REAL)" },
+  { pmid = "36594748", doi = "10.1097/SLA.0000000000005788", title_hint = "Comparison of Laparoscopic Versus Robot-Assisted Surgery for Rectal Cancers" },
+]
+
+[[q]]
+id = "Q4"
+question = "How many cases are required to achieve proficiency in robotic colorectal surgery? Compare learning curves for robotic and laparoscopic colectomy and rectal surgery, considering prior experience, procedure complexity, and how proficiency is defined."
+landmarks = [
+  { pmid = "34318575", doi = "10.1111/codi.15843", title_hint = "The learning curve in robotic colorectal surgery compared with laparoscopic colorectal surgery" },
+  { pmid = "41334488", doi = "10.4293/JSLS.2025.00077", title_hint = "Learning Curve in Robotic Colorectal Surgery" },
+  { pmid = "42828702", doi = "10.1007/s11701-026-04024-x", title_hint = "Learning curves in robotic and laparoscopic colorectal surgery" },
+]
+
+[[q]]
+id = "Q5"
+question = "Does robotic gastrectomy improve postoperative morbidity, lymph-node retrieval, margin status, or long-term survival compared with laparoscopic gastrectomy?"
+landmarks = [
+  { pmid = "26020107", doi = "10.1097/SLA.0000000000001249", title_hint = "Multicenter Prospective Comparative Study of Robotic Versus Laparoscopic Gastrectomy" },
+  { pmid = "38215239", doi = "10.1093/bjs/znad435", title_hint = "Long-term oncological outcomes of robotic versus laparoscopic gastrectomy" },
+]
+
+[[q]]
+id = "Q6"
+question = "How does laparoscopic gastrectomy compare with open gastrectomy for locally advanced gastric cancer in complications, recurrence, disease-free survival, and overall survival? What are the implications for choosing a minimally invasive approach?"
+landmarks = [
+  { pmid = "35857305", doi = "10.1001/jamasurg.2022.2749", title_hint = "Laparoscopic vs Open Distal Gastrectomy for Locally Advanced Gastric Cancer" },
+  { pmid = "32816629", doi = "10.1200/JCO.20.01210", title_hint = "Long-Term Outcomes of Laparoscopic Distal Gastrectomy for Locally Advanced Gastric Cancer" },
+]
+
+[[q]]
+id = "Q7"
+question = "Compare robot-assisted minimally invasive esophagectomy with conventional minimally invasive esophagectomy for esophageal cancer. What are the effects on lymph-node yield, complications, margin status, mortality, and survival?"
+landmarks = [
+  { pmid = "34565343", doi = "10.1186/s12885-021-08780-x", title_hint = "Robot-assisted minimally invasive thoraco-laparoscopic esophagectomy" },
+  { pmid = "42814447", doi = "10.1001/jamasurg.2026.4478", title_hint = "Robotic vs Thoracolaparoscopic Esophagectomy for Esophageal Cancer" },
+]
+
+[[q]]
+id = "Q8"
+question = "Compare robotic and laparoscopic distal pancreatectomy for benign, premalignant, and malignant lesions. Evaluate conversion, operative time, blood loss, postoperative pancreatic fistula, spleen preservation, margin status, and oncological outcomes."
+landmarks = [
+  { pmid = "30962137", doi = "10.1016/j.hpb.2019.02.020", title_hint = "Robotic versus conventional laparoscopic distal pancreatic resection" },
+  { pmid = "42133237", doi = "10.1007/s11701-026-03464-9", title_hint = "Robot-assisted versus laparoscopic distal pancreatectomy: an updated systematic review" },
+]
+
+[[q]]
+id = "Q9"
+question = "Does minimally invasive distal pancreatectomy provide oncological outcomes comparable to open surgery for resectable pancreatic cancer? Explain the primary endpoint, noninferiority framework, R0 resection, and the limits of applying results specifically to robotic surgery."
+landmarks = [
+  { pmid = "37457332", doi = "10.1016/j.lanepe.2023.100673", title_hint = "Minimally invasive versus open distal pancreatectomy for resectable pancreatic cancer (DIPLOMA)" },
+]
+
+[[q]]
+id = "Q10"
+question = "Evaluate robotic pancreaticoduodenectomy compared with open pancreaticoduodenectomy. Discuss morbidity, clinically relevant pancreatic fistula, delayed gastric emptying, postpancreatectomy hemorrhage, conversion, length of stay, R0 resection, lymph-node yield, and mortality."
+# landmarks curated by Claude, pending owner confirmation
+landmarks = [
+  { pmid = "38420108", doi = "10.1016/j.lanepe.2024.100864", title_hint = "Robotic versus open partial pancreatoduodenectomy (EUROPA)" },
+  { pmid = "38428441", doi = "10.1016/S2468-1253(24)00005-0", title_hint = "Effect of robotic versus open pancreaticoduodenectomy on postoperative length of hospital stay" },
+  { pmid = "42386316", doi = "10.1136/bmj-2026-319692", title_hint = "Robotic versus Open Pancreatoduodenectomy (PORTAL)" },
+]
+
+[[q]]
+id = "Q11"
+question = "For benign or malignant liver disease, compare robotic, laparoscopic, and open liver resection for blood loss, transfusion, conversion, morbidity, length of stay, margin status, and long-term oncological outcomes. How might selection and institutional expertise affect the findings?"
+# landmarks curated by Claude, pending owner confirmation
+landmarks = [
+  { pmid = "28657937", doi = "10.1097/SLA.0000000000002353", title_hint = "Laparoscopic Versus Open Resection for Colorectal Liver Metastases: The OSLO-COMET" },
+  { pmid = "40164991", doi = "10.1093/bjsopen/zrae141", title_hint = "Robotic versus laparoscopic hepatectomy: meta-analysis of propensity-score matched studies" },
+]
+
+[[q]]
+id = "Q12"
+question = "For major hepatectomy, bile duct reconstruction, and complex pancreatic surgery, how should surgeons decide whether robotic surgery provides a clinically meaningful advantage? Discuss complexity, learning curves, conversion, complications, oncological endpoints, and institutional experience."
+# landmarks curated by Claude, pending owner confirmation
+landmarks = [
+  { pmid = "38420108", doi = "10.1016/j.lanepe.2024.100864", title_hint = "Robotic versus open partial pancreatoduodenectomy (EUROPA)" },
+  { pmid = "37457332", doi = "10.1016/j.lanepe.2023.100673", title_hint = "Minimally invasive versus open distal pancreatectomy for resectable pancreatic cancer (DIPLOMA)" },
+  { pmid = "32989544", doi = "10.1007/s00464-020-08008-2", title_hint = "Laparoscopic versus robotic major hepatectomy: a systematic review and meta-analysis" },
+]
+
+[[q]]
+id = "Q13"
+question = "Does robotic inguinal hernia repair improve pain, complications, recurrence, return to normal activity, or quality of life compared with conventional laparoscopic repair? Assess randomized evidence, operative time, and costs."
+landmarks = [
+  { pmid = "32186683", doi = "10.1001/jamasurg.2020.0034", title_hint = "Robotic Inguinal vs Transabdominal Laparoscopic Inguinal Hernia Repair" },
+]
+
+[[q]]
+id = "Q14"
+question = "For ventral hernia repair using intraperitoneal mesh, compare robotic and laparoscopic approaches in complications, operative time, pain, recurrence, mesh-related outcomes, length of stay, and costs."
+landmarks = [
+  { pmid = "35703814", doi = "10.1097/XCS.0000000000000171", title_hint = "Robotic vs Laparoscopic Ventral Hernia Repair with Intraperitoneal Mesh" },
+]
+
+[[q]]
+id = "Q15"
+question = "Compare robotic and laparoscopic right colectomy for benign and malignant disease. Discuss operative time, conversion, complications, length of stay, intracorporeal anastomosis, recovery, and oncological quality."
+landmarks = [
+  { pmid = "22864881", doi = "10.1002/bjs.8841", title_hint = "Randomized clinical trial of robot-assisted versus standard laparoscopic right colectomy" },
+]
+
+[[q]]
+id = "Q16"
+question = "Across colorectal, upper GI, HPB, and general surgery, is robotic surgery cost-effective compared with conventional laparoscopy? Evaluate capital expenditure, instruments, operating-room time, length of stay, complications, readmissions, quality-adjusted life-years, and procedure volume."
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "32186683", doi = "10.1001/jamasurg.2020.0034", title_hint = "Robotic Inguinal vs Transabdominal Laparoscopic Inguinal Hernia Repair" },
+  { pmid = "42565915", doi = "10.1007/s11701-026-03716-8", title_hint = "Is robotic colorectal surgery worth the cost?" },
+]
+
+[[q]]
+id = "Q17"
+question = "Design an evidence-based implementation pathway for a new robotic GI and colorectal surgery program. Address credentialing, simulation, proctoring, case selection, learning curves, complication monitoring, conversion thresholds, outcome auditing, and expansion to complex HPB procedures."
+landmarks = [
+  { pmid = "34318575", doi = "10.1111/codi.15843", title_hint = "The learning curve in robotic colorectal surgery compared with laparoscopic colorectal surgery" },
+  { pmid = "41334488", doi = "10.4293/JSLS.2025.00077", title_hint = "Learning Curve in Robotic Colorectal Surgery" },
+  { pmid = "42828702", doi = "10.1007/s11701-026-04024-x", title_hint = "Learning curves in robotic and laparoscopic colorectal surgery" },
+]
+
+[[q]]
+id = "Q18"
+question = "Suppose one randomized trial shows improved short-term outcomes with robotic rectal surgery, another shows no significant difference, and a third reports improved long-term oncological outcomes. How should the evidence be synthesized?"
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "36087608", doi = "10.1016/S2468-1253(22)00248-5", title_hint = "Robotic versus laparoscopic surgery for middle and low rectal cancer (REAL)" },
+  { pmid = "36594748", doi = "10.1097/SLA.0000000000005788", title_hint = "Comparison of Laparoscopic Versus Robot-Assisted Surgery for Rectal Cancers" },
+]
+
+[[q]]
+id = "Q19"
+question = "When comparing robotic and laparoscopic GI surgery, which complication definitions and outcome measures should be used? Explain Clavien–Dindo grading, 30- and 90-day morbidity, readmission, reoperation, mortality, conversion, pancreatic fistula, and anastomotic leak."
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "37457332", doi = "10.1016/j.lanepe.2023.100673", title_hint = "Minimally invasive versus open distal pancreatectomy for resectable pancreatic cancer (DIPLOMA)" },
+  { pmid = "32186683", doi = "10.1001/jamasurg.2020.0034", title_hint = "Robotic Inguinal vs Transabdominal Laparoscopic Inguinal Hernia Repair" },
+]
+
+[[q]]
+id = "Q20"
+question = "A patient with low rectal cancer, obesity, previous abdominal surgery, and significant comorbidity is being considered for robotic versus laparoscopic resection. How should published evidence guide the decision? Discuss trial applicability, patient factors, surgeon expertise, anticipated conversion, oncological objectives, and uncertainty."
+landmarks = [
+  { pmid = "29067426", doi = "10.1001/jama.2017.7219", title_hint = "Effect of Robotic-Assisted vs Conventional Laparoscopic Surgery on Risk of Conversion" },
+  { pmid = "36087608", doi = "10.1016/S2468-1253(22)00248-5", title_hint = "Robotic versus laparoscopic surgery for middle and low rectal cancer (REAL)" },
+  { pmid = "36594748", doi = "10.1097/SLA.0000000000005788", title_hint = "Comparison of Laparoscopic Versus Robot-Assisted Surgery for Rectal Cancers" },
+]

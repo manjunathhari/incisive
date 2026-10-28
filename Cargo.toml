@@ -7,6 +7,15 @@ edition = "2024"
 version = "0.1.0"
 publish = false
 
+# Debug builds keep line tables only (readable panics and backtraces) but no full
+# debug info. Full debug info made the test build outgrow the GitHub runner's disk
+# ("No space left on device") and this machine's.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"

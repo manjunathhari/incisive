@@ -16,7 +16,7 @@ Running record of the Phase 1 build. Updated after every task and every stage.
 | B. Safety filters | 2, 3 | ✅ complete (27 Oct) |
 | C. Money and records | 4, 5 | ✅ complete (27 Oct) |
 | D. Ask pipeline and screens | 6 | ✅ complete (27 Oct) |
-| E. Production wiring and final review | 7 + review | ✅ complete (27 Oct) — awaiting your settings and merge go-ahead |
+| E. Production wiring and final review | 7 + review | ✅ complete (27 Oct) — merged and live |
 
 ## Decisions made before the build (pre-flight rulings)
 
@@ -347,3 +347,26 @@ These are the decisions I took on your behalf during the build. Each is recorded
   - reject (not clean up) unusual characters, then switch to an allowlist
   - billed gate failures charged
   - gate retry under-count accepted as a follow-up
+
+## After merge: live on production ✅
+
+**Date:** 27 Oct 2026, evening (IST) · **Merged:** PR #1 → `main` at `7eb5e22` · **Deploy:** run 40530079424.
+- **First deploy attempt:** stopped at the settings check, because the pasted `MODEL_PRICES` wasn't valid JSON. The live site stayed on Phase 0, as designed.
+- **Second attempt:** succeeded after the value was re-entered.
+
+**Owner checks on the live site:**
+- "Signed in as Owner".
+- Identifier example → red block (`deid_blocked`).
+- Activity page shows "Chain verified ✓".
+- "best stocks today" first returned "I couldn't check this question just now" (`gate_failed`, failing closed as designed).
+  - Cloud logs showed Anthropic answering **HTTP 400**.
+  - A direct test in Cloud Shell showed the reason: *"Your credit balance is too low to access the Anthropic API."*
+  - Fix: the owner claimed the Max plan's monthly API credit into the Console organization that owns the key. No code change.
+  - After that, "best stocks today" → amber: "Incisive only answers medical and surgical questions. The question asks for stock recommendations, which is finance…" ✅
+
+**Follow-ups found during the live check:**
+- Log lines use a `level` field that Google Cloud Logging doesn't read as severity, so warnings are filed as ordinary entries. Emit a `severity` field, so "WARNING or worse" filters work.
+- Log Anthropic's error *type* (e.g. `invalid_request_error`) alongside the status. Still log no message text.
+- Set `GLOBAL_MONTHLY_CAP_INR` to match the real Max credit: $100 → 8640, $200 → 17280. It is currently 4320, which errs on the safe side.
+
+**Phase 1 is complete.** Next is Phase 2, the evidence agent: PubMed / Europe PMC / Unpaywall tools, screening, appraisal and a citation verifier. It plugs in where Phase 1 now returns "Accepted".

@@ -512,7 +512,7 @@ fn parse_verdict(text: &str) -> Option<RawVerdict> {
 }
 
 /// Whether a failed call may still have been billed. See [`GateError::Unavailable`].
-fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
+pub(crate) fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
     use claude_client::ClaudeError::*;
     match e {
         Api { .. } | RateLimited { .. } | Overloaded => false,
@@ -587,7 +587,7 @@ fn error_status(e: &claude_client::ClaudeError) -> Option<u16> {
 }
 
 /// Stop the question from opening or closing our `<question>` wrapper.
-fn neutralise_close_tag(question: &str) -> String {
+pub(crate) fn neutralise_close_tag(question: &str) -> String {
     let once = replace_ci(question, "</question>", "< /question>");
     replace_ci(&once, "<question>", "< question>")
 }
@@ -630,7 +630,7 @@ fn sanitise_reason(raw: &str) -> String {
     }
 }
 
-fn error_kind(e: &claude_client::ClaudeError) -> &'static str {
+pub(crate) fn error_kind(e: &claude_client::ClaudeError) -> &'static str {
     use claude_client::ClaudeError::*;
     match e {
         Api { .. } => "api",
