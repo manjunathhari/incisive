@@ -116,11 +116,14 @@ pub struct Trail {
     /// Records screened (after merging).
     pub screened: u32,
     pub included: u32,
-    /// Records left unscreened when the search stopped early: neither
-    /// included nor excluded.
+    /// Records not assessed: no usable verdict, a failed screening batch, or
+    /// left unscreened when the search stopped early. Neither included nor
+    /// excluded. (Answers stored before Fix B count only the stopped ones
+    /// here and may list the rest in `excluded_top`: see [`not_assessed`].)
     #[serde(default)]
     pub not_assessed: u32,
-    /// The most common exclusion reasons with their counts.
+    /// The most common exclusion reasons with their counts. Never a
+    /// not-assessed label (except in answers stored before Fix B).
     pub excluded_top: Vec<(String, u32)>,
     pub refinements: Vec<Refinement>,
     /// "cost limit" or "time limit" when the search stopped early.
@@ -249,35 +252,54 @@ pub fn check_text(c: &CheckSummary) -> String {
     )
 }
 
-/// "Screened 15, included 2, excluded 13", or with records the search
-/// stopped before: "Screened 10 of 15, included 2, excluded 8; 5 not
-/// assessed (search stopped early)".
+/// A not-assessed label in `excluded_top` ("not assessed", "not assessed
+/// (stopped early)"): only in answers stored before Fix B.
+fn is_not_assessed(reason: &str) -> bool {
+    reason.starts_with("not assessed")
+}
+
+/// Records not assessed: [`Trail::not_assessed`], plus, in answers stored
+/// before Fix B, the not-assessed labels then tallied among the exclusion
+/// reasons. Never counted as excluded.
+pub fn not_assessed(t: &Trail) -> u32 {
+    t.excluded_top
+        .iter()
+        .filter(|(r, _)| is_not_assessed(r))
+        .fold(t.not_assessed, |n, (_, c)| n.saturating_add(*c))
+}
+
+/// "Screened 15, included 2, excluded 13", or with records not assessed
+/// (see [`not_assessed`]): "Screened 10 of 15, included 2, excluded 8; 5
+/// not assessed".
 pub fn screened_text(t: &Trail) -> String {
-    let assessed = t.screened.saturating_sub(t.not_assessed);
+    let not_assessed = not_assessed(t);
+    let assessed = t.screened.saturating_sub(not_assessed);
     let excluded = assessed.saturating_sub(t.included);
-    if t.not_assessed == 0 {
+    if not_assessed == 0 {
         format!(
             "Screened {}, included {}, excluded {excluded}",
             t.screened, t.included
         )
     } else {
         format!(
-            "Screened {assessed} of {}, included {}, excluded {excluded}; {} not assessed (search stopped early)",
-            t.screened, t.included, t.not_assessed
+            "Screened {assessed} of {}, included {}, excluded {excluded}; {not_assessed} not assessed",
+            t.screened, t.included
         )
     }
 }
 
-/// "Top exclusion reasons: wrong population (3); …", or `None`.
+/// "Top exclusion reasons: wrong population (3); …", or `None`. Not-assessed
+/// labels (answers stored before Fix B) are left out.
 pub fn exclusions_text(t: &Trail) -> Option<String> {
-    if t.excluded_top.is_empty() {
-        return None;
-    }
     let r: Vec<String> = t
         .excluded_top
         .iter()
+        .filter(|(r, _)| !is_not_assessed(r))
         .map(|(r, n)| format!("{r} ({n})"))
         .collect();
+    if r.is_empty() {
+        return None;
+    }
     Some(format!("Top exclusion reasons: {}", r.join("; ")))
 }
 

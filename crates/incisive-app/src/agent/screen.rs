@@ -23,6 +23,10 @@
 //!   "false"/"no"/"exclude" (any case). Ids outside the batch are ignored,
 //!   the first verdict for an id wins, and a record with no verdict or no
 //!   usable `include` is "not assessed".
+//! * "Not assessed" (no verdict, a failed batch, or never sent because
+//!   screening stopped) is never counted as excluded: it is counted apart
+//!   ([`Screened::not_assessed`], [`Screened::stopped`]) and never appears
+//!   among the exclusion reasons (Fix B).
 //! * Exclusions are tallied by `code` (population, intervention, comparison,
 //!   outcome, design, not_relevant, other; anything else is "other") as
 //!   labels such as "wrong population". The free-text reason is cleaned
@@ -76,6 +80,9 @@ const LINE_REASONS: usize = 3;
 const MAX_TOKENS: u32 = 1_500;
 
 pub const REASON_RETRACTED: &str = "retracted";
+/// Not-assessed labels. Before Fix B they were tallied among the exclusion
+/// reasons, so answers stored then may hold them in `excluded_top`; the
+/// answer renders them apart ([`super::answer::not_assessed`]).
 pub const REASON_NOT_ASSESSED: &str = "not assessed";
 pub const REASON_STOPPED: &str = "not assessed (stopped early)";
 const REASON_NONE: &str = "no reason given";
@@ -241,7 +248,7 @@ pub struct Screened {
     /// ranked strongest first.
     pub included: Vec<(Paper, EvidenceLevel, String)>,
     /// Exclusion reasons with their counts, most frequent first (ties in the
-    /// order first seen).
+    /// order first seen). Records not assessed are never here (Fix B).
     pub excluded_counts: Vec<(String, u32)>,
     /// The model's free-text reason per excluded record, as
     /// (`PaperId::key`, cleaned reason). For debugging only: never shown in
@@ -254,10 +261,16 @@ pub struct Screened {
     /// in the batch): their records were not assessed. Budget stops and
     /// cancellation are not failures.
     pub failed_batches: u32,
+    /// Records sent but not assessed: no usable verdict, or their batch
+    /// failed. Neither included nor excluded.
+    pub not_assessed: u32,
+    /// Records never sent because screening stopped early (wrap-up point or
+    /// budget). Neither included nor excluded.
+    pub stopped: u32,
 }
 
 impl Screened {
-    /// Total excluded.
+    /// Total excluded (not counting records not assessed).
     pub fn excluded(&self) -> u32 {
         self.excluded_counts.iter().map(|(_, n)| n).sum()
     }
@@ -480,11 +493,26 @@ fn clean_reason(reason: &str, question: &str) -> String {
     }
 }
 
-/// "Screened N: included I, excluded E (top reasons: r (c); …)", kept within
-/// the step-line limit with the closing bracket intact.
-fn summary_line(total: usize, included: usize, excluded: &[(String, u32)]) -> String {
+/// "Screened N: included I, excluded E (top reasons: r (c); …)", or with
+/// records not assessed "Screened A of N: included I, excluded E; K not
+/// assessed (top reasons: …)", kept within the step-line limit with the
+/// closing bracket intact. Records not assessed are never counted as
+/// excluded (Fix B).
+fn summary_line(
+    total: usize,
+    included: usize,
+    excluded: &[(String, u32)],
+    not_assessed: u32,
+) -> String {
     let e: u32 = excluded.iter().map(|(_, n)| n).sum();
-    let head = format!("Screened {total}: included {included}, excluded {e}");
+    let head = if not_assessed == 0 {
+        format!("Screened {total}: included {included}, excluded {e}")
+    } else {
+        let assessed = total.saturating_sub(not_assessed as usize);
+        format!(
+            "Screened {assessed} of {total}: included {included}, excluded {e}; {not_assessed} not assessed"
+        )
+    };
     if excluded.is_empty() {
         return head;
     }
@@ -530,6 +558,8 @@ pub async fn screen(
     let mut failed = 0u32;
     let mut failed_batches = 0u32;
     let mut stopped = 0u32;
+    // Records of an assessed batch left without a usable verdict.
+    let mut no_verdict = 0u32;
     let mut notes: Vec<(String, String)> = Vec::new();
 
     // Every batch's records (ids numbered across batches) and prompt, built
@@ -629,14 +659,12 @@ pub async fn screen(
             failed += n;
             failed_batches += 1;
         } else {
-            tally.add(REASON_NOT_ASSESSED, unassessed);
+            no_verdict += unassessed;
         }
     }
     if stopped > 0 {
         tracing::info!(%run_id, step = "screen", stopped, "screening stopped early");
     }
-    tally.add(REASON_NOT_ASSESSED, failed);
-    tally.add(REASON_STOPPED, stopped);
 
     // Level, then year (newest first, unknown last), then original order.
     let mut ranked: Vec<(usize, Paper, EvidenceLevel, String)> = included
@@ -655,11 +683,18 @@ pub async fn screen(
         excluded_notes: notes,
         title_only,
         failed_batches,
+        not_assessed: failed + no_verdict,
+        stopped,
     };
     add_line(
         ctx,
         StepKind::Screen,
-        &summary_line(total, screened.included.len(), &screened.excluded_counts),
+        &summary_line(
+            total,
+            screened.included.len(),
+            &screened.excluded_counts,
+            failed + no_verdict + stopped,
+        ),
     )
     .await;
     if title_only > 0 {

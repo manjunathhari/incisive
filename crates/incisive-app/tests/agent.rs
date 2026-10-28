@@ -2043,8 +2043,10 @@ async fn missing_verdict_counts_as_excluded() {
         text.contains("<pico>") && text.contains("</pico>"),
         "{text}"
     );
-    assert_eq!(excluded(&s, "not assessed"), 1);
-    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 2);
+    // Not assessed is counted apart, never as excluded (Fix B).
+    assert_eq!(s.not_assessed, 1);
+    assert_eq!(excluded(&s, "not assessed"), 0);
+    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 1);
 
     // A failed batch (bad JSON twice) is "not assessed", not an error.
     let llm = Arc::new(
@@ -2056,7 +2058,7 @@ async fn missing_verdict_counts_as_excluded() {
         .await
         .unwrap();
     assert!(s.included.is_empty());
-    assert_eq!(excluded(&s, "not assessed"), 3);
+    assert_eq!((s.not_assessed, s.excluded()), (3, 0));
 
     // Reasons are cleaned: cut to 80 chars, and never echo the question.
     let long = "x".repeat(200);
@@ -2124,7 +2126,7 @@ async fn lenient_verdicts_never_void_the_batch() {
     assert_eq!(pmids(&s), vec!["701", "705"]);
     assert_eq!(excluded(&s, "wrong population"), 1);
     // No usable include value: not assessed, never excluded under its reason.
-    assert_eq!(excluded(&s, "not assessed"), 2);
+    assert_eq!(s.not_assessed, 2);
     assert_eq!(excluded(&s, "wrong study design"), 0);
     // An unknown code is "other".
     assert_eq!(excluded(&s, "other"), 1);
@@ -2370,11 +2372,11 @@ async fn batches_of_ten_and_wrap_up_between_batches() {
     assert_eq!(counts, vec![10, 10, 5]);
     assert!(request_text(&llm, 1).contains("p-11"));
     assert_eq!(s.included.len(), 15);
-    assert_eq!(excluded(&s, "not assessed"), 10);
+    assert_eq!((s.not_assessed, s.excluded()), (10, 0));
     assert!(
         lines(&steps_of(&ctx, uid).await)
             .iter()
-            .any(|x| x.starts_with("Screened 25: included 15, excluded 10")),
+            .any(|x| x == "Screened 15 of 25: included 15, excluded 0; 10 not assessed"),
     );
 
     // Past the 3-minute mark: the first batch runs, the rest is not assessed.
@@ -2397,7 +2399,7 @@ async fn batches_of_ten_and_wrap_up_between_batches() {
         .unwrap();
     assert_eq!(llm.requests().len(), 1);
     assert_eq!(s.included.len(), 10);
-    assert_eq!(excluded(&s, "not assessed (stopped early)"), 15);
+    assert_eq!((s.stopped, s.not_assessed), (15, 0));
     assert_line_rules(&steps_of(&ctx, uid).await);
 
     // Cancelled: no call, the error propagates.
@@ -2528,7 +2530,7 @@ async fn concurrent_screening_keeps_the_limit_reserve_and_wrap_up_rules() {
     assert!(stopped > 0);
     assert_eq!(s.failed_batches, 0);
     assert_eq!(excluded(&s, "wrong population"), 160 - stopped);
-    assert_eq!(excluded(&s, "not assessed (stopped early)"), stopped);
+    assert_eq!((s.stopped, s.not_assessed), (stopped, 0));
     let l = lines(&steps_of(&ctx, uid).await);
     assert!(
         l.contains(&format!(
@@ -2625,6 +2627,8 @@ fn screened_of(papers: Vec<Paper>) -> Screened {
         excluded_notes: vec![],
         title_only: 0,
         failed_batches: 0,
+        not_assessed: 0,
+        stopped: 0,
     }
 }
 
@@ -5524,8 +5528,10 @@ async fn insufficient_recomputed_after_check() {
     assert_eq!(a.bottom_line.len(), 1);
     assert!(a.insufficient);
     assert!(!a.no_verified_claims);
-    // Both refs verified live, so both are listed.
-    assert_eq!(a.references.len(), 2);
+    // Both refs verified live, but only the one a surviving claim cites is
+    // listed (Fix B, item 10; was 2); the Check line still counts both.
+    assert_eq!(a.references.len(), 1);
+    assert_eq!((a.check.refs_verified, a.check.refs_total), (2, 2));
     assert!(render_text(&a).contains("Insufficient evidence"));
 }
 
@@ -5968,13 +5974,16 @@ async fn production_prices_capacity() {
         .find(|l| q(*l).unwrap_or(0) >= 2)
         .unwrap();
     // 1265 before the Check prompt asked for the verdict first (28 Oct);
-    // 1270 before the schemas were held (Fix A, 28 Oct).
+    // 1270 before the schemas were held (Fix A, 28 Oct); 1295 before the
+    // Write prompt's outcome rule (Fix B, 28 Oct: a longer Write prompt
+    // raises the finish reserve).
     assert_eq!(
-        min_quick, 1295,
-        "recorded in the Task 13 report, updated by Fix A"
+        min_quick, 1300,
+        "recorded in the Task 13 report, updated by Fixes A and B"
     );
-    // (565, 8) before the Check prompt change; (571, 8) before Fix A.
-    assert_eq!((r0, growth), (587, 8));
+    // (565, 8) before the Check prompt change; (571, 8) before Fix A;
+    // (587, 8) before the Write outcome rule (Fix B).
+    assert_eq!((r0, growth), (591, 8));
     // Fix B (28 Oct): the simulation now runs 4 screening batches and 3
     // papers at once, with in-flight holds counted and a refused hold
     // retried after the next call settles. Every figure above is unchanged
@@ -6183,7 +6192,7 @@ async fn screen_stop_counts_records_as_not_assessed() {
     let text = render_text(&a);
     assert!(
         text.contains(&format!(
-            "Screened {} of {}, included {}, excluded {}; {} not assessed (search stopped early)",
+            "Screened {} of {}, included {}, excluded {}; {} not assessed\n",
             t.screened - t.not_assessed,
             t.screened,
             t.included,
@@ -6886,4 +6895,239 @@ fn step_schemas_are_strict_compatible() {
     ] {
         assert!(problems.iter().any(|p| p == want), "{want}: {problems:?}");
     }
+}
+
+// ---------- answer polish (Fix B part 2) ----------
+
+#[tokio::test]
+async fn not_assessed_records_are_never_excluded() {
+    // Item 9: a record with no verdict, a failed batch and records left by
+    // a stop are "not assessed": counted apart from the excluded, in the
+    // step line and in the answer, never among the exclusion reasons.
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers: Vec<Paper> = (1..=6)
+        .map(|i| {
+            paper(
+                &format!("{}", 900 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    // p-1 included, p-2..p-4 excluded, p-5 and p-6 have no verdict.
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!({"verdicts": [
+            {"id": "p-1", "include": true, "code": "relevant", "reason": "ok"},
+            {"id": "p-2", "include": false, "code": "population", "reason": "r"},
+            {"id": "p-3", "include": false, "code": "population", "reason": "r"},
+            {"id": "p-4", "include": false, "code": "design", "reason": "r"},
+        ]}),
+        u(),
+    ));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    assert_eq!((s.not_assessed, s.stopped), (2, 0));
+    assert_eq!(s.excluded(), 3);
+    assert!(
+        s.excluded_counts
+            .iter()
+            .all(|(r, _)| !r.starts_with("not assessed")),
+        "{:?}",
+        s.excluded_counts
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter().any(|x| x
+            == "Screened 4 of 6: included 1, excluded 3; 2 not assessed (top reasons: wrong population (2); wrong study design (1))"),
+        "{l:?}"
+    );
+
+    // In a run: the second batch's reply has a verdict for p-11 only, so
+    // p-12..p-15 are not assessed. Not a stop: no "stopped early".
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .when("these ids: p-1,")
+            .reply_json(screen_reply(), u())
+            .when("these ids: p-11,")
+            .reply_json(
+                json!({"verdicts": [{"id": "p-11", "include": false, "code": "population", "reason": "r"}]}),
+                u(),
+            )
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    let a = answer_of(&outcome);
+    let t = &a.trail;
+    assert_eq!(
+        (t.screened, t.included, t.not_assessed),
+        (15, 2, 4),
+        "{t:?}"
+    );
+    assert_eq!(t.stopped_early, None);
+    assert!(
+        t.excluded_top
+            .iter()
+            .all(|(r, _)| !r.starts_with("not assessed")),
+        "{t:?}"
+    );
+    let text = render_text(&a);
+    assert!(
+        text.contains("Screened 11 of 15, included 2, excluded 9; 4 not assessed\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Top exclusion reasons: wrong population (9)\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn stored_answers_from_before_the_split_render_not_assessed_apart() {
+    // Item 9, backward compatibility: answers stored before Fix B have no
+    // `not_assessed` (or count only the stopped records there) and may list
+    // "not assessed" among the exclusion reasons.
+    let old = json!({
+        "pubmed_count": 1, "epmc_count": 2, "screened": 15, "included": 2,
+        "excluded_top": [["wrong population", 7], ["not assessed", 3]],
+        "refinements": [], "stopped_early": null, "unavailable": []
+    });
+    let t: Trail = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 12 of 15, included 2, excluded 10; 3 not assessed"
+    );
+    assert_eq!(
+        incisive_app::agent::answer::exclusions_text(&t).as_deref(),
+        Some("Top exclusion reasons: wrong population (7)")
+    );
+    let old = json!({
+        "pubmed_count": 1, "epmc_count": 2, "screened": 15, "included": 2,
+        "not_assessed": 5,
+        "excluded_top": [["wrong population", 6], ["not assessed", 2]],
+        "refinements": [], "stopped_early": "cost limit", "unavailable": []
+    });
+    let t: Trail = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 8 of 15, included 2, excluded 6; 7 not assessed"
+    );
+    // Nothing not assessed: the short form.
+    let mut t = t;
+    t.not_assessed = 0;
+    t.excluded_top = vec![("wrong population".into(), 13)];
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 15, included 2, excluded 13"
+    );
+}
+
+#[tokio::test]
+async fn references_list_only_refs_cited_by_surviving_claims() {
+    // Item 10: both papers are verified, but the surviving claims cite only
+    // the meta-analysis: the RCT is not listed (nor in key studies), and
+    // the Check line still reports the refs verified of those drafted.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("unsupported"), u())
+            .reply_json(verdict("unsupported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let a = answer_of(&run_pipeline(&ctx).await);
+    assert_eq!(a.bottom_line.len(), 1);
+    assert_eq!(a.bottom_line[0].refs, [1]);
+    let refs: Vec<(u8, Option<&str>)> = a
+        .references
+        .iter()
+        .map(|r| (r.ref_id, r.pmid.as_deref()))
+        .collect();
+    assert_eq!(refs, [(1, Some("41871586"))]);
+    assert_eq!(a.key_studies.len(), 1);
+    assert_eq!(a.key_studies[0].ref_id, 1);
+    assert_eq!((a.check.refs_verified, a.check.refs_total), (2, 2));
+    assert!(render_text(&a).contains("2/2 references verified."));
+}
+
+#[tokio::test]
+async fn references_cited_only_by_removed_claims_go_and_the_rest_renumber() {
+    // Item 10: the surviving claim cites the RCT (ref 2 of the draft); it
+    // becomes reference 1.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("unsupported"), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("unsupported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let a = answer_of(&run_pipeline(&ctx).await);
+    assert_eq!(a.bottom_line.len(), 1);
+    assert_eq!(a.bottom_line[0].refs, [1]);
+    let refs: Vec<(u8, Option<&str>)> = a
+        .references
+        .iter()
+        .map(|r| (r.ref_id, r.pmid.as_deref()))
+        .collect();
+    assert_eq!(refs, [(1, Some("40042831"))]);
+    assert_eq!(a.key_studies.len(), 1);
+    assert_eq!(a.key_studies[0].n, Some(1136));
+    let text = render_text(&a);
+    assert!(
+        text.contains("In one RCT the leak rate was 5.8% with ICG vs 7.9% without [1]"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn write_prompt_keeps_claims_to_the_pico_outcomes() {
+    // Item 11 (prompt only): claims address the PICO outcomes; none on an
+    // outcome outside it; no invented finding; at most one claim on which
+    // asked outcomes the evidence does not cover.
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!({"claims": [{"text": "c", "refs": [1], "confidence": "limited"}], "insufficient": false}),
+        u(),
+    ));
+    write(&ctx, &agent_llm(&llm), &pico(), &two_papers())
+        .await
+        .unwrap();
+    let sys = llm.requests()[0].system.clone().unwrap();
+    assert!(
+        sys.contains(incisive_app::agent::write::OUTCOME_RULE),
+        "{sys}"
+    );
+    for phrase in [
+        "address the outcomes listed in the PICO",
+        "operative time or cost only when the PICO lists them",
+        "Never write a claim about an outcome the PICO does not list",
+        "Never invent a finding",
+        "at most one claim may say which of the PICO outcomes the findings do not cover",
+    ] {
+        assert!(sys.contains(phrase), "missing {phrase:?}: {sys}");
+    }
+    assert!(!sys.contains("Write 3 to 6 short claims"), "{sys}");
 }
