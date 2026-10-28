@@ -143,7 +143,7 @@ One row per question:
 | Missed | Which landmarks were not found (by PMID, DOI or title hint). |
 | Refs | References in the final answer. |
 | Cite resolve | References the draft cited that the Check step verified in PubMed or Europe PMC, as verified/drafted (%). References that fail are removed before the answer is shown, so a lower number means Check caught something, not that a bad citation reached you. |
-| Final refs | Whether every reference in the final answer was verified and has a PMID or DOI. This must always be 100%; anything else is shown as **FLAG** and is a bug to report. |
+| Refs re-checked | After the run, the runner looks every reference in the final answer up again by itself, separately from Incisive's own Check step: in PubMed by PMID, or in Europe PMC by DOI when there is no PMID (free lookups, no Claude calls). A reference passes when the record is found, is not retracted and has the same title (ignoring case and punctuation). Shown as passed/total (%). This must be 100%; anything else is shown as **FLAG** with the reason for each failing reference (for example `ref 2 (PMID 123): title differs`) and should be reported. "—" means there was no answer to check. |
 | Claims drafted | Claims in the first draft of the answer. |
 | Claims removed | Claims the Check step removed (unsupported, or left with no verified reference). |
 | Cost | What the run cost in rupees (the run's recorded cost). |
@@ -154,8 +154,9 @@ Totals at the end:
 - **Landmark recall**: all landmarks found, out of all landmarks.
 - **Cost**: mean and maximum per run.
 - **Time**: mean and maximum per run.
-- **Runs over the cost limit (₹40 Focused, ₹15 Quick) or 5 minutes**: must be 0.
-- **Answers with a final reference that does not resolve**: must be 0.
+- **Runs over the cost limit** (₹40 Focused, ₹15 Quick): must be 0.
+- **Runs over 5 minutes**: must be 0.
+- **Answers with a final reference that did not re-resolve**: must be 0.
 
 ## 4. Safety
 
@@ -167,6 +168,8 @@ The runner refuses to start, with a message saying why, when:
   with `--allow-remote-db`;
 - `DATABASE_URL` points at any machine other than this one (`localhost`,
   `127.0.0.1` or `::1`), unless `--allow-remote-db` names that exact host.
+  The same applies to the `PGHOST` and `PGHOSTADDR` variables whenever they
+  are set, and to the host the database library itself would connect to.
 
 These checks run before it connects to anything, and there is no switch to
 turn them off. The runner never uses the live site, its sign-in or its data.

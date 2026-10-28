@@ -12,8 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use claude_client::Usage;
-use goldset::{Landmark, Question, ensure_goldset_user, render_report, run_question, totals};
+use goldset::{
+    Landmark, Question, Recheck, ensure_goldset_user, recheck_refs, render_report, run_question,
+    totals,
+};
 use incisive_app::agent::Literature;
+use incisive_app::agent::answer::Reference;
 use incisive_app::agent::llm::ScriptedLlm;
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
@@ -157,15 +161,19 @@ async fn icg_server() -> MockServer {
     server
 }
 
-fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
+fn literature(server: &MockServer) -> Literature {
     let oa = OaPolicy::default();
     let client = AllowlistedClient::new("Incisive/test", oa.clone())
         .with_base_override(server.uri())
         .with_retry_backoff(Duration::from_millis(1));
-    let lit = Literature {
+    Literature {
         pubmed: PubMed::new(client.clone(), None).with_min_interval(Duration::ZERO),
         epmc: EuropePmc::new(client, oa),
-    };
+    }
+}
+
+fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
+    let lit = literature(server);
     AppState {
         pool,
         verifier: Arc::new(IapVerifier::new(
@@ -277,7 +285,15 @@ async fn run_question_reports_a_real_budgeted_run() {
     assert_eq!(row.missed, ["PMID 40690925"]);
     assert_eq!(row.references, 2);
     assert_eq!((row.refs_verified, row.refs_drafted), (2, 2));
-    assert!(row.final_refs_resolve);
+    // Both final references looked up again (PubMed esummary) and matched.
+    assert_eq!(
+        row.recheck,
+        Some(Recheck {
+            resolved: 2,
+            total: 2,
+            problems: vec![],
+        })
+    );
     assert_eq!((row.claims_drafted, row.claims_removed), (3, 0));
     // The question is cut to its first 80 characters.
     assert!(QUESTION.chars().count() > 80);
@@ -299,11 +315,11 @@ async fn run_question_reports_a_real_budgeted_run() {
     assert_eq!(today.today_paise, charges);
 
     let t = totals(std::slice::from_ref(&row), 4_000, Duration::from_secs(300));
-    assert_eq!(t.over_limits, 0);
+    assert_eq!((t.over_cost, t.over_time, t.unresolved), (0, 0, 0));
     let report = render_report(&[row], &t, "focused", 4_000, Duration::from_secs(300));
     assert!(report.contains("| icg-leak |"), "{report}");
     assert!(
-        report.contains("| done | 3/4 | PMID 40690925 | 2 | 2/2 (100%) | 100% |"),
+        report.contains("| done | 3/4 | PMID 40690925 | 2 | 2/2 (100%) | 2/2 (100%) |"),
         "{report}"
     );
 }
@@ -346,4 +362,111 @@ async fn a_question_that_cannot_start_is_a_failed_row() {
     assert_eq!((row.landmarks_hit, row.landmarks_total), (0, 1));
     assert_eq!(row.cost_paise, 0);
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+fn reference(ref_id: u8, pmid: Option<&str>, doi: Option<&str>, title: &str) -> Reference {
+    Reference {
+        ref_id,
+        title: title.to_string(),
+        journal: None,
+        year: None,
+        pmid: pmid.map(str::to_string),
+        doi: doi.map(str::to_string),
+        study_type: "RCT".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn recheck_finds_a_title_mismatch_by_pmid() {
+    let server = icg_server().await;
+    let lit = literature(&server);
+    let refs = [
+        // As PubMed has it (case and punctuation differ: still the same).
+        reference(
+            1,
+            Some("40042831"),
+            None,
+            "indocyanine green fluorescence imaging in prevention of colorectal anastomotic leakage - a randomized clinical trial",
+        ),
+        // A real PMID with another paper's title.
+        reference(
+            2,
+            Some("41871586"),
+            None,
+            "Laparoscopic versus open mesh repair for inguinal hernia",
+        ),
+    ];
+    let c = recheck_refs(&lit, &refs).await;
+    assert_eq!((c.resolved, c.total), (1, 2));
+    assert_eq!(c.problems, ["ref 2 (PMID 41871586): title differs"]);
+    // One esummary batch; Europe PMC not asked.
+    let reqs = server.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .all(|r| r.url.path() == "/entrez/eutils/esummary.fcgi"),
+        "{reqs:?}"
+    );
+    assert_eq!(reqs.len(), 1);
+
+    let rows = [goldset::Row {
+        recheck: Some(c),
+        ..failed_row()
+    }];
+    let t = totals(&rows, 4_000, Duration::from_secs(300));
+    assert_eq!(t.unresolved, 1);
+    let report = render_report(&rows, &t, "focused", 4_000, Duration::from_secs(300));
+    assert!(
+        report.contains("**FLAG** 1/2 (50%): ref 2 (PMID 41871586): title differs"),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+async fn recheck_looks_up_doi_only_refs_in_europe_pmc() {
+    let server = icg_server().await;
+    let lit = literature(&server);
+    let refs = [
+        reference(
+            1,
+            None,
+            Some("https://doi.org/10.1007/S10151-026-03388-4"),
+            "Indocyanine green fluorescence angiography for prevention of anastomotic leak in colorectal surgery: a graded systematic review and meta-analysis with trial sequential analysis of randomized controlled trials.",
+        ),
+        reference(2, None, Some("10.9999/not-in-the-hits"), "Some paper"),
+        reference(3, None, None, "No identifiers"),
+    ];
+    let c = recheck_refs(&lit, &refs).await;
+    assert_eq!((c.resolved, c.total), (1, 3));
+    assert_eq!(
+        c.problems,
+        [
+            "ref 2 (DOI 10.9999/not-in-the-hits): not found in Europe PMC",
+            "ref 3: no PMID or DOI",
+        ]
+    );
+    let reqs = server.received_requests().await.unwrap();
+    assert!(
+        reqs.iter()
+            .all(|r| r.url.path() == "/europepmc/webservices/rest/search")
+    );
+}
+
+fn failed_row() -> goldset::Row {
+    goldset::Row {
+        id: "x".into(),
+        title: "x".into(),
+        status: "done".into(),
+        detail: None,
+        landmarks_hit: 0,
+        landmarks_total: 0,
+        missed: vec![],
+        references: 2,
+        refs_verified: 2,
+        refs_drafted: 2,
+        recheck: None,
+        claims_drafted: 0,
+        claims_removed: 0,
+        cost_paise: 0,
+        wall: Duration::from_secs(1),
+    }
 }

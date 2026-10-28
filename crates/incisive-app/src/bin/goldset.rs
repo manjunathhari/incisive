@@ -19,7 +19,12 @@
 //! Safety: before any database connection or network call it refuses
 //! `APP_ENV=prod`, any Supabase host, and any other non-local database host
 //! unless `--allow-remote-db <host>` names that exact host (never Supabase).
-//! There is no override.
+//! The host is checked as written in the URL, in `PGHOST` / `PGHOSTADDR`, and
+//! as sqlx itself resolves it. There is no override.
+//!
+//! Every reference in each final answer is looked up again, independently of
+//! the pipeline's Check step (PubMed esummary by PMID, Europe PMC by DOI; no
+//! Claude calls), and its title compared: the "Refs re-checked" column.
 //!
 //! The report holds each question's id and its first 80 characters only.
 //! A failed question is reported and the next one runs; the exit code is
@@ -27,6 +32,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +44,7 @@ use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::deid;
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{self, IapVerifier, JwkSource, Role, User};
+use incisive_app::lit::Paper;
 use incisive_app::lit::http::{AllowlistedClient, OaPolicy, default_user_agent};
 use incisive_app::runs::budget::HARD_STOP_AFTER;
 use incisive_app::runs::worker::WorkerHandle;
@@ -47,6 +54,7 @@ use incisive_app::spend::{self, CapsConfig};
 use serde::Deserialize;
 use sqlx::PgPool;
 use sqlx::Row as _;
+use sqlx::postgres::PgConnectOptions;
 use uuid::Uuid;
 
 /// The throwaway local user every gold-set run belongs to.
@@ -145,13 +153,31 @@ fn normalise_doi(doi: &str) -> String {
 /// Lower-case, punctuation stripped (apostrophes removed, other punctuation
 /// read as a space, so "ICG-based" and "ICG based" agree), whitespace collapsed.
 pub fn normalise_title(s: &str) -> String {
-    let spaced: String = s
+    let spaced: String = strip_tags(s)
         .chars()
         .filter(|c| !matches!(c, '\'' | '\u{2019}' | '\u{2018}'))
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
         .flat_map(char::to_lowercase)
         .collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `s` without `<...>` markup tags (titles from Europe PMC may carry `<i>`).
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn title_matches(hint: &str, title: &str) -> bool {
@@ -220,9 +246,9 @@ pub struct Row {
     /// Drafted references that Check verified, of all drafted references.
     pub refs_verified: u32,
     pub refs_drafted: u32,
-    /// Every final reference resolves: each is one Check verified and has a
-    /// PMID or DOI. Must be true for every row with an answer.
-    pub final_refs_resolve: bool,
+    /// The final references looked up again (see [`recheck_refs`]); `None`
+    /// when there is no answer.
+    pub recheck: Option<Recheck>,
     pub claims_drafted: u32,
     pub claims_removed: u32,
     /// `runs.cost_paise`, read after the worker finished.
@@ -244,12 +270,29 @@ impl Row {
             references: 0,
             refs_verified: 0,
             refs_drafted: 0,
-            final_refs_resolve: true,
+            recheck: None,
             claims_drafted: 0,
             claims_removed: 0,
             cost_paise,
             wall,
         }
+    }
+}
+
+/// An independent lookup of a final answer's references.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recheck {
+    /// References found again, not retracted, with the same title.
+    pub resolved: usize,
+    /// References in the final answer.
+    pub total: usize,
+    /// One line per reference that did not resolve.
+    pub problems: Vec<String>,
+}
+
+impl Recheck {
+    pub fn all_resolved(&self) -> bool {
+        self.resolved == self.total
     }
 }
 
@@ -263,9 +306,11 @@ pub struct Totals {
     pub max_cost_paise: i64,
     pub mean_wall: Duration,
     pub max_wall: Duration,
-    /// Runs over the cost limit or the time limit (must be 0).
-    pub over_limits: usize,
-    /// Rows whose final references do not all resolve (must be 0).
+    /// Runs over the cost limit (must be 0).
+    pub over_cost: usize,
+    /// Runs over the time limit (must be 0).
+    pub over_time: usize,
+    /// Answers with a final reference that did not re-resolve (must be 0).
     pub unresolved: usize,
 }
 
@@ -288,11 +333,12 @@ pub fn totals(rows: &[Row], limit_paise: i64, time_limit: Duration) -> Totals {
         max_cost_paise: rows.iter().map(|r| r.cost_paise).max().unwrap_or(0),
         mean_wall,
         max_wall: rows.iter().map(|r| r.wall).max().unwrap_or_default(),
-        over_limits: rows
+        over_cost: rows.iter().filter(|r| r.cost_paise > limit_paise).count(),
+        over_time: rows.iter().filter(|r| r.wall > time_limit).count(),
+        unresolved: rows
             .iter()
-            .filter(|r| r.cost_paise > limit_paise || r.wall > time_limit)
+            .filter(|r| r.recheck.as_ref().is_some_and(|c| !c.all_resolved()))
             .count(),
-        unresolved: rows.iter().filter(|r| !r.final_refs_resolve).count(),
     }
 }
 
@@ -342,7 +388,7 @@ pub fn render_report(
         rupees(limit_paise),
         duration(time_limit),
     ));
-    out.push_str("| ID | Question (first 80 chars) | Status | Landmarks | Missed | Refs | Cite resolve | Final refs | Claims drafted | Claims removed | Cost | Time |\n");
+    out.push_str("| ID | Question (first 80 chars) | Status | Landmarks | Missed | Refs | Cite resolve | Refs re-checked | Claims drafted | Claims removed | Cost | Time |\n");
     out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for r in rows {
         let status = match &r.detail {
@@ -364,10 +410,24 @@ pub fn render_report(
                 percent(r.refs_verified as usize, r.refs_drafted as usize)
             )
         };
-        let final_refs = if r.final_refs_resolve {
-            "100%"
-        } else {
-            "**FLAG**"
+        let rechecked = match &r.recheck {
+            None => "\u{2014}".to_string(),
+            Some(c) if c.total == 0 => "\u{2014}".to_string(),
+            Some(c) if c.all_resolved() => {
+                format!(
+                    "{}/{} ({})",
+                    c.resolved,
+                    c.total,
+                    percent(c.resolved, c.total)
+                )
+            }
+            Some(c) => format!(
+                "**FLAG** {}/{} ({}): {}",
+                c.resolved,
+                c.total,
+                percent(c.resolved, c.total),
+                c.problems.join("; ")
+            ),
         };
         let title: String = r.title.chars().take(TITLE_CHARS).collect();
         out.push_str(&format!(
@@ -380,7 +440,7 @@ pub fn render_report(
             cell(&missed),
             r.references,
             resolve,
-            final_refs,
+            cell(&rechecked),
             r.claims_drafted,
             r.claims_removed,
             rupees(r.cost_paise),
@@ -407,19 +467,24 @@ pub fn render_report(
         duration(totals.max_wall)
     ));
     out.push_str(&format!(
-        "- Runs over {} or {} (must be 0): {}{}\n",
+        "- Runs over {} (must be 0): {}{}\n",
         rupees(limit_paise),
-        duration(time_limit),
-        totals.over_limits,
-        flag(totals.over_limits)
+        totals.over_cost,
+        flag(totals.over_cost)
     ));
     out.push_str(&format!(
-        "- Answers with a final reference that does not resolve (must be 0): {}{}\n",
+        "- Runs over {} (must be 0): {}{}\n",
+        duration(time_limit),
+        totals.over_time,
+        flag(totals.over_time)
+    ));
+    out.push_str(&format!(
+        "- Answers with a final reference that did not re-resolve (must be 0): {}{}\n",
         totals.unresolved,
         flag(totals.unresolved)
     ));
     out.push_str(
-        "\nCite resolve: drafted references that Check verified against PubMed / Europe PMC (removed ones never reach the answer). Final refs: every reference in the final answer was verified and has a PMID or DOI.\n",
+        "\nCite resolve: drafted references that Check verified against PubMed / Europe PMC (removed ones never reach the answer). Refs re-checked: every reference in the final answer looked up again by the runner (PubMed by PMID, else Europe PMC by DOI), found, not retracted and with the same title; must be 100%.\n",
     );
     out
 }
@@ -462,12 +527,19 @@ fn check_host(raw: &str, allow_remote: Option<&str>) -> Result<(), String> {
 }
 
 /// Refuse a production environment or database. Runs before any connection.
-/// `pghost` is `PGHOST`, which applies when the URL names no host. Messages
-/// name the host only, never the URL (it may carry a password).
+///
+/// `pg_env` looks up `PGHOST` / `PGHOSTADDR` (the process environment in
+/// `main`). Hosts are checked three ways, all of which must pass:
+/// 1. as written in the URL (its host and any `host=` / `hostaddr=`);
+/// 2. `PGHOSTADDR` and `PGHOST` whenever set, whatever the URL says (sqlx
+///    prefers `PGHOSTADDR` to `PGHOST` when the URL names no host);
+/// 3. the host sqlx will actually use ([`check_effective_host`]).
+///
+/// Messages name the host only, never the URL (it may carry a password).
 pub fn check_target(
     app_env: Option<&str>,
     database_url: &str,
-    pghost: Option<&str>,
+    pg_env: &dyn Fn(&str) -> Option<String>,
     allow_remote: Option<&str>,
 ) -> Result<(), String> {
     if app_env.is_some_and(|e| e.trim().eq_ignore_ascii_case("prod")) {
@@ -489,17 +561,30 @@ pub fn check_target(
     if let Some(h) = url.host_str().filter(|h| !h.is_empty()) {
         hosts.push(h.to_string());
     }
-    if hosts.is_empty()
-        && let Some(h) = pghost.filter(|h| !h.trim().is_empty())
-    {
-        hosts.push(h.to_string());
+    for var in ["PGHOSTADDR", "PGHOST"] {
+        if let Some(h) = pg_env(var).filter(|h| !h.trim().is_empty()) {
+            hosts.push(h);
+        }
     }
     for raw in &hosts {
         for h in raw.split(',') {
             check_host(h, allow_remote)?;
         }
     }
-    Ok(())
+    check_effective_host(database_url, allow_remote)
+}
+
+/// The host sqlx will connect to, from `PgConnectOptions::from_str` (offline;
+/// it applies the process's `PG*` defaults the same way a real connection
+/// does). A Unix socket is local.
+pub fn check_effective_host(database_url: &str, allow_remote: Option<&str>) -> Result<(), String> {
+    let opts = PgConnectOptions::from_str(database_url.trim()).map_err(|_| {
+        "refusing to run: DATABASE_URL could not be read as a database address".to_string()
+    })?;
+    if opts.get_socket().is_some() {
+        return Ok(());
+    }
+    check_host(opts.get_host(), allow_remote)
 }
 
 // ---------- running ----------
@@ -524,6 +609,10 @@ pub async fn ensure_goldset_user(pool: &PgPool, daily_cap_paise: i64) -> sqlx::R
         .await?
         .ok_or(sqlx::Error::RowNotFound)
 }
+
+/// Past this much time on one question, the wait for a cancelled run logs
+/// progress (once a minute).
+const SLOW_WAIT_LOG: Duration = Duration::from_secs(420);
 
 const TERMINAL: [&str; 4] = ["done", "partial", "failed", "interrupted"];
 
@@ -555,6 +644,103 @@ async fn run_answer(pool: &PgPool, run_id: Uuid) -> Option<Answer> {
             .ok()
             .flatten();
     body.and_then(|b| serde_json::from_value(b).ok())
+}
+
+/// Europe PMC hits fetched per DOI lookup.
+const DOI_HITS: u16 = 5;
+
+fn same_title(ours: &str, live: &str) -> bool {
+    let ours = normalise_title(ours);
+    !ours.is_empty() && ours == normalise_title(live)
+}
+
+/// Why a looked-up paper is not this reference, if it is not.
+fn mismatch(r: &Reference, live: &Paper) -> Option<&'static str> {
+    if live.retracted {
+        Some("retracted")
+    } else if !same_title(&r.title, &live.title) {
+        Some("title differs")
+    } else {
+        None
+    }
+}
+
+/// Look every final reference up again, independently of the pipeline's
+/// Check step: PubMed esummary for those with a PMID (one batch), Europe PMC
+/// (`DOI:"…"`) for DOI-only ones. A reference resolves when the record is
+/// found, is not retracted and has the same title ([`normalise_title`]). No
+/// Claude calls; nothing is charged.
+pub async fn recheck_refs(lit: &Literature, refs: &[Reference]) -> Recheck {
+    let pmid_of = |r: &Reference| {
+        r.pmid
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+    };
+    let pmids: Vec<String> = refs.iter().filter_map(pmid_of).collect();
+    let live = if pmids.is_empty() {
+        Ok(Vec::new())
+    } else {
+        lit.pubmed.summaries(&pmids).await
+    };
+    let mut out = Recheck {
+        total: refs.len(),
+        ..Recheck::default()
+    };
+    for r in refs {
+        let problem = if let Some(pmid) = pmid_of(r) {
+            let label = format!("ref {} (PMID {pmid})", r.ref_id);
+            match &live {
+                Err(_) => Some(format!("{label}: PubMed lookup failed")),
+                Ok(papers) => match papers
+                    .iter()
+                    .find(|p| p.pmid.as_deref() == Some(pmid.as_str()))
+                {
+                    None => Some(format!("{label}: not found in PubMed")),
+                    Some(p) => mismatch(r, p).map(|why| format!("{label}: {why}")),
+                },
+            }
+        } else if let Some(doi) = r
+            .doi
+            .as_deref()
+            .map(normalise_doi)
+            .filter(|d| !d.is_empty())
+        {
+            let label = format!("ref {} (DOI {doi})", r.ref_id);
+            if doi.chars().any(|c| c == '"' || c.is_control()) {
+                Some(format!("{label}: DOI cannot be searched"))
+            } else {
+                match lit.epmc.search(&format!("DOI:\"{doi}\""), DOI_HITS).await {
+                    Err(_) => Some(format!("{label}: Europe PMC lookup failed")),
+                    Ok(hits) => {
+                        let same_doi: Vec<&Paper> = hits
+                            .papers
+                            .iter()
+                            .filter(|p| {
+                                p.doi.as_deref().map(normalise_doi).as_deref() == Some(doi.as_str())
+                            })
+                            .collect();
+                        match same_doi.first() {
+                            None => Some(format!("{label}: not found in Europe PMC")),
+                            Some(_) if same_doi.iter().any(|p| mismatch(r, p).is_none()) => None,
+                            Some(first) => {
+                                let why = mismatch(r, first).unwrap_or("title differs");
+                                Some(format!("{label}: {why}"))
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            Some(format!("ref {}: no PMID or DOI", r.ref_id))
+        };
+        match problem {
+            None => out.resolved += 1,
+            Some(p) => out.problems.push(p),
+        }
+    }
+    out
 }
 
 /// Why an answer is partial or thin (shown next to the status).
@@ -630,9 +816,19 @@ pub async fn run_question(
             Err(_) => {}
         }
         if started.elapsed() > deadline {
+            // Cancel, then wait for the worker however long it takes, so the
+            // run is closed, its reservation released and its cost final
+            // before the next question starts.
             state.worker.cancel(run_id);
-            let grace = Instant::now();
-            while state.worker.is_running(run_id) && grace.elapsed() < Duration::from_secs(30) {
+            let mut next_log = SLOW_WAIT_LOG;
+            while state.worker.is_running(run_id) {
+                if started.elapsed() >= next_log {
+                    eprintln!(
+                        "    still waiting for the cancelled run to finish ({}s)",
+                        started.elapsed().as_secs()
+                    );
+                    next_log += Duration::from_secs(60);
+                }
                 tokio::time::sleep(poll).await;
             }
             break ("failed".to_string(), Some("runner_timeout".to_string()));
@@ -666,12 +862,7 @@ pub async fn run_question(
         .landmarks
         .iter()
         .partition(|lm| landmark_hit(lm, &a.references));
-    let final_refs_resolve = u32::try_from(a.references.len())
-        .is_ok_and(|n| n <= a.check.refs_verified)
-        && a.references.iter().all(|r| {
-            r.pmid.as_deref().is_some_and(|p| !p.trim().is_empty())
-                || r.doi.as_deref().is_some_and(|d| !d.trim().is_empty())
-        });
+    let recheck = recheck_refs(&state.lit, &a.references).await;
     Row {
         id: q.id.trim().to_string(),
         title: clip(&q.question, TITLE_CHARS),
@@ -683,7 +874,7 @@ pub async fn run_question(
         references: a.references.len(),
         refs_verified: a.check.refs_verified,
         refs_drafted: a.check.refs_total,
-        final_refs_resolve,
+        recheck: Some(recheck),
         claims_drafted: a.check.checked,
         claims_removed: a.check.removed,
         cost_paise: cost,
@@ -822,7 +1013,7 @@ async fn run() -> Result<(), String> {
     check_target(
         env("APP_ENV").as_deref(),
         &database_url,
-        env("PGHOST").as_deref(),
+        &|k: &str| env(k),
         args.allow_remote_db.as_deref(),
     )?;
     for var in ["ANTHROPIC_API_KEY", "UNPAYWALL_EMAIL", "MODEL_PRICES"] {
@@ -952,7 +1143,7 @@ mod tests {
             references: 0,
             refs_verified: 0,
             refs_drafted: 0,
-            final_refs_resolve: true,
+            recheck: None,
             claims_drafted: 0,
             claims_removed: 0,
             cost_paise: cost,
@@ -1117,7 +1308,7 @@ question = "Laparoscopic versus open mesh repair for inguinal hernia?"
         assert_eq!(t.max_cost_paise, 3_800);
         assert_eq!(t.mean_wall, Duration::from_secs(100));
         assert_eq!(t.max_wall, Duration::from_secs(200));
-        assert_eq!(t.over_limits, 0);
+        assert_eq!((t.over_cost, t.over_time), (0, 0));
 
         // At the limit is fine; over the cost or the time limit counts once.
         rows.push(row("d", 0, 0, 4_000, 300));
@@ -1125,7 +1316,15 @@ question = "Laparoscopic versus open mesh repair for inguinal hernia?"
         rows.push(row("f", 0, 0, 10, 301));
         rows.push(row("g", 0, 0, 5_000, 400));
         let t = totals(&rows, 4_000, Duration::from_secs(300));
-        assert_eq!(t.over_limits, 3);
+        // e and g over cost; f and g over time.
+        assert_eq!((t.over_cost, t.over_time), (2, 2));
+        assert_eq!(t.unresolved, 0);
+        rows[0].recheck = Some(Recheck {
+            resolved: 1,
+            total: 2,
+            problems: vec!["ref 2 (PMID 9): title differs".into()],
+        });
+        assert_eq!(totals(&rows, 4_000, Duration::from_secs(300)).unresolved, 1);
         assert_eq!(t.max_cost_paise, 5_000);
 
         let empty = totals(&[], 4_000, Duration::from_secs(300));
@@ -1150,26 +1349,91 @@ question = "Laparoscopic versus open mesh repair for inguinal hernia?"
         assert!(report.contains("\u{20b9}12.34"), "{report}");
         assert!(!report.contains("TAIL-NOT-SHOWN"), "{report}");
         assert!(report.contains("Landmark recall"), "{report}");
+        assert!(report.contains("Refs re-checked"), "{report}");
+
+        // Rows without an answer show a dash, not a pass; a reference that
+        // did not re-resolve is flagged with the reason.
+        let failed = Row::failed(
+            &Question {
+                id: "f".into(),
+                question: "q".into(),
+                landmarks: vec![],
+            },
+            "llm",
+            0,
+            Duration::from_secs(1),
+        );
+        let mut done = row("ok", 0, 0, 10, 1);
+        done.recheck = Some(Recheck {
+            resolved: 2,
+            total: 2,
+            problems: vec![],
+        });
+        let mut bad = row("bad", 0, 0, 10, 1);
+        bad.recheck = Some(Recheck {
+            resolved: 1,
+            total: 2,
+            problems: vec!["ref 2 (PMID 9): title differs".into()],
+        });
+        let rows = [failed, done, bad];
+        let t = totals(&rows, 4_000, Duration::from_secs(300));
+        let report = render_report(&rows, &t, "focused", 4_000, Duration::from_secs(300));
+        assert!(
+            report.contains("| f | q | failed (llm) | 0/0 | \u{2014} | 0 | \u{2014} | \u{2014} |"),
+            "{report}"
+        );
+        assert!(report.contains("| 2/2 (100%) |"), "{report}");
+        assert!(
+            report.contains("**FLAG** 1/2 (50%): ref 2 (PMID 9): title differs"),
+            "{report}"
+        );
+        assert!(
+            report.contains("did not re-resolve (must be 0): 1 **FLAG**"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Runs over \u{20b9}40.00 (must be 0): 0\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Runs over 5m 00s (must be 0): 0\n"),
+            "{report}"
+        );
     }
 
     #[test]
     fn refuses_prod_database() {
+        let no_env = |_: &str| -> Option<String> { None };
+        let env_of = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
         let local = "postgres://postgres@127.0.0.1:55434/postgres";
         // APP_ENV=prod is refused whatever the database.
-        let err = check_target(Some("prod"), local, None, None).unwrap_err();
+        let err = check_target(Some("prod"), local, &no_env, None).unwrap_err();
         assert!(err.contains("APP_ENV=prod"), "{err}");
-        assert!(check_target(Some(" PROD "), local, None, None).is_err());
+        assert!(check_target(Some(" PROD "), local, &no_env, None).is_err());
 
         // Local databases are allowed.
         for url in [
             local,
             "postgres://u:pw@localhost/db",
             "postgresql://u@[::1]:5432/db",
-            "postgres:///db",
+            "postgres:///db?host=/var/run/postgresql",
         ] {
-            assert_eq!(check_target(Some("dev"), url, None, None), Ok(()), "{url}");
+            assert_eq!(
+                check_target(Some("dev"), url, &no_env, None),
+                Ok(()),
+                "{url}"
+            );
         }
-        assert_eq!(check_target(None, local, None, None), Ok(()));
+        assert_eq!(check_target(None, local, &no_env, None), Ok(()));
+        let local_env = env_of(&[("PGHOST", "localhost"), ("PGHOSTADDR", "127.0.0.1")]);
+        assert_eq!(check_target(Some("dev"), local, &local_env, None), Ok(()));
 
         // Supabase: refused, even when named in --allow-remote-db.
         for (url, host) in [
@@ -1183,47 +1447,88 @@ question = "Laparoscopic versus open mesh repair for inguinal hernia?"
             ),
             ("postgres://u@x.SUPABASE.COM/db", "x.supabase.com"),
         ] {
-            let err = check_target(Some("dev"), url, None, None).unwrap_err();
+            let err = check_target(Some("dev"), url, &no_env, None).unwrap_err();
             assert!(err.contains("Supabase"), "{err}");
             assert!(!err.contains("hunter2pw"), "password leaked: {err}");
-            assert!(check_target(Some("dev"), url, None, Some(host)).is_err());
+            assert!(check_target(Some("dev"), url, &no_env, Some(host)).is_err());
         }
 
         // Any other remote host: refused unless named exactly.
         let remote = "postgres://u:hunter2pw@db.example.org:5432/db";
-        let err = check_target(Some("dev"), remote, None, None).unwrap_err();
+        let err = check_target(Some("dev"), remote, &no_env, None).unwrap_err();
         assert!(err.contains("db.example.org"), "{err}");
         assert!(err.contains("--allow-remote-db"), "{err}");
         assert!(!err.contains("hunter2pw"), "password leaked: {err}");
         assert_eq!(
-            check_target(Some("dev"), remote, None, Some("db.example.org")),
+            check_target(Some("dev"), remote, &no_env, Some("db.example.org")),
             Ok(())
         );
-        assert!(check_target(Some("dev"), remote, None, Some("example.org")).is_err());
-        assert!(check_target(Some("dev"), "postgres://u@10.0.0.5/db", None, None).is_err());
+        assert!(check_target(Some("dev"), remote, &no_env, Some("example.org")).is_err());
+        assert!(check_target(Some("dev"), "postgres://u@10.0.0.5/db", &no_env, None).is_err());
 
-        // A host given as a query parameter, or through PGHOST when the URL
-        // has none, is the host that counts.
+        // A host given as a query parameter counts.
         assert!(
             check_target(
                 Some("dev"),
                 "postgres://u@localhost/db?host=db.x.supabase.co",
-                None,
+                &no_env,
                 None
             )
             .is_err()
         );
-        assert!(check_target(Some("dev"), "postgres:///db", Some("db.example.org"), None).is_err());
-        assert_eq!(
+
+        // The review's gap: a URL with no host, so sqlx takes PGHOSTADDR
+        // (before PGHOST). Both env variables are checked whenever set.
+        let addr = env_of(&[("PGHOSTADDR", "203.0.113.5")]);
+        let err = check_target(Some("dev"), "postgres:db", &addr, None).unwrap_err();
+        assert!(err.contains("203.0.113.5"), "{err}");
+        let addr_with_local_host =
+            env_of(&[("PGHOSTADDR", "203.0.113.5"), ("PGHOST", "localhost")]);
+        assert!(check_target(Some("dev"), "postgres:db", &addr_with_local_host, None).is_err());
+        let supa = env_of(&[("PGHOST", "db.abcdefgh.supabase.co")]);
+        let err = check_target(Some("dev"), "postgres:db", &supa, None).unwrap_err();
+        assert!(err.contains("Supabase"), "{err}");
+        assert!(
             check_target(
                 Some("dev"),
-                "postgres:///db?host=/var/run/postgresql",
-                None,
-                None
-            ),
+                "postgres:db",
+                &supa,
+                Some("db.abcdefgh.supabase.co")
+            )
+            .is_err()
+        );
+        // Named exactly, a disposable remote PGHOSTADDR is allowed.
+        assert_eq!(
+            check_target(Some("dev"), "postgres:db", &addr, Some("203.0.113.5")),
             Ok(())
         );
+
         // Not a URL at all.
-        assert!(check_target(Some("dev"), "not a url", None, None).is_err());
+        assert!(check_target(Some("dev"), "not a url", &no_env, None).is_err());
+    }
+
+    #[test]
+    fn effective_host_is_what_sqlx_would_use() {
+        // From sqlx's own parse of the URL.
+        assert_eq!(
+            check_effective_host("postgres://u@127.0.0.1:55434/postgres", None),
+            Ok(())
+        );
+        assert_eq!(
+            check_effective_host("postgres:///db?host=/var/run/postgresql", None),
+            Ok(())
+        );
+        assert!(check_effective_host("postgres://u:pw@db.example.org/db", None).is_err());
+        assert!(
+            check_effective_host("postgres://u@localhost/db?host=db.x.supabase.co", None).is_err()
+        );
+        assert!(
+            check_effective_host("postgres://u@db.x.supabase.co/db", Some("db.x.supabase.co"))
+                .is_err()
+        );
+        assert_eq!(
+            check_effective_host("postgres://u@db.example.org/db", Some("db.example.org")),
+            Ok(())
+        );
     }
 }
