@@ -24,6 +24,9 @@ pub const NO_EVIDENCE: &str = "No relevant evidence found.";
 /// Bottom line when the search stopped early (cost or time limit) and no
 /// claim was written: not "no evidence", since the search was cut short.
 pub const STOPPED_NO_ANSWER: &str = "No answer could be written: the search stopped early, before enough evidence was read and checked.";
+/// Bottom line when Write was refused for budget (the evidence may all have
+/// been read; only the write-up did not fit).
+pub const WRITE_REFUSED: &str = "The cost limit was reached before the answer could be written.";
 /// Shown above the bottom line when the evidence is too thin for a conclusion.
 pub const INSUFFICIENT: &str = "Insufficient evidence \u{2014} no conclusion is drawn.";
 /// Marks a partly supported claim.
@@ -119,6 +122,9 @@ pub struct Trail {
     pub refinements: Vec<Refinement>,
     /// "cost limit" or "time limit" when the search stopped early.
     pub stopped_early: Option<String>,
+    /// Write was refused because the cost limit was reached.
+    #[serde(default)]
+    pub write_refused: bool,
     /// Databases that could not be reached ("PubMed", "Europe PMC").
     pub unavailable: Vec<String>,
 }
@@ -150,6 +156,8 @@ pub fn empty_bottom_line(a: &Answer) -> Option<&'static str> {
         None
     } else if a.no_verified_claims {
         Some(NO_VERIFIED_CLAIMS)
+    } else if a.trail.write_refused {
+        Some(WRITE_REFUSED)
     } else if a.trail.stopped_early.is_some() {
         Some(STOPPED_NO_ANSWER)
     } else {

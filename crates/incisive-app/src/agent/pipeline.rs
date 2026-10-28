@@ -22,7 +22,9 @@
 //! gathering call's hold must leave it free (`try_hold_gathering`), so the
 //! gathering money is never spent at the cost of the write-up. If Write is
 //! still refused, the run ends `partial` with a Note and no claims, never
-//! `failed`.
+//! `failed`; the trail records `write_refused` (not "search stopped early":
+//! the search may well have finished) and the bottom line says the cost
+//! limit was reached before the answer could be written.
 //!
 //! **Failures** (Ruling, Task 13 carry-over 2), as the run's `error_kind`:
 //! * `Unrecorded` (money not booked): "unrecorded", at once.
@@ -140,6 +142,8 @@ struct Gathered {
     extracted: Vec<Extracted>,
     /// "cost limit" / "time limit" once gathering stopped early.
     stopped: Option<&'static str>,
+    /// Write was refused for budget (despite the finish reserve).
+    write_refused: bool,
 }
 
 impl Gathered {
@@ -311,7 +315,7 @@ async fn run(ctx: &RunContext) -> Result<(Answer, bool), Stop> {
                 "Not enough of the cost limit was left to write the answer",
             )
             .await;
-            g.stopped = Some("cost limit");
+            g.write_refused = true;
             Draft {
                 bottom_line: vec![],
                 insufficient: true,
@@ -378,6 +382,7 @@ fn assemble(
         mut trail,
         extracted,
         stopped,
+        write_refused,
     } = g;
     let by_ref: HashMap<u8, &Extracted> = extracted.iter().map(|e| (e.ref_id, e)).collect();
     let verified: Vec<u8> = checked
@@ -492,7 +497,9 @@ fn assemble(
     let no_verified_claims = drafted > 0 && bottom_line.is_empty();
 
     trail.stopped_early = stopped.map(str::to_string);
-    let degraded = !trail.unavailable.is_empty() || stopped.is_some() || no_verified_claims;
+    trail.write_refused = write_refused;
+    let degraded =
+        !trail.unavailable.is_empty() || stopped.is_some() || write_refused || no_verified_claims;
 
     let answer = Answer {
         question: ctx.question.clone(),

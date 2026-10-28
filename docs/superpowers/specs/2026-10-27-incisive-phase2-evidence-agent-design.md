@@ -24,7 +24,7 @@ Phase 2 is done when:
 | D3 | **History is kept**, private per user, deletable, with automatic deletion after 12 months. |
 | D4 | **Tiered models:** Haiku screens; Sonnet frames, searches, extracts, writes and checks. Each step's model is a setting. |
 | D5 | **Live step list** while running; the run continues if the page is closed. |
-| D6 | **Per-question limits:** Quick ₹5, Focused ₹40, 5 minutes for both. Near a limit the run finishes gracefully. Limits are owner settings. |
+| D6 | **Per-question limits:** Quick ₹15 (owner ruling 28 Oct; was ₹5), Focused ₹40, 5 minutes for both. Near a limit the run finishes gracefully. Limits are owner settings. |
 | D7 | **Hybrid agent:** fixed steps, with agent-style freedom only inside Search (up to 3 query refinements). |
 
 ### Out of scope for Phase 2
@@ -55,7 +55,7 @@ A question that passes Phase 1 becomes a **run**. A run executes these steps in 
 | Papers used for extraction | 5 (abstracts) | 10 (full text where free) |
 | Retrieve step | skipped | runs |
 | Check step | **always** | **always** |
-| Cost limit | ₹5 | ₹40 |
+| Cost limit | ₹15 | ₹40 |
 | Time limit | 5 min | 5 min |
 
 **Thin evidence:** if fewer than 2 relevant studies are included, the answer says **"Insufficient evidence"**, lists what was found, and does not draw a conclusion.
@@ -71,7 +71,7 @@ A question that passes Phase 1 becomes a **run**. A run executes these steps in 
 - **Cloud Run:** switch to CPU always allocated (`--no-cpu-throttling`), keeping min instances at 0. **Before switching, the cost is confirmed with the owner.**
 - **One active run per user.** A second Send while a run is queued or running returns `{"status":"run_in_progress"}`: "You already have a question running."
 - **Money:**
-  - The Phase 1 spending reservation takes the run's full cost limit up front (₹5 or ₹40).
+  - The Phase 1 spending reservation takes the run's full cost limit up front (₹15 or ₹40).
   - Each Claude call records its actual cost as a `charge` against the run.
   - When the run ends, the unused remainder of the reservation is released.
   - The per-user and global caps are therefore never overrun by more than Phase 1's documented single-call bound.

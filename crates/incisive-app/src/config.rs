@@ -537,7 +537,7 @@ mod tests {
                 screen_n: 20,
                 use_n: 5,
                 full_text: false,
-                limit_paise: 500,
+                limit_paise: 1500,
                 time_limit_s: 300,
             }
         );
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(c.runs.focused.screen_n, 150);
         assert_eq!(c.runs.focused.use_n, 10);
         assert_eq!(c.runs.quick.refinements, 2);
-        assert_eq!(c.runs.quick.limit_paise, 500);
+        assert_eq!(c.runs.quick.limit_paise, 1500);
         assert_eq!(
             c.runs.for_mode(crate::runs::RunMode::Focused).limit_paise,
             6000

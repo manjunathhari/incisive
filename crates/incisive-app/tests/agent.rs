@@ -4406,7 +4406,7 @@ async fn confidence_capped_by_evidence_level() {
 
 use incisive_app::agent::answer::{
     Answer, AnswerClaim, CheckSummary, DECISION_SUPPORT, KeyStudy, NO_EVIDENCE, NO_VERIFIED_CLAIMS,
-    PARTIAL_MARK, Reference, STOPPED_NO_ANSWER, Trail, render_text, rerun_href,
+    PARTIAL_MARK, Reference, STOPPED_NO_ANSWER, Trail, WRITE_REFUSED, render_text, rerun_href,
 };
 use incisive_app::agent::{PipelineOutcome, run_pipeline};
 use incisive_app::runs::RunStatus;
@@ -4973,6 +4973,7 @@ fn sample_answer() -> Answer {
             excluded_top: vec![("wrong population".into(), 7)],
             refinements: vec![],
             stopped_early: Some("time limit".into()),
+            write_refused: false,
             unavailable: vec!["Europe PMC".into()],
         },
         cost_paise: 1840,
@@ -5284,29 +5285,24 @@ fn prod_script(extract_u: (u32, u32)) -> Arc<ScriptedLlm> {
 }
 
 #[tokio::test]
-async fn production_prices_quick_cannot_hold_the_finish_reserve() {
-    // Quick's limit (500 paise) is below the finish reserve itself (Write +
-    // 6 Checks ≈ 565 paise at Sonnet rates): the run wraps up right after
-    // Frame, ends partial with "stopped early", and never fails at Write.
+async fn production_prices_quick_reaches_check() {
+    // Quick at its limit (₹15, owner ruling) reads both fixture papers
+    // beside the finish reserve and reaches Check.
     let Some(pool) = pool().await else { return };
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
     let llm = prod_script(EXTRACT_ABSTRACT_U);
-    let (ctx, uid) = prod_ctx(&pool, RunMode::Quick, 500, &llm, &server).await;
-    let reserve = incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[]);
-    assert!((500..700).contains(&reserve), "{reserve}");
-
+    let limit = DepthSettings::QUICK.limit_paise;
+    assert_eq!(limit, 1500);
+    let (ctx, uid) = prod_ctx(&pool, RunMode::Quick, limit, &llm, &server).await;
     let outcome = run_pipeline(&ctx).await;
-    assert!(
-        matches!(outcome, PipelineOutcome::Partial(_)),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
     let a = answer_of(&outcome);
-    assert_eq!(llm.requests().len(), 1, "only Frame");
-    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
-    let text = render_text(&a);
-    assert!(text.contains(STOPPED_NO_ANSWER), "{text}");
-    assert!(!text.contains(NO_EVIDENCE));
-    assert!(a.cost_paise <= 500);
+    assert_eq!(llm.remaining(), 0, "every call made, Check included");
+    assert_eq!((a.bottom_line.len(), a.references.len()), (3, 2));
+    assert_eq!(a.check.checked, 3);
+    assert_eq!(a.trail.stopped_early, None);
+    assert!(a.key_studies.is_empty());
+    assert!(a.cost_paise < limit);
     assert_eq!(
         a.cost_paise,
         charge_rows(&pool, uid).await.iter().sum::<i64>()
@@ -5419,7 +5415,8 @@ async fn production_prices_capacity() {
 
     let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
     let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
-    assert_eq!(q(500), None, "Quick at 500 cannot even search");
+    assert_eq!(q(500), None, "Quick at the old ₹5 cannot even search");
+    assert_eq!(q(1500), Some(4), "Quick at ₹15: 4 of 5 abstracts");
     assert_eq!(f(full_paper), Some(6), "Focused, all full text");
     assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
     // The smallest Quick limit (5-paise steps) that reads 2 papers.
@@ -5517,9 +5514,11 @@ async fn write_refused_for_budget_is_partial_not_failed() {
     );
     let a = answer_of(&outcome);
     assert_eq!(llm.remaining(), 0, "no Write call was made");
+    // Extract also stopped before the second paper (past 70%).
     assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    assert!(a.trail.write_refused);
     assert!(a.bottom_line.is_empty() && a.insufficient && !a.no_verified_claims);
-    assert!(render_text(&a).contains(STOPPED_NO_ANSWER));
+    assert!(render_text(&a).contains(&format!("Bottom line\n{WRITE_REFUSED}\n")));
     let l = lines(&steps_of(&ctx, uid).await);
     assert!(
         l.iter()
@@ -5595,4 +5594,49 @@ async fn screen_stop_counts_records_as_not_assessed() {
         )),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn write_refused_after_every_paper_was_read_is_not_search_stopped_early() {
+    // N-2: gathering completes unstopped (both papers read; the last
+    // extraction's real charge, ~3,960 paise, far overshoots its hold), and
+    // only Write is refused. The run is partial because of Write alone: no
+    // "search stopped early", and the bottom line says why.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(
+                extraction(json!([finding(ICG_VERBATIM)])),
+                usage(100, 90_000),
+            ),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0, "both papers read; no Write call made");
+    assert_eq!(a.trail.stopped_early, None);
+    assert!(a.trail.write_refused);
+    assert!(a.bottom_line.is_empty() && a.insufficient && !a.no_verified_claims);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{WRITE_REFUSED}\n")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("stopped early") && !text.contains(NO_EVIDENCE),
+        "{text}"
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Not enough of the cost limit was left to write the answer"),
+        "{l:?}"
+    );
+    assert!(l.iter().all(|x| !x.contains("stopped early")), "{l:?}");
 }

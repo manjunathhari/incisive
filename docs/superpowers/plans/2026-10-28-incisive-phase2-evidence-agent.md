@@ -23,7 +23,7 @@
   | Search refinements | 1 | 3 |
   | Records screened | 20 | 100 |
   | Papers used | 5 (abstracts) | 10 (full text where free) |
-  | Cost limit | ₹5 (500 paise) | ₹40 (4000 paise) |
+  | Cost limit | ₹15 (1500 paise; owner ruling 28 Oct, was ₹5) | ₹40 (4000 paise) |
   | Time limit | 5 min | 5 min |
   | Check step | always | always |
 
@@ -631,7 +631,7 @@ crates/incisive-app/tests/{runs.rs, lit.rs, agent.rs, fixtures/lit/*}
   - The smoke test still passes in prod mode with dummy values.
 
 - [ ] **Step 1: Write failing tests:**
-  - `quick_request_uses_quick_limits_and_reservation` (a reservation of 500 paise)
+  - `quick_request_uses_quick_limits_and_reservation` (a reservation of 1500 paise)
   - `mode_defaults_to_focused`
   - `ncbi_key_optional_and_redacted_in_debug`
   - `unpaywall_email_in_smoke_env` (YAML parse check in a test, or a CI step)

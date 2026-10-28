@@ -54,7 +54,9 @@ impl DepthSettings {
         screen_n: 20,
         use_n: 5,
         full_text: false,
-        limit_paise: 500,
+        // ₹15 (owner ruling, 28 Oct 2026; was ₹5): Quick must leave the
+        // finish reserve for Write and Check (Ruling R-13c).
+        limit_paise: 1500,
         time_limit_s: 300,
     };
     pub const FOCUSED: DepthSettings = DepthSettings {

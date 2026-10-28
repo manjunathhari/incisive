@@ -1112,7 +1112,7 @@ async fn accepted_question_starts_a_run_and_finishes() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(limit, 500);
+    assert_eq!(limit, 1500);
 }
 
 #[tokio::test]
@@ -1196,8 +1196,9 @@ async fn over_cap_for_run_limit_creates_no_run() {
         return;
     };
     let st = app_state(pool.clone());
-    // Room for the gate estimate and a Quick run, not a Focused one (4000).
-    let user = new_user_with_cap(&pool, 1_000).await;
+    // Room for the gate estimate and a Quick run (1500), not a Focused one
+    // (4000).
+    let user = new_user_with_cap(&pool, 2_000).await;
     let outcome = run_ask(&st, &user, RULE_QUESTION, RunMode::Focused)
         .await
         .unwrap();
@@ -1216,7 +1217,7 @@ async fn over_cap_for_run_limit_creates_no_run() {
     assert_eq!(events, ["gate_decided", "accepted", "cap_blocked"]);
     assert_eq!(rows[2].1, json!({"estimate_paise": 4000}));
 
-    // A Quick run (500) still fits.
+    // A Quick run (1500) still fits.
     let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Quick).await);
     wait_idle(&st, run).await;
 }
@@ -2489,6 +2490,7 @@ fn answer_json() -> serde_json::Value {
             excluded_top: vec![("wrong population".into(), 7)],
             refinements: vec![],
             stopped_early: None,
+            write_refused: false,
             unavailable: vec![],
         },
         cost_paise: 1840,
