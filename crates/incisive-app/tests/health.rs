@@ -139,3 +139,53 @@ async fn home_page_shows_name_and_tagline() {
     assert!(body.contains("Incisive"));
     assert!(body.contains("Cut to the evidence."));
 }
+
+#[tokio::test]
+async fn browser_code_is_revalidated_on_every_load() {
+    // A deploy keeps the /pkg/ file names, so browsers must revalidate them
+    // (otherwise a cached old build runs against the new page and nothing
+    // on it responds).
+    let dir = std::env::temp_dir().join(format!("incisive-site-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+    std::fs::write(dir.join("pkg/incisive-app.js"), "export default 1;").unwrap();
+    let opts = LeptosOptions::builder()
+        .output_name("incisive-app")
+        .site_root(dir.to_str().unwrap())
+        .build();
+    let res = build_router(Arc::new(AlwaysUp), identity_state(), opts)
+        .oneshot(
+            Request::builder()
+                .uri("/pkg/incisive-app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-cache")
+    );
+    // Pages and other routes are left alone.
+    let res = build_router(
+        Arc::new(AlwaysUp),
+        identity_state(),
+        LeptosOptions::builder().output_name("incisive-app").build(),
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        res.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

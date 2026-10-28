@@ -123,6 +123,26 @@ fn same_origin(origin: &str, authority: &str) -> bool {
 /// must match the request's host and port, or the request is refused with 403
 /// before identity, audit or spend. A missing `Origin` is allowed (curl and
 /// server-side clients omit it).
+/// The browser code under `/pkg/` keeps the same file names across deploys, so
+/// a browser that cached the previous version would run it against the new
+/// page and fail to hydrate (every button dead). `no-cache` lets the browser
+/// keep its copy but makes it revalidate on each load (a cheap 304 when the
+/// file is unchanged), so a deploy is always picked up.
+pub async fn revalidate_pkg(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_pkg = req.uri().path().starts_with("/pkg/");
+    let mut res = next.run(req).await;
+    if is_pkg {
+        res.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+    }
+    res
+}
+
 async fn same_origin_check(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -216,6 +236,7 @@ pub fn build_router(
         .layer(RequestBodyLimitLayer::new(ASK_BODY_LIMIT))
         // Server functions read identity in the handler: refuse cross-site first.
         .layer(axum::middleware::from_fn(same_origin_check))
+        .layer(axum::middleware::from_fn(revalidate_pkg))
         .with_state(leptos_options);
     health_routes(r)
         .merge(api_routes(state))
