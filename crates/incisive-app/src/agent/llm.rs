@@ -138,6 +138,11 @@ pub enum StepError {
     /// after a retry. The cost is counted locally and logged for
     /// reconciliation. **Fatal**: the pipeline must end the run `failed`.
     Unrecorded,
+    /// The literature databases could not be searched (both PubMed and Europe
+    /// PMC failed). Ends the run (`failed`), but it is **not** fatal in the
+    /// money sense: every Claude call so far was charged normally, so the
+    /// worker simply finishes the run and releases the remainder.
+    Lit,
 }
 
 impl StepError {
@@ -149,10 +154,13 @@ impl StepError {
             StepError::Parse => "parse",
             StepError::Cancelled => "cancelled",
             StepError::Unrecorded => "unrecorded",
+            StepError::Lit => "lit",
         }
     }
 
-    /// True when the run must stop (`failed`) rather than degrade a step.
+    /// True when money may be unaccounted for and the run must stop (`failed`)
+    /// at once. [`StepError::Lit`] also ends the run, but is not fatal here:
+    /// the pipeline decides that per step.
     pub fn is_fatal(self) -> bool {
         matches!(self, StepError::Unrecorded)
     }

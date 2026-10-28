@@ -1,0 +1,12 @@
+{
+  "population": "Adults undergoing elective colorectal resection with anastomosis",
+  "intervention": "Indocyanine green fluorescence angiography of the anastomosis",
+  "comparison": "Standard white-light visual assessment",
+  "outcomes": [
+    "anastomotic leak rate",
+    "change in surgical plan"
+  ],
+  "limits": [
+    "randomised trials and meta-analyses"
+  ]
+}

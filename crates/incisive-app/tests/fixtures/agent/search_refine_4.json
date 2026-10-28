@@ -1,0 +1,5 @@
+{
+  "accept": false,
+  "query": "ICG[tiab] AND leak[tiab]",
+  "reason": "Should never be used"
+}

@@ -1,0 +1,5 @@
+{
+  "accept": false,
+  "query": "(\"indocyanine green\"[tiab] OR ICG[tiab]) AND (\"anastomotic leak\"[mh] OR \"anastomotic leak\"[tiab]) AND colorectal[tiab] AND (randomized controlled trial[pt] OR meta-analysis[pt])",
+  "reason": "Add meta-analyses and the MeSH heading"
+}

@@ -11,7 +11,9 @@
 //! returns a fixed body. Task 13 replaces the body of [`run_pipeline`]; the
 //! [`RunContext`] shape is fixed for it.
 
+pub mod frame;
 pub mod llm;
+pub mod search;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -22,10 +24,13 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::identity::User;
+use crate::lit::europepmc::EuropePmc;
+use crate::lit::pubmed::PubMed;
 use crate::runs::budget::RunBudget;
 use crate::runs::worker::{self, CancelFlag};
 use crate::runs::{DepthSettings, RunMode, StepKind, store};
 use crate::server::AppState;
+use llm::{AgentModels, LlmCall, LlmClient};
 
 /// Everything one run's pipeline needs. Built by the worker.
 pub struct RunContext {
@@ -41,6 +46,75 @@ pub struct RunContext {
     pub budget: Arc<RunBudget>,
     /// Set when the user deletes the run; checked between steps.
     pub cancel: CancelFlag,
+}
+
+/// The agent's Claude client and its model per step.
+///
+/// Task 13 threads this through [`RunContext`] (an `Arc<AgentLlm>` field built
+/// once at startup); until then the step functions take it as a parameter.
+#[derive(Clone)]
+pub struct AgentLlm {
+    pub client: Arc<dyn LlmClient>,
+    pub models: AgentModels,
+}
+
+impl AgentLlm {
+    /// A budgeted call handle for one step of `ctx`'s run.
+    pub fn call(&self, ctx: &RunContext, model: &str, step: &'static str) -> LlmCall {
+        LlmCall::new(
+            self.client.clone(),
+            ctx.budget.clone(),
+            ctx.state.pool.clone(),
+            ctx.cancel.clone(),
+            model,
+            step,
+        )
+    }
+}
+
+/// The literature clients the steps use. The paper cache is reached through
+/// `ctx.state.pool`.
+///
+/// Task 13/14 build one at startup and thread it through [`RunContext`] as an
+/// `Arc<Literature>` field; until then the step functions take it as a
+/// parameter. Retrieve (Task 10) adds the Unpaywall client here.
+pub struct Literature {
+    pub pubmed: PubMed,
+    pub epmc: EuropePmc,
+}
+
+/// Longest step line stored.
+pub const MAX_STEP_LINE: usize = 160;
+
+/// `s` with control characters turned into spaces, runs of whitespace
+/// collapsed, trimmed, and cut to at most `max` characters (an ellipsis marks
+/// a cut). Character-safe.
+pub fn clip(s: &str, max: usize) -> String {
+    let clean = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= max {
+        return clean;
+    }
+    let mut out: String = clean.chars().take(max.saturating_sub(1)).collect();
+    out = out.trim_end().to_string();
+    out.push('\u{2026}');
+    out
+}
+
+/// Append a progress line (cut to [`MAX_STEP_LINE`]). A failed write is
+/// logged by kind only and otherwise ignored: the worker's heartbeat notices a
+/// deleted or lost run between steps.
+pub(crate) async fn add_line(ctx: &RunContext, kind: StepKind, line: &str) {
+    let line = clip(line, MAX_STEP_LINE);
+    if store::add_step(&ctx.state.pool, ctx.run_id, kind, &line)
+        .await
+        .is_err()
+    {
+        tracing::warn!(run_id = %ctx.run_id, step = kind.as_str(), "step line not stored");
+    }
 }
 
 /// What the pipeline produced.

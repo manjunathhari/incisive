@@ -1,0 +1,5 @@
+{
+  "accept": false,
+  "query": "ICG[tiab]\nAND leak[tiab]",
+  "reason": "Broaden"
+}

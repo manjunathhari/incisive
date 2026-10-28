@@ -1,0 +1,4 @@
+{
+  "query": "(\"indocyanine green\"[tiab] OR ICG[tiab]) AND \"anastomotic leak\"[tiab] AND colorectal[tiab]",
+  "reason": "Core concepts of the question"
+}
