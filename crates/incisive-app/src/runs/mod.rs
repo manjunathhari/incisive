@@ -17,6 +17,10 @@ pub mod store;
 #[cfg(feature = "ssr")]
 pub mod worker;
 
+/// Shown for a missing run, or one that belongs to someone else. Shared with
+/// the browser, which stops polling when it sees it.
+pub const RUN_NOT_FOUND_MESSAGE: &str = "That question wasn't found. It may have been deleted.";
+
 /// How deep the run goes. Focused unless the user picks Quick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

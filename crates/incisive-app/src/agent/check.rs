@@ -126,6 +126,9 @@ pub struct Checked {
     pub refs_verified: u32,
     /// Refs removed by live verification.
     pub refs_removed: u32,
+    /// The cited refs that verified live, ascending. Only these may be shown
+    /// as references (Review Focus 3: the rest are never shown).
+    pub verified: Vec<u8>,
     /// Carried from the draft: the evidence is too thin for a conclusion.
     pub insufficient: bool,
 }
@@ -475,6 +478,11 @@ pub async fn check(
         removed: count(removed),
         refs_verified: count(refs_verified),
         refs_removed: count(refs_total - refs_verified),
+        verified: cited
+            .iter()
+            .copied()
+            .filter(|r| valid.contains(r))
+            .collect(),
         insufficient: draft.insufficient,
     })
 }

@@ -5,17 +5,23 @@
 //! bodies, so this module also builds for the browser (`hydrate`).
 //!
 //! Everything shown is plain text: Leptos escapes it, and no `inner_html` is used.
+//! The answer (`agent::answer::Answer`) is drawn from its structured fields.
 
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
 use leptos_router::{
     components::{A, Route, Router, Routes},
-    hooks::{use_navigate, use_params_map},
+    hooks::{use_navigate, use_params_map, use_query_map},
     path,
 };
 
+use crate::agent::answer::{
+    self, Answer, DECISION_SUPPORT, INSUFFICIENT, PARTIAL_MARK, Reference, check_text, date_ist,
+    duration_text, empty_bottom_line, exclusions_text, key_study_text, mode_label, render_text,
+    rerun_href, screened_text, show_insufficient, stopped_text, unavailable_text,
+};
 use crate::ask::{ActivityView, AskOutcome, MeView};
-use crate::runs::{RunMode, RunStatus, RunSummary, RunView};
+use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
 
 const STYLE: &str = r#"
@@ -58,7 +64,17 @@ button.small { padding:4px 12px; font-size:.85rem; }
 .runs { list-style:none; padding:0; margin:12px 0; }
 .runs li { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; justify-content:space-between; padding:10px 12px; background:var(--card); border:1px solid var(--line); border-radius:6px; margin-bottom:8px; }
 .runs .meta { color:var(--muted); font-size:.85rem; }
-pre.answer { white-space:pre-wrap; word-break:break-word; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px; font-size:.85rem; }
+.answer { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:12px 16px; margin-top:16px; }
+.answer h3 { margin:18px 0 6px; font-size:1.05rem; }
+.answer .decision { font-weight:600; color:var(--accent); margin:0 0 4px; }
+.answer dl { display:grid; grid-template-columns:max-content 1fr; gap:2px 12px; margin:0; }
+.answer dt { color:var(--muted); } .answer dd { margin:0; }
+.answer code { word-break:break-word; font-size:.85rem; }
+.answer ul { padding-left:20px; margin:4px 0; } .answer li { margin:4px 0; }
+.answer .refs-list { list-style:none; padding-left:0; }
+.conf { color:var(--muted); font-size:.9rem; }
+.partial-mark { color:var(--amber); font-weight:600; }
+.answer a { color:var(--accent); word-break:break-word; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -152,7 +168,8 @@ pub async fn list_my_runs() -> Result<Vec<RunSummary>, ServerFnError> {
         set_status(r.status());
         ServerFnError::new(r.message())
     })?;
-    crate::runs::api::list_view(&state, &user, None)
+    // My questions shows the most recent 100 (the API's maximum).
+    crate::runs::api::list_view(&state, &user, Some(crate::runs::api::MAX_LIMIT))
         .await
         .map_err(run_api_error)
 }
@@ -309,11 +326,41 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn AskPage() -> impl IntoView {
-    let (question, set_question) = signal(String::new());
+    // Edit & re-run arrives as `/?q=<question>&mode=<mode>`: prefill the box.
+    let query = use_query_map();
+    let (initial_q, initial_mode) = query.with_untracked(|q| {
+        (
+            q.get("q").unwrap_or_default(),
+            q.get("mode")
+                .as_deref()
+                .and_then(RunMode::parse)
+                .unwrap_or_default(),
+        )
+    });
+    let prefilled = !initial_q.is_empty();
+    let (question, set_question) = signal(initial_q);
+    let mode = RwSignal::new(initial_mode);
     let action = ServerAction::<AskQuestion>::new();
     let pending = action.pending();
-    // Once the question is accepted, follow its run (browser only: an effect never runs on the server).
     let navigate = use_navigate();
+    // Browser only (effects never run on the server). Drop the question from
+    // the address bar once it is in the box, so a reload or a shared link
+    // does not carry it.
+    Effect::new({
+        let navigate = navigate.clone();
+        move |_| {
+            if prefilled {
+                navigate(
+                    "/",
+                    leptos_router::NavigateOptions {
+                        replace: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    });
+    // Once the question is accepted, follow its run.
     Effect::new(move |_| {
         if let Some(Ok(AskOutcome::RunStarted { run_id, .. })) = action.value().get() {
             navigate(&format!("/runs/{run_id}"), Default::default());
@@ -323,7 +370,7 @@ fn AskPage() -> impl IntoView {
         ev.prevent_default();
         action.dispatch(AskQuestion {
             question: question.get_untracked(),
-            mode: RunMode::default(),
+            mode: mode.get_untracked(),
         });
     };
     view! {
@@ -414,7 +461,7 @@ fn status_badge(s: RunStatus) -> impl IntoView {
 }
 
 fn rupees(paise: i64) -> String {
-    format!("\u{20b9}{}.{:02}", paise / 100, paise % 100)
+    answer::rupees(paise)
 }
 
 /// How often the run page asks for news while the run is queued or running.
@@ -435,33 +482,40 @@ fn RunPage() -> impl IntoView {
         |(id, _)| async move {
             match id {
                 Some(id) => get_my_run(id).await,
-                None => Err(ServerFnError::new(
-                    "That question wasn't found. It may have been deleted.",
-                )),
+                None => Err(ServerFnError::new(RUN_NOT_FOUND_MESSAGE)),
             }
         },
     );
 
-    // Poll while queued or running; stop at a terminal status. Effects run only
-    // in the browser, so the server never starts a timer.
+    // Poll while queued or running. Stop only at a terminal status or when
+    // the run is not found (deleted); any other error is transient: keep
+    // polling and keep showing the last good view. Effects run only in the
+    // browser, so the server never starts a timer.
     let timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage> =
         StoredValue::new_local(None);
+    let last_good: RwSignal<Option<RunView>> = RwSignal::new(None);
     let stop = move || {
         if let Some(h) = timer.try_update_value(|t| t.take()).flatten() {
             h.clear();
         }
     };
-    Effect::new(move |_| match data.get() {
-        Some(Ok(v)) if v.summary.status.is_active() => {
-            if timer.with_value(|t| t.is_none()) {
-                let h = leptos::leptos_dom::helpers::set_interval_with_handle(
-                    move || tick.update(|t| *t += 1),
-                    POLL_EVERY,
-                );
-                timer.set_value(h.ok());
-            }
+    let start = move || {
+        if timer.with_value(|t| t.is_none()) {
+            let h = leptos::leptos_dom::helpers::set_interval_with_handle(
+                move || tick.update(|t| *t += 1),
+                POLL_EVERY,
+            );
+            timer.set_value(h.ok());
         }
-        Some(_) => stop(),
+    };
+    Effect::new(move |_| match data.get() {
+        Some(Ok(v)) => {
+            let active = v.summary.status.is_active();
+            last_good.set(Some(v));
+            if active { start() } else { stop() }
+        }
+        Some(Err(e)) if is_not_found(&e) => stop(),
+        Some(Err(_)) => start(),
         None => {}
     });
     on_cleanup(stop);
@@ -475,20 +529,40 @@ fn RunPage() -> impl IntoView {
                 data.get()
                     .map(|r| match r {
                         Ok(v) => run_view(v).into_any(),
-                        Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
+                        Err(e) if is_not_found(&e) => {
+                            view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
+                        }
+                        Err(e) => match last_good.get() {
+                            Some(v) => view! {
+                                <p class="hint" role="status">
+                                    "Connection problem \u{2014} retrying. " {error_text(&e)}
+                                </p>
+                                {run_view(v)}
+                            }
+                                .into_any(),
+                            None => view! {
+                                <p class="box amber" role="alert">
+                                    {error_text(&e)} " Retrying\u{2026}"
+                                </p>
+                            }
+                                .into_any(),
+                        },
                     })
             }}
         </Transition>
     }
 }
 
+/// The run is gone (or someone else's): polling stops.
+fn is_not_found(e: &ServerFnError) -> bool {
+    error_text(e) == RUN_NOT_FOUND_MESSAGE
+}
+
 fn run_view(v: RunView) -> impl IntoView {
     let status = v.summary.status;
     let ended_without_answer = v.answer.is_none() && !status.is_active();
-    // Placeholder until the real answer view (Task 13): the stored JSON, as text.
-    let answer = v
-        .answer
-        .map(|a| serde_json::to_string_pretty(&a).unwrap_or_default());
+    // The stored body is drawn from its fields, never shown raw.
+    let answer = v.answer.map(|a| serde_json::from_value::<Answer>(a).ok());
     view! {
         <h2>{v.summary.title}</h2>
         <p>{status_badge(status)} " " <span class="meta">{rupees(v.summary.cost_paise)}</span></p>
@@ -504,9 +578,14 @@ fn run_view(v: RunView) -> impl IntoView {
                 .into_any()
         }}
         {answer
-            .map(|a| view! {
-                <h3>"Answer"</h3>
-                <pre class="answer">{a}</pre>
+            .map(|a| match a {
+                Some(a) => answer_view(a).into_any(),
+                None => view! {
+                    <p class="box amber" role="status">
+                        "This answer can't be shown. Please ask the question again."
+                    </p>
+                }
+                    .into_any(),
             })}
         {ended_without_answer
             .then(|| view! {
@@ -517,11 +596,185 @@ fn run_view(v: RunView) -> impl IntoView {
     }
 }
 
+/// `https://pubmed.ncbi.nlm.nih.gov/<pmid>/` for an all-digit PMID.
+fn pubmed_link(pmid: &str) -> Option<String> {
+    (!pmid.is_empty() && pmid.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!("https://pubmed.ncbi.nlm.nih.gov/{pmid}/"))
+}
+
+/// `https://doi.org/<doi>`, percent-encoded except for `/`.
+fn doi_link(doi: &str) -> Option<String> {
+    let doi = doi.trim();
+    (!doi.is_empty()).then(|| {
+        let path: Vec<String> = doi.split('/').map(answer::percent_encode).collect();
+        format!("https://doi.org/{}", path.join("/"))
+    })
+}
+
+fn reference_view(r: Reference) -> impl IntoView {
+    let mut head = r.title.trim_end_matches('.').to_string();
+    head.push('.');
+    match (&r.journal, r.year) {
+        (Some(j), Some(y)) => head.push_str(&format!(" {j}, {y}.")),
+        (Some(j), None) => head.push_str(&format!(" {j}.")),
+        (None, Some(y)) => head.push_str(&format!(" {y}.")),
+        (None, None) => {}
+    }
+    let pmid = r
+        .pmid
+        .clone()
+        .and_then(|p| pubmed_link(&p).map(|href| (p, href)));
+    let doi = r
+        .doi
+        .clone()
+        .and_then(|d| doi_link(&d).map(|href| (d, href)));
+    view! {
+        <li>
+            {format!("[{}] ", r.ref_id)}
+            {head}
+            {pmid.map(|(p, href)| view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> })}
+            {doi.map(|(d, href)| view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("DOI {d}")}</a> })}
+            " " <span class="conf">{format!("({})", r.study_type)}</span>
+        </li>
+    }
+}
+
+/// Copy the plain-text answer (browser only).
+fn copy_text(text: &str) {
+    #[cfg(feature = "hydrate")]
+    {
+        // The promise is not awaited: a refused copy changes nothing.
+        let _ = web_sys::window().map(|w| w.navigator().clipboard().write_text(text));
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = text;
+}
+
+/// The answer, in the §4 order, as escaped text and links only.
+fn answer_view(a: Answer) -> impl IntoView {
+    let text = render_text(&a);
+    let rerun = rerun_href(&a.question, a.mode);
+    let empty = empty_bottom_line(&a);
+    let insufficient = show_insufficient(&a);
+    let pico = a.pico.clone();
+    let check = check_text(&a.check);
+    let t = a.trail.clone();
+    let screened = screened_text(&t);
+    let exclusions = exclusions_text(&t);
+    let stopped = t.stopped_early.as_deref().map(stopped_text);
+    let unavailable = unavailable_text(&t);
+    let cost = format!(
+        "{} \u{b7} {}",
+        rupees(a.cost_paise),
+        duration_text(a.elapsed_s)
+    );
+    let copied = RwSignal::new(false);
+    view! {
+        <section class="answer" aria-label="Answer">
+            <p class="decision">{DECISION_SUPPORT}</p>
+            <p class="meta">{format!("{} \u{b7} {}", mode_label(a.mode), date_ist(a.created_at))}</p>
+
+            <h3>"How I read your question"</h3>
+            <dl>
+                <dt>"Population"</dt><dd>{pico.population}</dd>
+                <dt>"Intervention"</dt><dd>{pico.intervention}</dd>
+                <dt>"Comparison"</dt><dd>{pico.comparison.unwrap_or_else(|| "none stated".into())}</dd>
+                {(!pico.outcomes.is_empty()).then(|| view! { <dt>"Outcomes"</dt><dd>{pico.outcomes.join("; ")}</dd> })}
+                {(!pico.limits.is_empty()).then(|| view! { <dt>"Limits"</dt><dd>{pico.limits.join("; ")}</dd> })}
+            </dl>
+            {(!a.final_query.is_empty()).then(|| view! { <p>"PubMed query: " <code>{a.final_query.clone()}</code></p> })}
+            <p><A href=rerun>"Edit & re-run"</A></p>
+
+            <h3>"Bottom line"</h3>
+            {insufficient.then(|| view! { <p class="box amber">{INSUFFICIENT}</p> })}
+            {match empty {
+                Some(msg) => view! { <p>{msg}</p> }.into_any(),
+                None => view! {
+                    <ul>
+                        {a.bottom_line
+                            .into_iter()
+                            .map(|c| {
+                                view! {
+                                    <li>
+                                        {c.partial.then(|| view! { <span class="partial-mark" title="partly supported">{PARTIAL_MARK}</span> " " })}
+                                        {c.text}
+                                        " " {answer::refs_text(&c.refs)}
+                                        " " <span class="conf">
+                                            {if c.partial {
+                                                format!("({}, partly supported)", c.confidence)
+                                            } else {
+                                                format!("({})", c.confidence)
+                                            }}
+                                        </span>
+                                    </li>
+                                }
+                            })
+                            .collect_view()}
+                    </ul>
+                }
+                    .into_any(),
+            }}
+
+            {(!a.key_studies.is_empty()).then(|| view! {
+                <h3>"Key studies"</h3>
+                <ul>
+                    {a.key_studies
+                        .into_iter()
+                        .map(|k| view! { <li>{format!("[{}] {}", k.ref_id, key_study_text(&k))}</li> })
+                        .collect_view()}
+                </ul>
+            })}
+
+            <h3>"References"</h3>
+            {if a.references.is_empty() {
+                view! { <p>"None verified."</p> }.into_any()
+            } else {
+                view! {
+                    <ul class="refs-list">
+                        {a.references.into_iter().map(reference_view).collect_view()}
+                    </ul>
+                }
+                    .into_any()
+            }}
+
+            <h3>"Check"</h3>
+            <p>{check}</p>
+
+            <h3>"Search trail"</h3>
+            <ul>
+                <li>{format!("PubMed: {} hits \u{b7} Europe PMC: {} hits", t.pubmed_count, t.epmc_count)}</li>
+                <li>{screened}</li>
+                {exclusions.map(|x| view! { <li>{x}</li> })}
+                {t.refinements
+                    .into_iter()
+                    .map(|r| view! { <li>"Refined: " {r.reason} " " <code>{r.query}</code></li> })
+                    .collect_view()}
+                {stopped.map(|x| view! { <li>{x}</li> })}
+                {unavailable.map(|x| view! { <li>{x}</li> })}
+            </ul>
+
+            <h3>"Cost and time"</h3>
+            <p>{cost}</p>
+
+            <button
+                class="secondary small"
+                on:click=move |_| {
+                    copy_text(&text);
+                    copied.set(true);
+                }
+            >
+                {move || if copied.get() { "Copied" } else { "Copy as text" }}
+            </button>
+        </section>
+    }
+}
+
 #[component]
 fn HistoryPage() -> impl IntoView {
     let refresh = RwSignal::new(0u32);
     let runs = Resource::new(move || refresh.get(), |_| list_my_runs());
     let confirming = RwSignal::new(false);
+    // A failed delete's message is cleared by the next action.
     let delete_one = Action::new(move |id: &Uuid| {
         let id = *id;
         async move {
@@ -536,6 +789,10 @@ fn HistoryPage() -> impl IntoView {
         refresh.update(|n| *n += 1);
         r.map(|_| ())
     });
+    let clear_errors = move || {
+        delete_one.value().set(None);
+        delete_all.value().set(None);
+    };
     let failure = move || {
         let e = match (delete_one.value().get(), delete_all.value().get()) {
             (Some(Err(e)), _) | (_, Some(Err(e))) => Some(e),
@@ -576,6 +833,7 @@ fn HistoryPage() -> impl IntoView {
                                                         <button
                                                             class="secondary small"
                                                             on:click=move |_| {
+                                                                clear_errors();
                                                                 delete_one.dispatch(id);
                                                             }
                                                         >
@@ -603,6 +861,7 @@ fn HistoryPage() -> impl IntoView {
                             class="danger"
                             disabled=move || delete_all.pending().get()
                             on:click=move |_| {
+                                clear_errors();
                                 delete_all.dispatch(());
                             }
                         >
@@ -616,7 +875,13 @@ fn HistoryPage() -> impl IntoView {
                     .into_any()
             } else {
                 view! {
-                    <button class="secondary" on:click=move |_| confirming.set(true)>
+                    <button
+                        class="secondary"
+                        on:click=move |_| {
+                            clear_errors();
+                            confirming.set(true);
+                        }
+                    >
                         "Delete all my history"
                     </button>
                 }

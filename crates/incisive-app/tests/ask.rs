@@ -126,7 +126,10 @@ fn state_with(pool: PgPool, gate: Arc<dyn Classifier>, dev_mode: bool) -> AppSta
         gate_model: GATE_MODEL.to_string(),
         dev_mode,
         runs: RunsConfig::default(),
-        worker: WorkerHandle::default(),
+        // Runs started by `run_ask` use the deterministic placeholder.
+        worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
+        llm: Some(incisive_app::agent::testing::idle_llm(GATE_MODEL)),
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 

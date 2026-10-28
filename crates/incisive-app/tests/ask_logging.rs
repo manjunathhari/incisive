@@ -95,6 +95,8 @@ fn state(pool: PgPool, gate: Arc<dyn Classifier>, gate_model: &str) -> AppState 
         dev_mode: true,
         runs: incisive_app::runs::RunsConfig::default(),
         worker: incisive_app::runs::worker::WorkerHandle::default(),
+        llm: None,
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 

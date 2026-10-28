@@ -501,6 +501,47 @@ pub async fn release(pool: &PgPool, user_id: i64, run_id: Uuid) -> sqlx::Result<
     Ok(released.unwrap_or(0))
 }
 
+/// Release the run's reservation except `keep` paise, which stay reserved for
+/// Claude calls still in flight (Ruling R-8d); returns the paise released.
+/// With `keep <= 0` this is [`release`]. Their late charges consume what is
+/// kept, and the last one releases the rest (`RunBudget::release_if_finished`).
+pub async fn release_keeping(
+    pool: &PgPool,
+    user_id: i64,
+    run_id: Uuid,
+    keep: i64,
+) -> sqlx::Result<i64> {
+    if keep <= 0 {
+        return release(pool, user_id, run_id).await;
+    }
+    let mut tx = pool.begin().await?;
+    lock_spend(&mut tx, user_id).await?;
+    let before: Option<i64> = sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend \
+         WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation'",
+    )
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(before) = before else {
+        tx.commit().await?;
+        return Ok(0);
+    };
+    let after = before.min(keep);
+    sqlx::query(
+        "UPDATE incisive.spend SET paise = $3 \
+         WHERE request_id = $1 AND user_id = $2 AND kind = 'reservation'",
+    )
+    .bind(run_id)
+    .bind(user_id)
+    .bind(after)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(before - after)
+}
+
 /// The user holding the reservation made under `request_id`, if one remains.
 /// Lets a worker release a run's reservation after the run row is gone.
 pub async fn reservation_owner(pool: &PgPool, request_id: Uuid) -> sqlx::Result<Option<i64>> {

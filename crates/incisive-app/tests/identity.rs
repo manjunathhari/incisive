@@ -189,6 +189,8 @@ fn state_with(env: AppEnv, pool: sqlx::PgPool, verifier: IapVerifier) -> AppStat
         dev_mode: env == AppEnv::Dev,
         runs: incisive_app::runs::RunsConfig::default(),
         worker: incisive_app::runs::worker::WorkerHandle::default(),
+        llm: None,
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 

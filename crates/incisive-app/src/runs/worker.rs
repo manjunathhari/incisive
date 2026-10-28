@@ -132,9 +132,21 @@ fn start_ticker(pool: PgPool, run_id: Uuid, cancel: CancelFlag) -> Ticker {
 
 /// Starts run tasks and tracks them, so a run can be cancelled. Cheap to clone;
 /// clones share one registry.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WorkerHandle {
     active: Arc<Mutex<HashMap<Uuid, CancelFlag>>>,
+    /// The pipeline [`WorkerHandle::spawn`] runs: the real one, except in
+    /// tests ([`WorkerHandle::with_pipeline`]).
+    pipeline: PipelineFn,
+}
+
+impl Default for WorkerHandle {
+    fn default() -> Self {
+        WorkerHandle {
+            active: Arc::default(),
+            pipeline: default_pipeline,
+        }
+    }
 }
 
 /// Removes the run from the registry when its task ends, however it ends.
@@ -156,7 +168,17 @@ impl WorkerHandle {
 
     /// Execute `run_id` in a background tokio task.
     pub fn spawn(&self, state: AppState, run_id: Uuid) {
-        self.spawn_pipeline(state, run_id, default_pipeline);
+        self.spawn_pipeline(state, run_id, self.pipeline);
+    }
+
+    /// Tests only: a handle whose [`WorkerHandle::spawn`] (and so every run
+    /// `run_ask` starts) uses `pipeline`.
+    #[cfg(feature = "test-util")]
+    pub fn with_pipeline(pipeline: PipelineFn) -> WorkerHandle {
+        WorkerHandle {
+            active: Arc::default(),
+            pipeline,
+        }
     }
 
     /// Tests only: execute `run_id` with a substitute pipeline.
@@ -227,7 +249,7 @@ async fn after_panic(pool: &PgPool, run_id: Uuid) {
     let end = End::Status(RunStatus::Failed, Some("panic"));
     // A second panic here is caught by tokio; the run is then left for
     // self-heal / recovery.
-    finish(pool, run_id, user_id, end, cost).await;
+    finish(pool, run_id, user_id, end, cost, 0).await;
 }
 
 /// True only when the run row is known to be gone. A failed check counts as
@@ -251,7 +273,7 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
                 }
             };
             match spend::reservation_owner(pool, run_id).await {
-                Ok(Some(user_id)) => finish(pool, run_id, user_id, end, 0).await,
+                Ok(Some(user_id)) => finish(pool, run_id, user_id, end, 0, 0).await,
                 Ok(None) => {}
                 Err(_) => tracing::error!(%run_id, "run reservation owner could not be read"),
             }
@@ -263,7 +285,7 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         _ => {
             tracing::error!(%run_id, "run user could not be loaded");
             let end = End::Status(RunStatus::Failed, Some("store"));
-            finish(pool, run_id, user_id, end, 0).await;
+            finish(pool, run_id, user_id, end, 0, 0).await;
             return;
         }
     };
@@ -276,20 +298,30 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
             } else {
                 End::AlreadyFinished
             };
-            finish(pool, run_id, user_id, end, 0).await;
+            finish(pool, run_id, user_id, end, 0, 0).await;
             return;
         }
         Err(_) => {
             tracing::error!(%run_id, "run could not be started");
             let end = End::Status(RunStatus::Failed, Some("store"));
-            finish(pool, run_id, user_id, end, 0).await;
+            finish(pool, run_id, user_id, end, 0, 0).await;
             return;
         }
     }
 
+    // No Claude client (dev without ANTHROPIC_API_KEY): fail closed.
+    let Some(llm) = state.llm.clone() else {
+        tracing::warn!(%run_id, "no Claude client configured; run failed");
+        let end = End::Status(RunStatus::Failed, Some("no_api_key"));
+        finish(pool, run_id, user_id, end, 0, 0).await;
+        return;
+    };
+
     let _ticker = start_ticker(pool.clone(), run_id, cancel.clone());
     let ctx = RunContext {
         state: state.clone(),
+        llm,
+        lit: state.lit.clone(),
         run_id,
         user,
         question,
@@ -319,7 +351,9 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         }
     };
     let end = decide(pool, &ctx, outcome).await;
-    finish(pool, run_id, user_id, end, ctx.budget.spent()).await;
+    // Calls dropped mid-flight (hard stop) still charge from their own task.
+    let keep = ctx.budget.finish();
+    finish(pool, run_id, user_id, end, ctx.budget.spent(), keep).await;
 }
 
 /// Turn the pipeline's outcome into how the run ends, storing the answer.
@@ -370,7 +404,12 @@ async fn decide(pool: &PgPool, ctx: &RunContext, outcome: PipelineOutcome) -> En
 }
 
 /// Store the final status, release the reservation's remainder and audit.
-async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise: i64) {
+///
+/// `keep` is what calls still in flight hold ([`RunBudget::finish`]): that
+/// much of the reservation stays until they settle, and the last of them
+/// releases it (Ruling R-8d). The audited `cost_paise` is what was charged by
+/// now, so it can lag a late charge; `runs.cost_paise` is authoritative.
+async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise: i64, keep: i64) {
     let audited: Option<&'static str> = match end {
         End::Status(status, kind) => {
             let mut stored = store::set_status(pool, run_id, status, kind).await;
@@ -394,8 +433,12 @@ async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise:
         End::Deleted => Some("deleted"),
         End::AlreadyFinished => None,
     };
-    // The charges stand; only the unused remainder is released.
-    if spend::release(pool, user_id, run_id).await.is_err() {
+    // The charges stand; only the unused remainder is released, less what
+    // calls in flight still hold.
+    if spend::release_keeping(pool, user_id, run_id, keep)
+        .await
+        .is_err()
+    {
         tracing::error!(%run_id, "run reservation could not be released");
     }
     let Some(status) = audited else { return };

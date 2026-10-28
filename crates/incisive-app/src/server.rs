@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 
+use crate::agent::{AgentLlm, Literature};
 use crate::app::{App, shell};
 use crate::ask::{ASK_BODY_LIMIT, activity_handler, ask_handler, me_handler};
 use crate::config::AppEnv;
@@ -39,6 +40,12 @@ pub struct AppState {
     pub runs: RunsConfig,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
+    /// The evidence agent's Claude client and models. `None` only in dev
+    /// without `ANTHROPIC_API_KEY`: every run then fails closed
+    /// (`error_kind` "no_api_key").
+    pub llm: Option<Arc<AgentLlm>>,
+    /// The literature clients (one allowlisted HTTP client, shared OA policy).
+    pub lit: Arc<Literature>,
 }
 
 impl FromRef<AppState> for IdentityState {
