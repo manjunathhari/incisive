@@ -5710,6 +5710,63 @@ async fn all_screen_batches_failing_is_a_service_failure_not_no_evidence() {
     );
 }
 
+/// Frame and Search succeed; the only screen reply is `screen_reply`, and
+/// every later screening call fails. Nothing usable came back, so the run
+/// is a service failure (final review 2, N-1).
+async fn screen_reply_without_usable_verdict_is_service_failure(screen_reply: serde_json::Value) {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .reply_json(screen_reply, u()),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert!(a.trail.service_failed);
+    assert_eq!(a.trail.included, 0);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{SERVICE_FAILED}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(NO_EVIDENCE));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter().any(|x| x.starts_with("Screening failed for ")),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_verdict_list_is_a_service_failure_not_no_evidence() {
+    screen_reply_without_usable_verdict_is_service_failure(json!([])).await;
+}
+
+#[tokio::test]
+async fn a_verdict_list_with_only_null_includes_is_a_service_failure() {
+    let v: Vec<serde_json::Value> = (1..=30)
+        .map(|i| json!({"id": format!("p-{i}"), "include": null, "code": "population", "reason": "r"}))
+        .collect();
+    screen_reply_without_usable_verdict_is_service_failure(json!(v)).await;
+}
+
+#[tokio::test]
+async fn a_verdict_list_with_only_out_of_batch_ids_is_a_service_failure() {
+    let v = json!([
+        {"id": "p-901", "include": true, "code": "population", "reason": "r"},
+        {"id": "p-902", "include": false, "code": "population", "reason": "r"},
+    ]);
+    screen_reply_without_usable_verdict_is_service_failure(v).await;
+}
+
 #[tokio::test]
 async fn all_extract_calls_failing_is_a_service_failure_not_no_evidence() {
     // Screening includes two papers, then every extraction call fails.

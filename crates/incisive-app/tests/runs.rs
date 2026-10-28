@@ -3211,7 +3211,7 @@ async fn ssr_run_page_header_is_the_full_question() {
     let (s, html) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
     assert_eq!(s, StatusCode::OK);
     let escaped = question.replace('<', "&lt;").replace('>', "&gt;");
-    let h2 = html.find("<h2>").expect("header");
+    let h2 = html.find("<h2 class=\"run-question\">").expect("header");
     let end = h2 + html[h2..].find("</h2>").unwrap();
     assert!(html[h2..end].contains(&escaped), "{}", &html[h2..end]);
     assert!(!html.contains("<i>ICG</i>"));

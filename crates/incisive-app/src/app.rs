@@ -61,6 +61,7 @@ button.small { padding:4px 12px; font-size:.85rem; }
 .badge.done { background:var(--green-bg); color:var(--green); }
 .badge.partial { background:var(--amber-bg); color:var(--amber); }
 .badge.failed, .badge.interrupted { background:var(--red-bg); color:var(--red); }
+.run-question { overflow-wrap:anywhere; font-size:1.2rem; }
 .steps { padding-left:20px; } .steps li { margin:4px 0; }
 .runs { list-style:none; padding:0; margin:12px 0; }
 .runs li { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; justify-content:space-between; padding:10px 12px; background:var(--card); border:1px solid var(--line); border-radius:6px; margin-bottom:8px; }
@@ -649,7 +650,7 @@ fn run_view(v: RunView) -> impl IntoView {
         .and_then(Option::as_ref)
         .map_or(v.summary.title, |a| a.question.clone());
     view! {
-        <h2>{heading}</h2>
+        <h2 class="run-question">{heading}</h2>
         <p>
             {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
             <span class="meta">{rupees(v.summary.cost_paise)}</span>

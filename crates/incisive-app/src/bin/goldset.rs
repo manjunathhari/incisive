@@ -815,6 +815,9 @@ fn answer_notes(a: &Answer) -> Option<String> {
     if a.trail.write_refused {
         notes.push("write refused".to_string());
     }
+    if a.trail.service_failed {
+        notes.push("service failed".to_string());
+    }
     if a.no_verified_claims {
         notes.push("no verified claims".to_string());
     }
@@ -1229,6 +1232,36 @@ mod tests {
             cost_paise: cost,
             wall: Duration::from_secs(secs),
         }
+    }
+
+    #[test]
+    fn answer_notes_names_a_service_failure() {
+        let mut a: Answer = serde_json::from_value(serde_json::json!({
+            "question": "q",
+            "mode": serde_json::to_value(RunMode::Focused).unwrap(),
+            "created_at": "2026-10-28T08:35:00Z",
+            "pico": {"population": "p", "intervention": "i"},
+            "final_query": "q",
+            "bottom_line": [],
+            "insufficient": true,
+            "no_verified_claims": false,
+            "key_studies": [],
+            "references": [],
+            "check": {"checked": 0, "supported": 0, "partial": 0, "removed": 0,
+                      "refs_verified": 0, "refs_total": 0},
+            "trail": {"pubmed_count": 0, "epmc_count": 0, "screened": 0, "included": 0,
+                      "excluded_top": [], "refinements": [], "stopped_early": null,
+                      "unavailable": []},
+            "cost_paise": 0,
+            "elapsed_s": 0,
+        }))
+        .unwrap();
+        assert_eq!(answer_notes(&a).as_deref(), Some("insufficient evidence"));
+        a.trail.service_failed = true;
+        assert_eq!(
+            answer_notes(&a).as_deref(),
+            Some("service failed; insufficient evidence")
+        );
     }
 
     #[test]

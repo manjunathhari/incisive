@@ -388,7 +388,7 @@ serving, but:
 
 - **Readiness stays down.** The Phase 1 binary does not know migrations 0005 to
   0009 and its migration step refuses a database that has them, retrying forever:
-  `/readyz` answers 503 and the logs show `migration attempt failed` about every
+  `/ready` (Cloud Run; `/readyz` locally) answers 503 and the logs show `migration attempt failed` about every
   30 seconds. Requests are still served (Cloud Run's default startup probe only
   checks the port). Do **not** delete rows from `_sqlx_migrations` to quiet this:
   rolling forward would then try to create the Phase 2 tables again and fail.

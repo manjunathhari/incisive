@@ -19,7 +19,7 @@
 //!   worker still has Claude calls in flight. Their late charges then book
 //!   with no reservation behind them. If the worker is on another instance it
 //!   notices the deletion only at its next heartbeat (up to 20 s) and may
-//!   start one more call meanwhile, while the user can already start a new
+//!   start further calls meanwhile, while the user can already start a new
 //!   run in the freed slot. The overrun is bounded by the deleted run's limit.
 //! * **Unbooked spend** (final review M-3). A Claude call that was billed but
 //!   whose charge could not be booked (`StepError::Unrecorded`) is counted in

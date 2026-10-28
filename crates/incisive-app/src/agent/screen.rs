@@ -237,8 +237,9 @@ pub struct Screened {
     pub excluded_notes: Vec<(String, String)>,
     /// Records with no abstract that were screened on their title.
     pub title_only: u32,
-    /// Batches whose Claude call failed (`Llm`/`Parse`, or a reply with no
-    /// verdict list): their records were not assessed. Budget stops and
+    /// Batches whose Claude call failed (`Llm`/`Parse`), or whose reply held
+    /// no verdict list or no usable verdict (a non-null `include` for an id
+    /// in the batch): their records were not assessed. Budget stops and
     /// cancellation are not failures.
     pub failed_batches: u32,
 }
@@ -526,9 +527,13 @@ pub async fn screen(
                 by_id.entry(id).or_insert(v);
             }
         }
+        let mut usable = 0u32;
+        let mut unassessed = 0u32;
         for (i, (id, p)) in records.iter().enumerate() {
             let v = by_id.get(id.as_str());
-            match v.and_then(|v| verdict_include(v).map(|inc| (v, inc))) {
+            let verdict = v.and_then(|v| verdict_include(v).map(|inc| (v, inc)));
+            usable += u32::from(verdict.is_some());
+            match verdict {
                 Some((v, true)) => {
                     included.push((
                         start + i,
@@ -544,8 +549,20 @@ pub async fn screen(
                     ));
                 }
                 // No verdict, or no usable include value.
-                None => tally.add(REASON_NOT_ASSESSED, 1),
+                None => unassessed += 1,
             }
+        }
+        // A reply with a verdict list but no usable verdict for any record
+        // (empty list, every `include` null, or only ids outside the batch)
+        // assessed nothing: it counts as a failed batch, like a failed call
+        // (final review 2, N-1). Otherwise the records without a verdict are
+        // tallied as not assessed one by one.
+        if usable == 0 {
+            tracing::warn!(%run_id, step = "screen", records = n, "screening reply held no usable verdict; not assessed");
+            failed += n;
+            failed_batches += 1;
+        } else {
+            tally.add(REASON_NOT_ASSESSED, unassessed);
         }
         start = end;
     }
