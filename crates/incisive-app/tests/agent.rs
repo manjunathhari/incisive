@@ -5858,20 +5858,29 @@ fn launched_concurrently(
     now: Instant,
     k: usize,
     calls: &[(i64, i64)],
+    share: i64,
     mut done: impl FnMut(usize),
 ) -> usize {
-    let mut in_flight: std::collections::VecDeque<(Hold, i64)> = Default::default();
+    type InFlight = (Hold, incisive_app::runs::budget::InFlightReserve, i64);
+    let mut in_flight: std::collections::VecDeque<InFlight> = Default::default();
     let (mut launched, mut finished, mut launching) = (0, 0, true);
     loop {
         while launching && in_flight.len() < k && launched < calls.len() {
-            if launched > 0 && b.should_wrap_up(now) {
+            // As `bounded`: with calls in flight, only the settled reasons.
+            let wrap_up = if in_flight.is_empty() {
+                b.should_wrap_up(now)
+            } else {
+                b.should_wrap_up_settled(now)
+            };
+            if launched > 0 && wrap_up {
                 launching = false;
                 break;
             }
             let (hold, real) = calls[launched];
             match b.try_hold_gathering(hold) {
                 Some(h) => {
-                    in_flight.push_back((h, real));
+                    // Extract's reserve share, taken after the hold (R-FB4).
+                    in_flight.push_back((h, b.reserve_in_flight(share), real));
                     launched += 1;
                 }
                 // Tried again once an in-flight call has settled.
@@ -5879,10 +5888,10 @@ fn launched_concurrently(
                 None => launching = false,
             }
         }
-        let Some((h, real)) = in_flight.pop_front() else {
+        let Some((h, share, real)) = in_flight.pop_front() else {
             return launched;
         };
-        drop(h);
+        drop((h, share));
         b.record_spent_for_test(b.spent() + real);
         finished += 1;
         done(finished);
@@ -5895,14 +5904,14 @@ fn launched_concurrently(
 /// then the screening batches ([`SCREEN_CONCURRENCY`] at once), all with
 /// the finish reserve in force, then up to `max` extractions
 /// ([`EXTRACT_CONCURRENCY`] at once; the reserve grows by `growth` per paper
-/// read). `None`: gathering itself wrapped up (before or during Screen).
+/// read, and each paper in flight keeps `share` more of it free, R-FB4). `None`: gathering itself wrapped up (before or during Screen).
 fn papers_before_wrap_up(
     limit: i64,
     frame: (i64, i64),
     search: &[(i64, i64)],
     screen: &[(i64, i64)],
     extract: (i64, i64),
-    reserve: (i64, i64),
+    reserve: (i64, i64, i64),
     max: usize,
 ) -> Option<usize> {
     let (read, write_fits) = simulate(limit, frame, search, screen, extract, reserve, max)?;
@@ -5919,7 +5928,7 @@ fn simulate(
     search: &[(i64, i64)],
     screen: &[(i64, i64)],
     extract: (i64, i64),
-    reserve: (i64, i64),
+    reserve: (i64, i64, i64),
     max: usize,
 ) -> Option<(usize, bool)> {
     let now = Instant::now();
@@ -5944,7 +5953,7 @@ fn simulate(
     if b.should_wrap_up(now) {
         return None;
     }
-    if launched_concurrently(&b, now, SCREEN_CONCURRENCY, screen, |_| {}) < screen.len() {
+    if launched_concurrently(&b, now, SCREEN_CONCURRENCY, screen, 0, |_| {}) < screen.len() {
         // Records were left unscreened: the pipeline wraps up.
         return None;
     }
@@ -5952,7 +5961,7 @@ fn simulate(
         return Some((0, true));
     }
     let papers = vec![extract; max];
-    let read = launched_concurrently(&b, now, EXTRACT_CONCURRENCY, &papers, |n| {
+    let read = launched_concurrently(&b, now, EXTRACT_CONCURRENCY, &papers, reserve.2, |n| {
         b.set_finish_reserve(reserve.0 + reserve.1 * i64::try_from(n).unwrap());
     });
     Some((read, b.spent() + b.finish_reserve() <= limit))
@@ -5982,6 +5991,9 @@ async fn production_prices_capacity() {
         incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[p]) - r0
     };
     let (ft_typical, ft_max) = (ft_growth(300), ft_growth(1_000));
+    // R-FB4: the share each paper in flight keeps free (its largest
+    // possible growth).
+    let share = incisive_app::agent::extract::max_growth(&ctx.llm, &ctx.budget, &pico());
     let (frame, propose, review, screen) = ((h[0], c[0]), (h[1], c[1]), (h[2], c[2]), (h[3], c[3]));
     let abstract_paper = (h[5], c[5]);
     // A full text sent at the 25,000-character cap, on top of the measured
@@ -6012,7 +6024,7 @@ async fn production_prices_capacity() {
             &quick,
             &quick_screen,
             abstract_paper,
-            (r0, growth),
+            (r0, growth, share),
             5,
         )
     };
@@ -6023,7 +6035,7 @@ async fn production_prices_capacity() {
             &focused,
             &focused_screen,
             paper,
-            (r0, growth),
+            (r0, growth, share),
             10,
         )
     };
@@ -6042,7 +6054,7 @@ async fn production_prices_capacity() {
             &quick_live,
             &quick_screen,
             abstract_paper,
-            (r0, growth),
+            (r0, growth, share),
             5,
         )
     };
@@ -6053,7 +6065,7 @@ async fn production_prices_capacity() {
             &focused_live,
             &focused_screen,
             paper,
-            (r0, growth),
+            (r0, growth, share),
             10,
         )
     };
@@ -6092,10 +6104,16 @@ async fn production_prices_capacity() {
     assert_eq!((ft_typical, ft_max), (125, 384));
     assert_eq!(f(full_paper, growth), Some(6));
     assert_eq!(fl(full_paper, growth), Some(5));
-    // Pessimistic growth: 3 papers. With live search output the papers in
-    // flight then push the reserve past the room left, so Write would be
-    // refused (partial, never over the limit): the R-13c gap of review M-3,
-    // left open by the ruling (report, concerns).
+    // R-FB4: each paper in flight keeps its largest possible growth free
+    // (443 paise at production prices). No count above changes: with the
+    // doubled in-flight holds (R-FB3) the papers in flight already had that
+    // room at these hold sizes; the share makes it a guarantee.
+    assert_eq!(share, 443);
+    // Pessimistic growth: 3 papers. With live search output Write would
+    // still be refused (partial, never over the limit), but that is the
+    // single-call gap, as before Fix B: the last paper goes out alone (the
+    // others have settled), so its own growth is not reserved; the same run
+    // one paper at a time gives the same result (report, R-FB4).
     let sim = |search: &[(i64, i64)]| {
         simulate(
             4000,
@@ -6103,7 +6121,7 @@ async fn production_prices_capacity() {
             search,
             &focused_screen,
             full_paper,
-            (r0, ft_max),
+            (r0, ft_max, share),
             10,
         )
     };
@@ -7435,4 +7453,45 @@ async fn panicking_task_nobody_waits_for_still_counts_its_estimate() {
     }
     assert_eq!(budget.spent(), estimate, "counted once");
     assert_eq!(budget.held(), 0);
+}
+
+#[tokio::test]
+async fn extract_keeps_a_reserve_share_per_paper_in_flight() {
+    // Ruling R-FB4, wiring: while two papers are in flight, each keeps its
+    // largest possible growth free; all of it is back once they are read.
+    let Some(pool) = pool().await else { return };
+    let abs = icg_abstract();
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let gate = BudgetGate::default();
+    gate.set(ctx.budget.clone()).ok().unwrap();
+    let llm_for_share = agent_llm(&Arc::new(ScriptedLlm::new()));
+    let share = incisive_app::agent::extract::max_growth(&llm_for_share, &ctx.budget, &pico());
+    assert!(share > 0);
+    let g = gate.clone();
+    let seen = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let seen2 = seen.clone();
+    let both_shares: incisive_app::agent::llm::Gate = Arc::new(move || {
+        let r = g.get().map_or(0, |b| b.in_flight_reserve());
+        seen2.fetch_max(r, std::sync::atomic::Ordering::SeqCst);
+        r >= 2 * share
+    });
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .until("from ref-1.", both_shares)
+            .when("from ref-1.")
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .when("from ref-2.")
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u()),
+    );
+    let out = extract(
+        &ctx,
+        &agent_llm(&llm),
+        &pico(),
+        vec![abstract_paper("151", &abs), abstract_paper("152", &abs)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.papers.len(), 2);
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2 * share);
+    assert_eq!(ctx.budget.in_flight_reserve(), 0);
 }

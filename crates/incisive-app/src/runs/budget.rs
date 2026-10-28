@@ -83,6 +83,27 @@ struct State {
     /// `MAX_CLAIMS`): gathering calls may not hold into it
     /// ([`RunBudget::try_hold_gathering`]). Ruling R-13c.
     finish_reserve: i64,
+    /// What the papers still being extracted may add to the finish reserve
+    /// once their findings are in ([`InFlightReserve`], Ruling R-FB4).
+    /// Counted with `finish_reserve` everywhere.
+    in_flight_reserve: i64,
+}
+
+/// A share of the finish reserve kept for one paper being extracted: what
+/// its findings may add to Write's and Check's holds (Ruling R-FB4).
+/// Dropped when the paper's call finishes, just before Extract raises the
+/// finish reserve for the findings it actually gave.
+#[derive(Debug)]
+#[must_use = "the share is released when dropped"]
+pub struct InFlightReserve {
+    budget: Arc<RunBudget>,
+    amount: i64,
+}
+
+impl Drop for InFlightReserve {
+    fn drop(&mut self) {
+        self.budget.state().in_flight_reserve -= self.amount;
+    }
 }
 
 /// An in-flight reservation of part of the run's limit, taken before a Claude
@@ -209,7 +230,11 @@ impl RunBudget {
             return None;
         }
         let mut st = self.state();
-        let kept = if reserve { st.finish_reserve } else { 0 };
+        let kept = if reserve {
+            st.finish_reserve + st.in_flight_reserve
+        } else {
+            0
+        };
         // In-flight headroom (Ruling R-FB3): a gathering call launched while
         // others are in flight must fit with every in-flight hold, its own
         // included, counted twice. With nothing in flight the rule is the
@@ -427,6 +452,25 @@ impl RunBudget {
         self.state().finish_reserve
     }
 
+    /// Keep `paise` more of the finish reserve free while one paper is being
+    /// extracted, for what its findings may add (Ruling R-FB4). Extract takes
+    /// it right after the paper's hold, so a paper never reserves for itself
+    /// (with one paper at a time nothing changes): it counts for every
+    /// launch while the paper is in flight.
+    pub fn reserve_in_flight(self: &Arc<Self>, paise: i64) -> InFlightReserve {
+        let amount = paise.max(0);
+        self.state().in_flight_reserve += amount;
+        InFlightReserve {
+            budget: Arc::clone(self),
+            amount,
+        }
+    }
+
+    /// The finish-reserve share kept for papers in flight.
+    pub fn in_flight_reserve(&self) -> i64 {
+        self.state().in_flight_reserve
+    }
+
     /// Why the run should wrap up, if it should. "cost limit": 70% of the
     /// limit spent, or no headroom left above the finish reserve
     /// (`spent + held + finish_reserve >= limit`; each gathering call also
@@ -436,7 +480,7 @@ impl RunBudget {
     pub fn wrap_up_reason(&self, now: Instant) -> Option<&'static str> {
         let (spent, held, reserve) = {
             let st = self.state();
-            (st.spent, st.held, st.finish_reserve)
+            (st.spent, st.held, st.finish_reserve + st.in_flight_reserve)
         };
         let limit = i128::from(self.limit_paise);
         if i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
@@ -463,6 +507,24 @@ impl RunBudget {
     /// it has passed.
     pub fn until_wrap_up(&self, now: Instant) -> Duration {
         self.wrap_up_after.saturating_sub(self.age(now))
+    }
+
+    /// [`RunBudget::should_wrap_up`] leaving out what calls in flight hold
+    /// and the finish-reserve shares of papers in flight: 70% spent, the
+    /// wrap-up time, or no headroom above the finish reserve for what is
+    /// already spent. A step with calls in flight stops launching only on
+    /// these; the transient lack of headroom that in-flight amounts cause
+    /// is left to the hold check, which refuses (and the step waits for a
+    /// call to settle). With nothing in flight it equals `should_wrap_up`.
+    pub fn should_wrap_up_settled(&self, now: Instant) -> bool {
+        let (spent, reserve) = {
+            let st = self.state();
+            (st.spent, st.finish_reserve)
+        };
+        let limit = i128::from(self.limit_paise);
+        i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
+            || (reserve > 0 && i128::from(spent) + i128::from(reserve) >= limit)
+            || self.age(now) >= self.wrap_up_after
     }
 
     /// True when [`RunBudget::wrap_up_reason`] gives a reason.

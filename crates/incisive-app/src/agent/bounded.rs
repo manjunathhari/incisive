@@ -12,11 +12,15 @@
 //! `launch` closure, which must start the item's first Claude call
 //! synchronously ([`super::llm::LlmCall::start_structured`]): when `launch`
 //! returns, that call's hold is already taken (or refused). So:
-//! * before every launch, the cancel flag and the wrap-up point
-//!   ([`RunBudget::should_wrap_up`]: 70% spent, wrap-up time, or no headroom
-//!   left above the finish reserve, with every in-flight hold counted) are
-//!   checked; once wrap-up is reached no new item is launched (the first
-//!   item is always launched, as before Fix B);
+//! * before every launch, the cancel flag and the wrap-up point are
+//!   checked: with nothing in flight [`RunBudget::should_wrap_up`] (70%
+//!   spent, wrap-up time, or no headroom left above the finish reserve),
+//!   exactly as one call at a time; with calls in flight
+//!   [`RunBudget::should_wrap_up_settled`], the same without their holds and
+//!   reserve shares, which the hold check counts instead (a hold that does
+//!   not fit waits for a call to settle, then everything is checked again).
+//!   Once wrap-up is reached no new item is launched (the first item is
+//!   always launched, as before Fix B);
 //! * every hold is taken atomically ([`RunBudget::try_hold_gathering`]):
 //!   with nothing in flight against `spent + estimate + finish reserve`
 //!   (the single-call rule); with calls in flight against `spent + 2 ×
@@ -130,7 +134,15 @@ where
             if cancel.is_cancelled() {
                 return Err(StepError::Cancelled);
             }
-            if launched > 0 && budget.should_wrap_up(now) {
+            // With calls in flight, only a wrap-up reason that does not
+            // depend on them stops launching; their holds and reserve shares
+            // are left to the hold check (refused: wait for one to settle).
+            let wrap_up = if in_flight.is_empty() {
+                budget.should_wrap_up(now)
+            } else {
+                budget.should_wrap_up_settled(now)
+            };
+            if launched > 0 && wrap_up {
                 tracing::info!(%run_id, step, launched, "wrap-up reached; no further calls launched");
                 launching = false;
                 break;
@@ -571,5 +583,96 @@ mod tests {
             Outcome::Done(Err(StepError::RateLimited(_)))
         ));
         assert_eq!(log.len(), 1, "not waited for");
+    }
+
+    /// Extract-like items: hold `h`, charge `c`, each adds `g` to the
+    /// finish reserve once read; while in flight each keeps `share` of it
+    /// free (taken after its hold). Returns (papers read, spent, reserve).
+    async fn extract_like(
+        limit: i64,
+        r0: i64,
+        h: i64,
+        c: i64,
+        g: i64,
+        share: i64,
+    ) -> (usize, i64, i64) {
+        let b = budget(limit);
+        b.set_finish_reserve(r0);
+        let read = Mutex::new(0i64);
+        let out = run(
+            &b,
+            &CancelFlag::default(),
+            "test",
+            3,
+            4,
+            |_| {
+                let hold = match b.try_hold_gathering(h) {
+                    Some(hold) => hold,
+                    None => return Some(Err(StepError::OverBudget)),
+                };
+                let s = b.reserve_in_flight(share);
+                let b = b.clone();
+                Some(Ok(async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    drop((hold, s));
+                    b.record_spent_for_test(b.spent() + c);
+                    Ok(())
+                }))
+            },
+            |_, r: &Result<(), StepError>| {
+                if r.is_ok() {
+                    let mut n = read.lock().unwrap();
+                    *n += 1;
+                    b.set_finish_reserve(r0 + g * *n);
+                }
+            },
+        )
+        .await
+        .unwrap();
+        let n = out
+            .iter()
+            .filter(|o| matches!(o, Outcome::Done(Ok(()))))
+            .count();
+        assert_eq!(b.in_flight_reserve(), 0);
+        (n, b.spent(), b.finish_reserve())
+    }
+
+    #[tokio::test]
+    async fn in_flight_papers_keep_their_growth_free_so_write_stays_affordable() {
+        // Ruling R-FB4. Limit 1,850, finish reserve 600, holds and charges
+        // 300, each paper read adds 700 to the reserve. Without shares the
+        // second paper launches beside the first (2 × 600 + 600 = 1,800 <=
+        // 1,850) and, both read, Write's reserve no longer fits (600 + 2,000
+        // > 1,850). With each in-flight paper keeping 700 free it does not
+        // launch; once the first is read it no longer fits alone (300 + 300
+        // + 1,300 > 1,850): no further launch, and Write is affordable.
+        let (read, spent, reserve) = extract_like(1_850, 600, 300, 300, 700, 0).await;
+        assert_eq!(read, 2);
+        assert!(spent + reserve > 1_850, "without R-FB4 Write is refused");
+
+        let (read, spent, reserve) = extract_like(1_850, 600, 300, 300, 700, 700).await;
+        assert_eq!(read, 1);
+        assert!(
+            spent + reserve <= 1_850,
+            "Write is affordable: {spent} + {reserve}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lone_paper_launches_as_before() {
+        // The share counts only for other launches: one paper, nothing in
+        // flight, exactly the single-call rule (300 + 600 = 900 <= 900).
+        let b = budget(900);
+        b.set_finish_reserve(600);
+        let h = b.try_hold_gathering(300).unwrap();
+        let s = b.reserve_in_flight(700);
+        assert!(
+            b.should_wrap_up(Instant::now()),
+            "the share counts for others"
+        );
+        assert!(!b.should_wrap_up_settled(Instant::now()));
+        drop((h, s));
+        assert_eq!((b.held(), b.in_flight_reserve()), (0, 0));
+        assert!(!b.should_wrap_up(Instant::now()));
     }
 }

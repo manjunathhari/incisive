@@ -642,6 +642,50 @@ fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, Extracte
     (kept, dropped, fields)
 }
 
+/// The most one extracted paper can add to the finish reserve (Ruling
+/// R-FB4): Write's and Check's holds with a paper of [`MAX_FINDINGS`]
+/// findings at the field limits (outcome, result, a [`MAX_QUOTE`]-character
+/// quote, design, n) minus without it, plus one paisa per finishing call for
+/// rounding. Quotes are measured in ASCII characters: a quote with many
+/// multi-byte characters or collapsed whitespace can be a little longer.
+pub fn max_growth(llm: &AgentLlm, budget: &crate::runs::budget::RunBudget, pico: &Pico) -> i64 {
+    let finding = Finding {
+        outcome: "x".repeat(MAX_FIELD),
+        result: "x".repeat(MAX_RESULT),
+        quote: "x".repeat(MAX_QUOTE),
+    };
+    let paper = Extracted {
+        ref_id: 1,
+        paper: Paper {
+            pmid: None,
+            pmcid: None,
+            doi: None,
+            title: String::new(),
+            authors: vec![],
+            journal: None,
+            year: None,
+            pub_types: vec![],
+            abstract_text: None,
+            oa_url: None,
+            oa_is_pdf: false,
+            retracted: false,
+            source: crate::lit::PaperSource::PubMed,
+        },
+        level: EvidenceLevel::Other,
+        source: SourceKind::FullText,
+        design: "x".repeat(MAX_DESIGN),
+        n: Some(u32::MAX),
+        population: String::new(),
+        intervention: String::new(),
+        comparison: None,
+        findings: vec![finding; MAX_FINDINGS],
+    };
+    let with = super::finish_reserve(llm, budget, pico, &[paper]);
+    let without = super::finish_reserve(llm, budget, pico, &[]);
+    let calls = i64::try_from(super::write::MAX_CLAIMS).unwrap_or(0) + 1;
+    (with - without).max(0) + calls
+}
+
 /// One paper's reply, read and verified.
 enum PaperResult {
     /// At least one finding verified (`ref_id` is set when the step
@@ -737,6 +781,10 @@ pub async fn extract(
         super::finish_reserve(&ctx.llm, &ctx.budget, pico, &papers)
     };
 
+    // While a paper is in flight, the most its findings could add to the
+    // finish reserve is kept free for every other launch (Ruling R-FB4).
+    let growth = max_growth(&ctx.llm, &ctx.budget, pico);
+
     // Up to EXTRACT_CONCURRENCY papers in flight; outcomes come back in
     // input order (see `bounded`). Each paper's reply is read and its
     // quotes verified as it finishes, and the finish reserve raised before
@@ -753,7 +801,16 @@ pub async fn extract(
             let u = &papers[i];
             Some(
                 call.start_structured::<Value>(SYSTEM, user, &SCHEMA, MAX_TOKENS)
-                    .map(|reply| async move { Ok(read_paper(reply.await?, u, sections)) }),
+                    .map(|reply| {
+                        // Taken after this paper's hold: it counts for the
+                        // launches after it, never for itself.
+                        let share = ctx.budget.reserve_in_flight(growth);
+                        async move {
+                            let r = reply.await;
+                            drop(share);
+                            Ok(read_paper(r?, u, sections))
+                        }
+                    }),
             )
         },
         |i, r| {
