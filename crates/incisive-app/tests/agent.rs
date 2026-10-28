@@ -217,29 +217,61 @@ async fn fenced_json_accepted() {
             .reply_text("```json\n{\"answer\": \"fenced\"}\n```", usage(10, 10))
             .reply_text("```\n{\"answer\": \"bare fence\"}\n```", usage(10, 10))
             .reply_text("Here you go: {\"answer\": \"prose\"}", usage(10, 10))
+            // A citation after the answer is valid JSON too, but never an answer.
             .reply_text(
-                "Draft {\"answer\": \"first\"} then [1] and finally {\"answer\": \"last\"} done.",
+                "{\"answer\": \"cited\"} (see ref [1] and [1, 2])",
                 usage(10, 10),
             )
-            .reply_text("{\"answer\": \"cut off", usage(10, 10))
-            .reply_json(json!({"answer": "second try"}), usage(10, 10)),
+            // Citations alone: no answer, so the retry.
+            .reply_text("Looking at ref [1], it is fine.", usage(10, 10))
+            .reply_json(json!({"answer": "after citations"}), usage(10, 10))
+            // Two answers (one may be echoed from a source): ambiguous, retry.
+            .reply_text(
+                "{\"answer\": \"one\"} and {\"answer\": \"two\"}",
+                usage(10, 10),
+            )
+            .reply_json(json!({"answer": "after two"}), usage(10, 10))
+            // Cut off, with a citation inside the unfinished string: retry.
+            .reply_text("{\"answer\": \"cut off at [1] and", usage(10, 10))
+            .reply_json(json!({"answer": "after cut off"}), usage(10, 10)),
     );
     let c = call(&llm, &budget, &pool, &cancel);
-    assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "fenced");
-    assert_eq!(
-        c.json::<Out>("s", "u", 100).await.unwrap().answer,
-        "bare fence"
-    );
+    let next = async || c.json::<Out>("s", "u", 100).await.unwrap().answer;
+    assert_eq!(next().await, "fenced");
+    assert_eq!(next().await, "bare fence");
     // Prose around the object (live replies do this): the object is used.
-    assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "prose");
-    // Several values: the last one that reads as the type.
-    assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "last");
-    // A cut-off reply has no complete value: it takes the retry.
-    assert_eq!(
-        c.json::<Out>("s", "u", 100).await.unwrap().answer,
-        "second try"
+    assert_eq!(next().await, "prose");
+    assert_eq!(next().await, "cited");
+    assert_eq!(next().await, "after citations");
+    assert_eq!(next().await, "after two");
+    assert_eq!(next().await, "after cut off");
+    assert_eq!(llm.requests().len(), 10);
+}
+
+/// The same bracket cases for a step that reads into `Value` (Screen,
+/// Extract, Write): a citation never replaces the answer.
+#[tokio::test]
+async fn value_replies_ignore_citations() {
+    let Some(pool) = pool().await else { return };
+    let (_uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text(
+                "{\"claims\": [{\"text\": \"t\", \"refs\": [1, 2]}]} Claims cite [1] and [2].",
+                usage(10, 10),
+            )
+            .reply_text(
+                "[{\"id\": \"r1\", \"include\": true}] per [3]",
+                usage(10, 10),
+            ),
     );
-    assert_eq!(llm.requests().len(), 6);
+    let c = call(&llm, &budget, &pool, &cancel);
+    let v: serde_json::Value = c.json("s", "u", 100).await.unwrap();
+    assert_eq!(v["claims"][0]["refs"], json!([1, 2]));
+    let v: serde_json::Value = c.json("s", "u", 100).await.unwrap();
+    assert_eq!(v[0]["id"], "r1");
+    assert_eq!(llm.requests().len(), 2);
 }
 
 #[tokio::test]
@@ -3902,9 +3934,25 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
                 "Here is my verdict:\n```json\n[{\"claim\": 1, \"verdict\": \"unsupported\"}]\n```",
                 u(),
             )
-            // No verdict at all: one JSON retry, which answers.
+            // No verdict at all: one retry, which answers.
             .reply_text("The quotes concern a different population.", u())
-            .reply_json(json!({"claim": 1, "verdict": "supported"}), u()),
+            .reply_json(json!({"claim": 1, "verdict": "supported"}), u())
+            // JSON, then a citation: the JSON's verdict.
+            .reply_text(
+                "{\"claim\": 1, \"verdict\": \"supported\", \"reason\": \"Same arm.\"} (ref [1])",
+                u(),
+            )
+            // Cut off with a citation inside the reason: salvaged.
+            .reply_text(
+                "{\"claim\": 1, \"verdict\": \"partial\", \"reason\": \"Ref [1] gives the dire",
+                u(),
+            )
+            // Prose citing [1] with no verdict: the retry, which answers.
+            .reply_text("Looking at ref [1], the claim matches.", u())
+            .reply_json(json!({"claim": 1, "verdict": "supported"}), u())
+            // A verdict word cut off: not salvaged; retry also without one: removed.
+            .reply_text("{\"claim\": 1, \"verdict\": \"supp", u())
+            .reply_text("still nothing", u()),
     );
     let c = check(
         &ctx,
@@ -3916,6 +3964,10 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
                 claim("b", &[1]),
                 claim("c", &[1]),
                 claim("d", &[1]),
+                claim("e", &[1]),
+                claim("f", &[1]),
+                claim("g", &[1]),
+                claim("h", &[1]),
             ],
             insufficient: false,
         },
@@ -3931,10 +3983,16 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
             ("a".to_string(), ClaimVerdict::Supported),
             ("b".to_string(), ClaimVerdict::Partial),
             ("d".to_string(), ClaimVerdict::Supported),
+            ("e".to_string(), ClaimVerdict::Supported),
+            ("f".to_string(), ClaimVerdict::Partial),
+            ("g".to_string(), ClaimVerdict::Supported),
         ]
     );
-    assert_eq!(c.removed, 1);
-    assert_eq!(llm.requests().len(), 5);
+    assert_eq!(c.removed, 2);
+    // At most two calls per claim.
+    assert_eq!(llm.requests().len(), 11);
+    // The retry asks for JSON only.
+    assert!(user_text(&llm, 4).ends_with("Reply with JSON only."));
     // The prompt asks for the verdict first, in one object.
     let sys = llm.requests()[0].system.clone().unwrap();
     assert!(sys.contains("Put the verdict before the reason"), "{sys}");
@@ -4000,8 +4058,11 @@ async fn missing_verdict_is_unsupported() {
         ScriptedLlm::new()
             .reply_json(verdict("supported"), u())
             .reply_json(verdict("maybe"), u())
+            // No verdict for claim 1: one retry, again without one.
+            .reply_json(json!([]), u())
             .reply_json(json!([]), u())
             .reply_json(verdict("supported"), u())
+            .reply_json(json!([{"claim": 99, "verdict": "supported"}]), u())
             .reply_json(json!([{"claim": 99, "verdict": "supported"}]), u())
             // Claim 6: Claude unreachable. The rest continue.
             .fail(ClaudeError::Api {
@@ -4021,12 +4082,14 @@ async fn missing_verdict_is_unsupported() {
     )
     .await
     .unwrap();
-    // One call per claim, each with that claim alone.
-    assert_eq!(llm.requests().len(), 7);
-    for i in 0..7 {
+    // One call per claim (two when the reply has no verdict for claim 1),
+    // each with that claim alone.
+    let claim_of = [1, 2, 3, 3, 4, 5, 5, 6, 7];
+    assert_eq!(llm.requests().len(), claim_of.len());
+    for (i, own) in claim_of.iter().enumerate() {
         let t = user_text(&llm, i);
         for j in 1..=7 {
-            assert_eq!(t.contains(&format!("c{j}\n")), j == i + 1, "call {i}: {t}");
+            assert_eq!(t.contains(&format!("c{j}\n")), j == *own, "call {i}: {t}");
         }
     }
     assert_eq!(texts(&c), vec!["c1", "c4", "c7"]);

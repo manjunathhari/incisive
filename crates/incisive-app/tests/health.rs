@@ -168,24 +168,25 @@ async fn browser_code_is_revalidated_on_every_load() {
             .map(|v| v.to_str().unwrap()),
         Some("no-cache")
     );
-    // Pages and other routes are left alone.
-    let res = build_router(
-        Arc::new(AlwaysUp),
-        identity_state(),
-        LeptosOptions::builder().output_name("incisive-app").build(),
-    )
-    .oneshot(
-        Request::builder()
-            .uri("/healthz")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    assert!(
-        res.headers()
-            .get(axum::http::header::CACHE_CONTROL)
-            .is_none()
-    );
+    // Pages and look-alike paths are left alone.
+    for path in ["/", "/pkgx"] {
+        let res = build_router(
+            Arc::new(AlwaysUp),
+            identity_state(),
+            LeptosOptions::builder()
+                .output_name("incisive-app")
+                .site_root(dir.to_str().unwrap())
+                .build(),
+        )
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+        assert!(
+            res.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .is_none(),
+            "{path}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

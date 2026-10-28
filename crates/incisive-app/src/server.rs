@@ -119,10 +119,6 @@ fn same_origin(origin: &str, authority: &str) -> bool {
     o_host.eq_ignore_ascii_case(a.host()) && o_port == a_port
 }
 
-/// `POST /api/ask`, `POST /api/fn/*` and `DELETE /api/runs[/*]`: when an `Origin` header is present it
-/// must match the request's host and port, or the request is refused with 403
-/// before identity, audit or spend. A missing `Origin` is allowed (curl and
-/// server-side clients omit it).
 /// The browser code under `/pkg/` keeps the same file names across deploys, so
 /// a browser that cached the previous version would run it against the new
 /// page and fail to hydrate (every button dead). `no-cache` lets the browser
@@ -143,6 +139,10 @@ pub async fn revalidate_pkg(
     res
 }
 
+/// `POST /api/ask`, `POST /api/fn/*` and `DELETE /api/runs[/*]`: when an `Origin` header is present it
+/// must match the request's host and port, or the request is refused with 403
+/// before identity, audit or spend. A missing `Origin` is allowed (curl and
+/// server-side clients omit it).
 async fn same_origin_check(
     req: axum::extract::Request,
     next: axum::middleware::Next,

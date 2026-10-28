@@ -144,29 +144,29 @@ const SYSTEM_TAIL: &str = "Reply with one JSON object only, with no text before 
 Put the verdict before the reason.";
 
 /// The verdict word from a reply that is not usable JSON (cut off by the token
-/// limit, or prose with the verdict field in it): the first `"verdict": "…"`.
+/// limit, or prose with the verdict field in it): the first `"verdict": "…"`
+/// whose word is complete (closing quote present).
 fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
     let i = text.find("\"verdict\"")?;
     let rest = text[i + "\"verdict\"".len()..].trim_start();
     let rest = rest.strip_prefix(':')?.trim_start().strip_prefix('"')?;
-    let word: String = rest.chars().take_while(|c| *c != '"').collect();
-    Some(ClaimVerdict::read(Some(&Value::String(word))))
+    let end = rest.find('"')?;
+    Some(ClaimVerdict::read(Some(&Value::String(
+        rest[..end].to_string(),
+    ))))
 }
 
-/// The verdict in one reply's text: JSON first (see [`read_verdict`]), then
-/// the salvaged verdict field; `None` when neither is there.
+/// The verdict in one reply's text. A reply with usable JSON gives its
+/// claim-1 entry's `verdict` (`None` when that entry or field is missing: a
+/// verdict for another claim never counts). Only a reply with no usable JSON
+/// (cut off by the token limit) has its verdict field salvaged.
 fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
-    if let Some(v) = super::llm::parse_reply::<Value>(text) {
-        let has_verdict = match &v {
-            Value::Object(o) => o.contains_key("verdict") || o.values().any(Value::is_array),
-            Value::Array(_) => true,
-            _ => false,
-        };
-        if has_verdict {
-            return Some(read_verdict(v));
-        }
+    match super::llm::parse_reply::<Value>(text) {
+        Some(v) => verdict_entry(&v)
+            .and_then(|e| e.get("verdict"))
+            .map(|w| ClaimVerdict::read(Some(w))),
+        None => salvage_verdict(text),
     }
-    salvage_verdict(text)
 }
 
 fn system() -> String {
@@ -232,28 +232,25 @@ fn verdict_claim(v: &Value) -> Option<usize> {
     }
 }
 
-/// The verdict for claim 1 in a reply (see the module docs).
-fn read_verdict(reply: Value) -> ClaimVerdict {
-    let list = match reply {
+/// The entry for claim 1 in a reply (see the module docs): the reply object
+/// itself when it has a verdict, else claim 1 in the reply's list (or the only
+/// entry when it names no claim).
+fn verdict_entry(reply: &Value) -> Option<&Value> {
+    let list: &[Value] = match reply {
         Value::Array(a) => a,
-        Value::Object(o) if o.contains_key("verdict") => vec![Value::Object(o)],
+        Value::Object(o) if o.contains_key("verdict") => return Some(reply),
         Value::Object(o) => o
-            .into_iter()
-            .find_map(|(_, v)| match v {
-                Value::Array(a) => Some(a),
-                _ => None,
-            })
+            .values()
+            .find_map(|v| v.as_array().map(Vec::as_slice))
             .unwrap_or_default(),
-        _ => vec![],
+        _ => &[],
     };
-    let entry = list
-        .iter()
+    list.iter()
         .find(|v| verdict_claim(v) == Some(1))
-        .or_else(|| match list.as_slice() {
+        .or_else(|| match list {
             [only] if only.get("claim").is_none() => Some(only),
             _ => None,
-        });
-    ClaimVerdict::read(entry.and_then(|v| v.get("verdict")))
+        })
 }
 
 // ---------- reference matching ----------
@@ -461,9 +458,14 @@ pub async fn check(
             Ok(Some(v)) => Ok(v),
             Ok(None) => {
                 tracing::warn!(%run_id, step = "check", "check reply had no verdict; retrying once");
-                call.json::<Value>(&system, &prompt, MAX_TOKENS)
-                    .await
-                    .map(read_verdict)
+                let retry = format!("{prompt}{}", super::llm::JSON_ONLY_NUDGE);
+                match call.text(&system, &retry, MAX_TOKENS).await {
+                    Ok(text) => verdict_from_text(&text).ok_or_else(|| {
+                        tracing::warn!(%run_id, step = "check", "check reply had no verdict after retry");
+                        StepError::Parse
+                    }),
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         };
