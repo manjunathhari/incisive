@@ -295,14 +295,14 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         question,
         mode,
         settings: state.runs.for_mode(mode),
-        budget: RunBudget::new(
+        budget: Arc::new(RunBudget::new(
             run_id,
             user_id,
             limit_paise,
             Instant::now(),
             state.prices.clone(),
             state.usd_inr,
-        ),
+        )),
         cancel,
     };
     let guarded = AssertUnwindSafe(async { pipeline(&ctx).await }).catch_unwind();

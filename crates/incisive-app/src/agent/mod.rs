@@ -15,6 +15,7 @@ pub mod llm;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -37,7 +38,7 @@ pub struct RunContext {
     pub question: String,
     pub mode: RunMode,
     pub settings: DepthSettings,
-    pub budget: RunBudget,
+    pub budget: Arc<RunBudget>,
     /// Set when the user deletes the run; checked between steps.
     pub cancel: CancelFlag,
 }

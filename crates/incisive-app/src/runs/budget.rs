@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use claude_client::Usage;
@@ -74,18 +74,18 @@ struct State {
 /// it without charging releases it.
 #[derive(Debug)]
 #[must_use = "a Hold frees its amount when dropped; pass it to RunBudget::charge"]
-pub struct Hold<'a> {
-    budget: &'a RunBudget,
+pub struct Hold {
+    budget: Arc<RunBudget>,
     amount: i64,
 }
 
-impl Hold<'_> {
+impl Hold {
     pub fn amount(&self) -> i64 {
         self.amount
     }
 }
 
-impl Drop for Hold<'_> {
+impl Drop for Hold {
     fn drop(&mut self) {
         if self.amount > 0 {
             self.budget.state().held -= self.amount;
@@ -131,7 +131,10 @@ impl RunBudget {
     /// Atomically hold `estimate_paise` of the limit for one call about to be
     /// made. Succeeds only if `spent + held + estimate <= limit`, so concurrent
     /// calls cannot all pass the check before any is charged.
-    pub fn try_hold(&self, estimate_paise: i64) -> Option<Hold<'_>> {
+    ///
+    /// The hold owns a share of the budget, so it can move into a task that
+    /// outlives the caller.
+    pub fn try_hold(self: &Arc<Self>, estimate_paise: i64) -> Option<Hold> {
         if estimate_paise < 0 {
             return None;
         }
@@ -143,7 +146,7 @@ impl RunBudget {
         st.held += estimate_paise;
         drop(st);
         Some(Hold {
-            budget: self,
+            budget: Arc::clone(self),
             amount: estimate_paise,
         })
     }
@@ -161,7 +164,7 @@ impl RunBudget {
     pub async fn charge(
         &self,
         pool: &PgPool,
-        hold: Hold<'_>,
+        hold: Hold,
         call_id: Uuid,
         model: &str,
         usage: &Usage,
@@ -258,11 +261,18 @@ impl RunBudget {
 
     /// A hold of nothing, for re-sending a `charge` whose first attempt
     /// already consumed the real hold. Always succeeds.
-    pub fn empty_hold(&self) -> Hold<'_> {
+    pub fn empty_hold(self: &Arc<Self>) -> Hold {
         Hold {
-            budget: self,
+            budget: Arc::clone(self),
             amount: 0,
         }
+    }
+
+    /// Count `paise` as spent without a ledger row: a Claude call was made and
+    /// billed but its charge could not be booked. Keeps the headroom from being
+    /// reused; the run is failed by the caller and reconciled from the error log.
+    pub fn count_unbooked(&self, paise: i64) {
+        self.state().spent += paise.max(0);
     }
 
     /// Paise charged so far in this run.

@@ -1,17 +1,19 @@
 //! Budgeted Claude call wrapper and agent config. The charging tests use a
 //! real database (`TEST_DATABASE_URL`, skipped when unset); the rest are pure.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use claude_client::{ClaudeError, Usage};
 use incisive_app::agent::llm::{
-    AgentModels, LlmCall, SOURCE_RULE, ScriptedLlm, StepError, estimate_usage, wrap_source,
+    AgentModels, LlmCall, SOURCE_RULE, ScriptedLlm, StepError, estimate_usage,
+    neutralise_source_tags, wrap_source,
 };
 use incisive_app::config::{Config, ConfigError};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::runs::RunMode;
 use incisive_app::runs::budget::RunBudget;
-use incisive_app::runs::store::create_run;
+use incisive_app::runs::store::{create_run, get_run_for_user};
 use incisive_app::runs::worker::CancelFlag;
 use incisive_app::spend::{CapCheck, CapsConfig, Prices, reserve};
 use secrecy::SecretString;
@@ -49,7 +51,7 @@ async fn pool() -> Option<PgPool> {
 }
 
 /// A user and a run with `limit` reserved, plus a budget over it.
-async fn setup(pool: &PgPool, limit: i64) -> (i64, Uuid, RunBudget) {
+async fn setup(pool: &PgPool, limit: i64) -> (i64, Uuid, Arc<RunBudget>) {
     let email = format!("agent-{}@example.com", Uuid::new_v4());
     let uid: i64 = sqlx::query_scalar(
         "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise) \
@@ -74,7 +76,14 @@ async fn setup(pool: &PgPool, limit: i64) -> (i64, Uuid, RunBudget) {
         .await
         .unwrap();
     assert!(matches!(c, CapCheck::Ok { .. }));
-    let budget = RunBudget::new(run, uid, limit, Instant::now(), prices(), 88.0);
+    let budget = Arc::new(RunBudget::new(
+        run,
+        uid,
+        limit,
+        Instant::now(),
+        prices(),
+        88.0,
+    ));
     (uid, run, budget)
 }
 
@@ -88,20 +97,20 @@ async fn charge_rows(pool: &PgPool, uid: i64) -> Vec<i64> {
     .unwrap()
 }
 
-fn call<'a>(
-    llm: &'a ScriptedLlm,
-    budget: &'a RunBudget,
-    pool: &'a PgPool,
-    cancel: &'a CancelFlag,
-) -> LlmCall<'a> {
-    LlmCall {
-        llm,
-        budget,
-        pool,
-        cancel,
-        model: MODEL,
-        step: "test",
-    }
+fn call(
+    llm: &Arc<ScriptedLlm>,
+    budget: &Arc<RunBudget>,
+    pool: &PgPool,
+    cancel: &CancelFlag,
+) -> LlmCall {
+    LlmCall::new(
+        llm.clone(),
+        budget.clone(),
+        pool.clone(),
+        cancel.clone(),
+        MODEL,
+        "test",
+    )
 }
 
 // ---------- calls ----------
@@ -110,9 +119,11 @@ fn call<'a>(
 async fn charges_real_usage_even_when_parse_fails() {
     let Some(pool) = pool().await else { return };
     let (uid, _run, budget) = setup(&pool, 10_000).await;
-    let llm = ScriptedLlm::new()
-        .reply_text("sorry, no json", usage(1000, 200))
-        .reply_text("still none", usage(2000, 100));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("sorry, no json", usage(1000, 200))
+            .reply_text("still none", usage(2000, 100)),
+    );
     let cancel = CancelFlag::default();
     let err = call(&llm, &budget, &pool, &cancel)
         .json::<Out>("sys", "user", 500)
@@ -131,9 +142,11 @@ async fn retries_once_on_bad_json_then_errors() {
     let cancel = CancelFlag::default();
 
     // Bad then good: the retry succeeds, both calls charged, retry says JSON only.
-    let llm = ScriptedLlm::new()
-        .reply_text("nope", usage(100, 10))
-        .reply_json(json!({"answer": "ok"}), usage(100, 10));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("nope", usage(100, 10))
+            .reply_json(json!({"answer": "ok"}), usage(100, 10)),
+    );
     let out: Out = call(&llm, &budget, &pool, &cancel)
         .json("sys", "the question", 500)
         .await
@@ -146,10 +159,12 @@ async fn retries_once_on_bad_json_then_errors() {
     assert_eq!(charge_rows(&pool, uid).await.len(), 2);
 
     // Bad twice: exactly two calls, never a third.
-    let llm = ScriptedLlm::new()
-        .reply_text("nope", usage(100, 10))
-        .reply_text("nope again", usage(100, 10))
-        .reply_json(json!({"answer": "never"}), usage(100, 10));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("nope", usage(100, 10))
+            .reply_text("nope again", usage(100, 10))
+            .reply_json(json!({"answer": "never"}), usage(100, 10)),
+    );
     let err = call(&llm, &budget, &pool, &cancel)
         .json::<Out>("sys", "q", 500)
         .await
@@ -164,7 +179,7 @@ async fn refuses_call_when_over_budget_without_calling() {
     let Some(pool) = pool().await else { return };
     // 1 paise limit; a 4000-token output estimate costs far more.
     let (uid, _run, budget) = setup(&pool, 1).await;
-    let llm = ScriptedLlm::new().reply_json(json!({"answer": "x"}), usage(1, 1));
+    let llm = Arc::new(ScriptedLlm::new().reply_json(json!({"answer": "x"}), usage(1, 1)));
     let cancel = CancelFlag::default();
     let err = call(&llm, &budget, &pool, &cancel)
         .json::<Out>("sys", "user", 4000)
@@ -180,7 +195,7 @@ async fn refuses_call_when_over_budget_without_calling() {
 async fn cancelled_run_makes_no_call() {
     let Some(pool) = pool().await else { return };
     let (uid, _run, budget) = setup(&pool, 10_000).await;
-    let llm = ScriptedLlm::new().reply_json(json!({"answer": "x"}), usage(1, 1));
+    let llm = Arc::new(ScriptedLlm::new().reply_json(json!({"answer": "x"}), usage(1, 1)));
     let cancel = CancelFlag::default();
     cancel.cancel();
     let err = call(&llm, &budget, &pool, &cancel)
@@ -197,11 +212,13 @@ async fn fenced_json_accepted() {
     let Some(pool) = pool().await else { return };
     let (_uid, _run, budget) = setup(&pool, 10_000).await;
     let cancel = CancelFlag::default();
-    let llm = ScriptedLlm::new()
-        .reply_text("```json\n{\"answer\": \"fenced\"}\n```", usage(10, 10))
-        .reply_text("```\n{\"answer\": \"bare fence\"}\n```", usage(10, 10))
-        .reply_text("Here you go: {\"answer\": \"prose\"}", usage(10, 10))
-        .reply_json(json!({"answer": "second try"}), usage(10, 10));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("```json\n{\"answer\": \"fenced\"}\n```", usage(10, 10))
+            .reply_text("```\n{\"answer\": \"bare fence\"}\n```", usage(10, 10))
+            .reply_text("Here you go: {\"answer\": \"prose\"}", usage(10, 10))
+            .reply_json(json!({"answer": "second try"}), usage(10, 10)),
+    );
     let c = call(&llm, &budget, &pool, &cancel);
     assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "fenced");
     assert_eq!(
@@ -220,10 +237,12 @@ async fn every_request_system_prompt_contains_source_rule() {
     let Some(pool) = pool().await else { return };
     let (_uid, _run, budget) = setup(&pool, 10_000).await;
     let cancel = CancelFlag::default();
-    let llm = ScriptedLlm::new()
-        .reply_text("bad", usage(10, 10))
-        .reply_json(json!({"answer": "a"}), usage(10, 10))
-        .reply_text("prose", usage(10, 10));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("bad", usage(10, 10))
+            .reply_json(json!({"answer": "a"}), usage(10, 10))
+            .reply_text("prose", usage(10, 10)),
+    );
     let c = call(&llm, &budget, &pool, &cancel);
     c.json::<Out>("You are a screener.", "u", 100)
         .await
@@ -247,11 +266,11 @@ async fn http_error_drops_hold_without_charge() {
     let Some(pool) = pool().await else { return };
     let (uid, _run, budget) = setup(&pool, 100).await;
     let cancel = CancelFlag::default();
-    let llm = ScriptedLlm::new().fail(ClaudeError::Api {
+    let llm = Arc::new(ScriptedLlm::new().fail(ClaudeError::Api {
         status: 400,
         error_type: "invalid_request_error".into(),
         message: "bad".into(),
-    });
+    }));
     let err = call(&llm, &budget, &pool, &cancel)
         .json::<Out>("s", "u", 1000)
         .await
@@ -284,7 +303,7 @@ async fn timeout_charges_the_estimate() {
         .await
         .unwrap_err();
     assert!(err.is_timeout());
-    let llm = ScriptedLlm::new().fail(ClaudeError::Transport(err));
+    let llm = Arc::new(ScriptedLlm::new().fail(ClaudeError::Transport(err)));
     let e = call(&llm, &budget, &pool, &cancel)
         .json::<Out>("sys", "user", 1000)
         .await
@@ -316,9 +335,15 @@ fn wrap_source_neutralises_closing_tag() {
 }
 
 #[test]
-fn wrap_source_restricts_id() {
-    let w = wrap_source("a\" onload=\"x<>", "t");
-    assert!(w.starts_with("<source id=\"aonloadx\">"), "{w}");
+#[cfg(debug_assertions)]
+fn wrap_source_rejects_bad_ids_in_debug() {
+    for bad in ["", "a b", "a\"b", "ref-\u{e9}", &"x".repeat(65)] {
+        let bad = bad.to_string();
+        let r = std::panic::catch_unwind(move || wrap_source(&bad, "t"));
+        assert!(r.is_err());
+    }
+    assert!(wrap_source(&"x".repeat(64), "t").starts_with("<source id=\"xxx"));
+    assert!(wrap_source("ref-12", "t").starts_with("<source id=\"ref-12\">"));
 }
 
 #[test]
@@ -425,4 +450,245 @@ fn agent_models_default_and_prod_price_check() {
     let mut d = base();
     d.push(("AGENT_MODELS", r#"{"check":"claude-unpriced"}"#));
     Config::from_lookup(lookup(d)).unwrap();
+}
+
+#[test]
+fn wrap_source_neutralises_tag_variants() {
+    for variant in [
+        "</ source>",
+        "< /source>",
+        "<  /  SOURCE >",
+        "&lt;/source&gt;",
+        "&LT;/Source&GT;",
+        "&#60;/source>",
+        "&#x3C;/source>",
+        "&#0060;/source>",
+        "\u{ff1c}/source\u{ff1e}",
+        "\u{ff1c}source id=\"x\">",
+        "< source>",
+        "<\u{200b}/source>",
+    ] {
+        let w = wrap_source("ref-1", &format!("a {variant} b"));
+        let inner = &w["<source id=\"ref-1\">\n".len()..w.len() - "\n</source>".len()];
+        assert!(inner.starts_with("a ") && inner.ends_with(" b"), "{inner}");
+        let lower = inner.to_lowercase();
+        for opener in ["<", "&lt;", "\u{ff1c}", "&#60;", "&#x3c;", "&#0060;"] {
+            assert!(
+                !lower.contains(&format!("{opener}source"))
+                    && !lower.contains(&format!("{opener}/source")),
+                "{variant} -> {inner}"
+            );
+        }
+        assert!(inner.contains("\u{2039}"), "{variant} -> {inner}");
+        // Deterministic and idempotent.
+        assert_eq!(neutralise_source_tags(inner), inner);
+        assert_eq!(w, wrap_source("ref-1", &format!("a {variant} b")));
+    }
+}
+
+// ---------- failure injection ----------
+
+/// Run `body` with a trigger on `table` that rejects the first `n` rows
+/// matching `when` (a sequence counts them, because a sequence survives the
+/// rolled-back statement). The trigger is dropped afterwards, even if `body`
+/// panics.
+async fn with_failures<F, T>(pool: &PgPool, table: &str, when: &str, n: i64, body: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let tag = Uuid::new_v4().simple().to_string();
+    let func = format!("incisive.agent_trig_{tag}");
+    let trig = format!("agent_trig_{tag}");
+    let seq = format!("incisive.agent_seq_{tag}");
+    for sql in [
+        format!("CREATE SEQUENCE {seq}"),
+        format!(
+            "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+               IF {when} THEN IF nextval('{seq}') <= {n} THEN RAISE EXCEPTION 'injected'; END IF; END IF; \
+               RETURN NEW; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER {trig} BEFORE INSERT OR UPDATE ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {func}()"
+        ),
+    ] {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(&sql).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let res = tokio::spawn(body).await;
+    for sql in [
+        format!("DROP TRIGGER {trig} ON {table}"),
+        format!("DROP FUNCTION {func}()"),
+        format!("DROP SEQUENCE {seq}"),
+    ] {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(&sql).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    res.unwrap()
+}
+
+fn good() -> Arc<ScriptedLlm> {
+    Arc::new(ScriptedLlm::new().reply_json(json!({"answer": "ok"}), usage(1000, 200)))
+}
+
+async fn run_cost(pool: &PgPool, uid: i64, run: Uuid) -> i64 {
+    get_run_for_user(pool, uid, run)
+        .await
+        .unwrap()
+        .unwrap()
+        .summary
+        .cost_paise
+}
+
+// ---------- charge-retry paths ----------
+
+#[tokio::test]
+async fn not_booked_once_then_success() {
+    let Some(pool) = pool().await else { return };
+    let (uid, run, budget) = setup(&pool, 10_000).await;
+    let llm = good();
+    let (p, b, l) = (pool.clone(), budget.clone(), llm.clone());
+    let when = format!("NEW.kind = 'charge' AND NEW.user_id = {uid}");
+    let out = with_failures(&pool, "incisive.spend", &when, 1, async move {
+        call(&l, &b, &p, &CancelFlag::default())
+            .json::<Out>("s", "u", 500)
+            .await
+    })
+    .await;
+    assert_eq!(out.unwrap().answer, "ok");
+    // One Claude call, one ledger row, counted once everywhere.
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(charge_rows(&pool, uid).await, vec![18]);
+    assert_eq!(budget.spent(), 18);
+    assert_eq!(run_cost(&pool, uid, run).await, 18);
+}
+
+#[tokio::test]
+async fn not_booked_twice_is_unrecorded_and_still_counted() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 60).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(json!({"answer": "ok"}), usage(5000, 1000))
+            .reply_json(json!({"answer": "again"}), usage(1, 1)),
+    );
+    let (p, b, l) = (pool.clone(), budget.clone(), llm.clone());
+    let when = format!("NEW.kind = 'charge' AND NEW.user_id = {uid}");
+    let err = with_failures(&pool, "incisive.spend", &when, 1000, async move {
+        call(&l, &b, &p, &CancelFlag::default())
+            .json::<Out>("s", "u", 100)
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err, StepError::Unrecorded);
+    assert!(err.is_fatal());
+    assert!(charge_rows(&pool, uid).await.is_empty());
+    // Real cost 88 paise is counted locally, past the 60 limit.
+    assert_eq!(budget.spent(), 88);
+    // So no further call can be made.
+    let again = call(&llm, &budget, &pool, &CancelFlag::default())
+        .json::<Out>("s", "u", 100)
+        .await
+        .unwrap_err();
+    assert_eq!(again, StepError::OverBudget);
+    assert_eq!(llm.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn booked_but_not_recorded_never_recalls_claude() {
+    let Some(pool) = pool().await else { return };
+    // Retry succeeds: the run cost is completed under the same call id.
+    let (uid, run, budget) = setup(&pool, 10_000).await;
+    let llm = good();
+    let (p, b, l) = (pool.clone(), budget.clone(), llm.clone());
+    let when = format!("NEW.id = '{run}'");
+    let out = with_failures(&pool, "incisive.runs", &when, 1, async move {
+        call(&l, &b, &p, &CancelFlag::default())
+            .json::<Out>("s", "u", 500)
+            .await
+    })
+    .await;
+    assert!(out.is_ok());
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(charge_rows(&pool, uid).await, vec![18]);
+    assert_eq!(budget.spent(), 18);
+    assert_eq!(run_cost(&pool, uid, run).await, 18);
+
+    // Retry fails too: still Ok, still one call, money booked.
+    let (uid, run, budget) = setup(&pool, 10_000).await;
+    let llm = good();
+    let (p, b, l) = (pool.clone(), budget.clone(), llm.clone());
+    let when = format!("NEW.id = '{run}'");
+    let out = with_failures(&pool, "incisive.runs", &when, 1000, async move {
+        call(&l, &b, &p, &CancelFlag::default())
+            .json::<Out>("s", "u", 500)
+            .await
+    })
+    .await;
+    assert!(out.is_ok());
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(charge_rows(&pool, uid).await, vec![18]);
+    assert_eq!(budget.spent(), 18);
+    assert_eq!(run_cost(&pool, uid, run).await, 0);
+}
+
+#[tokio::test]
+async fn rate_limit_and_overload_charge_nothing() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    for err in [
+        ClaudeError::RateLimited { retry_after: None },
+        ClaudeError::Overloaded,
+    ] {
+        let llm = Arc::new(ScriptedLlm::new().fail(err));
+        let e = call(&llm, &budget, &pool, &CancelFlag::default())
+            .json::<Out>("s", "u", 500)
+            .await
+            .unwrap_err();
+        assert_eq!(e, StepError::Llm);
+    }
+    assert!(charge_rows(&pool, uid).await.is_empty());
+    assert_eq!(budget.spent(), 0);
+    assert!(budget.can_afford(10_000));
+}
+
+// ---------- cancellation mid-call ----------
+
+#[tokio::test]
+async fn dropping_the_future_mid_call_still_charges() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .delay(Duration::from_millis(300))
+            .reply_json(json!({"answer": "late"}), usage(1000, 200)),
+    );
+    let c = call(&llm, &budget, &pool, &CancelFlag::default());
+    // The hard-stop timeout drops the pipeline future while Claude is working.
+    let r = tokio::time::timeout(Duration::from_millis(50), c.json::<Out>("s", "u", 500)).await;
+    assert!(r.is_err(), "the call should still be running");
+    let mut rows = vec![];
+    for _ in 0..100 {
+        rows = charge_rows(&pool, uid).await;
+        if !rows.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(rows, vec![18]);
+    assert_eq!(budget.spent(), 18);
+    // The hold was converted, not leaked.
+    assert!(budget.can_afford(10_000 - 18));
 }

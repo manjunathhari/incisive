@@ -593,7 +593,7 @@ fn neutralise_close_tag(question: &str) -> String {
 }
 
 /// ASCII case-insensitive replace of every occurrence of `tag`.
-pub(crate) fn replace_ci(text: &str, tag: &str, with: &str) -> String {
+fn replace_ci(text: &str, tag: &str, with: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;

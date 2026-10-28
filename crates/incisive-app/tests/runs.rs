@@ -566,8 +566,8 @@ fn prices() -> Prices {
     Prices::from_json(r#"{"m-test": {"input": 1.0, "output": 5.0}}"#).unwrap()
 }
 
-fn budget(run: Uuid, user: i64, limit: i64, started: Instant) -> RunBudget {
-    RunBudget::new(run, user, limit, started, prices(), 88.0)
+fn budget(run: Uuid, user: i64, limit: i64, started: Instant) -> std::sync::Arc<RunBudget> {
+    std::sync::Arc::new(RunBudget::new(run, user, limit, started, prices(), 88.0))
 }
 
 fn big_global() -> CapsConfig {
@@ -703,7 +703,7 @@ async fn charge_and_release_survive_a_missing_reservation() {
     assert_eq!(reservation(&pool, run).await, None);
 }
 
-fn hold(b: &RunBudget, n: i64) -> incisive_app::runs::budget::Hold<'_> {
+fn hold(b: &std::sync::Arc<RunBudget>, n: i64) -> incisive_app::runs::budget::Hold {
     b.try_hold(n).expect("hold fits")
 }
 

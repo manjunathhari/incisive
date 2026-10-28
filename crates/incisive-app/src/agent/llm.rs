@@ -18,6 +18,8 @@
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::LazyLock;
 #[cfg(any(test, feature = "test-util"))]
 use std::sync::Mutex;
 
@@ -25,13 +27,14 @@ use async_trait::async_trait;
 use claude_client::{
     ClaudeError, Client, ContentBlock, Message, MessagesRequest, MessagesResponse, Role, Usage,
 };
+use regex::Regex;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::gate::{error_kind, maybe_billed, replace_ci};
-use crate::runs::budget::{BudgetError, RunBudget};
+use crate::gate::{error_kind, maybe_billed};
+use crate::runs::budget::{BudgetError, Hold, RunBudget};
 use crate::runs::worker::CancelFlag;
 
 /// Appended to every system prompt built through [`LlmCall`].
@@ -131,6 +134,10 @@ pub enum StepError {
     Parse,
     /// The run was cancelled; no call was made.
     Cancelled,
+    /// Claude was called and billed, but the charge could not be booked even
+    /// after a retry. The cost is counted locally and logged for
+    /// reconciliation. **Fatal**: the pipeline must end the run `failed`.
+    Unrecorded,
 }
 
 impl StepError {
@@ -141,7 +148,13 @@ impl StepError {
             StepError::Llm => "llm",
             StepError::Parse => "parse",
             StepError::Cancelled => "cancelled",
+            StepError::Unrecorded => "unrecorded",
         }
+    }
+
+    /// True when the run must stop (`failed`) rather than degrade a step.
+    pub fn is_fatal(self) -> bool {
+        matches!(self, StepError::Unrecorded)
     }
 }
 
@@ -174,6 +187,7 @@ impl LlmClient for Client {
 pub struct ScriptedLlm {
     replies: Mutex<VecDeque<Result<MessagesResponse, ClaudeError>>>,
     requests: Mutex<Vec<MessagesRequest>>,
+    delay: std::time::Duration,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -187,6 +201,12 @@ impl ScriptedLlm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(r);
+        self
+    }
+
+    /// Make every call take this long before it answers.
+    pub fn delay(mut self, delay: std::time::Duration) -> ScriptedLlm {
+        self.delay = delay;
         self
     }
 
@@ -234,6 +254,9 @@ impl LlmClient for ScriptedLlm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(req.clone());
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         self.replies
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -250,23 +273,77 @@ impl LlmClient for ScriptedLlm {
 
 // ---------- source wrapping ----------
 
-/// Wrap fetched text as `<source id="…">…</source>`. Any opening or closing
-/// `source` tag inside the text is broken (`< source`, `< /source`), so quoted
-/// text cannot end or fake a wrapper. `id` keeps only `[A-Za-z0-9_-]`.
+/// Replacement for a neutralised tag opener: U+2039 SINGLE LEFT-POINTING ANGLE
+/// QUOTATION MARK. `</source>` becomes `‹/source>`, `&lt;source` becomes
+/// `‹source`. Whitespace and zero-width characters between the opener and the
+/// name are dropped; the slash is kept.
+const NEUTRAL_OPEN: char = '\u{2039}';
+
+/// An opener (`<`, `&lt;`, fullwidth `＜`, or a numeric entity for `<`), then
+/// optional blanks, an optional `/`, optional blanks, then `source`.
+static SOURCE_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    const GAP: &str = r"[\s\u{200b}-\u{200d}\u{2060}\u{feff}]*";
+    Regex::new(&format!(
+        r"(?i)(?:<|&lt;|\u{{ff1c}}|&#0*60;|&#x0*3c;){GAP}(/?){GAP}source"
+    ))
+    .expect("source tag pattern is valid")
+});
+
+/// Break every opening or closing `source` tag in `text` (any case, spaced,
+/// entity-encoded or fullwidth) by replacing its opener with `‹`. Deterministic
+/// and idempotent. Apply it identically wherever text is shown to a model, so
+/// verbatim quotes taken from the wrapped text still match.
+pub fn neutralise_source_tags(text: &str) -> String {
+    SOURCE_TAG
+        .replace_all(text, |c: &regex::Captures| {
+            format!("{NEUTRAL_OPEN}{}source", &c[1])
+        })
+        .into_owned()
+}
+
+/// Longest `id` [`wrap_source`] accepts.
+pub const MAX_SOURCE_ID_LEN: usize = 64;
+
+fn valid_source_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_SOURCE_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Wrap fetched text as `<source id="…">…</source>`, with every source tag
+/// inside the text neutralised by [`neutralise_source_tags`].
+///
+/// `id` must be 1 to 64 characters of `[A-Za-z0-9_-]` (callers pass `ref-N`).
+/// A bad id is a programming error: it panics in debug builds; in release it
+/// is cleaned (invalid characters dropped, cut to 64, `x` if nothing is left)
+/// so the wrapper can never be broken out of.
 pub fn wrap_source(id: &str, text: &str) -> String {
-    let id: String = id
+    debug_assert!(valid_source_id(id), "invalid source id");
+    let mut id: String = id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(MAX_SOURCE_ID_LEN)
         .collect();
-    let once = replace_ci(text, "</source", "< /source");
-    let safe = replace_ci(&once, "<source", "< source");
-    format!("<source id=\"{id}\">\n{safe}\n</source>")
+    if id.is_empty() {
+        id.push('x');
+    }
+    format!(
+        "<source id=\"{id}\">\n{}\n</source>",
+        neutralise_source_tags(text)
+    )
 }
 
 // ---------- estimates and parsing ----------
 
 /// Estimated usage for a call: input ≈ ceil(prompt bytes / 3) + 50, output =
-/// `max_tokens` (the most it can cost).
+/// `max_tokens` (the most it can cost). This is an estimate, not a bound on
+/// the input side: token-dense text (for example some non-Latin scripts or
+/// symbol-heavy input) can need more than a token per three bytes, so a call
+/// can cost more than its hold. The overshoot is bounded per call (the real
+/// charge is still booked, and holds are checked before every call), so the
+/// run can pass its limit by at most one call's excess.
 pub fn estimate_usage(prompt_bytes: usize, max_tokens: u32) -> Usage {
     let input = prompt_bytes.div_ceil(3).saturating_add(50);
     Usage {
@@ -298,19 +375,42 @@ fn parse_strict<T: DeserializeOwned>(text: &str) -> Option<T> {
 
 // ---------- the wrapper ----------
 
-/// One step's handle for making budgeted Claude calls.
-pub struct LlmCall<'a> {
-    pub llm: &'a dyn LlmClient,
-    pub budget: &'a RunBudget,
-    pub pool: &'a PgPool,
-    pub cancel: &'a CancelFlag,
-    /// Model id for this step.
-    pub model: &'a str,
-    /// Step name for logs.
-    pub step: &'static str,
+/// One step's handle for making budgeted Claude calls. The fields are private:
+/// every call goes through [`LlmCall::json`] / [`LlmCall::text`], so none can
+/// skip the budget, the cancel check or [`SOURCE_RULE`].
+///
+/// The call and its charge run in a spawned task that owns its data. If the
+/// caller's future is dropped mid-call (hard stop, cancellation), the task
+/// still finishes and books the charge.
+#[derive(Clone)]
+pub struct LlmCall {
+    llm: Arc<dyn LlmClient>,
+    budget: Arc<RunBudget>,
+    pool: PgPool,
+    cancel: CancelFlag,
+    model: String,
+    step: &'static str,
 }
 
-impl LlmCall<'_> {
+impl LlmCall {
+    pub fn new(
+        llm: Arc<dyn LlmClient>,
+        budget: Arc<RunBudget>,
+        pool: PgPool,
+        cancel: CancelFlag,
+        model: impl Into<String>,
+        step: &'static str,
+    ) -> LlmCall {
+        LlmCall {
+            llm,
+            budget,
+            pool,
+            cancel,
+            model: model.into(),
+            step,
+        }
+    }
+
     /// Ask for JSON and parse it into `T`. One retry ("Reply with JSON only")
     /// on a bad reply, as a new logical call with its own hold and call id.
     /// The bad reply is charged either way.
@@ -324,11 +424,11 @@ impl LlmCall<'_> {
         if let Some(v) = parse_strict(&text) {
             return Ok(v);
         }
-        tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = self.model, "reply was not strict JSON; retrying once");
+        tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, "reply was not strict JSON; retrying once");
         let retry_user = format!("{user}{JSON_ONLY_NUDGE}");
         let text = self.text(system, &retry_user, max_tokens).await?;
         parse_strict(&text).ok_or_else(|| {
-            tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = self.model, "reply was not strict JSON after retry");
+            tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, "reply was not strict JSON after retry");
             StepError::Parse
         })
     }
@@ -346,7 +446,7 @@ impl LlmCall<'_> {
             return Err(StepError::Cancelled);
         }
         let req = MessagesRequest {
-            model: self.model.to_string(),
+            model: self.model.clone(),
             max_tokens,
             system: Some(format!("{system}\n\n{SOURCE_RULE}")),
             messages: vec![Message {
@@ -361,33 +461,63 @@ impl LlmCall<'_> {
         let estimate_usage = estimate_usage(prompt_bytes, max_tokens);
         let estimate = self
             .budget
-            .cost_of(self.model, &estimate_usage)
+            .cost_of(&self.model, &estimate_usage)
             .map_err(|_| {
-                tracing::error!(%run_id, step = self.step, model = self.model, "no price for agent model");
+                tracing::error!(%run_id, step = self.step, model = %self.model, "no price for agent model");
                 StepError::Llm
             })?;
         let Some(hold) = self.budget.try_hold(estimate) else {
-            tracing::info!(%run_id, step = self.step, model = self.model, estimate, "call refused: over budget");
+            tracing::info!(%run_id, step = self.step, model = %self.model, estimate, "call refused: over budget");
             return Err(StepError::OverBudget);
         };
-        let call_id = Uuid::new_v4();
 
-        match self.llm.call(&req).await {
+        let task = Attempt {
+            call: self.clone(),
+            req,
+            estimate,
+            estimate_usage,
+            call_id: Uuid::new_v4(),
+        };
+        // Owned by the spawned task: dropping this await does not stop it.
+        match tokio::spawn(task.run(hold)).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::error!(%run_id, step = self.step, "claude call task failed");
+                Err(StepError::Llm)
+            }
+        }
+    }
+}
+
+/// Everything one logical call needs once its hold is taken.
+struct Attempt {
+    call: LlmCall,
+    req: MessagesRequest,
+    estimate: i64,
+    estimate_usage: Usage,
+    call_id: Uuid,
+}
+
+impl Attempt {
+    async fn run(self, hold: Hold) -> Result<String, StepError> {
+        let c = &self.call;
+        let run_id = c.budget.run_id();
+        match c.llm.call(&self.req).await {
             Ok(resp) => {
                 tracing::info!(
-                    %run_id, step = self.step, model = self.model,
+                    %run_id, step = c.step, model = %c.model,
                     input_tokens = resp.usage.input_tokens,
                     output_tokens = resp.usage.output_tokens,
                     "claude call done"
                 );
-                self.charge(hold, call_id, &resp.usage).await?;
+                self.settle(hold, &resp.usage).await?;
                 Ok(response_text(&resp))
             }
             Err(e) => {
-                tracing::warn!(%run_id, step = self.step, model = self.model, error_kind = error_kind(&e), "claude call failed");
+                tracing::warn!(%run_id, step = c.step, model = %c.model, error_kind = error_kind(&e), "claude call failed");
                 if maybe_billed(&e) {
                     // The request may have been processed: pay the estimate.
-                    self.charge(hold, call_id, &estimate_usage).await?;
+                    self.settle(hold, &self.estimate_usage).await?;
                 } else {
                     drop(hold);
                 }
@@ -396,43 +526,50 @@ impl LlmCall<'_> {
         }
     }
 
-    /// Charge `usage` under `call_id`. If the first attempt fails, re-send the
-    /// same charge once (same call id; it never books twice). The money is
-    /// booked or has been spent either way, so the step goes on.
-    async fn charge(
-        &self,
-        hold: crate::runs::budget::Hold<'_>,
-        call_id: Uuid,
-        usage: &Usage,
-    ) -> Result<(), StepError> {
-        let run_id = self.budget.run_id();
-        match self
+    /// Charge `usage` under this call's id. A failed charge is re-sent once
+    /// with the same id (it never books twice). `BookedButNotRecorded` twice
+    /// is fine: the money is booked. Anything that leaves the money unbooked
+    /// fails closed: count it locally, log it, return `Unrecorded`.
+    async fn settle(&self, hold: Hold, usage: &Usage) -> Result<(), StepError> {
+        let c = &self.call;
+        let run_id = c.budget.run_id();
+        let call_id = self.call_id;
+        let first = c
             .budget
-            .charge(self.pool, hold, call_id, self.model, usage)
+            .charge(&c.pool, hold, call_id, &c.model, usage)
+            .await;
+        let err = match first {
+            Ok(_) => return Ok(()),
+            Err(e) => e,
+        };
+        if matches!(err, BudgetError::UnknownModel) {
+            return Err(self.unrecorded(usage));
+        }
+        tracing::warn!(%run_id, %call_id, step = c.step, outcome = %err, "charge needs a retry");
+        match c
+            .budget
+            .charge(&c.pool, c.budget.empty_hold(), call_id, &c.model, usage)
             .await
         {
             Ok(_) => Ok(()),
-            Err(BudgetError::UnknownModel) => Err(StepError::Llm),
-            Err(e) => {
-                tracing::warn!(%run_id, %call_id, step = self.step, outcome = %e, "charge needs a retry");
-                match self
-                    .budget
-                    .charge(
-                        self.pool,
-                        self.budget.empty_hold(),
-                        call_id,
-                        self.model,
-                        usage,
-                    )
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(%run_id, %call_id, step = self.step, outcome = %e, "charge retry failed; continuing");
-                    }
-                }
+            Err(BudgetError::BookedButNotRecorded(_)) => {
+                tracing::error!(%run_id, %call_id, step = c.step, "charge booked but its record is incomplete; continuing");
                 Ok(())
             }
+            Err(_) => Err(self.unrecorded(usage)),
         }
+    }
+
+    /// Money was spent but could not be booked: count it so the headroom is
+    /// not reused, and log ids and paise only for reconciliation.
+    fn unrecorded(&self, usage: &Usage) -> StepError {
+        let c = &self.call;
+        let paise = c.budget.cost_of(&c.model, usage).unwrap_or(self.estimate);
+        c.budget.count_unbooked(paise);
+        tracing::error!(
+            run_id = %c.budget.run_id(), call_id = %self.call_id, paise,
+            "claude call billed but charge not booked; reconcile manually"
+        );
+        StepError::Unrecorded
     }
 }
