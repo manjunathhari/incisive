@@ -46,7 +46,7 @@ use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{self, IapVerifier, JwkSource, Role, User};
 use incisive_app::lit::Paper;
 use incisive_app::lit::http::{AllowlistedClient, OaPolicy, default_user_agent};
-use incisive_app::runs::budget::HARD_STOP_AFTER;
+use incisive_app::runs::budget::hard_stop_after;
 use incisive_app::runs::worker::WorkerHandle;
 use incisive_app::runs::{RunMode, RunStatus};
 use incisive_app::server::AppState;
@@ -860,7 +860,8 @@ pub async fn run_question(
 
     // Wait for the final status, then for the worker to finish (release,
     // audit, late charges), so the cost read below is final.
-    let deadline = HARD_STOP_AFTER + Duration::from_secs(60);
+    let deadline =
+        hard_stop_after(state.runs.for_mode(mode).time_limit_s) + Duration::from_secs(60);
     let mut wall: Option<Duration> = None;
     let (status, kind) = loop {
         match run_state(&state.pool, run_id).await {

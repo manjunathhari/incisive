@@ -2500,6 +2500,7 @@ fn answer_json() -> serde_json::Value {
             refinements: vec![],
             stopped_early: None,
             write_refused: false,
+            service_failed: false,
             unavailable: vec![],
         },
         cost_paise: 1840,
@@ -3096,4 +3097,122 @@ fn deploy_workflow_wires_phase2_settings() {
     ] {
         assert!(deploy.contains(v), "deploy.yml misses `{v}`");
     }
+}
+
+/// Reports the hard stop the worker gave the run's budget.
+fn reports_hard_stop(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        PipelineOutcome::Done(json!({"hard_stop_s": ctx.budget.hard_stop().as_secs()}))
+    })
+}
+
+/// M-1: the worker builds each run's budget from the mode's `time_limit_s`
+/// (RUN_LIMITS): hard stop = time_limit_s + 60 s.
+#[tokio::test]
+async fn worker_uses_the_modes_time_limit() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut st = app_state(pool.clone());
+    st.runs.focused.time_limit_s = 120;
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    st.worker.spawn_with(st.clone(), run, reports_hard_stop);
+    poll_status(&pool, uid, run, RunStatus::Done).await;
+    wait_idle(&st, run).await;
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.answer, Some(json!({"hard_stop_s": 180})));
+}
+
+async fn backdate_reservation(pool: &PgPool, request: Uuid, secs: i64) {
+    sqlx::query(
+        "UPDATE incisive.spend SET at = now() - make_interval(secs => $2) \
+         WHERE request_id = $1 AND kind = 'reservation'",
+    )
+    .bind(request)
+    .bind(secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn delete_run_row(pool: &PgPool, run: Uuid) {
+    sqlx::query("DELETE FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// M-2: a run reservation whose run row is gone (its release failed) is
+/// released by the recovery sweep once it is older than the grace period.
+#[tokio::test]
+async fn recovery_releases_reservations_whose_run_is_gone() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    // Orphaned 15 minutes ago: released.
+    let (u1, old) = reserved_run(&pool, 4000).await;
+    delete_run_row(&pool, old).await;
+    backdate_reservation(&pool, old, 15 * 60).await;
+    // Orphaned just now (a delete may still be releasing): kept.
+    let (_u2, fresh) = reserved_run(&pool, 4000).await;
+    delete_run_row(&pool, fresh).await;
+    // Old reservation whose run still exists (an active run): kept.
+    let (_u3, live) = reserved_run(&pool, 4000).await;
+    backdate_reservation(&pool, live, 15 * 60).await;
+    // An old gate reservation (no run by design): not this sweep's.
+    let gate_req = Uuid::new_v4();
+    let user = full_user(&pool, u1).await;
+    reserve(&pool, &user, &big_global(), 30, gate_req, "gate")
+        .await
+        .unwrap();
+    backdate_reservation(&pool, gate_req, 15 * 60).await;
+
+    recover_stale_runs(&pool).await.unwrap();
+    assert_eq!(reservation(&pool, old).await, None);
+    assert_eq!(reservation(&pool, fresh).await, Some(4000));
+    assert_eq!(reservation(&pool, live).await, Some(4000));
+    assert_eq!(reservation(&pool, gate_req).await, Some(30));
+    // The caps no longer count it.
+    assert_eq!(
+        totals(&pool, u1).await.unwrap().today_paise,
+        30,
+        "only the gate reservation remains"
+    );
+}
+
+/// M-7: the run page header is the full question (not the 80-character
+/// title), as escaped text.
+#[tokio::test]
+async fn ssr_run_page_header_is_the_full_question() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let question = format!(
+        "In adults having robotic low anterior resection, does <i>ICG</i> angiography reduce leak? {}",
+        "Please include RCTs and meta-analyses from the last ten years."
+    );
+    assert!(question.chars().count() > 80);
+    let run = create_run(&pool, uid, &question, RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    set_status(&pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    let mut body = answer_json();
+    body["question"] = json!(question);
+    assert!(save_answer(&pool, run, &body).await.unwrap());
+    set_status(&pool, run, RunStatus::Done, None).await.unwrap();
+
+    let (s, html) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let escaped = question.replace('<', "&lt;").replace('>', "&gt;");
+    let h2 = html.find("<h2>").expect("header");
+    let end = h2 + html[h2..].find("</h2>").unwrap();
+    assert!(html[h2..end].contains(&escaped), "{}", &html[h2..end]);
+    assert!(!html.contains("<i>ICG</i>"));
 }

@@ -66,6 +66,13 @@ pub struct FetchedRecord {
 
 /// Spaces requests at least `gap` apart. Waiters queue on the mutex, so
 /// concurrent callers share one schedule.
+///
+/// The schedule is **per instance** (final review M-8): each Cloud Run
+/// instance paces its own requests, so with `--max-instances=3` the service
+/// as a whole can send up to three times NCBI's limit (9 a second without a
+/// key, 30 with one, against NCBI's 3 and 10). That needs concurrent runs on
+/// several instances at once, which is unlikely at current use, and NCBI's
+/// 429s are retried with backoff. The NCBI API key raises the limit.
 struct Pacer {
     gap: Duration,
     next: Mutex<Instant>,

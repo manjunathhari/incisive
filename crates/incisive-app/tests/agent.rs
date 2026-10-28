@@ -2378,6 +2378,7 @@ fn screened_of(papers: Vec<Paper>) -> Screened {
         excluded_counts: vec![],
         excluded_notes: vec![],
         title_only: 0,
+        failed_batches: 0,
     }
 }
 
@@ -4435,7 +4436,8 @@ async fn confidence_capped_by_evidence_level() {
 
 use incisive_app::agent::answer::{
     Answer, AnswerClaim, CheckSummary, DECISION_SUPPORT, KeyStudy, NO_EVIDENCE, NO_VERIFIED_CLAIMS,
-    PARTIAL_MARK, Reference, STOPPED_NO_ANSWER, Trail, WRITE_REFUSED, render_text, rerun_href,
+    PARTIAL_MARK, Reference, SERVICE_FAILED, STOPPED_NO_ANSWER, Trail, WRITE_REFUSED, render_text,
+    rerun_href,
 };
 use incisive_app::agent::{PipelineOutcome, run_pipeline};
 use incisive_app::runs::RunStatus;
@@ -5003,6 +5005,7 @@ fn sample_answer() -> Answer {
             refinements: vec![],
             stopped_early: Some("time limit".into()),
             write_refused: false,
+            service_failed: false,
             unavailable: vec!["Europe PMC".into()],
         },
         cost_paise: 1840,
@@ -5668,4 +5671,139 @@ async fn write_refused_after_every_paper_was_read_is_not_search_stopped_early() 
         "{l:?}"
     );
     assert!(l.iter().all(|x| !x.contains("stopped early")), "{l:?}");
+}
+
+// ---------- service failures (final review I-1) ----------
+
+#[tokio::test]
+async fn all_screen_batches_failing_is_a_service_failure_not_no_evidence() {
+    // Claude answers Frame and Search, then nothing more: every screening
+    // batch fails. Nothing was assessed, so "no evidence" would be false.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u()),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert!(a.trail.service_failed);
+    assert_eq!(a.trail.included, 0);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{SERVICE_FAILED}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(NO_EVIDENCE));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Screening failed for ") && x.contains("(2 batches)")),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn all_extract_calls_failing_is_a_service_failure_not_no_evidence() {
+    // Screening includes two papers, then every extraction call fails.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(gathering_script());
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert!(a.trail.service_failed);
+    assert_eq!(a.trail.included, 2);
+    assert!(a.bottom_line.is_empty() && a.references.is_empty());
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{SERVICE_FAILED}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(NO_EVIDENCE));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Extraction failed for 2 papers; they were not used"),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_batch_beside_successful_ones_only_adds_a_note() {
+    // The second screening batch fails (not JSON, twice); the first holds
+    // both includes. The answer is written and checked as usual.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let mut llm = ScriptedLlm::new()
+        .reply_json(agent_json("frame_pico.json"), u())
+        .reply_json(agent_json("search_initial.json"), u())
+        .reply_json(agent_json("search_accept.json"), u())
+        .reply_json(screen_reply(), u())
+        .reply_text("not json", u())
+        .reply_text("still not json", u())
+        .reply_json(meta_extraction(), u())
+        .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+        .reply_json(three_claims(), u());
+    for _ in 0..3 {
+        llm = llm.reply_json(verdict("supported"), u());
+    }
+    let llm = Arc::new(llm);
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    assert!(!a.trail.service_failed);
+    assert_eq!(a.bottom_line.len(), 3);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Screening failed for ") && x.contains("(1 batches)")),
+        "{l:?}"
+    );
+}
+
+#[test]
+fn time_limits_follow_time_limit_s() {
+    // M-1: wrap-up at 60% of time_limit_s, hard stop at time_limit_s + 60 s.
+    use incisive_app::runs::budget::{hard_stop_after, wrap_up_after};
+    let budget = |age: u64, limit: Option<u32>| {
+        let b = RunBudget::new(Uuid::new_v4(), 0, 4000, Instant::now(), prices(), 88.0);
+        let b = match limit {
+            Some(l) => b.with_time_limit(l),
+            None => b,
+        };
+        b.aged_for_test(Duration::from_secs(age))
+    };
+    let now = Instant::now;
+    // Defaults unchanged: 180 s and 360 s.
+    assert_eq!(DepthSettings::FOCUSED.time_limit_s, 300);
+    assert_eq!(wrap_up_after(300), Duration::from_secs(180));
+    assert_eq!(hard_stop_after(300), Duration::from_secs(360));
+    assert!(!budget(179, None).should_wrap_up(now()));
+    assert_eq!(budget(180, None).wrap_up_reason(now()), Some("time limit"));
+    assert!(!budget(359, None).past_hard_stop(now()));
+    assert!(budget(360, None).past_hard_stop(now()));
+    assert_eq!(budget(0, None).hard_stop(), Duration::from_secs(360));
+    // RUN_LIMITS time_limit_s = 100: wrap-up at 60 s, hard stop at 160 s.
+    assert!(!budget(59, Some(100)).should_wrap_up(now()));
+    assert_eq!(
+        budget(60, Some(100)).wrap_up_reason(now()),
+        Some("time limit")
+    );
+    assert!(!budget(159, Some(100)).past_hard_stop(now()));
+    assert!(budget(160, Some(100)).past_hard_stop(now()));
+    assert_eq!(budget(0, Some(100)).hard_stop(), Duration::from_secs(160));
 }

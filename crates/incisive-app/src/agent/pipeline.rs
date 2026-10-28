@@ -51,6 +51,14 @@
 //! unavailable, the search stopped early, or no claim survived Check;
 //! otherwise `Done`.
 //!
+//! **Service failures** (final review I-1). Screen and Extract count their
+//! failed Claude calls (`Llm`/`Parse`; budget stops and cancellation are not
+//! failures) and write a Note with the count. If nothing was included, or
+//! nothing extracted, while some of those calls failed, the empty result
+//! cannot be read as "no evidence": the run is `partial`, `service_failed` is
+//! set and the bottom line says the AI service failed. Failures beside
+//! successful calls leave only their Note.
+//!
 //! Nothing found is two different outcomes (Ruling R-13a):
 //! * wrap-up or the budget stopped gathering before anything was extracted:
 //!   `Partial`, with the "Search stopped early" Note and `stopped_early` set
@@ -144,6 +152,9 @@ struct Gathered {
     stopped: Option<&'static str>,
     /// Write was refused for budget (despite the finish reserve).
     write_refused: bool,
+    /// Nothing was included or extracted and some Claude calls of that step
+    /// failed: the empty result may be the outage's, not the literature's.
+    service_failed: bool,
 }
 
 impl Gathered {
@@ -245,6 +256,8 @@ async fn gather(ctx: &RunContext, pico: &Pico) -> Result<Gathered, Stop> {
         g.stop(ctx, reason).await;
     }
     if screened.included.is_empty() {
+        // Some batches failed: "nothing included" is not a finding.
+        g.service_failed = screened.failed_batches > 0;
         return Ok(g);
     }
 
@@ -276,6 +289,8 @@ async fn gather(ctx: &RunContext, pico: &Pico) -> Result<Gathered, Stop> {
         let reason = Gathered::stopped_by_step(ctx);
         g.stop(ctx, reason).await;
     }
+    // Some extraction calls failed and nothing was extracted: not a finding.
+    g.service_failed = extraction.papers.is_empty() && extraction.failed > 0;
     g.extracted = extraction.papers;
     Ok(g)
 }
@@ -383,6 +398,7 @@ fn assemble(
         extracted,
         stopped,
         write_refused,
+        service_failed,
     } = g;
     let by_ref: HashMap<u8, &Extracted> = extracted.iter().map(|e| (e.ref_id, e)).collect();
     let verified: Vec<u8> = checked
@@ -498,8 +514,12 @@ fn assemble(
 
     trail.stopped_early = stopped.map(str::to_string);
     trail.write_refused = write_refused;
-    let degraded =
-        !trail.unavailable.is_empty() || stopped.is_some() || write_refused || no_verified_claims;
+    trail.service_failed = service_failed;
+    let degraded = !trail.unavailable.is_empty()
+        || stopped.is_some()
+        || write_refused
+        || service_failed
+        || no_verified_claims;
 
     let answer = Answer {
         question: ctx.question.clone(),

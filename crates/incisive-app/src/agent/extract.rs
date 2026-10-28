@@ -603,6 +603,10 @@ pub struct Extraction {
     /// reached its wrap-up point or its budget. Non-zero means the step
     /// stopped early.
     pub stopped: usize,
+    /// Papers whose Claude call failed (`Llm`/`Parse`, or a reply that was
+    /// not an object): not used. Budget stops and cancellation are not
+    /// failures.
+    pub failed: usize,
 }
 
 /// Extract findings from `papers` (see the module docs).
@@ -733,5 +737,6 @@ pub async fn extract(
     Ok(Extraction {
         papers: out,
         stopped,
+        failed,
     })
 }

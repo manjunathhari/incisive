@@ -110,6 +110,9 @@ pub async fn delete_one(state: &AppState, user: &User, run_id: Uuid) -> Result<(
         // Best effort: false when the worker is on another instance.
         let _ = state.worker.cancel(run_id);
     }
+    // The whole reservation is released below, even if the worker still has
+    // Claude calls in flight: their late charges book without headroom, a
+    // bounded overshoot (final review M-4; `spend` module, overshoot notes).
     match store::delete_run(&state.pool, user.id, run_id).await {
         Ok(true) => {}
         // Deleted by someone else between the read and the delete.

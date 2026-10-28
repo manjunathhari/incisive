@@ -338,6 +338,24 @@ pub async fn finished_runs_holding_reservation(pool: &PgPool) -> sqlx::Result<Ve
     .await
 }
 
+/// Run reservations whose run row no longer exists, made more than
+/// [`LATE_CHARGE_GRACE_MIN`] minutes ago, as `(run_id, user_id)` (final
+/// review M-2). A run's reservation is made only after its row exists, so
+/// such a row was deleted (by the user, or by `undo_run`) and its release
+/// failed, or a late release after deletion failed. The grace leaves a
+/// delete that is still releasing, or a late charge still booking, alone.
+pub async fn orphaned_run_reservations(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
+    sqlx::query_as(
+        "SELECT s.request_id, s.user_id FROM incisive.spend s \
+         WHERE s.kind = 'reservation' AND s.purpose = 'run' \
+           AND s.at < now() - make_interval(mins => $1) \
+           AND NOT EXISTS (SELECT 1 FROM incisive.runs r WHERE r.id = s.request_id)",
+    )
+    .bind(LATE_CHARGE_GRACE_MIN)
+    .fetch_all(pool)
+    .await
+}
+
 /// Retention: delete runs created more than `days` days ago (steps and answers cascade).
 pub async fn delete_runs_older_than(pool: &PgPool, days: i32) -> sqlx::Result<u64> {
     let r = sqlx::query(

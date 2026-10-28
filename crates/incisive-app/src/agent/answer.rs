@@ -27,6 +27,9 @@ pub const STOPPED_NO_ANSWER: &str = "No answer could be written: the search stop
 /// Bottom line when Write was refused for budget (the evidence may all have
 /// been read; only the write-up did not fit).
 pub const WRITE_REFUSED: &str = "The cost limit was reached before the answer could be written.";
+/// Bottom line when nothing could be included or extracted because Claude
+/// calls failed (final review I-1): an outage, not an empty literature.
+pub const SERVICE_FAILED: &str = "The search could not be completed because the AI service failed; this is not a finding of no evidence.";
 /// Shown above the bottom line when the evidence is too thin for a conclusion.
 pub const INSUFFICIENT: &str = "Insufficient evidence \u{2014} no conclusion is drawn.";
 /// Marks a partly supported claim.
@@ -125,6 +128,10 @@ pub struct Trail {
     /// Write was refused because the cost limit was reached.
     #[serde(default)]
     pub write_refused: bool,
+    /// Nothing was included or extracted while Claude calls of that step
+    /// failed (see [`SERVICE_FAILED`]).
+    #[serde(default)]
+    pub service_failed: bool,
     /// Databases that could not be reached ("PubMed", "Europe PMC").
     pub unavailable: Vec<String>,
 }
@@ -158,6 +165,8 @@ pub fn empty_bottom_line(a: &Answer) -> Option<&'static str> {
         Some(NO_VERIFIED_CLAIMS)
     } else if a.trail.write_refused {
         Some(WRITE_REFUSED)
+    } else if a.trail.service_failed {
+        Some(SERVICE_FAILED)
     } else if a.trail.stopped_early.is_some() {
         Some(STOPPED_NO_ANSWER)
     } else {

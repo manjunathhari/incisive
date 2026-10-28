@@ -20,10 +20,20 @@ use crate::spend::{self, Prices};
 
 /// Wrap up (jump to Write + Check) once this share of the cost limit is spent.
 const WRAP_UP_PERCENT: i128 = 70;
-/// ... or once this much time has passed.
-const WRAP_UP_AFTER: Duration = Duration::from_secs(180);
-/// Past this the run is failed.
-pub const HARD_STOP_AFTER: Duration = Duration::from_secs(360);
+/// The default time limit (`DepthSettings::time_limit_s`), 300 s.
+const DEFAULT_TIME_LIMIT_S: u32 = 300;
+
+/// Wrap up (jump to Write + Check) once 60% of `time_limit_s` has passed:
+/// 180 s at the default 300 s.
+pub const fn wrap_up_after(time_limit_s: u32) -> Duration {
+    Duration::from_millis(time_limit_s as u64 * 600)
+}
+
+/// The hard stop for `time_limit_s`: the limit plus 60 s (360 s at the
+/// default 300 s). Past it the run is failed.
+pub const fn hard_stop_after(time_limit_s: u32) -> Duration {
+    Duration::from_secs(time_limit_s as u64 + 60)
+}
 
 #[derive(Debug)]
 pub enum BudgetError {
@@ -111,6 +121,9 @@ pub struct RunBudget {
     /// Added to the run's age (tests only, [`RunBudget::aged_for_test`]), so
     /// time-limit tests do not depend on the host's monotonic clock.
     age_offset: Duration,
+    /// From the run's `time_limit_s` ([`RunBudget::with_time_limit`]).
+    wrap_up_after: Duration,
+    hard_stop_after: Duration,
 }
 
 impl RunBudget {
@@ -131,7 +144,23 @@ impl RunBudget {
             usd_inr,
             state: Mutex::new(State::default()),
             age_offset: Duration::ZERO,
+            wrap_up_after: wrap_up_after(DEFAULT_TIME_LIMIT_S),
+            hard_stop_after: hard_stop_after(DEFAULT_TIME_LIMIT_S),
         }
+    }
+
+    /// Time limits from the run's `time_limit_s` (`RUN_LIMITS`): wrap-up at
+    /// 60% of it, hard stop at it plus 60 s. Without this, the defaults for
+    /// 300 s apply (180 s and 360 s).
+    pub fn with_time_limit(mut self, time_limit_s: u32) -> RunBudget {
+        self.wrap_up_after = wrap_up_after(time_limit_s);
+        self.hard_stop_after = hard_stop_after(time_limit_s);
+        self
+    }
+
+    /// When this run is failed for time (see [`RunBudget::with_time_limit`]).
+    pub fn hard_stop(&self) -> Duration {
+        self.hard_stop_after
     }
 
     /// Tests only: the run behaves as if it started `by` earlier.
@@ -308,6 +337,11 @@ impl RunBudget {
     /// Count `paise` as spent without a ledger row: a Claude call was made and
     /// billed but its charge could not be booked. Keeps the headroom from being
     /// reused; the run is failed by the caller and reconciled from the error log.
+    ///
+    /// Local only: once the run ends, the reservation is released except what
+    /// in-flight calls hold ([`RunBudget::finish`]), so the caps stop counting
+    /// this amount until it is reconciled (final review M-3; see the `spend`
+    /// module's overshoot notes).
     pub fn count_unbooked(&self, paise: i64) {
         self.state().spent += paise.max(0);
     }
@@ -366,7 +400,8 @@ impl RunBudget {
     /// limit spent, or no headroom left above the finish reserve
     /// (`spent + held + finish_reserve >= limit`; each gathering call also
     /// needs its own estimate on top, [`RunBudget::try_hold_gathering`]).
-    /// "time limit": 3 minutes elapsed. Cost is reported first.
+    /// "time limit": the wrap-up time elapsed (60% of `time_limit_s`, 3
+    /// minutes by default). Cost is reported first.
     pub fn wrap_up_reason(&self, now: Instant) -> Option<&'static str> {
         let (spent, held, reserve) = {
             let st = self.state();
@@ -377,7 +412,7 @@ impl RunBudget {
             || (reserve > 0 && i128::from(spent) + i128::from(held) + i128::from(reserve) >= limit)
         {
             Some("cost limit")
-        } else if self.age(now) >= WRAP_UP_AFTER {
+        } else if self.age(now) >= self.wrap_up_after {
             Some("time limit")
         } else {
             None
@@ -398,9 +433,10 @@ impl RunBudget {
         self.wrap_up_reason(now).is_some()
     }
 
-    /// True once 6 minutes have elapsed.
+    /// True once the hard stop has passed (`time_limit_s` + 60 s; 6 minutes
+    /// by default).
     pub fn past_hard_stop(&self, now: Instant) -> bool {
-        self.age(now) >= HARD_STOP_AFTER
+        self.age(now) >= self.hard_stop_after
     }
 
     /// Read-only check against `spent` and current holds. It is **not** a

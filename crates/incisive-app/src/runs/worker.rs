@@ -37,7 +37,7 @@ use futures_util::FutureExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::budget::{HARD_STOP_AFTER, RunBudget};
+use super::budget::RunBudget;
 use super::{RunStatus, store};
 use crate::agent::{self, PipelineFuture, PipelineOutcome, RunContext};
 use crate::audit::{self, Event};
@@ -333,18 +333,22 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         question,
         mode,
         settings: state.runs.for_mode(mode),
-        budget: Arc::new(RunBudget::new(
-            run_id,
-            user_id,
-            limit_paise,
-            Instant::now(),
-            state.prices.clone(),
-            state.usd_inr,
-        )),
+        budget: Arc::new(
+            RunBudget::new(
+                run_id,
+                user_id,
+                limit_paise,
+                Instant::now(),
+                state.prices.clone(),
+                state.usd_inr,
+            )
+            // Wrap-up and hard stop from the mode's `time_limit_s` (RUN_LIMITS).
+            .with_time_limit(state.runs.for_mode(mode).time_limit_s),
+        ),
         cancel,
     };
     let guarded = AssertUnwindSafe(async { pipeline(&ctx).await }).catch_unwind();
-    let outcome = match tokio::time::timeout(HARD_STOP_AFTER, guarded).await {
+    let outcome = match tokio::time::timeout(ctx.budget.hard_stop(), guarded).await {
         Ok(Ok(outcome)) => outcome,
         // The payload is dropped unread: it could quote question text.
         Ok(Err(_payload)) => {
@@ -503,6 +507,12 @@ pub async fn interrupt_and_release_stale(pool: &PgPool) -> sqlx::Result<Vec<(Uui
 pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
     let marked = interrupt_and_release_stale(pool).await?;
     for (run_id, user_id) in store::finished_runs_holding_reservation(pool).await? {
+        spend::release(pool, user_id, run_id).await?;
+    }
+    // Reservations whose run row is gone (final review M-2): released under
+    // the same locks, so they stop counting against the caps.
+    for (run_id, user_id) in store::orphaned_run_reservations(pool).await? {
+        tracing::info!(%run_id, "orphaned run reservation released");
         spend::release(pool, user_id, run_id).await?;
     }
     Ok(marked.len())

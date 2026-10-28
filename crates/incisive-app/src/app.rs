@@ -642,8 +642,14 @@ fn run_view(v: RunView) -> impl IntoView {
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw.
     let answer = v.answer.map(|a| serde_json::from_value::<Answer>(a).ok());
+    // The header is the full question once the answer holds it (§4), else
+    // the stored 80-character title. Plain text: Leptos escapes it.
+    let heading = answer
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map_or(v.summary.title, |a| a.question.clone());
     view! {
-        <h2>{v.summary.title}</h2>
+        <h2>{heading}</h2>
         <p>
             {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
             <span class="meta">{rupees(v.summary.cost_paise)}</span>

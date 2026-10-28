@@ -237,6 +237,10 @@ pub struct Screened {
     pub excluded_notes: Vec<(String, String)>,
     /// Records with no abstract that were screened on their title.
     pub title_only: u32,
+    /// Batches whose Claude call failed (`Llm`/`Parse`, or a reply with no
+    /// verdict list): their records were not assessed. Budget stops and
+    /// cancellation are not failures.
+    pub failed_batches: u32,
 }
 
 impl Screened {
@@ -466,6 +470,7 @@ pub async fn screen(
     let mut included: Vec<(usize, Paper, String)> = Vec::new();
     let mut title_only = 0u32;
     let mut failed = 0u32;
+    let mut failed_batches = 0u32;
     let mut stopped = 0u32;
     let mut notes: Vec<(String, String)> = Vec::new();
 
@@ -493,6 +498,7 @@ pub async fn screen(
             Err(e @ (StepError::Llm | StepError::Parse)) => {
                 tracing::warn!(%run_id, step = "screen", error_kind = e.kind(), records = n, "screening batch failed; not assessed");
                 failed += n;
+                failed_batches += 1;
                 start = end;
                 continue;
             }
@@ -506,6 +512,7 @@ pub async fn screen(
         let Some(verdicts) = verdict_list(reply) else {
             tracing::warn!(%run_id, step = "screen", records = n, "screening reply held no verdict list; not assessed");
             failed += n;
+            failed_batches += 1;
             start = end;
             continue;
         };
@@ -561,6 +568,7 @@ pub async fn screen(
         excluded_counts: tally.sorted(),
         excluded_notes: notes,
         title_only,
+        failed_batches,
     };
     add_line(
         ctx,
@@ -580,7 +588,9 @@ pub async fn screen(
         add_line(
             ctx,
             StepKind::Note,
-            &format!("Screening failed for {failed} records; they were not assessed"),
+            &format!(
+                "Screening failed for {failed} records ({failed_batches} batches); they were not assessed"
+            ),
         )
         .await;
     }

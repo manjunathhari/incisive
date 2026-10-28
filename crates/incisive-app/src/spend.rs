@@ -13,6 +13,24 @@
 //! request's difference between estimate and actual, and the next `reserve`
 //! sees it (charges count toward every total) and blocks accordingly.
 //!
+//! Run overshoots (Phase 2), each bounded and accepted:
+//! * **Deleting an active run** (final review M-4). `runs::api::delete_one`
+//!   releases the whole reservation at once (Ruling R-1b), even while the
+//!   worker still has Claude calls in flight. Their late charges then book
+//!   with no reservation behind them. If the worker is on another instance it
+//!   notices the deletion only at its next heartbeat (up to 20 s) and may
+//!   start one more call meanwhile, while the user can already start a new
+//!   run in the freed slot. The overrun is bounded by the deleted run's limit.
+//! * **Unbooked spend** (final review M-3). A Claude call that was billed but
+//!   whose charge could not be booked (`StepError::Unrecorded`) is counted in
+//!   the run's local budget only (`RunBudget::count_unbooked`). The worker
+//!   keeps just what in-flight calls hold when it releases the reservation,
+//!   so that cost then appears in neither the ledger nor a reservation, and
+//!   the caps do not count it until it is reconciled by hand from the error
+//!   log (`... estimate counted as unbooked, reconcile manually`). It needs a
+//!   ledger write to fail twice for one call, and is bounded by that call's
+//!   estimate.
+//!
 //! Lock ordering (deadlock-free): inside one transaction always take the GLOBAL
 //! advisory lock first, then the per-user lock. Both are transaction-scoped
 //! `pg_advisory_xact_lock(namespace, key)` with two int4 keys, so user ids can
