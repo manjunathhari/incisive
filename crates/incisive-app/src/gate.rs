@@ -512,7 +512,7 @@ fn parse_verdict(text: &str) -> Option<RawVerdict> {
 }
 
 /// Whether a failed call may still have been billed. See [`GateError::Unavailable`].
-fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
+pub(crate) fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
     use claude_client::ClaudeError::*;
     match e {
         Api { .. } | RateLimited { .. } | Overloaded => false,
@@ -593,7 +593,7 @@ fn neutralise_close_tag(question: &str) -> String {
 }
 
 /// ASCII case-insensitive replace of every occurrence of `tag`.
-fn replace_ci(text: &str, tag: &str, with: &str) -> String {
+pub(crate) fn replace_ci(text: &str, tag: &str, with: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
@@ -630,7 +630,7 @@ fn sanitise_reason(raw: &str) -> String {
     }
 }
 
-fn error_kind(e: &claude_client::ClaudeError) -> &'static str {
+pub(crate) fn error_kind(e: &claude_client::ClaudeError) -> &'static str {
     use claude_client::ClaudeError::*;
     match e {
         Api { .. } => "api",

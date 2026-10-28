@@ -3,6 +3,7 @@
 use secrecy::SecretString;
 use std::fmt;
 
+use crate::agent::llm::AgentModels;
 use crate::runs::RunsConfig;
 use crate::spend::Prices;
 
@@ -39,6 +40,8 @@ pub struct Config {
     /// Contact address sent to Unpaywall (required there) and NCBI (`UNPAYWALL_EMAIL`).
     /// Required in prod; an obviously fake address in dev.
     pub unpaywall_email: String,
+    /// Model per agent step (`AGENT_MODELS`, optional JSON; missing keys take defaults).
+    pub agent_models: AgentModels,
 }
 
 /// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
@@ -154,6 +157,26 @@ impl Config {
             }
         }
 
+        let agent_models = match lookup("AGENT_MODELS") {
+            None => AgentModels::default(),
+            Some(json) => AgentModels::from_json(&json).map_err(|reason| ConfigError::Invalid {
+                var: "AGENT_MODELS",
+                reason,
+            })?,
+        };
+        if app_env == AppEnv::Prod {
+            for (step, model) in agent_models.entries() {
+                if model_prices.get(model).is_none() {
+                    return Err(ConfigError::Invalid {
+                        var: "MODEL_PRICES",
+                        reason: format!(
+                            "no entry for AGENT_MODELS {step} `{model}`; add it to MODEL_PRICES or change AGENT_MODELS"
+                        ),
+                    });
+                }
+            }
+        }
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -226,6 +249,7 @@ impl Config {
             global_monthly_cap_paise,
             runs,
             unpaywall_email,
+            agent_models,
         })
     }
 }
@@ -245,7 +269,7 @@ mod tests {
 
     const DB: &str = "postgres://user:hunter2pw@host/db";
     /// Prices for the default gate model and the `CLAUDE_MODEL` used by `full()`.
-    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-test": {"input": 3, "output": 15}}"#;
+    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-test": {"input": 3, "output": 15}}"#;
 
     fn full() -> Vec<(&'static str, &'static str)> {
         vec![

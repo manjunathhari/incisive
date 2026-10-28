@@ -245,6 +245,26 @@ impl RunBudget {
         Ok(paise)
     }
 
+    /// The run this budget belongs to (for logging).
+    pub fn run_id(&self) -> Uuid {
+        self.run_id
+    }
+
+    /// Cost in paise of `usage` on `model`, rounded up (`spend::cost_paise`).
+    /// Used for the pre-call estimate; an unpriced model is an error.
+    pub fn cost_of(&self, model: &str, usage: &Usage) -> Result<i64, spend::SpendError> {
+        spend::cost_paise(&self.prices, self.usd_inr, model, usage)
+    }
+
+    /// A hold of nothing, for re-sending a `charge` whose first attempt
+    /// already consumed the real hold. Always succeeds.
+    pub fn empty_hold(&self) -> Hold<'_> {
+        Hold {
+            budget: self,
+            amount: 0,
+        }
+    }
+
     /// Paise charged so far in this run.
     pub fn spent(&self) -> i64 {
         self.state().spent

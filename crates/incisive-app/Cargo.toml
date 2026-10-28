@@ -55,6 +55,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_r
 base64 = "0.22"
 wiremock = "0.6"
 claude-client = { path = "../claude-client" }
+# The same reqwest the Claude client uses, to build a real timeout error in tests.
+reqwest-claude = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 incisive-app = { path = ".", features = ["test-util"] }

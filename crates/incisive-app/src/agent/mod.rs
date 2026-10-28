@@ -11,6 +11,8 @@
 //! returns a fixed body. Task 13 replaces the body of [`run_pipeline`]; the
 //! [`RunContext`] shape is fixed for it.
 
+pub mod llm;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
