@@ -438,10 +438,11 @@ fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
         }
     };
     view! {
-        <fieldset class="depth">
+        // The hint is announced with the group (and so with each choice).
+        <fieldset class="depth" aria-describedby="depth-hint">
             <legend>"Depth"</legend>
             <div class="seg">{option(RunMode::Quick)} {option(RunMode::Focused)}</div>
-            <p class="hint">
+            <p class="hint" id="depth-hint">
                 "Quick reads abstracts only. Focused reads more papers, with free full text where available. The amount is each run's cost limit."
             </p>
         </fieldset>

@@ -256,7 +256,8 @@ To suspend someone, `UPDATE incisive.users SET active = false WHERE email = '...
 Phase 2 adds five repository variables (same place as section 6) and one optional
 secret. Only `UNPAYWALL_EMAIL` is required; the rest have defaults. The Deploy
 workflow fails fast if `UNPAYWALL_EMAIL` is missing or is not an email address, if
-`AGENT_MODELS` or `RUN_LIMITS` is set but is not valid JSON, or if `HAS_NCBI_KEY` or
+`AGENT_MODELS` or `RUN_LIMITS` is set but is not a JSON object using only the key
+names below (a typo such as `limt_paise` is caught here), or if `HAS_NCBI_KEY` or
 `CPU_ALWAYS` is set to anything other than `true` or `false`.
 
 | Variable | Required? | What it is | Default |
@@ -342,25 +343,22 @@ instance exists, busy or idle, not just while it serves requests. With
 app; but after the last request Google may keep the instance alive, and billed,
 for up to about 15 minutes before shutting it down.
 
-Work out the cost per instance-hour for this service (1 vCPU, 512 MiB = 0.5 GiB)
-from the current asia-south1 prices on https://cloud.google.com/run/pricing
-(choose "instance-based billing"):
+Work out the cost per instance-hour for this service (1 vCPU, 512 MiB = 0.5 GiB).
+Read the current asia-south1 rates for instance-based billing from
+https://cloud.google.com/run/pricing (pick the region on that page; do not reuse
+figures from elsewhere, they change):
 
 ```
-per instance-hour (USD) = 3600 × (1 × <price per vCPU-second>
-                                  + 0.5 × <price per GiB-second>)
+per instance-hour (USD) = (vCPU-second rate × 1 + GiB-second rate × 0.5) × 3600
 per instance-hour (INR) = that × USD_INR
 ```
 
-For example, if the page lists $0.000018 per vCPU-second and $0.000002 per
-GiB-second (the Tier 1 rates when this was written; check them), that is
-3600 × (0.000018 + 0.000001) = about $0.068 per instance-hour. A single question
-then keeps an instance alive for roughly its run time plus the idle period (up
-to about 20 minutes, about a third of an instance-hour); questions asked close
-together share the same instance. Multiply your expected busy hours per month by
-the per-instance-hour figure, and compare it with the Rs 500 budget alert (section
-5). Cloud Run's monthly free tier may cover some or all of it; the pricing page
-says how much.
+A single question keeps an instance alive for roughly its run time plus the idle
+period, up to about 20 minutes, so about a third of an instance-hour per isolated
+question; questions asked close together share the same instance. Multiply your
+expected busy hours per month by the per-instance-hour figure, and compare it with
+the Rs 500 budget alert (section 5). Cloud Run's monthly free tier may cover some
+or all of it; the pricing page says how much.
 
 When you are happy with the figure, set the repository variable `CPU_ALWAYS` to
 `true`; the next deploy switches billing. Set it back to `false` to return to

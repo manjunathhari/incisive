@@ -67,10 +67,39 @@ jobs:
             echo "::error::vars.UNPAYWALL_EMAIL must be an email address (see infra/README.md section 11)"
             exit 1
           fi
-          # Optional; when set they must be valid JSON (the app applies defaults otherwise).
+          # Optional; when set each must be a JSON object whose keys are ones the
+          # app accepts (for RUN_LIMITS also each mode's field names), so a typo
+          # fails here. The app applies defaults otherwise and checks the values
+          # themselves at startup.
           for v in AGENT_MODELS RUN_LIMITS; do
-            if [ -n "${!v//[[:space:]]/}" ] && ! printf '%s' "${!v}" | python3 -m json.tool >/dev/null 2>&1; then
-              echo "::error::vars.$v is set but is not valid JSON (see infra/README.md section 11)"
+            [ -n "${!v//[[:space:]]/}" ] || continue
+            case "$v" in
+              AGENT_MODELS) allowed="frame search screen extract write check"; fields="" ;;
+              RUN_LIMITS) allowed="quick focused"
+                          fields="refinements screen_n use_n full_text limit_paise time_limit_s" ;;
+            esac
+            if ! msg=$(printf '%s' "${!v}" | python3 -c '
+          import json, sys
+          allowed, fields = sys.argv[1].split(), sys.argv[2].split()
+          try:
+              v = json.loads(sys.stdin.read())
+          except ValueError:
+              sys.exit("is not valid JSON")
+          if not isinstance(v, dict):
+              sys.exit("must be a JSON object")
+          bad = sorted(k for k in v if k not in allowed)
+          if bad:
+              sys.exit("has unknown key(s) " + ", ".join(bad) + "; allowed: " + ", ".join(allowed))
+          for k, sub in v.items():
+              if not fields:
+                  break
+              if not isinstance(sub, dict):
+                  sys.exit("`" + k + "` must be a JSON object")
+              bad = sorted(f for f in sub if f not in fields)
+              if bad:
+                  sys.exit("`" + k + "` has unknown field(s) " + ", ".join(bad) + "; allowed: " + ", ".join(fields))
+          ' "$allowed" "$fields" 2>&1); then
+              echo "::error::vars.$v $msg (see infra/README.md section 11)"
               exit 1
             fi
           done

@@ -2739,6 +2739,41 @@ async fn quick_request_uses_quick_limits_and_reservation() {
 }
 
 #[tokio::test]
+async fn unknown_mode_is_rejected_before_any_work() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut st = app_state(pool.clone());
+    st.worker = WorkerHandle::with_pipeline(reports_settings);
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let req = Request::post("/api/fn/ask")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-dev-user-email", &email)
+        .body(Body::from(format!(
+            "question={}&mode=turbo",
+            form_encode(RULE_QUESTION)
+        )))
+        .unwrap();
+    let (s, body) = send(router(st), req).await;
+    // Leptos answers a form it cannot decode with 500 (before the function
+    // body runs, so the app cannot choose the status). Pinned so a change shows.
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(body.contains("unknown variant `turbo`"), "{body}");
+    assert!(!body.contains("run_started"), "{body}");
+    // Rejected while decoding the form, before identity, the identifier filter
+    // and the gate: no run, no money held, no audit row.
+    assert!(list_runs(&pool, uid, 10).await.unwrap().is_empty());
+    let spend: i64 = sqlx::query_scalar("SELECT count(*) FROM incisive.spend WHERE user_id = $1")
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(spend, 0);
+    assert!(audit_rows(&pool, uid).await.is_empty());
+}
+
+#[tokio::test]
 async fn mode_defaults_to_focused() {
     // The type, the toggle's choice of starting mode, and the wire default.
     assert_eq!(RunMode::default(), RunMode::Focused);
@@ -2829,6 +2864,17 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
     let q_start = body[..quick].rfind('<').unwrap();
     let q_end = quick + body[quick..].find('>').unwrap();
     assert!(!body[q_start..q_end].contains("checked"));
+    // The explanatory hint is tied to the radio group for screen readers.
+    let fs = body.find("<fieldset").expect("fieldset");
+    let fs_tag = &body[fs..fs + body[fs..].find('>').unwrap()];
+    assert!(
+        fs_tag.contains(r#"aria-describedby="depth-hint""#),
+        "{fs_tag}"
+    );
+    assert!(
+        body.contains(r#"<p class="hint" id="depth-hint">"#),
+        "{body}"
+    );
 
     // `/api/fn/me` carries the figures the hints use.
     let req = Request::post("/api/fn/me")
@@ -2852,12 +2898,32 @@ async fn ssr_run_page_shows_mode_badge() {
     let uid = new_user(&pool).await;
     let email = email_of(&pool, uid).await;
     let run = finished_run(&pool, uid, "badge question", 10).await;
-    let (s, body) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run}"), &email),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert!(
         body.contains(r#"<span class="badge mode">Quick</span>"#),
         "{body}"
     );
+    let focused = create_run(&pool, uid, "focused badge", RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(&pool, focused, RunStatus::Done, None)
+            .await
+            .unwrap()
+    );
+    let (s, body) = send(router(st), api("GET", &format!("/runs/{focused}"), &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        body.contains(r#"<span class="badge mode">Focused</span>"#),
+        "{body}"
+    );
+    assert!(!body.contains(r#"<span class="badge mode">Quick</span>"#));
 }
 
 #[test]
@@ -2965,6 +3031,38 @@ fn deploy_workflow_wires_phase2_settings() {
     for v in ["AGENT_MODELS", "RUN_LIMITS", "UNPAYWALL_EMAIL"] {
         assert!(check.contains(v), "fail-fast check misses {v}");
     }
+    // The key names the check accepts are the ones the app accepts.
+    let quoted = |after: &str, prefix: &str| -> Vec<String> {
+        let from = check
+            .find(after)
+            .unwrap_or_else(|| panic!("check misses {after}"));
+        let at = from
+            + check[from..]
+                .find(prefix)
+                .unwrap_or_else(|| panic!("check misses {prefix}"));
+        let rest = &check[at + prefix.len()..];
+        let mut v: Vec<String> = rest[..rest.find('"').unwrap()]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        v.sort();
+        v
+    };
+    let mut steps: Vec<String> = incisive_app::agent::llm::AgentModels::default()
+        .entries()
+        .iter()
+        .map(|(s, _)| s.to_string())
+        .collect();
+    steps.sort();
+    assert_eq!(quoted("AGENT_MODELS)", r#"allowed=""#), steps);
+    assert_eq!(quoted("RUN_LIMITS)", r#"allowed=""#), ["focused", "quick"]);
+    let mut fields: Vec<String> =
+        match serde_json::to_value(incisive_app::runs::DepthSettings::QUICK).unwrap() {
+            serde_json::Value::Object(m) => m.keys().cloned().collect(),
+            _ => unreachable!(),
+        };
+    fields.sort();
+    assert_eq!(quoted("RUN_LIMITS)", r#"fields=""#), fields);
     let run = &scripts
         .iter()
         .find(|(n, _)| n == "Deploy to Cloud Run")
@@ -2976,8 +3074,18 @@ fn deploy_workflow_wires_phase2_settings() {
     assert!(run.contains("NCBI_API_KEY=ncbi-api-key:latest"));
     assert!(run.contains(r#""$HAS_NCBI_KEY" = "true""#));
     assert!(run.contains(r#""$CPU_ALWAYS" = "true""#));
-    assert!(run.contains("--no-cpu-throttling"));
-    assert!(run.contains("--cpu-throttling"));
+    // Each branch pinned exactly (a bare `--cpu-throttling` would also match
+    // inside `--no-cpu-throttling`); the throttled default is the cost-safe one.
+    assert!(run.contains(r#"cpu_flag="--no-cpu-throttling""#));
+    assert!(run.contains(r#"cpu_flag="--cpu-throttling""#));
+    assert!(run.contains(r#""$cpu_flag""#));
+    let else_branch = run
+        .split("if [ \"$CPU_ALWAYS\" = \"true\" ]; then")
+        .nth(1)
+        .and_then(|rest| rest.split("else").nth(1))
+        .and_then(|rest| rest.split("fi").next())
+        .expect("CPU_ALWAYS if/else");
+    assert_eq!(else_branch.trim(), r#"cpu_flag="--cpu-throttling""#);
     // The Deploy step's `env:` passes the guards in from repository variables.
     for v in [
         "HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}",
