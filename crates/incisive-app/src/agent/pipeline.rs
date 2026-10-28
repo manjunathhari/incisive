@@ -40,6 +40,13 @@
 //! unavailable, the search stopped early, or no claim survived Check;
 //! otherwise `Done`.
 //!
+//! Nothing found is two different outcomes (Ruling R-13a):
+//! * wrap-up or the budget stopped gathering before anything was extracted:
+//!   `Partial`, with the "Search stopped early" Note and `stopped_early` set
+//!   (the search was cut short, so "no evidence" would overstate it);
+//! * every step ran and nothing relevant was found (empty search, nothing
+//!   included): `Done`, `insufficient`, "No relevant evidence found."
+//!
 //! Privacy: nothing here logs the question, PICO, claims or titles; only the
 //! run id, counts and fixed kinds.
 

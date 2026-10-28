@@ -4869,6 +4869,14 @@ async fn empty_search_gives_insufficient_answer() {
     assert!(!a.no_verified_claims);
     assert!(a.bottom_line.is_empty() && a.references.is_empty());
     assert_eq!(a.trail.screened, 0);
+    // Every step ran (R-13a): not stopped early, so Done, with no Note.
+    assert_eq!(a.trail.stopped_early, None);
+    assert!(
+        steps_of(&ctx, uid)
+            .await
+            .iter()
+            .all(|s| !s.line.starts_with("Search stopped early"))
+    );
     let text = render_text(&a);
     assert!(
         text.contains(&format!("Bottom line\n{NO_EVIDENCE}\n")),
@@ -4992,10 +5000,35 @@ fn render_text_contains_decision_support_line() {
         "{t}"
     );
 
-    // Edit & re-run: the question percent-encoded, with the mode.
+    // Edit & re-run: the question percent-encoded in the fragment (never
+    // sent to the server), with the mode.
     assert_eq!(
         rerun_href("ICG & leak? 5%", RunMode::Quick),
-        "/?q=ICG%20%26%20leak%3F%205%25&mode=quick"
+        "/#q=ICG%20%26%20leak%3F%205%25&mode=quick"
+    );
+}
+
+#[test]
+fn rerun_fragment_round_trips_and_rejects_junk() {
+    use incisive_app::agent::answer::parse_rerun_fragment;
+    let q = "52 y/o M, robotic LAR: ICG <b>&</b> leak? 5% \u{2014} \u{e9}";
+    for mode in [RunMode::Quick, RunMode::Focused] {
+        let href = rerun_href(q, mode);
+        let frag = href.strip_prefix('/').unwrap();
+        assert_eq!(parse_rerun_fragment(frag), Some((q.to_string(), mode)));
+    }
+    // No question, or an empty one: nothing to fill.
+    assert_eq!(parse_rerun_fragment(""), None);
+    assert_eq!(parse_rerun_fragment("#mode=quick"), None);
+    assert_eq!(parse_rerun_fragment("#q=&mode=quick"), None);
+    // Unknown or missing mode: Focused. A malformed escape is kept as written.
+    assert_eq!(
+        parse_rerun_fragment("#q=a%2&mode=deep"),
+        Some(("a%2".to_string(), RunMode::Focused))
+    );
+    assert_eq!(
+        parse_rerun_fragment("q=100%25%zz"),
+        Some(("100%%zz".to_string(), RunMode::Focused))
     );
 }
 

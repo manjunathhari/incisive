@@ -2548,7 +2548,7 @@ async fn ssr_run_page_renders_answer() {
     // Edit & re-run prefills the question box.
     assert!(
         body.contains(
-            "/?q=ICG%20%3Cb%3Eleak%3C%2Fb%3E%20evidence%20%26%20more%3F&amp;mode=focused"
+            "/#q=ICG%20%3Cb%3Eleak%3C%2Fb%3E%20evidence%20%26%20more%3F&amp;mode=focused"
         ),
         "{body}"
     );
@@ -2579,17 +2579,12 @@ async fn ssr_run_page_renders_answer() {
     assert!(!body.contains("<script>x</script>"));
     assert!(body.contains("This answer can"), "{body}");
 
-    // The home page prefills from ?q= (rendered for the browser to hydrate).
-    let (s, body) = send(
-        router(st),
-        api("GET", "/?q=ICG%20%3Cb%3Eleak&mode=quick", &email),
-    )
-    .await;
+    // The server never reads a question from the query string: the box is
+    // filled in the browser from the fragment, which is never sent here.
+    let (s, body) = send(router(st), api("GET", "/?q=zebrafinch&mode=quick", &email)).await;
     assert_eq!(s, StatusCode::OK);
-    // The box is filled in the browser (`prop:value`): the server never puts
-    // the query text into the page as markup.
     assert!(body.contains("<textarea"));
-    assert!(!body.contains("<b>leak"), "{body}");
+    assert!(!body.contains("zebrafinch"), "{body}");
 }
 
 #[tokio::test]

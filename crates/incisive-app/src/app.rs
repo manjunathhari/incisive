@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
 use leptos_router::{
     components::{A, Route, Router, Routes},
-    hooks::{use_navigate, use_params_map, use_query_map},
+    hooks::{use_navigate, use_params_map},
     path,
 };
 
@@ -326,38 +326,18 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn AskPage() -> impl IntoView {
-    // Edit & re-run arrives as `/?q=<question>&mode=<mode>`: prefill the box.
-    let query = use_query_map();
-    let (initial_q, initial_mode) = query.with_untracked(|q| {
-        (
-            q.get("q").unwrap_or_default(),
-            q.get("mode")
-                .as_deref()
-                .and_then(RunMode::parse)
-                .unwrap_or_default(),
-        )
-    });
-    let prefilled = !initial_q.is_empty();
-    let (question, set_question) = signal(initial_q);
-    let mode = RwSignal::new(initial_mode);
+    let (question, set_question) = signal(String::new());
+    let mode = RwSignal::new(RunMode::default());
     let action = ServerAction::<AskQuestion>::new();
     let pending = action.pending();
     let navigate = use_navigate();
-    // Browser only (effects never run on the server). Drop the question from
-    // the address bar once it is in the box, so a reload or a shared link
-    // does not carry it.
-    Effect::new({
-        let navigate = navigate.clone();
-        move |_| {
-            if prefilled {
-                navigate(
-                    "/",
-                    leptos_router::NavigateOptions {
-                        replace: true,
-                        ..Default::default()
-                    },
-                );
-            }
+    // Edit & re-run arrives as `/#q=<question>&mode=<mode>`. The fragment never
+    // reaches the server; after hydration (effects run in the browser only)
+    // it fills the box and is removed from the address bar.
+    Effect::new(move |_| {
+        if let Some((q, m)) = take_rerun_fragment() {
+            set_question.set(q);
+            mode.set(m);
         }
     });
     // Once the question is accepted, follow its run.
@@ -639,6 +619,23 @@ fn reference_view(r: Reference) -> impl IntoView {
     }
 }
 
+/// The Edit & re-run fragment of the current address, if any, which is then
+/// cleared (browser only; `None` elsewhere).
+fn take_rerun_fragment() -> Option<(String, RunMode)> {
+    #[cfg(feature = "hydrate")]
+    {
+        let w = web_sys::window()?;
+        let found = answer::parse_rerun_fragment(&w.location().hash().ok()?)?;
+        // Keep the question out of reloads, history and shared links.
+        if let Ok(h) = w.history() {
+            let _ = h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/"));
+        }
+        Some(found)
+    }
+    #[cfg(not(feature = "hydrate"))]
+    None
+}
+
 /// Copy the plain-text answer (browser only).
 fn copy_text(text: &str) {
     #[cfg(feature = "hydrate")]
@@ -683,7 +680,9 @@ fn answer_view(a: Answer) -> impl IntoView {
                 {(!pico.limits.is_empty()).then(|| view! { <dt>"Limits"</dt><dd>{pico.limits.join("; ")}</dd> })}
             </dl>
             {(!a.final_query.is_empty()).then(|| view! { <p>"PubMed query: " <code>{a.final_query.clone()}</code></p> })}
-            <p><A href=rerun>"Edit & re-run"</A></p>
+            // A full page load (`rel="external"`) so the fragment survives to the
+            // home page; the browser does not send it to the server.
+            <p><a href=rerun rel="external">"Edit & re-run"</a></p>
 
             <h3>"Bottom line"</h3>
             {insufficient.then(|| view! { <p class="box amber">{INSUFFICIENT}</p> })}

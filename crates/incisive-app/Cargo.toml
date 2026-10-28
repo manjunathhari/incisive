@@ -33,8 +33,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 url = { version = "2", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-# Copy-to-clipboard on the run page (browser only).
-web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard"], optional = true }
+# Copy-to-clipboard on the run page; the Edit & re-run fragment (browser only).
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "Location", "History"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"], optional = true }
 # `v4` (random ids) is enabled by `ssr` only: the browser build just deserializes ids.
 uuid = { version = "1", features = ["serde"], optional = true }

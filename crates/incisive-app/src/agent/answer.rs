@@ -377,9 +377,50 @@ pub fn render_text(a: &Answer) -> String {
     o
 }
 
-/// The Edit & re-run link: `/?q=<question>&mode=<mode>`, percent-encoded.
+/// The Edit & re-run link: `/#q=<question>&mode=<mode>`, percent-encoded.
+/// The question travels in the fragment, which the browser never sends to
+/// the server (so no request log can hold it); the home page reads it after
+/// hydration ([`parse_rerun_fragment`]).
 pub fn rerun_href(question: &str, mode: RunMode) -> String {
-    format!("/?q={}&mode={}", percent_encode(question), mode.as_str())
+    format!("/#q={}&mode={}", percent_encode(question), mode.as_str())
+}
+
+/// Read an Edit & re-run fragment (`#q=…&mode=…`, leading `#` optional):
+/// the question and the mode (Focused when absent or unknown). `None` when
+/// there is no non-empty question.
+pub fn parse_rerun_fragment(fragment: &str) -> Option<(String, RunMode)> {
+    let mut question = None;
+    let mut mode = RunMode::default();
+    for pair in fragment.trim_start_matches('#').split('&') {
+        match pair.split_once('=') {
+            Some(("q", v)) => question = Some(percent_decode(v)),
+            Some(("mode", v)) => mode = RunMode::parse(v).unwrap_or_default(),
+            _ => {}
+        }
+    }
+    question.filter(|q| !q.is_empty()).map(|q| (q, mode))
+}
+
+/// Undo [`percent_encode`]. A malformed `%` sequence is kept as written;
+/// invalid UTF-8 is replaced.
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| char::from(c).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Percent-encode everything but the URL-unreserved characters.
