@@ -2,7 +2,8 @@
 //! then run on PubMed and Europe PMC and merged. Server only.
 //!
 //! The `search` model proposes `{"query": …, "reason": …}`. Each proposal is
-//! untrusted and goes through [`validate_query`] before it is sent anywhere;
+//! untrusted and goes through [`validate_query`] and an echo guard (no run of
+//! eight question words, [`contains_question`]) before it is sent anywhere;
 //! an invalid one still uses up an attempt, and the search falls back to the
 //! last valid query. After each valid query the model sees the PubMed hit
 //! count and the first 20 titles (each wrapped as a `<source>`), and answers
@@ -12,8 +13,9 @@
 //! or PubMed going down.
 //!
 //! The final query is run on PubMed (`settings.screen_n` records; the hits of
-//! the last valid query are reused, not re-searched) and on Europe PMC
-//! (`screen_n / 2`). Records are merged ([`merge_results`]), then abstracts
+//! the last valid query are reused, not re-searched) and, translated by
+//! [`to_epmc_query`], on Europe PMC (`screen_n / 2`). If PubMed fails on a
+//! refinement, the previous query and its hits are the final result. Records are merged ([`merge_results`]), then abstracts
 //! are filled cache first: cached papers are used as they are, the rest come
 //! from efetch ([`PubMed::details`]), whose retraction flag is OR-ed into
 //! `Paper.retracted` (Ruling R-6c), and are written back to the cache.
@@ -31,7 +33,7 @@ use serde::Deserialize;
 
 use super::frame::Pico;
 use super::llm::{LlmCall, StepError, wrap_source};
-use super::{AgentLlm, Literature, RunContext, add_line, clip};
+use super::{AgentLlm, Literature, RunContext, add_line, clip, contains_question};
 use crate::lit::europepmc::merge_results;
 use crate::lit::http::LitError;
 use crate::lit::pubmed::SearchHits;
@@ -55,9 +57,8 @@ pub struct SearchResult {
     pub refinements: Vec<(String, String)>,
     /// Total PubMed matches for the final query (0 if PubMed was down).
     pub pubmed_count: u64,
-    /// Records Europe PMC returned for the final query (at most
-    /// `screen_n / 2`; 0 if it was down). The client does not expose
-    /// Europe PMC's total hit count.
+    /// Total Europe PMC matches for the final query (its `hitCount`; 0 if it
+    /// was down). At most `screen_n / 2` of them are in `papers`.
     pub epmc_count: u64,
     /// Merged, de-duplicated records: PubMed's in relevance order, then
     /// Europe-PMC-only ones.
@@ -109,6 +110,211 @@ pub fn validate_query(q: &str) -> Result<(), &'static str> {
         return Err("unbalanced");
     }
     Ok(())
+}
+
+/// [`validate_query`], then the echo guard: a query holding eight or more
+/// consecutive words of the question is rejected as `echo` (the question's
+/// free text is never forwarded to NCBI or Europe PMC, spec §5).
+fn check_query(q: &str, question: &str) -> Result<(), &'static str> {
+    validate_query(q)?;
+    if contains_question(q, question) {
+        return Err("echo");
+    }
+    Ok(())
+}
+
+// ---------- Europe PMC translation (R-9b) ----------
+
+/// One lexical piece of a PubMed query.
+#[derive(Debug, Clone, PartialEq)]
+enum Tok {
+    Word(String),
+    /// A quoted phrase, without its quotes.
+    Phrase(String),
+    Open,
+    Close,
+    /// A field tag's contents, trimmed and lower-cased.
+    Tag(String),
+    /// AND, OR, NOT.
+    Op(&'static str),
+}
+
+/// Never yields a URL-like piece: any word or phrase containing `http` or
+/// `www.` is dropped. Control characters are separators.
+fn lex(q: &str) -> Vec<Tok> {
+    let unsafe_text = |t: &str| {
+        let l = t.to_ascii_lowercase();
+        l.contains("http") || l.contains("www.")
+    };
+    let mut out = Vec::new();
+    let mut chars = q.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() || c.is_control() || c == ']' {
+            chars.next();
+        } else if c == '"' {
+            chars.next();
+            let mut phrase = String::new();
+            for c in chars.by_ref() {
+                if c == '"' {
+                    break;
+                }
+                phrase.push(if c.is_control() { ' ' } else { c });
+            }
+            let phrase = phrase.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !phrase.is_empty() && !unsafe_text(&phrase) {
+                out.push(Tok::Phrase(phrase));
+            }
+        } else if c == '(' {
+            chars.next();
+            out.push(Tok::Open);
+        } else if c == ')' {
+            chars.next();
+            out.push(Tok::Close);
+        } else if c == '[' {
+            chars.next();
+            let mut tag = String::new();
+            for c in chars.by_ref() {
+                if c == ']' {
+                    break;
+                }
+                tag.push(c);
+            }
+            out.push(Tok::Tag(tag.trim().to_ascii_lowercase()));
+        } else {
+            let mut word = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() || c.is_control() || matches!(c, '"' | '(' | ')' | '[' | ']') {
+                    break;
+                }
+                word.push(c);
+                chars.next();
+            }
+            match word.as_str() {
+                "AND" => out.push(Tok::Op("AND")),
+                "OR" => out.push(Tok::Op("OR")),
+                "NOT" => out.push(Tok::Op("NOT")),
+                _ if unsafe_text(&word) => {}
+                _ => out.push(Tok::Word(word)),
+            }
+        }
+    }
+    out
+}
+
+/// The year a PubMed date starts with (`2015`, `2015/01/01`), if any.
+fn year_of(d: &str) -> Option<&str> {
+    let y = d.get(..4)?;
+    (y.chars().all(|c| c.is_ascii_digit())
+        && d[4..].chars().all(|c| c.is_ascii_digit() || c == '/'))
+    .then_some(y)
+}
+
+/// The Europe PMC form of one tagged term. `term` is the words (or phrase)
+/// the tag applies to; `quoted` is its quoted form.
+fn tagged(term: &str, phrase: bool, tag: &str) -> String {
+    // A single truncated word stays bare so the wildcard keeps working.
+    let q = if !phrase && !term.contains(' ') && term.contains('*') {
+        term.to_string()
+    } else {
+        format!("\"{term}\"")
+    };
+    let plain = if phrase {
+        format!("\"{term}\"")
+    } else {
+        term.to_string()
+    };
+    match tag {
+        "tiab" | "title/abstract" => format!("(TITLE:{q} OR ABSTRACT:{q})"),
+        "ti" | "title" => format!("TITLE:{q}"),
+        "mh" | "mesh" | "mesh terms" | "mh:noexp" | "mesh:noexp" | "majr" | "mesh major topic" => {
+            format!("MESH:{q}")
+        }
+        "pt" | "publication type" => format!("PUB_TYPE:{q}"),
+        "dp" | "pdat" | "date - publication" if !phrase => match term.split_once(':') {
+            Some((a, b)) => match (year_of(a), year_of(b)) {
+                (Some(a), Some(b)) => format!("PUB_YEAR:[{a} TO {b}]"),
+                _ => plain,
+            },
+            None => year_of(term).map_or(plain, |y| format!("PUB_YEAR:{y}")),
+        },
+        _ => plain,
+    }
+}
+
+/// Translate a PubMed query into Europe PMC syntax (Ruling R-9b). Outside
+/// quoted phrases:
+///
+/// * `X[tiab]` / `X[Title/Abstract]` → `(TITLE:"X" OR ABSTRACT:"X")`
+/// * `X[ti]` → `TITLE:"X"`
+/// * `X[mh]` / `X[mesh]` / `X[mh:noexp]` → `MESH:"X"`
+/// * `X[pt]` → `PUB_TYPE:"X"`
+/// * `a:b[dp]` → `PUB_YEAR:[a TO b]` (years), `a[dp]` → `PUB_YEAR:a`
+/// * any other tag is dropped, leaving the term
+///
+/// A tag applies to the quoted phrase right before it, or else to the run of
+/// unquoted words since the last operator, bracket, phrase or tag (PubMed's
+/// phrase reading). A single word with a `*` is left unquoted so truncation
+/// still works. Operators, parentheses and phrases are kept. Pure and total:
+/// never panics, and the output has no control characters and no URL-like
+/// text (such pieces are dropped).
+pub fn to_epmc_query(pubmed: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    // Untagged words waiting to see whether a tag follows.
+    let mut words: Vec<String> = Vec::new();
+    // The phrase just seen, if nothing has followed it yet.
+    let mut phrase: Option<String> = None;
+    let flush = |parts: &mut Vec<String>, words: &mut Vec<String>, phrase: &mut Option<String>| {
+        if let Some(p) = phrase.take() {
+            parts.push(format!("\"{p}\""));
+        }
+        parts.append(words);
+    };
+    for tok in lex(pubmed) {
+        match tok {
+            Tok::Word(w) => {
+                if let Some(p) = phrase.take() {
+                    parts.push(format!("\"{p}\""));
+                }
+                words.push(w);
+            }
+            Tok::Phrase(p) => {
+                flush(&mut parts, &mut words, &mut phrase);
+                phrase = Some(p);
+            }
+            Tok::Tag(tag) => {
+                if let Some(p) = phrase.take() {
+                    parts.push(tagged(&p, true, &tag));
+                } else if !words.is_empty() {
+                    let term = words.join(" ");
+                    words.clear();
+                    parts.push(tagged(&term, false, &tag));
+                }
+                // A tag with nothing before it is dropped.
+            }
+            Tok::Open => {
+                flush(&mut parts, &mut words, &mut phrase);
+                parts.push("(".into());
+            }
+            Tok::Close => {
+                flush(&mut parts, &mut words, &mut phrase);
+                parts.push(")".into());
+            }
+            Tok::Op(op) => {
+                flush(&mut parts, &mut words, &mut phrase);
+                parts.push(op.into());
+            }
+        }
+    }
+    flush(&mut parts, &mut words, &mut phrase);
+    // Join with spaces, but none just inside parentheses.
+    let mut out = String::new();
+    for p in parts {
+        if !out.is_empty() && !out.ends_with('(') && p != ")" {
+            out.push(' ');
+        }
+        out.push_str(&p);
+    }
+    out
 }
 
 /// Fixed kind of a literature error, for logs.
@@ -285,7 +491,9 @@ fn clean_reason(ctx: &RunContext, reason: &str) -> String {
     let q = ctx.question.trim().to_lowercase();
     if r.is_empty() {
         "no reason given".into()
-    } else if !q.is_empty() && r.to_lowercase().contains(&q) {
+    } else if contains_question(reason, &ctx.question)
+        || (!q.is_empty() && r.to_lowercase().contains(&q))
+    {
         // Never echo the question into a step line.
         "query adjusted".into()
     } else {
@@ -320,16 +528,21 @@ pub async fn search(
 
     for attempt in 0..attempts {
         if let Some((query, reason)) = proposal.take() {
-            match validate_query(&query) {
+            match check_query(&query, &ctx.question) {
                 Ok(()) => {
                     rejected = None;
-                    if attempt > 0 {
-                        let reason = clean_reason(ctx, &reason);
-                        add_line(ctx, StepKind::Search, &format!("Refined search: {reason}")).await;
-                        refinements.push((query.clone(), reason));
-                    }
                     match lit.pubmed.search(&query, hits_max).await {
                         Ok(hits) => {
+                            if attempt > 0 {
+                                let reason = clean_reason(ctx, &reason);
+                                add_line(
+                                    ctx,
+                                    StepKind::Search,
+                                    &format!("Refined search: {reason}"),
+                                )
+                                .await;
+                                refinements.push((query.clone(), reason));
+                            }
                             add_line(
                                 ctx,
                                 StepKind::Search,
@@ -347,6 +560,18 @@ pub async fn search(
                                 hits: Some(hits),
                                 titles: papers.into_iter().map(|p| p.title).collect(),
                             });
+                        }
+                        Err(e) if current.is_some() => {
+                            // A refinement failed: the previous query and its
+                            // hits stand as the final result.
+                            tracing::warn!(%run_id, step = "search", error_kind = lit_kind(&e), "pubmed search failed on a refinement; keeping the previous query");
+                            add_line(
+                                ctx,
+                                StepKind::Note,
+                                "PubMed unavailable; kept the previous query",
+                            )
+                            .await;
+                            break;
                         }
                         Err(e) => {
                             tracing::warn!(%run_id, step = "search", error_kind = lit_kind(&e), "pubmed search failed");
@@ -464,27 +689,27 @@ async fn finish(
     }
 
     let epmc_max = (ctx.settings.screen_n / 2).max(1);
-    let (epmc_papers, epmc_up) = match lit.epmc.search(&current.query, epmc_max).await {
-        Ok(v) => {
+    let epmc_query = to_epmc_query(&current.query);
+    let (epmc_papers, epmc_count, epmc_up) = match lit.epmc.search(&epmc_query, epmc_max).await {
+        Ok(h) => {
             add_line(
                 ctx,
                 StepKind::Search,
-                &format!("Searched Europe PMC: {} hits", v.len()),
+                &format!("Searched Europe PMC: {} hits", h.count),
             )
             .await;
-            (v, true)
+            (h.papers, h.count, true)
         }
         Err(e) => {
             tracing::warn!(%run_id, step = "search", error_kind = lit_kind(&e), "europe pmc search failed");
             add_line(ctx, StepKind::Note, "Europe PMC unavailable").await;
-            (Vec::new(), false)
+            (Vec::new(), 0, false)
         }
     };
     if !pubmed_up && pubmed_papers.is_empty() && !epmc_up {
         tracing::warn!(%run_id, step = "search", "both literature databases unavailable");
         return Err(StepError::Lit);
     }
-    let epmc_count = epmc_papers.len() as u64;
 
     let mut papers = merge_results(pubmed_papers, epmc_papers);
     fill_abstracts(ctx, lit, &mut papers, &mut known, pubmed_up).await;

@@ -587,7 +587,7 @@ fn error_status(e: &claude_client::ClaudeError) -> Option<u16> {
 }
 
 /// Stop the question from opening or closing our `<question>` wrapper.
-fn neutralise_close_tag(question: &str) -> String {
+pub(crate) fn neutralise_close_tag(question: &str) -> String {
     let once = replace_ci(question, "</question>", "< /question>");
     replace_ci(&once, "<question>", "< question>")
 }

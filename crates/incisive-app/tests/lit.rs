@@ -1428,7 +1428,10 @@ mod epmc_unpaywall_tests {
             .mount(&server)
             .await;
         let oa = OaPolicy::default();
-        let papers = epmc(&server, &oa).search(TOPIC1, 10).await.unwrap();
+        let hits = epmc(&server, &oa).search(TOPIC1, 10).await.unwrap();
+        // The API's total, not the page size.
+        assert_eq!(hits.count, 789);
+        let papers = hits.papers;
         assert_eq!(papers.len(), 10);
         assert!(papers.iter().all(|p| p.source == PaperSource::EuropePmc));
 
@@ -1491,7 +1494,7 @@ mod epmc_unpaywall_tests {
             .await;
         let oa = OaPolicy::default();
         let e = epmc(&server, &oa);
-        let papers = e.search(TOPIC1, 10).await.unwrap();
+        let papers = e.search(TOPIC1, 10).await.unwrap().papers;
         let granted = papers
             .iter()
             .find(|p| p.pmid.as_deref() == Some("42778806"))
@@ -1526,7 +1529,7 @@ mod epmc_unpaywall_tests {
         let server = MockServer::start().await;
         serve_json(&server, SEARCH, body.to_string()).await;
         let oa = OaPolicy::default();
-        let papers = epmc(&server, &oa).search("x", 5).await.unwrap();
+        let papers = epmc(&server, &oa).search("x", 5).await.unwrap().papers;
         assert_eq!(papers[0].oa_url, None, "http is never granted");
         assert_eq!(papers[1].oa_url, None, "closed record");
         assert_eq!(papers[2].oa_url, None, "subscription link");
@@ -1556,8 +1559,21 @@ mod epmc_unpaywall_tests {
             r#"{"hitCount":0,"resultList":{"result":[]}}"#.into(),
         )
         .await;
-        let r = epmc(&server, &OaPolicy::default()).search("x", 5).await;
-        assert_eq!(r.unwrap(), vec![]);
+        let r = epmc(&server, &OaPolicy::default())
+            .search("x", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.count, 0);
+        assert!(r.papers.is_empty());
+
+        // No hitCount: the page length stands in for it.
+        let server = MockServer::start().await;
+        serve_json(&server, SEARCH, r#"{"resultList":{"result":[]}}"#.into()).await;
+        let r = epmc(&server, &OaPolicy::default())
+            .search("x", 5)
+            .await
+            .unwrap();
+        assert_eq!(r.count, 0);
     }
 
     // ----- Europe PMC full text -----
@@ -2024,7 +2040,8 @@ mod epmc_unpaywall_tests {
         let papers = epmc(&server, &OaPolicy::default())
             .search("x", 5)
             .await
-            .unwrap();
+            .unwrap()
+            .papers;
         assert!(papers[0].oa_is_pdf, "documentStyle pdf");
         assert_eq!(
             papers[0].oa_url.as_deref(),

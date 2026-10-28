@@ -35,6 +35,14 @@ pub struct FullText {
     pub sections: Vec<(String, String)>,
 }
 
+/// One page of Europe PMC search results.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpmcHits {
+    /// The API's total match count (`hitCount`); the page length when absent.
+    pub count: u64,
+    pub papers: Vec<Paper>,
+}
+
 pub struct EuropePmc {
     client: AllowlistedClient,
     oa: OaPolicy,
@@ -52,8 +60,9 @@ impl EuropePmc {
         Self { client, oa }
     }
 
-    /// Core search, up to `max` records (clamped to 1..=100).
-    pub async fn search(&self, query: &str, max: u16) -> Result<Vec<Paper>, LitError> {
+    /// Core search, up to `max` records (clamped to 1..=100), with the total
+    /// match count. `query` must be Europe PMC syntax.
+    pub async fn search(&self, query: &str, max: u16) -> Result<EpmcHits, LitError> {
         let mut u = Url::parse(REST)
             .and_then(|b| b.join("search"))
             .expect("static europe pmc url");
@@ -73,7 +82,8 @@ impl EuropePmc {
             }
             papers.push(paper);
         }
-        Ok(papers)
+        let count = body.hit_count.unwrap_or(papers.len() as u64);
+        Ok(EpmcHits { count, papers })
     }
 
     /// Full text of an open-access article by PMCID (`PMC` + digits).
@@ -98,6 +108,8 @@ fn is_pmcid(s: &str) -> bool {
 
 #[derive(Deserialize)]
 struct SearchResponse {
+    #[serde(rename = "hitCount")]
+    hit_count: Option<u64>,
     #[serde(rename = "resultList")]
     result_list: Option<ResultList>,
 }

@@ -104,6 +104,36 @@ pub fn clip(s: &str, max: usize) -> String {
     out
 }
 
+/// Consecutive question words that count as an echo.
+pub const ECHO_WORDS: usize = 8;
+
+/// Lower-cased words with everything but letters and digits removed.
+fn echo_words(s: &str) -> Vec<String> {
+    s.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// True when `text` contains a run of [`ECHO_WORDS`] (8) or more consecutive
+/// words of `question`, ignoring case, whitespace and punctuation. Used to
+/// keep the question out of step lines and search queries. A question of
+/// fewer than eight words never matches.
+pub fn contains_question(text: &str, question: &str) -> bool {
+    let q = echo_words(question);
+    if q.len() < ECHO_WORDS {
+        return false;
+    }
+    let t = format!(" {} ", echo_words(text).join(" "));
+    q.windows(ECHO_WORDS)
+        .any(|w| t.contains(&format!(" {} ", w.join(" "))))
+}
+
 /// Append a progress line (cut to [`MAX_STEP_LINE`]). A failed write is
 /// logged by kind only and otherwise ignored: the worker's heartbeat notices a
 /// deleted or lost run between steps.
