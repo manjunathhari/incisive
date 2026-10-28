@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use claude_client::{
-    ClaudeError, Client, ContentBlock, Message, MessagesRequest, RetryPolicy, Role, StopReason,
-    ToolChoice, ToolDef,
+    ClaudeError, Client, ContentBlock, Message, MessagesRequest, OutputConfig, OutputFormat,
+    RetryPolicy, Role, StopReason, ToolChoice, ToolDef,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -20,6 +20,7 @@ fn request() -> MessagesRequest {
         }],
         tools: vec![],
         tool_choice: None,
+        output_config: None,
     }
 }
 
@@ -343,4 +344,46 @@ async fn forced_tool_choice_is_sent() {
     assert!(
         matches!(&resp.content[0], ContentBlock::ToolUse { input, .. } if input == &json!({"a": 1}))
     );
+}
+
+#[test]
+fn output_config_is_omitted_when_unset_and_serialises_json_schema() {
+    let body = serde_json::to_value(request()).unwrap();
+    assert!(
+        !body.as_object().unwrap().contains_key("output_config"),
+        "{body}"
+    );
+    let mut req = request();
+    req.output_config = Some(OutputConfig {
+        format: OutputFormat::JsonSchema {
+            schema: json!({"type": "object", "additionalProperties": false}),
+        },
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {"type": "object", "additionalProperties": false}}})
+    );
+    // The deprecated parameter is never sent.
+    assert!(!body.as_object().unwrap().contains_key("output_format"));
+    assert!(!body.as_object().unwrap().contains_key("tool_choice"));
+}
+
+#[tokio::test]
+async fn refusal_stop_reason_is_parsed_and_unknown_is_other() {
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        json!({
+            "id": "msg_r",
+            "content": [{"type": "text", "text": "I can't help with that."}],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        }),
+    )
+    .await;
+    let resp = client(&server).create_message(&request()).await.unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::Refusal));
+    let other: StopReason = serde_json::from_value(json!("pause_turn")).unwrap();
+    assert_eq!(other, StopReason::Other);
 }

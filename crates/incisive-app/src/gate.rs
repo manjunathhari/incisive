@@ -539,6 +539,7 @@ impl Classifier for ClaudeClassifier {
             }],
             tools: vec![],
             tool_choice: None,
+            output_config: None,
         };
         let resp = self.client.create_message(&req).await.map_err(|e| {
             // Error kind only: never the request, which holds the question.

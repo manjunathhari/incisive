@@ -1,6 +1,7 @@
-//! A reply that cannot be read is logged without its content (Fix A, item 3):
-//! step, model, stop reason, whether a ToolUse block was present, its size
-//! and the serde error's category and position. Never reply text.
+//! A reply that cannot be read is logged without its content (Fix A, item 3,
+//! Ruling R-FA1): step, model, stop reason, its size and the serde error's
+//! category and position; a refusal logs its stop reason only. Never reply
+//! text.
 //!
 //! Own test binary with ONE test, so the capture subscriber is the global
 //! default before any callsite registers (see `ask_logging.rs`). Gated on
@@ -10,8 +11,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use claude_client::{ContentBlock, StopReason, Usage};
-use incisive_app::agent::llm::{LlmCall, ScriptedLlm, StepError, SubmitTool};
+use claude_client::{StopReason, Usage};
+use incisive_app::agent::llm::{LlmCall, OutputSchema, ScriptedLlm, StepError};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::runs::RunMode;
 use incisive_app::runs::budget::RunBudget;
@@ -105,23 +106,32 @@ async fn unreadable_replies_are_logged_without_content() {
         88.0,
     ));
 
-    // First: a ToolUse block whose input is the wrong type (a data error).
-    // Second: no ToolUse block, text that is not JSON (a syntax error).
+    // First: JSON of the wrong type (a data error). Second: valid JSON cut
+    // off by the token limit (truncated). Then a refusal (no retry).
     let llm = Arc::new(
         ScriptedLlm::new()
-            .reply_tool(json!({"answer": 5, "note": SECRET}), usage())
-            .reply_blocks(
-                vec![ContentBlock::Text {
-                    text: format!("I think {SECRET} is the answer"),
-                }],
-                Some(StopReason::EndTurn),
+            .reply_stop(
+                &format!("{{\"answer\": 5, \"note\": \"{SECRET}\"}}"),
+                StopReason::EndTurn,
+                usage(),
+            )
+            .reply_stop(
+                &format!("{{\"answer\": \"{SECRET}\"}}"),
+                StopReason::MaxTokens,
+                usage(),
+            )
+            .reply_stop(
+                &format!("I think {SECRET} is not something I can help with"),
+                StopReason::Refusal,
                 usage(),
             ),
     );
-    let tool = SubmitTool::new(
-        "Submit the answer.",
-        json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
-    );
+    let schema = OutputSchema::new(json!({
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": false
+    }));
     let call = LlmCall::new(
         llm.clone(),
         budget,
@@ -131,24 +141,32 @@ async fn unreadable_replies_are_logged_without_content() {
         "screen",
     );
     let err = call
-        .submit::<Out>("sys", "user", &tool, 100)
+        .structured::<Out>("sys", "user", &schema, 100)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::Parse);
     assert_eq!(llm.requests().len(), 2);
+    let err = call
+        .structured::<Out>("sys", "user", &schema, 100)
+        .await
+        .unwrap_err();
+    assert_eq!(err, StepError::Llm);
+    assert_eq!(llm.requests().len(), 3);
 
     let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     assert!(!logs.contains(SECRET), "{logs}");
     assert!(!logs.contains("I think"), "{logs}");
-    let first = logs
-        .lines()
-        .find(|l| l.contains("reply had no usable JSON; retrying once"))
-        .unwrap_or_else(|| panic!("{logs}"));
+    let line = |what: &str| {
+        logs.lines()
+            .find(|l| l.contains(what))
+            .unwrap_or_else(|| panic!("{what}: {logs}"))
+            .to_string()
+    };
+    let first = line("reply had no usable JSON; retrying once");
     for want in [
         "step=\"screen\"",
         "model=m-test",
-        "stop_reason=Some(ToolUse)",
-        "tool_use=true",
+        "stop_reason=Some(EndTurn)",
         "error_category=\"data\"",
         "reply_chars=",
         "error_line=",
@@ -156,16 +174,14 @@ async fn unreadable_replies_are_logged_without_content() {
     ] {
         assert!(first.contains(want), "{want} missing: {first}");
     }
-    let second = logs
-        .lines()
-        .find(|l| l.contains("reply had no usable JSON after retry"))
-        .unwrap_or_else(|| panic!("{logs}"));
+    let second = line("reply had no usable JSON after retry");
     for want in [
-        "stop_reason=Some(EndTurn)",
-        "tool_use=false",
-        "error_category=\"syntax\"",
-        "error_line=1",
+        "stop_reason=Some(MaxTokens)",
+        "error_category=\"truncated\"",
     ] {
         assert!(second.contains(want), "{want} missing: {second}");
     }
+    let refused = line("claude refused; call failed");
+    assert!(refused.contains("stop_reason=Some(Refusal)"), "{refused}");
+    assert!(!refused.contains("reply_chars"), "{refused}");
 }

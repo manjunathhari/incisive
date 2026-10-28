@@ -1,8 +1,8 @@
 //! Search (step 2): a PubMed query from the PICO, refined at most N times,
 //! then run on PubMed and Europe PMC and merged. Server only.
 //!
-//! The `search` model proposes `{"query": …, "reason": …}` through the forced
-//! `submit` tool (`LlmCall::submit`). Each proposal is
+//! The `search` model proposes `{"query": …, "reason": …}` as structured
+//! output (`LlmCall::structured`, [`PROPOSE_SCHEMA`]). Each proposal is
 //! untrusted and goes through [`validate_query`] and an echo guard (no run of
 //! eight question words, [`contains_question`]) before it is sent anywhere;
 //! an invalid one still uses up an attempt, and the search falls back to the
@@ -35,7 +35,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::frame::Pico;
-use super::llm::{LlmCall, StepError, SubmitTool, wrap_source};
+use super::llm::{LlmCall, OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, Literature, RunContext, add_line, clip, contains_question};
 use crate::lit::europepmc::merge_results;
 use crate::lit::http::LitError;
@@ -344,37 +344,33 @@ AND / OR / NOT, parentheses and truncation (*). Prefer a query that finds the st
 meta-analyses, randomised trials) without missing key studies. Apply the limits the surgeon stated. \
 Query rules, enforced by code: one line; at most 1,000 characters; only letters, digits, spaces and - \" ( ) [ ] * / : , . ' ; \
 balanced quotes and brackets; no URLs or web addresses. A query that breaks a rule is discarded. \
-Call the submit tool with one object.";
+Reply with one JSON object matching the given schema.";
 
-/// The submit tool for a proposal: `{"query", "reason"}`.
-static PROPOSE_TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
-    SubmitTool::new(
-        "Submit the proposed PubMed query and the reason for it.",
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "reason": {"type": "string"}
-            },
-            "required": ["query", "reason"]
-        }),
-    )
+/// The proposal's JSON Schema: `{"query", "reason"}`.
+pub static PROPOSE_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "reason": {"type": "string"}
+        },
+        "required": ["query", "reason"],
+        "additionalProperties": false
+    }))
 });
 
-/// The submit tool for a review: `{"accept"}`, or a new query with a reason.
-static REVIEW_TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
-    SubmitTool::new(
-        "Submit the review of the current query: accept it, or give a better query and the reason.",
-        json!({
-            "type": "object",
-            "properties": {
-                "accept": {"type": "boolean"},
-                "query": {"type": "string"},
-                "reason": {"type": "string"}
-            },
-            "required": ["accept"]
-        }),
-    )
+/// The review's JSON Schema: `{"accept"}`, or a new query with a reason.
+pub static REVIEW_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "accept": {"type": "boolean"},
+            "query": {"type": "string"},
+            "reason": {"type": "string"}
+        },
+        "required": ["accept"],
+        "additionalProperties": false
+    }))
 });
 
 /// Model reply proposing a query.
@@ -410,7 +406,7 @@ fn rejected_note(rejected: Option<&'static str>) -> String {
 
 fn propose_prompt(pico: &Pico, rejected: Option<&'static str>) -> String {
     format!(
-        "{}\n\nWrite the PubMed query for this PICO.{}\n\nCall the submit tool exactly as {{\"query\": string, \"reason\": string}}, where reason is one short sentence.",
+        "{}\n\nWrite the PubMed query for this PICO.{}\n\nReply exactly as {{\"query\": string, \"reason\": string}}, where reason is one short sentence.",
         pico_block(pico),
         rejected_note(rejected)
     )
@@ -433,8 +429,8 @@ fn review_prompt(
     }
     format!(
         "{}\n\nCurrent query:\n{query}\n\nPubMed hits: {count}\n\nFirst {} titles, in relevance order:\n{wrapped}{}\n\n\
-         If this query finds the evidence for this PICO well, call the submit tool with {{\"accept\": true}}. \
-         Otherwise call it with {{\"accept\": false, \"query\": string, \"reason\": string}} with a better query and one short sentence on why.",
+         If this query finds the evidence for this PICO well, reply {{\"accept\": true}}. \
+         Otherwise reply {{\"accept\": false, \"query\": string, \"reason\": string}} with a better query and one short sentence on why.",
         pico_block(pico),
         titles.len(),
         rejected_note(rejected)
@@ -561,10 +557,10 @@ pub async fn search(
     let mut rejected: Option<&'static str> = None;
 
     let first: Proposal = call
-        .submit(
+        .structured(
             SYSTEM,
             &propose_prompt(pico, None),
-            &PROPOSE_TOOL,
+            &PROPOSE_SCHEMA,
             MAX_TOKENS,
         )
         .await?;
@@ -694,10 +690,10 @@ async fn next_proposal(
 ) -> Result<Option<(String, String)>, StepError> {
     let Some(cur) = current else {
         let p: Proposal = call
-            .submit(
+            .structured(
                 SYSTEM,
                 &propose_prompt(pico, rejected),
-                &PROPOSE_TOOL,
+                &PROPOSE_SCHEMA,
                 MAX_TOKENS,
             )
             .await?;
@@ -706,7 +702,7 @@ async fn next_proposal(
     let count = cur.hits.as_ref().map_or(0, |h| h.count);
     let prompt = review_prompt(pico, &cur.query, count, &cur.titles, rejected);
     let r: Review = call
-        .submit(SYSTEM, &prompt, &REVIEW_TOOL, MAX_TOKENS)
+        .structured(SYSTEM, &prompt, &REVIEW_SCHEMA, MAX_TOKENS)
         .await?;
     if r.accept {
         return Ok(None);

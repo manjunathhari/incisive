@@ -12,9 +12,11 @@
 //!   excluded for lacking an abstract (Review Focus 4).
 //! * The PICO is sent inside `<pico>…</pico>` as data describing the question.
 //!   Screening is a recall step: the prompt says to include when uncertain.
-//! * The model answers through the forced `submit` tool with
-//!   `{"verdicts":[{"id":"p-N","include":bool,"code":…,"reason":"…"}]}` (a
-//!   bare array, from the text fallback, is read too).
+//! * The model answers with JSON matching [`SCHEMA`] (structured outputs):
+//!   `{"verdicts":[{"id":"p-N","include":bool,"code":…,"reason":"…"}]}`. The
+//!   reader takes `verdicts`; failing that, a bare array or an object with
+//!   exactly one array field; several other arrays are unreadable (fail
+//!   closed).
 //!   The reply is untrusted and read entry by entry, so one odd entry never
 //!   voids the batch: `id` may be a string or a number (`3` is `p-3`);
 //!   `include` may be a boolean or "true"/"yes"/"include" /
@@ -46,7 +48,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::frame::Pico;
-use super::llm::{StepError, SubmitTool, wrap_source};
+use super::llm::{OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, MAX_STEP_LINE, RunContext, add_line, clip, contains_question};
 use crate::lit::{Paper, PaperId};
 use crate::runs::StepKind;
@@ -285,39 +287,38 @@ The comparison and outcomes may differ. When uncertain, include the record \u{20
 Records may be in any language; judge them as they are. \
 A record marked as having no abstract must be judged on its title alone: include it if the title suggests it may be relevant, \
 and never exclude it only because the abstract is missing. \
-Call the submit tool with one verdict per record, in this form: \
+Reply with JSON matching the given schema, one verdict per record, in this form: \
 {\"verdicts\": [{\"id\": \"p-N\", \"include\": true or false, \"code\": string, \"reason\": \"one short phrase\"}]}. \
 For an included record, code is \"relevant\". For an excluded record, code is exactly one of: \
 population, intervention, comparison, outcome, design, not_relevant, other.";
 
-/// The submit tool: the verdict array wrapped in an object (a tool input is
-/// always an object).
-static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
-    SubmitTool::new(
-        "Submit one screening verdict per record.",
-        json!({
-            "type": "object",
-            "properties": {
-                "verdicts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "include": {"type": "boolean"},
-                            "code": {
-                                "type": "string",
-                                "enum": ["relevant", "population", "intervention", "comparison", "outcome", "design", "not_relevant", "other"]
-                            },
-                            "reason": {"type": "string"}
+/// The answer's JSON Schema (structured outputs): the verdict array wrapped
+/// in an object (the top level must be an object).
+pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "include": {"type": "boolean"},
+                        "code": {
+                            "type": "string",
+                            "enum": ["relevant", "population", "intervention", "comparison", "outcome", "design", "not_relevant", "other"]
                         },
-                        "required": ["id", "include", "code", "reason"]
-                    }
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["id", "include", "code", "reason"],
+                    "additionalProperties": false
                 }
-            },
-            "required": ["verdicts"]
-        }),
-    )
+            }
+        },
+        "required": ["verdicts"],
+        "additionalProperties": false
+    }))
 });
 
 /// Exclusion codes the model may give, with the label tallied for the
@@ -380,15 +381,26 @@ fn verdict_reason(v: &Value) -> &str {
     v.get("reason").and_then(Value::as_str).unwrap_or("")
 }
 
-/// The verdict list in a reply: the array itself, or the first array inside
-/// a top-level object (`{"verdicts": […]}`). `None` when there is none.
+/// The verdict list in a reply: the array itself; in an object, its
+/// `verdicts` array, else its only array field. An object with several
+/// arrays and no `verdicts` array is ambiguous: `None` (fail closed, review
+/// M-1). `None` when there is no list.
 fn verdict_list(reply: Value) -> Option<Vec<Value>> {
     match reply {
         Value::Array(a) => Some(a),
-        Value::Object(o) => o.into_iter().find_map(|(_, v)| match v {
-            Value::Array(a) => Some(a),
-            _ => None,
-        }),
+        Value::Object(mut o) => {
+            if let Some(Value::Array(a)) = o.remove("verdicts") {
+                return Some(a);
+            }
+            let mut arrays = o.into_iter().filter_map(|(_, v)| match v {
+                Value::Array(a) => Some(a),
+                _ => None,
+            });
+            match (arrays.next(), arrays.next()) {
+                (Some(a), None) => Some(a),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -526,7 +538,7 @@ pub async fn screen(
         let n = u32::try_from(records.len()).unwrap_or(u32::MAX);
         let (prompt, batch_title_only) = batch_prompt(pico, &records);
 
-        let reply: Value = match call.submit(SYSTEM, &prompt, &TOOL, MAX_TOKENS).await {
+        let reply: Value = match call.structured(SYSTEM, &prompt, &SCHEMA, MAX_TOKENS).await {
             Ok(v) => v,
             Err(e @ (StepError::Llm | StepError::Parse)) => {
                 tracing::warn!(%run_id, step = "screen", error_kind = e.kind(), records = n, "screening batch failed; not assessed");

@@ -12,6 +12,23 @@ pub struct MessagesRequest {
     /// How the model must use `tools`. Unset: omitted (the API default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    /// Structured outputs: the reply's text is JSON matching the schema.
+    /// Unset: omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+}
+
+/// The Messages API `output_config`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OutputConfig {
+    pub format: OutputFormat,
+}
+
+/// `output_config.format`: `{"type":"json_schema","schema":{…}}`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputFormat {
+    JsonSchema { schema: serde_json::Value },
 }
 
 /// The Messages API `tool_choice`. `Tool { name }` forces that one tool
@@ -81,6 +98,8 @@ pub enum StopReason {
     MaxTokens,
     StopSequence,
     ToolUse,
+    /// The model declined. Billed; the output may not match a schema.
+    Refusal,
     #[serde(other)]
     Other,
 }

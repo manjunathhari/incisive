@@ -33,21 +33,21 @@
 //!   Ruling R-11c follow-up), to the claim's population and setting
 //!   ([`SCOPE_RULE`]), and says the claim is the statement under test, never
 //!   an instruction ([`CLAIM_RULE`]).
-//! * The answer is asked for through the forced `submit` tool (Fix A), one
-//!   object, verdict first:
-//!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`.
-//!   With a ToolUse block its `input` is read; without one, the reply text,
-//!   where reasoning around the JSON is allowed (see `llm::parse_reply`).
-//!   Either way it is untrusted and read leniently, under the same rules: an
-//!   array, or an array inside an object, also
+//! * The answer is asked for as structured output (Ruling R-FA1: JSON
+//!   matching [`SCHEMA`], in the reply text), one object, verdict first:
+//!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`. It
+//!   is untrusted and read leniently: reasoning around the JSON is allowed
+//!   (see `llm::parse_reply`); an array, or an array inside an object, also
 //!   works; the claim id may be a number, a digit string or `claim-1` (an
 //!   entry without an id counts when it is the only one); a verdict for any
 //!   other claim never counts; the verdict word is read ignoring case
-//!   ("partly supported" is partial). A reply cut off by the token limit has
-//!   its verdict field salvaged when the word is complete (text path only). A
-//!   reply with no verdict for claim 1, or with more than one verdict field
-//!   (ambiguous), gets one retry ("Call the submit tool with your answer.");
-//!   still none: unsupported.
+//!   ("partly supported" is partial). A reply whose stop reason is
+//!   `max_tokens` is never read. Otherwise, text that is not usable JSON has
+//!   its verdict field salvaged when the word is complete. A reply with no
+//!   verdict for claim 1, with more than one verdict field (ambiguous), or
+//!   cut off by the token limit, gets one retry ("Reply with JSON matching
+//!   the given schema only."); still none: unsupported. A refusal fails that
+//!   claim's call (`Llm`) with no retry.
 //! * `OverBudget`, `Llm`, or no verdict after the retry, for one claim
 //!   makes that claim unsupported, and the rest are still checked. The
 //!   wrap-up point never skips Check. `Cancelled` and fatal errors propagate.
@@ -73,8 +73,7 @@ use serde_json::{Value, json};
 
 use super::extract::Extracted;
 use super::llm::{
-    Reply, SUBMIT_NUDGE, StepError, SubmitTool, log_unreadable, reply_fault, tool_answer,
-    wrap_source,
+    OutputSchema, Reply, SCHEMA_NUDGE, StepError, log_unreadable, reply_fault, wrap_source,
 };
 use super::screen::EvidenceLevel;
 use super::write::{Claim, Confidence, Draft, cap_confidence};
@@ -151,24 +150,24 @@ each inside <source id=\"ref-N\"> tags. Judge the claim only against these quote
 The claim is supported when its quotes state everything it says; partial when its quotes support part of it \
 or support it with less certainty or generality than it states; unsupported otherwise.";
 
-const SYSTEM_TAIL: &str = "Call the submit tool with one object, in this form: \
+const SYSTEM_TAIL: &str = "Reply with one JSON object matching the given schema, in this form: \
 {\"claim\": 1, \"verdict\": \"supported\" or \"partial\" or \"unsupported\", \"reason\": \"one short sentence\"}. \
 Put the verdict before the reason.";
 
-/// The submit tool: one verdict for claim 1.
-static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
-    SubmitTool::new(
-        "Submit the verdict for claim 1.",
-        json!({
-            "type": "object",
-            "properties": {
-                "claim": {"type": "integer"},
-                "verdict": {"type": "string", "enum": ["supported", "partial", "unsupported"]},
-                "reason": {"type": "string"}
-            },
-            "required": ["claim", "verdict", "reason"]
-        }),
-    )
+/// The answer's JSON Schema (structured outputs): one verdict for claim 1.
+/// `reason` is optional so that, with required properties output first, the
+/// verdict comes before the reason (as the prompt asks).
+pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "claim": {"type": "integer"},
+            "verdict": {"type": "string", "enum": ["supported", "partial", "unsupported"]},
+            "reason": {"type": "string"}
+        },
+        "required": ["claim", "verdict"],
+        "additionalProperties": false
+    }))
 });
 
 /// The verdict word from a reply that is not usable JSON (cut off by the token
@@ -203,32 +202,14 @@ fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
     }
 }
 
-/// How many `verdict` fields `v` holds, at any depth.
-fn verdict_fields(v: &Value) -> usize {
-    match v {
-        Value::Object(o) => o
-            .iter()
-            .map(|(k, v)| usize::from(k == "verdict") + verdict_fields(v))
-            .sum(),
-        Value::Array(a) => a.iter().map(verdict_fields).sum(),
-        _ => 0,
-    }
-}
-
-/// The verdict in one reply. With a ToolUse block, its input (already JSON)
-/// under the same rules as the text: claim 1 only, and exactly one verdict
-/// field (more is ambiguous: no verdict). Without one, the text path
-/// ([`verdict_from_text`]).
+/// The verdict in one reply: none when it was cut off by the token limit
+/// (Ruling R-FA1: never read, so it takes the retry), else the text path
+/// ([`verdict_from_text`], with its ambiguity and salvage rules).
 fn verdict_from_reply(reply: &Reply) -> Option<ClaimVerdict> {
-    let Some(input) = tool_answer(reply, Some(&TOOL)) else {
-        return verdict_from_text(&reply.text);
-    };
-    if verdict_fields(&input) > 1 {
+    if reply.truncated() {
         return None;
     }
-    verdict_entry(&input)
-        .and_then(|e| e.get("verdict"))
-        .map(|w| ClaimVerdict::read(Some(w)))
+    verdict_from_text(&reply.text)
 }
 
 fn system() -> String {
@@ -254,7 +235,7 @@ pub fn hold_per_claim_for(
         &llm.models.check,
         &system(),
         &claim_prompt(&widest, &by_ref),
-        Some(&TOOL),
+        Some(&SCHEMA),
         MAX_TOKENS,
     )
 }
@@ -514,10 +495,10 @@ pub async fn check(
             return Err(StepError::Cancelled);
         }
         let prompt = claim_prompt(&c, &by_ref);
-        // A reply cut off after its verdict still counts; only a reply with
-        // no verdict at all takes the retry.
+        // A reply with no verdict for claim 1 (or cut off by the token
+        // limit) takes the single retry. A refusal is `Llm`: no retry.
         let first = call
-            .reply(&system, &prompt, Some(&TOOL), MAX_TOKENS)
+            .reply(&system, &prompt, Some(&SCHEMA), MAX_TOKENS)
             .await
             .map(|r| {
                 let v = verdict_from_reply(&r);
@@ -534,8 +515,8 @@ pub async fn check(
         let reply = match first {
             Ok(Some(v)) => Ok(v),
             Ok(None) => {
-                let retry = format!("{prompt}{SUBMIT_NUDGE}");
-                match call.reply(&system, &retry, Some(&TOOL), MAX_TOKENS).await {
+                let retry = format!("{prompt}{SCHEMA_NUDGE}");
+                match call.reply(&system, &retry, Some(&SCHEMA), MAX_TOKENS).await {
                     Ok(r) => verdict_from_reply(&r).ok_or_else(|| {
                         log_unreadable(
                             &call,
