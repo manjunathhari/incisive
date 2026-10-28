@@ -15,7 +15,7 @@ A running record of the Phase 2 build, updated after every stage.
 | B. Literature tools | 5–7 | ✅ complete (28 Oct) |
 | C. Finding the evidence | 8–11 | ✅ complete (28 Oct) |
 | D. Writing and checking | 12–13 | ✅ complete (28 Oct) |
-| E. Quick, production, proof | 14–15 + review | ⬜ not started |
+| E. Quick, production, proof | 14–15 + review | ⏳ built and reviewed; live check and merge pending |
 
 ## Decisions made before the build
 1. **Test data for the literature sources is recorded from the real services.** You allowed PubMed, Europe PMC and Unpaywall in Settings (23:05 IST), so the saved sample responses the tests use come from the live services. Europe PMC was briefly down on its own side when I checked; if it stays down, I will write its sample by hand from the documented format and replace it later.
@@ -227,3 +227,65 @@ The full suite passes, including on a fresh database squeezed onto 2 CPUs.
 - **Then:** a whole-phase review, a pull request, and the merge on your go-ahead.
 
 **Needed from you:** the 20 gold-standard questions (for Task 15) and an NCBI API key (optional, but it speeds up searches).
+
+## Stage E: Quick, production and proof ⏳
+
+**Date:** 28 Oct 2026 · **Commits:** `58f815a..3299669`, plus your gold set `66fc72d` and the test fix `66f449e` · **Status:** built and reviewed. The live check and the merge are still to come.
+
+### What was built (plain English)
+- **Quick / Focused toggle.** It sits on the question box and shows each limit: Quick up to ₹15, Focused up to ₹40. These figures come from the live settings. Your browser remembers your choice, and Edit & re-run keeps the mode you used. The answer page shows a mode badge.
+- **Phase 2 production settings.** The deploy now handles:
+  - `UNPAYWALL_EMAIL`, which is required;
+  - optional model and limit overrides, which are checked before deploying, so a typo stops the deploy with a clear message;
+  - an optional NCBI key, which is never logged;
+  - the always-on CPU switch.
+  
+  README §11 explains each one.
+- **Gold-set runner.** It runs your benchmark questions through the real pipeline, under the same spending limits as the live site, and writes a report. For each question the report gives:
+  - landmark papers found;
+  - references re-checked independently on PubMed or Europe PMC (title, DOI and retraction), with no AI involved;
+  - claims removed;
+  - cost and time.
+  
+  It refuses to run against the live database. Reviewers tried 25 different ways to get past that check, and none worked.
+- **Your gold set.** 20 questions with answer keys (`docs/goldset/`). Every PMID and DOI was checked against PubMed. Landmarks for Q10–Q12 were added from PubMed and still need your confirmation.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 14. Toggle and production settings | Approved after 1 fix round | 1 | 58f815a, b74f692 |
+| 15. Gold-set runner | Approved after 2 fix rounds | 2 | dc937c7, bb4c56b, 344d641 |
+| Whole-phase review | Ready with fixes. One fix wave. | 1 | 7f5cf05, 3299669 |
+
+### Whole-phase review (all of Phase 2 read together)
+- **What held up:**
+  - **Money.** No path leaks a reservation or exceeds your caps.
+  - **Runs.** No run can stay "running" forever.
+  - **Security.**
+    - Every outside call goes through the allowlist.
+    - Paper text is always treated as data.
+    - Nobody can see or delete another user's runs.
+    - Answers are shown as plain text.
+  - **Migrations.** They only add to the live database and are safe on it.
+- **Fixed in the fix wave:**
+  - **AI outage reported as no evidence.** If the AI service failed during screening or reading, the answer used to say "No relevant evidence found". It now says the search could not be completed and marks the run partial.
+  - **Time limit setting.** It now actually controls the time limits. The defaults are unchanged: wrap-up at 3 minutes, hard stop at 6.
+  - **Orphaned reservations.** Money left reserved for a run that had been deleted is now released.
+  - **Full question.** The run page shows the full question.
+  - **Model prices.** The deploy checks that every AI model has a price.
+  - **Database index.** A new index speeds up spend checks.
+  - **Rollback notes.** The README now covers going back to Phase 1.
+
+### Decisions made during the stage (rulings)
+- **Always-on CPU is turned on for the launch** (your decision, 28 Oct). If CPU is throttled, a background Focused run stalls once the page is idle. Cost at Mumbai rates is about $0.068 per instance-hour, and the first ~66 hours a month are free. At expected use that is roughly ₹0–₹200 a month.
+- **A failed AI call is never reported as "no evidence".** An empty step that had failures counts as a service failure.
+
+### Still to do
+1. **Live check:** 5 Focused questions in Cloud Shell, with your key typed into a hidden prompt.
+2. **Gold-set run** of all 20 questions, to record the baseline.
+3. **Repository variables:**
+   - `UNPAYWALL_EMAIL`
+   - `CPU_ALWAYS=true`
+   - `HAS_NCBI_KEY`, if you create the key
+   - check `GLOBAL_MONTHLY_CAP_INR`
+4. **Pull request and merge** on your go-ahead.
