@@ -18,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }],
         }],
         tools: vec![],
+        tool_choice: None,
     };
     let resp = client.create_message(&req).await?;
     for block in &resp.content {

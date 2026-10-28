@@ -9,6 +9,20 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolDef>,
+    /// How the model must use `tools`. Unset: omitted (the API default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// The Messages API `tool_choice`. `Tool { name }` forces that one tool
+/// (`{"type":"tool","name":"…"}`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoice {
+    Auto,
+    Any,
+    Tool { name: String },
+    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

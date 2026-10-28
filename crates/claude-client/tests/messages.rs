@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use claude_client::{
     ClaudeError, Client, ContentBlock, Message, MessagesRequest, RetryPolicy, Role, StopReason,
+    ToolChoice, ToolDef,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -18,6 +19,7 @@ fn request() -> MessagesRequest {
             content: vec![ContentBlock::Text { text: "Hi".into() }],
         }],
         tools: vec![],
+        tool_choice: None,
     }
 }
 
@@ -273,4 +275,72 @@ fn debug_does_not_leak_key() {
     let shown = format!("{c:?}");
     assert!(!shown.contains("sk-live-SECRET"), "leaked: {shown}");
     assert!(shown.contains("[redacted]"));
+}
+
+#[test]
+fn tool_choice_is_omitted_when_unset() {
+    let body = serde_json::to_value(request()).unwrap();
+    let o = body.as_object().unwrap();
+    assert!(!o.contains_key("tool_choice"), "{body}");
+    assert!(!o.contains_key("tools"), "{body}");
+}
+
+#[test]
+fn forced_tool_choice_serialises_as_the_api_expects() {
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "submit".into(),
+        description: "Submit the answer.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+    }];
+    req.tool_choice = Some(ToolChoice::Tool {
+        name: "submit".into(),
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "tool", "name": "submit"})
+    );
+    assert_eq!(body["tools"][0]["name"], "submit");
+    assert_eq!(
+        serde_json::to_value(ToolChoice::Auto).unwrap(),
+        json!({"type": "auto"})
+    );
+    assert_eq!(
+        serde_json::to_value(ToolChoice::Any).unwrap(),
+        json!({"type": "any"})
+    );
+}
+
+#[tokio::test]
+async fn forced_tool_choice_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(
+            json!({"tool_choice": {"type": "tool", "name": "submit"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_t",
+            "content": [{"type": "tool_use", "id": "tu_1", "name": "submit", "input": {"a": 1}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "submit".into(),
+        description: "d".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+    req.tool_choice = Some(ToolChoice::Tool {
+        name: "submit".into(),
+    });
+    let resp = client(&server).create_message(&req).await.unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert!(
+        matches!(&resp.content[0], ContentBlock::ToolUse { input, .. } if input == &json!({"a": 1}))
+    );
 }
