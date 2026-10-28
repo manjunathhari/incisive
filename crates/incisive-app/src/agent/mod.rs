@@ -11,12 +11,14 @@
 //! returns a fixed body. Task 13 replaces the body of [`run_pipeline`]; the
 //! [`RunContext`] shape is fixed for it.
 
+pub mod check;
 pub mod extract;
 pub mod frame;
 pub mod llm;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
+pub mod write;
 
 use std::future::Future;
 use std::pin::Pin;

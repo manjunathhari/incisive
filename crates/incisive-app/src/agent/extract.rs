@@ -118,7 +118,7 @@ impl SourceKind {
 }
 
 /// One finding with its supporting quote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Finding {
     pub outcome: String,
     pub result: String,
