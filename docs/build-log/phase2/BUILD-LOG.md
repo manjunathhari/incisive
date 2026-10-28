@@ -13,8 +13,8 @@ A running record of the Phase 2 build, updated after every stage.
 |---|---|---|
 | A. Runs and history | 1–4 | ✅ complete (28 Oct) |
 | B. Literature tools | 5–7 | ✅ complete (28 Oct) |
-| C. Finding the evidence | 8–11 | ⏳ in progress |
-| D. Writing and checking | 12–13 | ⬜ not started |
+| C. Finding the evidence | 8–11 | ✅ complete (28 Oct) |
+| D. Writing and checking | 12–13 | ✅ complete (28 Oct) |
 | E. Quick, production, proof | 14–15 + review | ⬜ not started |
 
 ## Decisions made before the build
@@ -132,8 +132,98 @@ The full suite passes, including on a fresh database squeezed onto 2 CPUs.
 - **New database columns** for the cache: PMCID and the PDF flag. These are new migrations, and the earlier ones are never edited.
 
 ### Next stage
-**Stage C: Finding the evidence.** Already under way:
-- **Task 8, the budgeted Claude call:** done. Every AI call reserves its cost, stays charged even if the question is stopped mid-call, and paper text is wrapped as data.
-- **Task 9, framing and search:** done. The question becomes a PICO and a PubMed search, refined up to 3 times. In a live check, Europe PMC went from 3 to 101 hits once its queries were translated.
-- **Task 10, screening and retrieval:** being built.
-- **Task 11, extraction with verbatim quotes:** next.
+**Stage C: Finding the evidence.** It's reported below.
+
+## Stage C: Finding the evidence ✅
+
+**Date:** 28 Oct 2026 · **Commits:** `6148d4a..c47feb8` · **GitHub CI:** run 40623407579 on `7a371d7`, all checks passed. That was the first run after the repo went public; earlier runs had stopped on GitHub billing.
+
+### What was built (plain English)
+- **A budgeted Claude call.** Every AI call reserves its likely cost before it starts and is charged the real cost afterwards. The charge still happens if you stop the question mid-call. If the charge can't be recorded twice in a row, the run stops; it never carries on unbilled. Paper text is always wrapped and marked as data, so instructions hidden inside a paper are never treated as commands.
+- **Framing and search.** Your question is turned into a PICO (patients, intervention, comparison, outcome) and a PubMed search, which is refined up to 3 times if it finds too few or too many papers. The search is translated into Europe PMC's own syntax. In a live check this took Europe PMC from 3 hits to 101.
+- **Screening.** Haiku screens papers 10 at a time and leans towards keeping a paper when unsure. Each exclusion gets a coded reason. The evidence level (meta-analysis, RCT, cohort and so on) comes first from the paper's official publication type, not its title, so a comment *on* a meta-analysis isn't ranked as one.
+- **Retrieval.** Full text comes only from Europe PMC's structured open-access version. Everything else is read as abstract only.
+- **Extraction with verbatim quotes.** Each finding must quote the paper word for word, within one section, starting at the beginning of a clause, and at least 20 characters long. Any number in the finding must appear in the quote. The quote is checked against the paper by code, not by the AI. Each paper's text is capped at 25,000 characters, in the order abstract, results, methods; the discussion is dropped first.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 8. Budgeted Claude call | Approved after 1 fix round | 1 | 6148d4a, 5540d87 |
+| 9. Framing and search | Approved after 1 fix round | 1 | c0783b4, 5a233fe |
+| 10. Screening and retrieval | Approved after 1 fix round | 1 | 00e25ef, e89a624 |
+| 11. Extraction | Approved after 2 fix rounds | 2 | 46b733a, 7d6b17b, c47feb8 |
+
+### Review findings (summary)
+- **Money:**
+  - A failed charge could let a run carry on unbilled.
+  - Stopping a question mid-call could lose the charge.
+  - Both now fail safe.
+- **Search:** PubMed-style search terms were sent to Europe PMC unchanged, so it found almost nothing. Now translated.
+- **Screening:**
+  - One malformed reply could throw away a whole batch of 10.
+  - Titles could override publication types.
+  - Both are fixed.
+- **Extraction:** this was the most serious finding of the stage. A cut-off quote could pass the check. The reviewer showed how:
+  - by dropping a minus sign or a leading digit;
+  - by quoting "reduced mortality" out of "**not** reduced mortality";
+  - by writing decimals with a middle dot (0·52).
+
+  All of these are now blocked and kept as permanent tests.
+
+### Decisions made during the stage (rulings)
+- **A run stops if its cost can't be recorded.** *Cost if wrong:* an occasional run stops early because of a database hiccup.
+- **Paper text sent for extraction is capped at 25,000 characters per paper** (the spec allowed up to 60,000). *Cost if wrong:* fewer quotable sentences from discussion sections.
+- **Observational studies count as prospective cohorts only when the title says "prospective".** *Cost if wrong:* some real prospective cohorts are ranked lower ("other").
+
+## Stage D: Writing and checking ✅
+
+**Date:** 28 Oct 2026 · **Commits:** `dc414ee..d3d1127`, plus the CI fixes `7a371d7` and `149d77f` · **GitHub CI:** run 40632901642 on `149d77f` (result pending at time of writing; updated below when known).
+
+### What was built (plain English)
+- **Writing the answer.** Sonnet writes the answer from only two things: the PICO, and the verified findings with each paper's design, size and evidence level. It never sees the papers' full text at this point. The confidence wording ("strong", "moderate" and so on) is capped by code. "Strong" needs at least 2 RCTs, systematic reviews, meta-analyses or guidelines.
+- **Checking every claim.**
+  - The references are verified live against PubMed or Europe PMC first. Retracted or mismatched papers are removed.
+  - Each claim then gets its own check against the verified quotes only.
+  - The check confirms that each number belongs to the right measure and the right arm. For example, a p-value can't be presented as a risk ratio.
+  - A claim that loses all its references is dropped.
+- **The full pipeline.** Frame, then Search, Screen, Retrieve, Extract, Write and Check, with a live step line for each. Runs heartbeat, can be stopped, and finish gracefully when the time or money limit nears.
+- **The answer page.** The order on the page is:
+  1. "Decision support — the clinician decides."
+  2. The bottom line, with ◐ marking claims that are only partly supported.
+  3. Numbered references linking to PubMed or the DOI.
+  4. The search trail.
+  5. Edit & re-run.
+
+  All AI text is shown as plain text; it can never run as code on the page.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 12. Write and Check | Approved after 1 fix round | 1 | dc414ee, 5ba57c2 |
+| 13. Pipeline and answer page | Approved after 2 fix rounds, plus a small final round | 3 | 13df628, ea2c8ba, 265cfc9, d3d1127 |
+
+### Review findings (summary)
+- **Check (critical):** a claim could stay marked "supported" after its supporting paper was removed. That would credit a finding to the wrong paper. Now:
+  - references are verified before the claims are checked;
+  - each claim is checked on its own, so one claim's evidence can't leak into another.
+- **Pipeline:**
+  - Running out of money mid-reading could produce a false "No relevant evidence found". It now says the run stopped early.
+  - A run could spend its money gathering papers and then fail at the writing step. Every run now keeps back enough to write and check the answer before it gathers more.
+- **Privacy:** Edit & re-run now carries the question after `#` in the address. That part of an address is never sent to the server, so your clinical questions stay out of the Google server logs.
+
+### Decisions made during the stage (rulings)
+- **The Quick limit is raised from ₹5 to ₹15 (your decision, 28 Oct).** At real Sonnet prices ₹5 couldn't even cover writing and checking the answer. At ₹15 a Quick run reads about 4 abstracts and checks its claims. Focused stays at ₹40; it reads about 6 full-text papers or 10 abstracts.
+- **A run that hits its limit before reading anything is "partial".** "No relevant evidence found" is used only when every step ran.
+- **Fewer than 2 distinct verified references means the answer is marked "insufficient evidence"**, however confident the wording.
+
+### Problems found along the way
+- **A server restart interrupted Task 13.** Its partial work was saved to a backup branch and finished by a fresh builder.
+- **An intermittent CI failure.** A test that briefly installs a database trigger couldn't get the table lock in time on GitHub's slower machine. It now retries.
+
+### Next stage
+**Stage E: Quick, production and proof.**
+- **Task 14:** the Quick/Focused toggle; Phase 2 production settings; an optional NCBI key.
+- **Task 15:** the gold-set runner, plus a 5-question live check.
+- **Then:** a whole-phase review, a pull request, and the merge on your go-ahead.
+
+**Needed from you:** the 20 gold-standard questions (for Task 15) and an NCBI API key (optional, but it speeds up searches).
