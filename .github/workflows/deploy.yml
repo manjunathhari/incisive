@@ -103,6 +103,31 @@ jobs:
               exit 1
             fi
           done
+          # Every agent model, configured or default, must be priced in
+          # MODEL_PRICES: the app refuses to start otherwise, and failing here
+          # saves a build and push. The defaults mirror DEFAULT_MODEL and
+          # DEFAULT_SCREEN_MODEL in crates/incisive-app/src/agent/llm.rs.
+          if ! msg=$(python3 -c '
+          import json, os, sys
+          defaults = {"frame": "claude-sonnet-5-5", "search": "claude-sonnet-5-5",
+                      "screen": "claude-haiku-5-5", "extract": "claude-sonnet-5-5",
+                      "write": "claude-sonnet-5-5", "check": "claude-sonnet-5-5"}
+          prices = json.loads(os.environ["MODEL_PRICES"])
+          if not isinstance(prices, dict):
+              sys.exit("vars.MODEL_PRICES must be a JSON object")
+          raw = os.environ.get("AGENT_MODELS", "").strip()
+          models = json.loads(raw) if raw else {}
+          for step, default in defaults.items():
+              model = models.get(step, default)
+              # Same rule as the app: non-empty, no whitespace.
+              if not isinstance(model, str) or not model or any(c.isspace() for c in model):
+                  sys.exit("vars.AGENT_MODELS `" + step + "` must be a model name without spaces")
+              if model not in prices:
+                  sys.exit("vars.MODEL_PRICES has no price for " + model + " (agent step " + step + ")")
+          ' 2>&1); then
+            echo "::error::$msg (see infra/README.md sections 10 and 11)"
+            exit 1
+          fi
           # Optional switches: unset, true or false (a typo must not silently mean off).
           for v in HAS_NCBI_KEY CPU_ALWAYS; do
             case "${!v//[[:space:]]/}" in

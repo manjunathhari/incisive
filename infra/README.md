@@ -270,7 +270,9 @@ names below (a typo such as `limt_paise` is caught here), or if `HAS_NCBI_KEY` o
 
 **`AGENT_MODELS`.** Any of the keys `frame`, `search`, `screen`, `extract`, `write`,
 `check`; keys you leave out keep their default. Every model named here must also
-have an entry in `MODEL_PRICES` (section 10), or the app refuses to start.
+have an entry in `MODEL_PRICES` (section 10), or the app refuses to start. The
+Deploy workflow checks this before building, using the defaults above for any key
+you leave out, so a missing price fails the deploy early.
 
 ```json
 {"screen": "claude-haiku-5-5", "extract": "claude-sonnet-5-5"}
@@ -286,7 +288,7 @@ fields you want to change. Money is in paise (100 paise = 1 rupee). The defaults
 | `use_n` | 5 | 10 | papers read |
 | `full_text` | `false` | `true` | fetch free full text (otherwise abstracts only) |
 | `limit_paise` | 1500 (₹15) | 4000 (₹40) | cost limit, reserved in full when the run starts |
-| `time_limit_s` | 300 | 300 | time limit in seconds |
+| `time_limit_s` | 300 | 300 | time limit in seconds: the run starts writing up at 60% of it (180 s by default) and is failed at it plus 60 s (360 s by default); must be above 0 |
 
 ```json
 {"quick": {"limit_paise": 2000}, "focused": {"screen_n": 80}}
@@ -302,6 +304,13 @@ contact you if the app misbehaves on their service.
 
 Without a key PubMed allows 3 requests a second; with one, 10. The app works
 either way; a key just makes searches faster.
+
+The app keeps to that rate **per instance**: each Cloud Run instance paces its own
+PubMed requests. With `--max-instances=3`, three instances running questions at
+the same moment could together send up to three times NCBI's limit. That needs
+concurrent load across instances, which is unlikely at current use, and NCBI's
+"too many requests" replies are retried with backoff. The key raises the limit
+for every instance.
 
 1. Sign in (or create a free account) at https://account.ncbi.nlm.nih.gov/.
 2. Open **Account Settings** (your name, top right → Account settings).
@@ -328,14 +337,21 @@ key (only whether one is set).
 
 ### CPU always on (optional; costs more)
 
-**Why it helps.** A question runs in the background for up to about 5 minutes
+**Why it matters.** A question runs in the background for up to about 5 minutes
 after the Send request has already returned. With the default (`--cpu-throttling`,
 request-based billing) Cloud Run gives the instance CPU only while it is serving a
-request. While the run page is open it polls every 2 seconds, which keeps the run
-moving; if the user leaves the page, the run can stall, and a stalled run may end
-as `interrupted`. `CPU_ALWAYS=true` deploys with `--no-cpu-throttling` (instance-based
-billing): the CPU stays on for the life of the instance, so runs finish whether or
-not anyone is watching.
+request. The run page's polling does not reliably keep a run going: each poll gives
+the run only a short burst of CPU, and every Claude call needs a dozen or so
+database round trips. Expect Phase 2 under throttling to be slow even with the page
+open, so Focused runs may stop early (partial, "time limit") or fail at the hard
+stop. Once the page is closed or left idle, a run stalls; after 90 seconds without
+a heartbeat it ends as `interrupted`. A stalled worker can also hold the spending
+lock mid-transaction and delay other users' questions.
+
+**`CPU_ALWAYS=true` is recommended for Phase 2.** It deploys with
+`--no-cpu-throttling` (instance-based billing): the CPU stays on for the life of
+the instance, so runs finish whether or not anyone is watching. The deploy default
+stays `false` until you have confirmed the cost below.
 
 **What it costs.** With instance-based billing you pay for every second an
 instance exists, busy or idle, not just while it serves requests. With
@@ -363,3 +379,31 @@ or all of it; the pricing page says how much.
 When you are happy with the figure, set the repository variable `CPU_ALWAYS` to
 `true`; the next deploy switches billing. Set it back to `false` to return to
 request-based billing.
+
+### Rolling back Phase 2 (prefer rolling forward)
+
+If a Phase 2 release misbehaves, fix it and deploy again (roll forward). Going back
+to a Phase 1 image (or shifting traffic to a Phase 1 revision) keeps the app
+serving, but:
+
+- **Readiness stays down.** The Phase 1 binary does not know migrations 0005 to
+  0009 and its migration step refuses a database that has them, retrying forever:
+  `/readyz` answers 503 and the logs show `migration attempt failed` about every
+  30 seconds. Requests are still served (Cloud Run's default startup probe only
+  checks the port). Do **not** delete rows from `_sqlx_migrations` to quiet this:
+  rolling forward would then try to create the Phase 2 tables again and fail.
+- **Activity page and chain check are wrong.** Phase 1 cannot read the Phase 2
+  audit events (`run_started`, `run_finished`, `run_deleted`): the owner's Activity
+  page shows an error and the chain check reports **Broken**. This is a false
+  alarm, not tampering; both are correct again after rolling forward.
+- **Questions running at the time of the rollback stay reserved.** Phase 1 has no
+  run worker or recovery, so each one's full cost limit keeps counting against its
+  user's daily and monthly caps and the global cap. Release them in the Supabase
+  SQL editor (or `psql`):
+
+  ```sql
+  DELETE FROM incisive.spend WHERE kind = 'reservation' AND purpose = 'run';
+  ```
+
+  Charges already made stand. After rolling forward, recovery marks those runs
+  `interrupted` within a minute.
