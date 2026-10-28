@@ -360,7 +360,7 @@ static PICO_TAG: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)<\s*(/?)\s*pico"));
 
 /// Break any `<pico>` / `</pico>` inside the PICO text (`<` becomes `‹`), so
 /// it cannot close its wrapper.
-fn neutralise_pico_tags(text: &str) -> String {
+pub(crate) fn neutralise_pico_tags(text: &str) -> String {
     PICO_TAG.replace_all(text, "\u{2039}${1}pico").into_owned()
 }
 
