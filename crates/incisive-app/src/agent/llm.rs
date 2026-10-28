@@ -490,8 +490,14 @@ impl LlmCall {
         match tokio::spawn(task.run(hold)).await {
             Ok(r) => r,
             Err(_) => {
-                tracing::error!(%run_id, step = self.step, "claude call task failed");
-                Err(StepError::Llm)
+                // The task panicked (its hold was dropped while unwinding).
+                // Claude may have been called and billed, with no charge
+                // booked: count the estimate so the headroom is not reused,
+                // and fail closed (Ruling: JoinError is Unrecorded).
+                self.budget.count_unbooked(estimate);
+                tracing::error!(%run_id, step = self.step, paise = estimate, "claude call task failed; estimate counted as unbooked, reconcile manually");
+                self.budget.release_if_finished(&self.pool).await;
+                Err(StepError::Unrecorded)
             }
         }
     }
@@ -507,7 +513,16 @@ struct Attempt {
 }
 
 impl Attempt {
+    /// Make the call, then, if the run has ended meanwhile, release what is
+    /// left of its reservation (Ruling R-8d: the worker kept it for us).
     async fn run(self, hold: Hold) -> Result<String, StepError> {
+        let (budget, pool) = (self.call.budget.clone(), self.call.pool.clone());
+        let r = self.call_and_settle(hold).await;
+        budget.release_if_finished(&pool).await;
+        r
+    }
+
+    async fn call_and_settle(self, hold: Hold) -> Result<String, StepError> {
         let c = &self.call;
         let run_id = c.budget.run_id();
         match c.llm.call(&self.req).await {

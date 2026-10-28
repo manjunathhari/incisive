@@ -7,41 +7,50 @@
 //! pipeline only adds progress lines and charges its Claude calls through
 //! `ctx.budget`.
 //!
-//! This is the placeholder (Phase 2, Task 3): it writes one line per step and
-//! returns a fixed body. Task 13 replaces the body of [`run_pipeline`]; the
-//! [`RunContext`] shape is fixed for it.
+//! The orchestration itself lives in [`pipeline`]; the stored body is an
+//! [`answer::Answer`].
 
+pub mod answer;
 pub mod check;
 pub mod extract;
 pub mod frame;
 pub mod llm;
+mod pipeline;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
+#[cfg(feature = "test-util")]
+pub mod testing;
 pub mod write;
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
-use serde_json::{Value, json};
+use secrecy::SecretString;
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::User;
 use crate::lit::europepmc::EuropePmc;
+use crate::lit::http::{AllowlistedClient, OaPolicy};
 use crate::lit::pubmed::PubMed;
 use crate::runs::budget::RunBudget;
-use crate::runs::worker::{self, CancelFlag};
+use crate::runs::worker::CancelFlag;
 use crate::runs::{DepthSettings, RunMode, StepKind, store};
 use crate::server::AppState;
 use llm::{AgentModels, LlmCall, LlmClient};
 
+pub use pipeline::run_pipeline;
+
 /// Everything one run's pipeline needs. Built by the worker.
 pub struct RunContext {
-    /// Pool, prices, run limits and config. Later tasks reach the agent's
-    /// shared Claude client (an `Arc<dyn …>`) through it.
+    /// Pool, prices, run limits and config.
     pub state: AppState,
+    /// The agent's Claude client and its model per step (built at startup).
+    pub llm: Arc<AgentLlm>,
+    /// The literature clients (built at startup).
+    pub lit: Arc<Literature>,
     pub run_id: Uuid,
     pub user: User,
     /// The question as stored (post identifier filter). Never logged or audited.
@@ -53,10 +62,10 @@ pub struct RunContext {
     pub cancel: CancelFlag,
 }
 
-/// The agent's Claude client and its model per step.
-///
-/// Task 13 threads this through [`RunContext`] (an `Arc<AgentLlm>` field built
-/// once at startup); until then the step functions take it as a parameter.
+/// The agent's Claude client and its model per step. Built once at startup
+/// and reached through [`RunContext::llm`]; the step functions take it as a
+/// parameter (the pipeline passes `&ctx.llm`), so tests can drive one step
+/// with its own client.
 #[derive(Clone)]
 pub struct AgentLlm {
     pub client: Arc<dyn LlmClient>,
@@ -80,13 +89,30 @@ impl AgentLlm {
 /// The literature clients the steps use. The paper cache is reached through
 /// `ctx.state.pool`.
 ///
-/// Task 13/14 build one at startup and thread it through [`RunContext`] as an
-/// `Arc<Literature>` field; until then the step functions take it as a
-/// parameter. Retrieve (Task 10) needs only Europe PMC's `full_text`
-/// (Ruling R-10a), so there is no Unpaywall client here in Phase 2.
+/// Built once at startup ([`Literature::new`]) and reached through
+/// [`RunContext::lit`]; the step functions take it as a parameter. Retrieve
+/// (Task 10) needs only Europe PMC's `full_text` (Ruling R-10a), so there is
+/// no Unpaywall client here in Phase 2.
 pub struct Literature {
     pub pubmed: PubMed,
     pub epmc: EuropePmc,
+}
+
+impl Literature {
+    /// PubMed (with the NCBI key when there is one, and `email` as NCBI's
+    /// contact address) and Europe PMC over one allowlisted client and one
+    /// shared open-access policy.
+    pub fn new(
+        client: AllowlistedClient,
+        oa: OaPolicy,
+        ncbi_key: Option<SecretString>,
+        email: Option<String>,
+    ) -> Literature {
+        Literature {
+            pubmed: PubMed::new(client.clone(), ncbi_key).with_email(email),
+            epmc: EuropePmc::new(client, oa),
+        }
+    }
 }
 
 /// Longest step line stored.
@@ -166,45 +192,3 @@ pub enum PipelineOutcome {
 
 /// A boxed pipeline future borrowing its context.
 pub type PipelineFuture<'a> = Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>>;
-
-/// The pipeline steps for `mode`, in order, with their progress lines.
-fn steps(mode: RunMode) -> Vec<(StepKind, &'static str)> {
-    let mut v = vec![
-        (StepKind::Frame, "Framing the question"),
-        (StepKind::Search, "Searching PubMed and Europe PMC"),
-        (StepKind::Screen, "Screening titles and abstracts"),
-    ];
-    if mode == RunMode::Focused {
-        v.push((StepKind::Retrieve, "Fetching free full texts"));
-    }
-    v.extend([
-        (StepKind::Extract, "Extracting findings"),
-        (StepKind::Write, "Writing the answer"),
-        (StepKind::Check, "Checking every claim against its sources"),
-        (StepKind::Present, "Preparing the answer"),
-    ]);
-    v
-}
-
-/// Run the pipeline for `ctx`. Placeholder: one progress line per step, no
-/// Claude calls (so nothing is charged), and a fixed answer body.
-pub async fn run_pipeline(ctx: &RunContext) -> PipelineOutcome {
-    for (kind, line) in steps(ctx.mode) {
-        if ctx.cancel.is_cancelled() {
-            return PipelineOutcome::Failed("cancelled");
-        }
-        // A failed write usually means the run was deleted; the worker checks.
-        if store::add_step(&ctx.state.pool, ctx.run_id, kind, line)
-            .await
-            .is_err()
-        {
-            return PipelineOutcome::Failed("store");
-        }
-        // Still ours? (Interrupted or deleted elsewhere: stop.)
-        if !worker::heartbeat(ctx).await {
-            return PipelineOutcome::Failed("interrupted");
-        }
-        tokio::time::sleep(Duration::ZERO).await;
-    }
-    PipelineOutcome::Done(json!({ "placeholder": true }))
-}

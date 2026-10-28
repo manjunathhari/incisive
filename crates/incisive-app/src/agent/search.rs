@@ -63,6 +63,9 @@ pub struct SearchResult {
     /// Merged, de-duplicated records: PubMed's in relevance order, then
     /// Europe-PMC-only ones.
     pub papers: Vec<Paper>,
+    /// Databases that failed during the search ("PubMed", "Europe PMC"),
+    /// each once, for the trail. Their Note lines say the same.
+    pub unavailable: Vec<&'static str>,
 }
 
 /// Check a model-proposed PubMed query. The error is a fixed kind:
@@ -519,6 +522,8 @@ pub async fn search(
     let mut current: Option<Current> = None;
     let mut refinements: Vec<(String, String)> = Vec::new();
     let mut pubmed_up = true;
+    // PubMed failed on a refinement (the previous query's hits stand).
+    let mut pubmed_failed = false;
     let mut rejected: Option<&'static str> = None;
 
     let first: Proposal = call
@@ -571,6 +576,7 @@ pub async fn search(
                                 "PubMed unavailable; kept the previous query",
                             )
                             .await;
+                            pubmed_failed = true;
                             break;
                         }
                         Err(e) => {
@@ -632,7 +638,11 @@ pub async fn search(
         return Err(StepError::Cancelled);
     }
 
-    finish(ctx, lit, current, refinements, pubmed_up, known).await
+    let mut r = finish(ctx, lit, current, refinements, pubmed_up, known).await?;
+    if pubmed_failed && !r.unavailable.contains(&"PubMed") {
+        r.unavailable.insert(0, "PubMed");
+    }
+    Ok(r)
 }
 
 /// Ask for the next query: a fresh proposal when no query is valid yet,
@@ -720,12 +730,20 @@ async fn finish(
     )
     .await;
 
+    let mut unavailable = Vec::new();
+    if !pubmed_up {
+        unavailable.push("PubMed");
+    }
+    if !epmc_up {
+        unavailable.push("Europe PMC");
+    }
     Ok(SearchResult {
         final_query: current.query,
         refinements,
         pubmed_count,
         epmc_count,
         papers,
+        unavailable,
     })
 }
 

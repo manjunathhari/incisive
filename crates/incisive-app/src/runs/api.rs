@@ -28,7 +28,7 @@ use crate::identity::{CurrentUser, User};
 use crate::server::AppState;
 use crate::spend;
 
-pub const NOT_FOUND_MESSAGE: &str = "That question wasn't found. It may have been deleted.";
+pub const NOT_FOUND_MESSAGE: &str = super::RUN_NOT_FOUND_MESSAGE;
 pub const RUN_API_FAILED_MESSAGE: &str = "Incisive couldn't load your questions. Please try again.";
 pub const DEFAULT_LIMIT: i64 = 20;
 pub const MAX_LIMIT: i64 = 100;

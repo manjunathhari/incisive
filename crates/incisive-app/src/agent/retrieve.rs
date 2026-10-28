@@ -21,6 +21,9 @@
 //!
 //! Full texts are held in memory for Extract only, never stored.
 //!
+//! The "Reading K papers (…)" line is a Retrieve line in Focused mode; Quick
+//! mode has no Retrieve step, so there it is written under Extract.
+//!
 //! Privacy: nothing here logs titles, identifiers or text; only the run id,
 //! counts and fixed kinds.
 //!
@@ -111,6 +114,12 @@ pub async fn retrieve(
         line.push_str(&format!(", {title} title only"));
     }
     line.push(')');
-    add_line(ctx, StepKind::Retrieve, &line).await;
+    // Quick mode has no Retrieve step: its reading line belongs to Extract.
+    let kind = if ctx.settings.full_text {
+        StepKind::Retrieve
+    } else {
+        StepKind::Extract
+    };
+    add_line(ctx, kind, &line).await;
     Ok(used)
 }

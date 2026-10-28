@@ -759,6 +759,8 @@ fn app_state(pool: PgPool) -> AppState {
         dev_mode: true,
         runs: RunsConfig::default(),
         worker: WorkerHandle::default(),
+        llm: None,
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 
@@ -776,6 +778,8 @@ async fn run_ctx(pool: &PgPool, settings: DepthSettings, limit: i64) -> (RunCont
         .unwrap();
     let ctx = RunContext {
         state: app_state(pool.clone()),
+        llm: incisive_app::agent::testing::idle_llm(MODEL),
+        lit: incisive_app::agent::testing::offline_literature(),
         run_id: run,
         user,
         question: QUESTION.to_string(),
@@ -4217,6 +4221,7 @@ async fn all_claims_removed_gives_empty_checked() {
             removed: 2,
             refs_verified: 2,
             refs_removed: 0,
+            verified: vec![1, 2],
             insufficient: false,
         }
     );
@@ -4383,4 +4388,758 @@ async fn confidence_capped_by_evidence_level() {
     .await
     .unwrap();
     assert_eq!(c.claims[0].0.confidence, Confidence::Moderate);
+}
+
+// ---------- pipeline and answer (Task 13) ----------
+
+use incisive_app::agent::answer::{
+    Answer, AnswerClaim, CheckSummary, DECISION_SUPPORT, KeyStudy, NO_EVIDENCE, NO_VERIFIED_CLAIMS,
+    PARTIAL_MARK, Reference, Trail, render_text, rerun_href,
+};
+use incisive_app::agent::{PipelineOutcome, run_pipeline};
+use incisive_app::runs::RunStatus;
+use incisive_app::runs::store::set_status;
+
+/// A verbatim clause of the meta-analysis abstract (efetch fixture).
+const META_ABS_QUOTE: &str = "ICGFA significantly reduced overall anastomotic leak (risk ratio 0\u{b7}66 [95% CI 0\u{b7}56-0\u{b7}78]";
+
+/// A context for the whole pipeline in `mode`, with the run `running`.
+async fn pipeline_ctx(
+    pool: &PgPool,
+    mode: RunMode,
+    llm: &Arc<ScriptedLlm>,
+    server: &MockServer,
+    limit: i64,
+) -> (RunContext, i64) {
+    let settings = match mode {
+        RunMode::Quick => DepthSettings::QUICK,
+        RunMode::Focused => DepthSettings::FOCUSED,
+    };
+    let (mut ctx, uid) = run_ctx(pool, settings, limit).await;
+    ctx.mode = mode;
+    ctx.llm = Arc::new(agent_llm(llm));
+    ctx.lit = Arc::new(literature(server));
+    assert!(
+        set_status(pool, ctx.run_id, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    (ctx, uid)
+}
+
+/// Screening verdicts for every id up to p-30: p-1 and p-2 (the ICG RCT and
+/// the meta-analysis) included, the rest excluded.
+fn screen_reply() -> serde_json::Value {
+    let v: Vec<serde_json::Value> = (1..=30)
+        .map(|i| {
+            json!({"id": format!("p-{i}"), "include": i <= 2, "code": "population", "reason": "r"})
+        })
+        .collect();
+    json!(v)
+}
+
+fn meta_extraction() -> serde_json::Value {
+    json!({
+        "design": "systematic review and meta-analysis",
+        "n": 4754,
+        "population": "adults having colorectal resection",
+        "intervention": "ICG fluorescence angiography",
+        "comparison": "standard assessment",
+        "findings": [finding_r(META_ABS_QUOTE, "anastomotic leak", "risk ratio 0.66")],
+    })
+}
+
+fn three_claims() -> serde_json::Value {
+    json!({
+        "claims": [
+            {"text": "ICG angiography reduced anastomotic leak across randomised trials", "refs": [1], "confidence": "strong"},
+            {"text": "In one RCT the leak rate was 5.8% with ICG vs 7.9% without", "refs": [2], "confidence": "moderate"},
+            {"text": "Both sources point the same way", "refs": [1, 2, 2], "confidence": "strong"},
+        ],
+        "insufficient": false,
+    })
+}
+
+/// Frame, search (propose, accept), two screening batches: the calls every
+/// ICG run makes before Extract.
+fn gathering_script() -> ScriptedLlm {
+    ScriptedLlm::new()
+        .reply_json(agent_json("frame_pico.json"), u())
+        .reply_json(agent_json("search_initial.json"), u())
+        .reply_json(agent_json("search_accept.json"), u())
+        .reply_json(screen_reply(), u())
+        .reply_json(screen_reply(), u())
+}
+
+fn full_script(verdicts: &[&str]) -> Arc<ScriptedLlm> {
+    let mut llm = gathering_script()
+        .reply_json(meta_extraction(), u())
+        .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+        .reply_json(three_claims(), u());
+    for v in verdicts {
+        llm = llm.reply_json(verdict(v), u());
+    }
+    Arc::new(llm)
+}
+
+fn answer_of(outcome: &PipelineOutcome) -> Answer {
+    match outcome {
+        PipelineOutcome::Done(v) | PipelineOutcome::Partial(v) => {
+            serde_json::from_value(v.clone()).unwrap()
+        }
+        other => panic!("no answer: {other:?}"),
+    }
+}
+
+fn kinds(steps: &[StepLine]) -> Vec<StepKind> {
+    steps.iter().map(|s| s.kind).collect()
+}
+
+#[tokio::test]
+async fn end_to_end_focused_with_fixtures_produces_answer() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = full_script(&["supported", "supported", "partial"]);
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0, "every scripted call was made");
+
+    // References: only the two verified papers, renumbered 1..2 in ranked
+    // order (meta-analysis first).
+    let refs: Vec<(u8, Option<&str>)> = a
+        .references
+        .iter()
+        .map(|r| (r.ref_id, r.pmid.as_deref()))
+        .collect();
+    assert_eq!(refs, [(1, Some("41871586")), (2, Some("40042831"))]);
+    assert_eq!(a.references[0].study_type, "systematic review");
+    assert_eq!(a.references[1].study_type, "RCT");
+    assert_eq!(a.check.refs_verified, 2);
+    assert_eq!(a.check.refs_total, 2);
+
+    // Key studies (Focused).
+    assert_eq!(a.key_studies.len(), 2);
+    assert_eq!(a.key_studies[1].n, Some(1136));
+    assert_eq!(a.key_studies[1].source, "abstract only");
+    assert!(a.key_studies[1].main_finding.contains("5.8% vs 7.9%"));
+
+    // Bottom line: three claims, the third partly supported, refs deduped.
+    assert_eq!(a.bottom_line.len(), 3);
+    assert!(!a.bottom_line[0].partial);
+    assert!(a.bottom_line[2].partial);
+    assert_eq!(a.bottom_line[2].refs, [1, 2]);
+    assert_eq!(
+        a.check,
+        CheckSummary {
+            checked: 3,
+            supported: 2,
+            partial: 1,
+            removed: 0,
+            refs_verified: 2,
+            refs_total: 2
+        }
+    );
+    assert!(!a.insufficient);
+    assert!(!a.no_verified_claims);
+    assert_eq!(a.question, QUESTION);
+    assert_eq!(a.pico, pico());
+    assert_eq!(a.final_query, query_of("search_initial.json"));
+    assert_eq!(a.trail.pubmed_count, 126);
+    assert_eq!(a.trail.epmc_count, 789);
+    assert_eq!(a.trail.included, 2);
+    assert!(a.trail.screened > 2);
+    assert!(a.trail.unavailable.is_empty());
+    assert_eq!(a.trail.stopped_early, None);
+
+    // Cost: the answer's equals the sum of the run's charges and its row.
+    let charged: i64 = charge_rows(&pool, uid).await.iter().sum();
+    assert!(charged > 0);
+    assert_eq!(a.cost_paise, charged);
+    assert_eq!(run_cost(&pool, uid, ctx.run_id).await, charged);
+
+    // Steps: all eight kinds, in order, under the line rules.
+    let steps = steps_of(&ctx, uid).await;
+    assert_line_rules(&steps);
+    let k = kinds(&steps);
+    let pos = |kind| k.iter().position(|x| *x == kind).unwrap();
+    assert!(pos(StepKind::Frame) < pos(StepKind::Search));
+    assert!(pos(StepKind::Search) < pos(StepKind::Screen));
+    assert!(pos(StepKind::Screen) < pos(StepKind::Retrieve));
+    assert!(pos(StepKind::Retrieve) < pos(StepKind::Extract));
+    assert!(pos(StepKind::Extract) < pos(StepKind::Write));
+    assert!(pos(StepKind::Write) < pos(StepKind::Check));
+    assert_eq!(k.last(), Some(&StepKind::Present));
+
+    let text = render_text(&a);
+    assert!(text.starts_with(DECISION_SUPPORT), "{text}");
+    assert!(text.contains(&format!(
+        "- {PARTIAL_MARK} Both sources point the same way [1, 2]"
+    )));
+    assert!(text.contains("3 claims checked: 2 supported, 1 partly supported"));
+    assert!(text.contains("2/2 references verified"));
+}
+
+#[tokio::test]
+async fn quick_mode_has_no_key_studies_and_no_full_text_fetch() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = full_script(&["supported", "supported", "supported"]);
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Quick, &llm, &server, 500).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    let a = answer_of(&outcome);
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    assert_eq!(a.mode, RunMode::Quick);
+    assert!(a.key_studies.is_empty());
+    assert_eq!(a.references.len(), 2);
+    let full_text_requests = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/fullTextXML"))
+        .count();
+    assert_eq!(full_text_requests, 0);
+
+    let steps = steps_of(&ctx, uid).await;
+    assert!(steps.iter().all(|s| s.kind != StepKind::Retrieve));
+    let reading = steps
+        .iter()
+        .find(|s| s.line.starts_with("Reading "))
+        .expect("reading line");
+    assert_eq!(reading.kind, StepKind::Extract);
+    assert!(reading.line.contains("0 full text"));
+}
+
+#[tokio::test]
+async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    // The first extraction is expensive (~3,080 paise of 4,000): spend
+    // passes 70% and Extract stops before the second paper.
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), usage(100, 70_000))
+            .reply_json(
+                json!({"claims": [{"text": "ICG angiography reduced anastomotic leak", "refs": [1], "confidence": "strong"}], "insufficient": false}),
+                u(),
+            )
+            .reply_json(verdict("supported"), u()),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    // frame + 2 search + 2 screen + 1 extract + write + check
+    assert_eq!(llm.requests().len(), 8);
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    assert!(a.insufficient, "one paper is thin evidence");
+    assert_eq!(a.bottom_line.len(), 1);
+    assert_eq!(a.references.len(), 1);
+    let steps = steps_of(&ctx, uid).await;
+    let k = kinds(&steps);
+    assert!(k.contains(&StepKind::Write) && k.contains(&StepKind::Check));
+    let l = lines(&steps);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Search stopped early (cost limit)")),
+        "{l:?}"
+    );
+    assert!(render_text(&a).contains("Search stopped early (cost limit)."));
+
+    // Already past the wrap-up point (3 minutes) before Search: gathering
+    // is skipped entirely, with one note, and the answer says so.
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_json(agent_json("frame_pico.json"), u()));
+    let (mut ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let Some(past) = Instant::now().checked_sub(Duration::from_secs(200)) else {
+        return;
+    };
+    ctx.budget = Arc::new(RunBudget::new(ctx.run_id, uid, 4000, past, prices(), 88.0));
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("time limit"));
+    assert!(a.insufficient && a.bottom_line.is_empty() && !a.no_verified_claims);
+    assert_eq!(llm.requests().len(), 1, "only Frame ran");
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let k = kinds(&steps_of(&ctx, uid).await);
+    assert!(!k.contains(&StepKind::Search) && !k.contains(&StepKind::Screen));
+}
+
+#[tokio::test]
+async fn wrap_up_reached_in_search_skips_screen_with_a_note() {
+    // Carry-over 5: past the wrap-up point on entry to Screen, Screen does
+    // not run even one batch; nothing is extracted, so Write makes no call,
+    // there is no Check, and the answer says the search stopped early.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), usage(100, 70_000)),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    assert_eq!(llm.requests().len(), 3, "frame + 2 search, no screening");
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    assert!(a.trail.screened > 0 && a.trail.included == 0);
+    assert!(a.insufficient && a.bottom_line.is_empty() && !a.no_verified_claims);
+    let steps = steps_of(&ctx, uid).await;
+    let k = kinds(&steps);
+    assert!(!k.contains(&StepKind::Screen) && !k.contains(&StepKind::Check));
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|s| s.line.starts_with("Search stopped early (cost limit)"))
+            .count(),
+        1,
+        "one note"
+    );
+    assert_eq!(k.last(), Some(&StepKind::Present));
+}
+
+#[tokio::test]
+async fn hard_stop_marks_failed() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = full_script(&["supported", "supported", "supported"]);
+    let (mut ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let Some(past) = Instant::now().checked_sub(Duration::from_secs(361)) else {
+        return;
+    };
+    ctx.budget = Arc::new(RunBudget::new(ctx.run_id, uid, 4000, past, prices(), 88.0));
+    assert_eq!(
+        run_pipeline(&ctx).await,
+        PipelineOutcome::Failed("hard_stop")
+    );
+    assert!(llm.requests().is_empty(), "no step ran");
+    assert!(steps_of(&ctx, uid).await.is_empty());
+}
+
+/// Delegates to a scripted client and cancels the run (through the worker)
+/// once the first call has answered.
+struct CancelAfterFirst {
+    inner: Arc<ScriptedLlm>,
+    worker: WorkerHandle,
+    run_id: std::sync::OnceLock<Uuid>,
+}
+
+#[async_trait::async_trait]
+impl incisive_app::agent::llm::LlmClient for CancelAfterFirst {
+    async fn call(
+        &self,
+        req: &claude_client::MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, ClaudeError> {
+        let r = self.inner.call(req).await;
+        if let Some(id) = self.run_id.get() {
+            self.worker.cancel(*id);
+        }
+        r
+    }
+}
+
+#[tokio::test]
+async fn cancel_between_steps_stops_without_answer() {
+    let Some(pool) = pool().await else { return };
+    let (uid, run, _budget) = setup(&pool, 4000).await;
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let inner = full_script(&["supported", "supported", "supported"]);
+    let worker = WorkerHandle::default();
+    let client = Arc::new(CancelAfterFirst {
+        inner: inner.clone(),
+        worker: worker.clone(),
+        run_id: std::sync::OnceLock::new(),
+    });
+    client.run_id.set(run).unwrap();
+    let mut st = app_state(pool.clone());
+    st.worker = worker;
+    st.llm = Some(incisive_app::agent::testing::agent_llm(client, MODEL));
+    st.lit = Arc::new(literature(&server));
+
+    st.worker.spawn(st.clone(), run);
+    for _ in 0..500 {
+        if !st.worker.is_running(run) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!st.worker.is_running(run));
+    assert_eq!(inner.requests().len(), 1, "only Frame was called");
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.status, RunStatus::Failed);
+    assert_eq!(v.answer, None);
+    assert!(
+        v.steps.iter().all(|s| s.kind == StepKind::Frame),
+        "{:?}",
+        v.steps
+    );
+    // The Frame call's charge stands; the rest of the reservation is released.
+    assert_eq!(charge_rows(&pool, uid).await.len(), 1);
+    let left: Option<i64> = sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation'",
+    )
+    .bind(run)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, None);
+}
+
+#[tokio::test]
+async fn all_claims_removed_renders_no_verified_claims_message_and_partial() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = full_script(&["unsupported", "unsupported", "unsupported"]);
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert!(a.no_verified_claims);
+    assert!(a.bottom_line.is_empty());
+    assert_eq!(a.check.removed, 3);
+    // References and trail are still shown.
+    assert_eq!(a.references.len(), 2);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{NO_VERIFIED_CLAIMS}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(NO_EVIDENCE));
+    assert!(text.contains("References\n1. "));
+    assert!(text.contains("Search trail"));
+    assert!(text.contains("3 claims checked: 0 supported, 0 partly supported"));
+}
+
+#[tokio::test]
+async fn empty_search_gives_insufficient_answer() {
+    let Some(pool) = pool().await else { return };
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        ESEARCH,
+        200,
+        json!({"esearchresult": {"count": "0", "retmax": "0", "retstart": "0", "idlist": []}})
+            .to_string(),
+    )
+    .await;
+    mount(
+        &server,
+        EPMC_SEARCH,
+        200,
+        agent_fixture("epmc_search_empty.json"),
+    )
+    .await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u()),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    assert!(a.insufficient);
+    assert!(!a.no_verified_claims);
+    assert!(a.bottom_line.is_empty() && a.references.is_empty());
+    assert_eq!(a.trail.screened, 0);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{NO_EVIDENCE}\n")),
+        "{text}"
+    );
+    let k = kinds(&steps_of(&ctx, uid).await);
+    assert_eq!(k.last(), Some(&StepKind::Present));
+    assert!(!k.contains(&StepKind::Check));
+}
+
+fn sample_answer() -> Answer {
+    Answer {
+        question: "Does ICG <b>reduce</b> leak?".into(),
+        mode: RunMode::Focused,
+        created_at: chrono::DateTime::parse_from_rfc3339("2026-10-28T08:35:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        pico: pico(),
+        final_query: "icg[tiab]".into(),
+        bottom_line: vec![
+            AnswerClaim {
+                text: "ICG reduced leak".into(),
+                refs: vec![1, 2],
+                confidence: "strong".into(),
+                partial: false,
+            },
+            AnswerClaim {
+                text: "Effect was larger in rectal resections".into(),
+                refs: vec![1],
+                confidence: "moderate".into(),
+                partial: true,
+            },
+        ],
+        insufficient: false,
+        no_verified_claims: false,
+        key_studies: vec![KeyStudy {
+            ref_id: 1,
+            citation: "Smith J et al., Lancet Gastroenterol Hepatol, 2025".into(),
+            design: "meta-analysis".into(),
+            n: Some(4754),
+            main_finding: "anastomotic leak: RR 0.66".into(),
+            source: "abstract only".into(),
+        }],
+        references: vec![
+            Reference {
+                ref_id: 1,
+                title: "ICG meta-analysis.".into(),
+                journal: Some("Lancet".into()),
+                year: Some(2025),
+                pmid: Some("41871586".into()),
+                doi: Some("10.1016/x".into()),
+                study_type: "meta-analysis".into(),
+            },
+            Reference {
+                ref_id: 2,
+                title: "ICG RCT".into(),
+                journal: None,
+                year: None,
+                pmid: None,
+                doi: None,
+                study_type: "RCT".into(),
+            },
+        ],
+        check: CheckSummary {
+            checked: 3,
+            supported: 1,
+            partial: 1,
+            removed: 1,
+            refs_verified: 2,
+            refs_total: 3,
+        },
+        trail: Trail {
+            pubmed_count: 126,
+            epmc_count: 789,
+            screened: 15,
+            included: 3,
+            excluded_top: vec![("wrong population".into(), 7)],
+            refinements: vec![],
+            stopped_early: Some("time limit".into()),
+            unavailable: vec!["Europe PMC".into()],
+        },
+        cost_paise: 1840,
+        elapsed_s: 161,
+    }
+}
+
+#[test]
+fn render_text_contains_decision_support_line() {
+    let a = sample_answer();
+    let t = render_text(&a);
+    assert_eq!(t.lines().next(), Some(DECISION_SUPPORT));
+    assert_eq!(
+        DECISION_SUPPORT,
+        "Decision support \u{2014} the clinician decides."
+    );
+    assert!(t.contains("28 Oct 2026, 14:05 IST"), "{t}");
+    assert!(t.contains("- ICG reduced leak [1, 2] (strong)"));
+    assert!(t.contains(&format!(
+        "- {PARTIAL_MARK} Effect was larger in rectal resections [1] (moderate, partly supported)"
+    )));
+    assert!(t.contains("3 claims checked: 1 supported, 1 partly supported \u{25d0}, 1 removed. 2/3 references verified."));
+    assert!(t.contains(
+        "1. ICG meta-analysis. Lancet, 2025. PMID 41871586. DOI 10.1016/x. (meta-analysis)"
+    ));
+    assert!(t.contains("Top exclusion reasons: wrong population (7)"));
+    assert!(t.contains("Search stopped early (time limit)."));
+    assert!(t.contains("Unavailable: Europe PMC."));
+    assert!(t.contains("Cost and time: \u{20b9}18.40 \u{b7} 2 min 41 s"));
+    // Round trip through JSON (the browser deserializes the stored body).
+    let back: Answer = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+    assert_eq!(back, a);
+
+    // No verified claims: the message instead of an empty bottom line.
+    let mut none = a.clone();
+    none.bottom_line.clear();
+    none.no_verified_claims = true;
+    none.insufficient = true;
+    let t = render_text(&none);
+    assert!(
+        t.contains(&format!("Bottom line\n{NO_VERIFIED_CLAIMS}\n")),
+        "{t}"
+    );
+
+    // Edit & re-run: the question percent-encoded, with the mode.
+    assert_eq!(
+        rerun_href("ICG & leak? 5%", RunMode::Quick),
+        "/?q=ICG%20%26%20leak%3F%205%25&mode=quick"
+    );
+}
+
+/// Panics inside the spawned call task.
+struct PanickingLlm;
+
+#[async_trait::async_trait]
+impl incisive_app::agent::llm::LlmClient for PanickingLlm {
+    async fn call(
+        &self,
+        _req: &claude_client::MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, ClaudeError> {
+        panic!("boom");
+    }
+}
+
+#[tokio::test]
+async fn panicking_call_task_is_unrecorded_and_counts_the_estimate() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 4000).await;
+    let call = LlmCall::new(
+        Arc::new(PanickingLlm),
+        budget.clone(),
+        pool.clone(),
+        CancelFlag::default(),
+        MODEL,
+        "test",
+    );
+    let r = call.text("system", "user", 500).await;
+    assert_eq!(r, Err(StepError::Unrecorded));
+    assert!(StepError::Unrecorded.is_fatal());
+    assert!(budget.spent() > 0, "the estimate is counted");
+    assert_eq!(budget.held(), 0, "the hold was dropped");
+    assert!(charge_rows(&pool, uid).await.is_empty());
+}
+
+#[tokio::test]
+async fn insufficient_recomputed_after_check() {
+    // Write did not say insufficient, but only the claim citing ref 1
+    // survives Check: one distinct verified ref is thin evidence (R-12e).
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = full_script(&["supported", "unsupported", "unsupported"]);
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(a.bottom_line.len(), 1);
+    assert!(a.insufficient);
+    assert!(!a.no_verified_claims);
+    // Both refs verified live, so both are listed.
+    assert_eq!(a.references.len(), 2);
+    assert!(render_text(&a).contains("Insufficient evidence"));
+}
+
+#[tokio::test]
+async fn one_database_down_is_partial_and_both_down_fails_lit() {
+    let Some(pool) = pool().await else { return };
+    // Europe PMC down: the answer is still produced, marked partial.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        ESEARCH,
+        200,
+        lit_fixture("pubmed_esearch_icg.json"),
+    )
+    .await;
+    mount(
+        &server,
+        ESUMMARY,
+        200,
+        lit_fixture("pubmed_esummary_icg.json"),
+    )
+    .await;
+    mount(&server, EFETCH, 200, lit_fixture("pubmed_efetch_icg.xml")).await;
+    mount(&server, EPMC_SEARCH, 500, "down".into()).await;
+    // Five PubMed records: one screening batch.
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .reply_json(screen_reply(), u())
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(a.trail.unavailable, ["Europe PMC"]);
+    assert_eq!(a.bottom_line.len(), 3);
+    assert!(render_text(&a).contains("Unavailable: Europe PMC."));
+
+    // Both down: failed, error kind "lit".
+    let server = MockServer::start().await;
+    mount(&server, ESEARCH, 500, "down".into()).await;
+    mount(&server, EPMC_SEARCH, 500, "down".into()).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    assert_eq!(run_pipeline(&ctx).await, PipelineOutcome::Failed("lit"));
+}
+
+#[tokio::test]
+async fn step_errors_map_to_error_kinds() {
+    let Some(pool) = pool().await else { return };
+    let server = MockServer::start().await;
+    // Frame: Claude unreachable (scripted queue empty) -> "llm".
+    let llm = Arc::new(ScriptedLlm::new());
+    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    assert_eq!(run_pipeline(&ctx).await, PipelineOutcome::Failed("llm"));
+    // Frame: not JSON twice -> "parse".
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("no", u())
+            .reply_text("still no", u()),
+    );
+    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    assert_eq!(run_pipeline(&ctx).await, PipelineOutcome::Failed("parse"));
+    // A call task that panics: money unaccounted for -> "unrecorded".
+    let (mut ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    ctx.llm = incisive_app::agent::testing::agent_llm(Arc::new(PanickingLlm), MODEL);
+    assert_eq!(
+        run_pipeline(&ctx).await,
+        PipelineOutcome::Failed("unrecorded")
+    );
+    // Write failing after extraction -> "llm" (no answer from unchecked text).
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u()),
+    );
+    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    assert_eq!(run_pipeline(&ctx).await, PipelineOutcome::Failed("llm"));
 }

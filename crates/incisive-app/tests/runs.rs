@@ -959,7 +959,10 @@ fn app_state(pool: PgPool) -> AppState {
         gate_model: "m-test".into(),
         dev_mode: true,
         runs: RunsConfig::default(),
-        worker: WorkerHandle::default(),
+        // Runs started by `run_ask` use the deterministic placeholder.
+        worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
+        llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
+        lit: incisive_app::agent::testing::offline_literature(),
     }
 }
 
@@ -1236,13 +1239,15 @@ async fn restart_recovery_interrupts_and_releases() {
     backdate(&pool, running, "heartbeat_at", 120).await;
     let (u2, queued) = reserved_run(&pool, 4000).await;
     backdate(&pool, queued, "created_at", 120).await;
-    // A finished run whose worker never released (e.g. a failed release).
+    // A finished run whose worker never released (e.g. a failed release),
+    // finished long enough ago that no late call can still be settling.
     let (u3, leaked) = reserved_run(&pool, 4000).await;
     assert!(
         set_status(&pool, leaked, RunStatus::Done, None)
             .await
             .unwrap()
     );
+    backdate(&pool, leaked, "finished_at", 15 * 60).await;
     // A live run (another instance's): fresh heartbeat, left alone.
     let (u4, live) = reserved_run(&pool, 4000).await;
     assert!(
@@ -2308,4 +2313,299 @@ async fn ssr_history_page_renders() {
         body.contains("ICG &lt;b&gt;leak&lt;/b&gt; evidence?"),
         "{body}"
     );
+}
+
+// ---------- Task 13: agent wiring, late charges, answer page ----------
+
+#[tokio::test]
+async fn no_api_key_fails_closed() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    // The real pipeline, and no Claude client (dev without ANTHROPIC_API_KEY).
+    let mut st = app_state(pool.clone());
+    st.worker = WorkerHandle::default();
+    st.llm = None;
+    let user = new_user_with_cap(&pool, 100_000).await;
+    let run = started(run_ask(&st, &user, RULE_QUESTION, RunMode::Focused).await);
+    poll_status(&pool, user.id, run, RunStatus::Failed).await;
+    wait_idle(&st, run).await;
+    assert_eq!(error_kind(&pool, run).await.as_deref(), Some("no_api_key"));
+    assert_eq!(reservation(&pool, run).await, None);
+    let v = get_run_for_user(&pool, user.id, run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(v.answer.is_none() && v.steps.is_empty());
+}
+
+/// Starts one Claude call, abandons it after 50 ms (as the hard stop drops
+/// a call mid-flight), and finishes the run.
+fn abandons_a_call(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        let call = ctx.llm.call(ctx, "m-test", "test");
+        let r = tokio::time::timeout(Duration::from_millis(50), call.text("s", "u", 1000)).await;
+        assert!(r.is_err(), "the call must still be in flight");
+        PipelineOutcome::Done(json!({"abandoned": true}))
+    })
+}
+
+/// Answers only once the test opens the gate, so "still in flight" does not
+/// depend on timing.
+struct GatedLlm {
+    inner: incisive_app::agent::llm::ScriptedLlm,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl incisive_app::agent::llm::LlmClient for GatedLlm {
+    async fn call(
+        &self,
+        req: &claude_client::MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, claude_client::ClaudeError> {
+        self.gate.notified().await;
+        self.inner.call(req).await
+    }
+}
+
+/// Ruling R-8d: the worker keeps the reservation share held by calls still
+/// in flight; the late charge books against it and the last call releases
+/// the rest. Recovery's sweep leaves a just-finished run alone.
+#[tokio::test]
+async fn finish_keeps_headroom_for_calls_in_flight() {
+    let Some((pool, _guard)) = test_pool_exclusive().await else {
+        return;
+    };
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let llm = Arc::new(GatedLlm {
+        inner: incisive_app::agent::llm::ScriptedLlm::new().reply_text(
+            "late",
+            Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+            },
+        ),
+        gate: gate.clone(),
+    });
+    let mut st = app_state(pool.clone());
+    st.llm = Some(incisive_app::agent::testing::agent_llm(llm, "m-test"));
+    let (uid, run) = reserved_run(&pool, 4000).await;
+    st.worker.spawn_with(st.clone(), run, abandons_a_call);
+
+    poll_status(&pool, uid, run, RunStatus::Done).await;
+    wait_idle(&st, run).await;
+    // Finished, but the call is still in flight: its hold stays reserved.
+    let kept = reservation(&pool, run).await.expect("hold kept");
+    assert!(kept > 0 && kept < 4000, "{kept}");
+    assert!(charges(&pool, uid).await.is_empty());
+    // The periodic sweep must not release it either.
+    recover_stale_runs(&pool).await.unwrap();
+    assert_eq!(reservation(&pool, run).await, Some(kept));
+
+    // The late charge lands, then the call releases the rest.
+    gate.notify_one();
+    for _ in 0..300 {
+        if reservation(&pool, run).await.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(reservation(&pool, run).await, None);
+    let c = charges(&pool, uid).await;
+    assert_eq!(c.len(), 1);
+    let cost: i64 = sqlx::query_scalar("SELECT cost_paise FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cost, c[0].0, "runs.cost_paise is authoritative");
+    // The run_finished audit was written before the late charge.
+    let ev = run_events(&pool, run).await;
+    let finished: Vec<_> = ev.iter().filter(|(e, _)| e == "run_finished").collect();
+    assert_eq!(finished[0].1["cost_paise"], 0);
+}
+
+fn answer_json() -> serde_json::Value {
+    use incisive_app::agent::answer::*;
+    let a = Answer {
+        question: "ICG <b>leak</b> evidence & more?".into(),
+        mode: RunMode::Focused,
+        created_at: chrono::Utc::now(),
+        pico: Pico {
+            population: "adults having colorectal resection".into(),
+            intervention: "ICG angiography".into(),
+            comparison: Some("white light".into()),
+            outcomes: vec!["anastomotic leak".into()],
+            limits: vec![],
+        },
+        final_query: "icg[tiab] AND leak[tiab]".into(),
+        bottom_line: vec![
+            AnswerClaim {
+                text: "ICG <i>reduced</i> leak".into(),
+                refs: vec![1, 2],
+                confidence: "strong".into(),
+                partial: false,
+            },
+            AnswerClaim {
+                text: "Benefit was clearest in rectal resections".into(),
+                refs: vec![1],
+                confidence: "moderate".into(),
+                partial: true,
+            },
+        ],
+        insufficient: false,
+        no_verified_claims: false,
+        key_studies: vec![KeyStudy {
+            ref_id: 1,
+            citation: "Smith J et al., Lancet, 2025".into(),
+            design: "meta-analysis".into(),
+            n: Some(4754),
+            main_finding: "anastomotic leak: RR 0.66".into(),
+            source: "abstract only".into(),
+        }],
+        references: vec![Reference {
+            ref_id: 1,
+            title: "ICG meta-analysis".into(),
+            journal: Some("Lancet".into()),
+            year: Some(2025),
+            pmid: Some("41871586".into()),
+            doi: Some("10.1016/S2468-1253(25)00373-5".into()),
+            study_type: "meta-analysis".into(),
+        }],
+        check: CheckSummary {
+            checked: 2,
+            supported: 1,
+            partial: 1,
+            removed: 0,
+            refs_verified: 1,
+            refs_total: 1,
+        },
+        trail: Trail {
+            pubmed_count: 126,
+            epmc_count: 789,
+            screened: 15,
+            included: 2,
+            excluded_top: vec![("wrong population".into(), 7)],
+            refinements: vec![],
+            stopped_early: None,
+            unavailable: vec![],
+        },
+        cost_paise: 1840,
+        elapsed_s: 161,
+    };
+    serde_json::to_value(a).unwrap()
+}
+
+#[tokio::test]
+async fn ssr_run_page_renders_answer() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let run = create_run(
+        &pool,
+        uid,
+        "ICG <b>leak</b> evidence & more?",
+        RunMode::Focused,
+        4000,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    set_status(&pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert!(save_answer(&pool, run, &answer_json()).await.unwrap());
+    set_status(&pool, run, RunStatus::Done, None).await.unwrap();
+
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run}"), &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in {body}"))
+    };
+    // Decision support first, before the bottom line.
+    assert!(at("Decision support \u{2014} the clinician decides.") < at("Bottom line"));
+    assert!(at("Bottom line") < at("Key studies"));
+    assert!(at("Key studies") < at("References"));
+    // Escaped text, never markup.
+    assert!(body.contains("ICG &lt;i&gt;reduced&lt;/i&gt; leak"));
+    assert!(!body.contains("<i>reduced</i>"));
+    assert!(!body.contains("<b>leak</b>"));
+    // Partial claims marked; check, trail, cost and time.
+    assert!(body.contains("\u{25d0}"));
+    assert!(body.contains("2 claims checked: 1 supported, 1 partly supported"));
+    assert!(body.contains("Screened 15, included 2, excluded 13"));
+    assert!(body.contains("\u{20b9}18.40"));
+    assert!(body.contains("2 min 41 s"));
+    assert!(body.contains("https://pubmed.ncbi.nlm.nih.gov/41871586/"));
+    // Edit & re-run prefills the question box.
+    assert!(
+        body.contains(
+            "/?q=ICG%20%3Cb%3Eleak%3C%2Fb%3E%20evidence%20%26%20more%3F&amp;mode=focused"
+        ),
+        "{body}"
+    );
+    assert!(body.contains("Edit &amp; re-run"));
+
+    // A stored body that is not an Answer is not shown raw.
+    let run2 = create_run(&pool, uid, "second", RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+    set_status(&pool, run2, RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert!(
+        save_answer(&pool, run2, &json!({"odd": "<script>x</script>"}))
+            .await
+            .unwrap()
+    );
+    set_status(&pool, run2, RunStatus::Done, None)
+        .await
+        .unwrap();
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run2}"), &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!body.contains("<script>x</script>"));
+    assert!(body.contains("This answer can"), "{body}");
+
+    // The home page prefills from ?q= (rendered for the browser to hydrate).
+    let (s, body) = send(
+        router(st),
+        api("GET", "/?q=ICG%20%3Cb%3Eleak&mode=quick", &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // The box is filled in the browser (`prop:value`): the server never puts
+    // the query text into the page as markup.
+    assert!(body.contains("<textarea"));
+    assert!(!body.contains("<b>leak"), "{body}");
+}
+
+#[tokio::test]
+async fn history_page_lists_up_to_100() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    for i in 0..25 {
+        finished_run(&pool, uid, &format!("history item {i:02}"), 100 - i).await;
+    }
+    let (s, body) = send(router(st), api("GET", "/history", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    for i in 0..25 {
+        assert!(body.contains(&format!("history item {i:02}")), "item {i}");
+    }
 }

@@ -304,6 +304,10 @@ pub async fn count_steps(pool: &PgPool, run_id: Uuid) -> sqlx::Result<i64> {
         .await
 }
 
+/// Minutes after a run finishes before recovery may release a reservation it
+/// still holds (a Claude call can take up to a few minutes with retries).
+pub const LATE_CHARGE_GRACE_MIN: i32 = 10;
+
 /// The run's recorded cost in paise, if the run exists.
 pub async fn run_cost(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar("SELECT cost_paise FROM incisive.runs WHERE id = $1")
@@ -315,13 +319,21 @@ pub async fn run_cost(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Option<i64>> 
 /// Finished runs (any terminal status) that still hold a spend reservation,
 /// as `(run_id, user_id)`: a release that never happened. Startup recovery
 /// releases them.
+///
+/// A run that finished less than [`LATE_CHARGE_GRACE_MIN`] minutes ago is
+/// left alone: its worker may have kept part of the reservation for a Claude
+/// call still in flight, which releases it once its late charge is booked
+/// (Ruling R-8d).
 pub async fn finished_runs_holding_reservation(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, i64)>> {
     sqlx::query_as(
         "SELECT r.id, r.user_id FROM incisive.runs r \
          JOIN incisive.spend s ON s.request_id = r.id AND s.user_id = r.user_id \
            AND s.kind = 'reservation' \
-         WHERE r.status IN ('done','partial','failed','interrupted')",
+         WHERE r.status IN ('done','partial','failed','interrupted') \
+           AND (r.finished_at IS NULL \
+                OR r.finished_at < now() - make_interval(mins => $1))",
     )
+    .bind(LATE_CHARGE_GRACE_MIN)
     .fetch_all(pool)
     .await
 }

@@ -3,10 +3,12 @@ use std::time::Duration;
 
 use claude_client::Client;
 use incisive_app::{
+    agent::{AgentLlm, Literature},
     config::{AppEnv, Config},
     db::{PgReadiness, lazy_pool, migrate_until_done},
     gate::{Classifier, ClaudeClassifier, OfflineClassifier},
     identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
+    lit::http::{AllowlistedClient, OaPolicy, default_user_agent},
     runs::worker::{WorkerHandle, recovery_loop},
     server::{AppState, build_router, install_panic_hook},
     spend::CapsConfig,
@@ -93,20 +95,40 @@ async fn main() {
         JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
     );
 
-    // The gate. No network at startup; the key is never logged. Config only lets
-    // the key be absent in dev, where every model call then fails closed.
-    let gate: Arc<dyn Classifier> = match config.anthropic_api_key.clone() {
-        Some(key) => Arc::new(ClaudeClassifier::new(
-            Arc::new(Client::new(key)),
+    // The gate and the agent share one Claude client. No network at startup;
+    // the key is never logged. Config only lets the key be absent in dev,
+    // where every model call then fails closed (runs fail as "no_api_key").
+    let claude: Option<Arc<Client>> = config
+        .anthropic_api_key
+        .clone()
+        .map(|key| Arc::new(Client::new(key)));
+    let gate: Arc<dyn Classifier> = match &claude {
+        Some(client) => Arc::new(ClaudeClassifier::new(
+            client.clone(),
             config.gate_model.clone(),
         )),
         None => {
             tracing::warn!(
-                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable"
+                "no ANTHROPIC_API_KEY (dev): questions the rules cannot decide will be refused as unavailable, and runs fail closed"
             );
             Arc::new(OfflineClassifier)
         }
     };
+    let llm = claude.map(|client| {
+        Arc::new(AgentLlm {
+            client,
+            models: config.agent_models.clone(),
+        })
+    });
+    // One allowlisted client and one open-access policy for all literature
+    // calls. The NCBI key (optional) arrives with Task 14's config.
+    let oa = OaPolicy::default();
+    let lit = Arc::new(Literature::new(
+        AllowlistedClient::new(default_user_agent(), oa.clone()),
+        oa,
+        None,
+        Some(config.unpaywall_email.clone()),
+    ));
     if config.model_prices.get(&config.gate_model).is_none() {
         tracing::warn!(
             gate_model = %config.gate_model,
@@ -127,6 +149,8 @@ async fn main() {
         dev_mode: config.app_env == AppEnv::Dev,
         runs: config.runs,
         worker: WorkerHandle::default(),
+        llm,
+        lit,
     };
 
     let app = build_router(

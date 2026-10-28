@@ -67,6 +67,8 @@ struct State {
     spent: i64,
     held: i64,
     calls: HashMap<Uuid, CallState>,
+    /// Set by the worker once the run has ended ([`RunBudget::finish`]).
+    finished: bool,
 }
 
 /// An in-flight reservation of part of the run's limit, taken before a Claude
@@ -275,6 +277,57 @@ impl RunBudget {
         self.state().spent += paise.max(0);
     }
 
+    /// Paise currently held by Claude calls in flight (taken, not yet charged
+    /// or dropped).
+    pub fn held(&self) -> i64 {
+        self.state().held
+    }
+
+    /// The worker ends the run: mark the budget finished and return what is
+    /// still held by calls in flight. The worker releases the reservation but
+    /// keeps this much of it; the last of those calls to settle releases the
+    /// rest ([`RunBudget::release_if_finished`]). Ruling R-8d.
+    pub fn finish(&self) -> i64 {
+        let mut st = self.state();
+        st.finished = true;
+        st.held
+    }
+
+    /// After a Claude call has settled (charged, or its hold dropped): if the
+    /// run has already ended and no call is in flight any more, release what
+    /// is left of the reservation. Idempotent; a failure is logged (ids only)
+    /// and left to the recovery sweep.
+    pub async fn release_if_finished(&self, pool: &PgPool) {
+        let idle = {
+            let st = self.state();
+            st.finished && st.held == 0
+        };
+        if idle
+            && spend::release(pool, self.user_id, self.run_id)
+                .await
+                .is_err()
+        {
+            tracing::error!(run_id = %self.run_id, "late reservation release failed");
+        }
+    }
+
+    /// Time since the run started.
+    pub fn elapsed(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.started)
+    }
+
+    /// Why the run should wrap up, if it should: "cost limit" (70% of the
+    /// limit spent) is reported before "time limit" (3 minutes elapsed).
+    pub fn wrap_up_reason(&self, now: Instant) -> Option<&'static str> {
+        if i128::from(self.spent()) * 100 >= i128::from(self.limit_paise) * WRAP_UP_PERCENT {
+            Some("cost limit")
+        } else if now.saturating_duration_since(self.started) >= WRAP_UP_AFTER {
+            Some("time limit")
+        } else {
+            None
+        }
+    }
+
     /// Paise charged so far in this run.
     pub fn spent(&self) -> i64 {
         self.state().spent
@@ -287,8 +340,7 @@ impl RunBudget {
     /// True once spend reaches 70% of the limit or 3 minutes have elapsed.
     /// Counts real spend only, not in-flight holds.
     pub fn should_wrap_up(&self, now: Instant) -> bool {
-        i128::from(self.spent()) * 100 >= i128::from(self.limit_paise) * WRAP_UP_PERCENT
-            || now.saturating_duration_since(self.started) >= WRAP_UP_AFTER
+        self.wrap_up_reason(now).is_some()
     }
 
     /// True once 6 minutes have elapsed.

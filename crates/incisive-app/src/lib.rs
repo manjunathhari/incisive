@@ -1,5 +1,11 @@
 #[cfg(feature = "ssr")]
 pub mod agent;
+/// Without `ssr` only the answer view types are built (the browser
+/// deserializes and draws them); the path is the same `agent/answer.rs`.
+#[cfg(not(feature = "ssr"))]
+pub mod agent {
+    pub mod answer;
+}
 pub mod app;
 pub mod ask;
 #[cfg(feature = "ssr")]
