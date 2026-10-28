@@ -12,8 +12,8 @@ A running record of the Phase 2 build, updated after every stage.
 | Stage | Tasks | Status |
 |---|---|---|
 | A. Runs and history | 1–4 | ✅ complete (28 Oct) |
-| B. Literature tools | 5–7 | ⏳ in progress |
-| C. Finding the evidence | 8–11 | ⬜ not started |
+| B. Literature tools | 5–7 | ✅ complete (28 Oct) |
+| C. Finding the evidence | 8–11 | ⏳ in progress |
 | D. Writing and checking | 12–13 | ⬜ not started |
 | E. Quick, production, proof | 14–15 + review | ⬜ not started |
 
@@ -97,3 +97,43 @@ The full suite passes, including on a fresh database squeezed onto 2 CPUs.
 
 ### Next stage
 **Stage B: Literature tools.** These are the connections to PubMed, Europe PMC and Unpaywall, with a fixed list of allowed addresses, a shared cache of paper details, retraction checks, and test data recorded from the real services.
+
+## Stage B: Literature tools ✅
+
+**Date:** 28 Oct 2026 · **Commits:** `69bd87b..40ba020`, plus the test-freeze fix `ab4df0e` and the CI fixes `aef426f` and `07280aa` · **GitHub CI:** run 40614291845 on `07280aa`. Everything passed: tests with Postgres, lint, the security audit, the container build (including the browser/WASM build) and the smoke test.
+
+### What was built (plain English)
+- **A locked-down web client.** Incisive's code can contact only PubMed (NCBI), Europe PMC, Unpaywall and Anthropic. A free full-text link is allowed only if it came from a Europe PMC or Unpaywall response, and only once. Reviewers tried more than a dozen tricks to reach other sites, including look-alike letters, IP addresses, user@host addresses, redirects and http downgrades. All were refused and are now permanent tests. Downloads are capped at 5 MB, and brief network hiccups are retried.
+- **PubMed connection.** It does search, paper details and abstracts. It stays under PubMed's limit of 3 requests per second (10 with a key), retries included. Retracted papers are detected two ways. The API key, when you add one, never appears in logs.
+- **Europe PMC and Unpaywall.** Europe PMC search finds open-access papers and reads their full text in sections: abstract, methods, results, discussion. Unpaywall finds free versions by DOI and records whether a link is a PDF or a web page. Results from both databases are merged, and duplicates are removed by PMID, DOI or PMCID.
+- **A shared cache of paper details.** It holds public bibliographic data only, with no record of who looked anything up. Entries are fresh for 30 days and deleted after 90. Refreshing a paper never wipes a saved abstract, and a retraction, once seen, stays marked.
+- **Real test data.** Since you allowed the three sites, the tests use real recorded responses. These include ICG and anastomotic leak (including a free full-text paper), inguinal hernia mesh RCTs, a retracted paper, and three Unpaywall cases: free PDF, free page only, and paywalled.
+
+### Tasks
+| Task | Review verdict | Fix rounds | Commits |
+|---|---|---|---|
+| 5. Locked-down web client | Approved after 1 fix round | 1 | 69bd87b, cd24f35 |
+| 6. PubMed and paper cache | Approved after 1 fix round | 1 | 8041144, c0d8a44 |
+| 7. Europe PMC and Unpaywall | Approved after 2 fix rounds | 2 | c3a8d5c, c9bd7ca, 40ba020 |
+
+### Two problems found along the way
+- **A test freeze.** One test suite occasionally froze. The root cause was in the web framework: building the app more than once in the same running server makes any page that loads data wait forever. The live site builds it once, so it was never affected. The tests rebuilt it constantly, which is how it surfaced. It's now built once per process, a test guards this, and a one-minute watchdog means a freeze can never stall GitHub again. 33 stress runs on 2 CPUs passed.
+- **GitHub failing for hours.** Once I made the failure readable, the reason was GitHub's build machine running out of disk. Compiling every test with full debugging information was too big. Builds now keep only the detail needed for readable errors, and the GitHub job deletes unused preinstalled tools first. GitHub is green again.
+
+### Review findings (summary)
+- **Web client:** network hiccups weren't retried, and the 5 MB cap relied on callers remembering it. Both are fixed.
+- **PubMed:** retries could break PubMed's rate limit, and a summary-only refresh could wipe a saved abstract. Both are fixed.
+- **Europe PMC and Unpaywall:** links didn't say whether they were PDFs, which Phase 2 can't read. Each link is now marked, web pages are preferred, and the marking is stored in the database. A temporary debugging file was accidentally included in a commit and has been removed.
+
+### Decisions made during the stage (rulings)
+- **Only the API responses can unlock a full-text link.** Never paper text or AI output. *Cost if wrong:* none.
+- **Retractions are "sticky" in the cache.** A refresh can't un-retract a paper. *Cost if wrong:* a genuine un-retraction would need a manual fix.
+- **Phase 2 reads full text only from Europe PMC's structured version.** Free PDFs and web pages are used as "abstract only". *Cost if wrong:* fewer full texts. Europe PMC's open-access set covers most free biomedical papers.
+- **New database columns** for the cache: PMCID and the PDF flag. These are new migrations, and the earlier ones are never edited.
+
+### Next stage
+**Stage C: Finding the evidence.** Already under way:
+- **Task 8, the budgeted Claude call:** done. Every AI call reserves its cost, stays charged even if the question is stopped mid-call, and paper text is wrapped as data.
+- **Task 9, framing and search:** done. The question becomes a PICO and a PubMed search, refined up to 3 times. In a live check, Europe PMC went from 3 to 101 hits once its queries were translated.
+- **Task 10, screening and retrieval:** being built.
+- **Task 11, extraction with verbatim quotes:** next.
