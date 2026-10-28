@@ -1,0 +1,33 @@
+# Gold-set questions: two worked examples.
+#
+# Copy this file to docs/goldset/questions.toml and write your own 20
+# questions in the same shape (see docs/goldset/README.md).
+#
+# Each [[q]] has:
+#   id         short, unique label (shown in the report)
+#   question   the clinical question, as you would type it into Incisive
+#   landmarks  the papers a good answer should cite. Each needs a title_hint
+#              (the start of the title, 20 characters or more); add the PMID
+#              and/or DOI when you know them. A landmark counts as found when
+#              a reference in the final answer has the same PMID, else the
+#              same DOI, else a title that starts with the hint.
+#
+# The landmark PMIDs and DOIs below are real records (taken from the PubMed
+# responses saved in crates/incisive-app/tests/fixtures/lit).
+
+[[q]]
+id = "icg-leak"
+question = "In adults having colorectal resection, does indocyanine green fluorescence angiography reduce anastomotic leak?"
+landmarks = [
+  { pmid = "40042831", doi = "10.1001/jamasurg.2025.0006", title_hint = "Indocyanine Green Fluorescence Imaging in Prevention of Colorectal Anastomotic Leakage" },
+  { pmid = "41871586", doi = "10.1016/S2468-1253(25)00373-5", title_hint = "Indocyanine green fluorescence angiography for anastomotic perfusion assessment in colorectal surgery" },
+  { pmid = "40690925", doi = "10.1016/S2468-1253(25)00101-3", title_hint = "Intraoperative fluorescence angiography with indocyanine green to prevent anastomotic leak in rectal cancer surgery" },
+]
+
+[[q]]
+id = "inguinal-lap-vs-open"
+question = "In adults with inguinal hernia, does laparoscopic mesh repair reduce chronic pain and recurrence compared with open Lichtenstein repair?"
+landmarks = [
+  { pmid = "9657784", doi = "10.1136/bmj.317.7151.103", title_hint = "Randomised controlled trial of laparoscopic versus open mesh repair for inguinal hernia" },
+  { pmid = "35777031", doi = "10.1097/MD.0000000000029746", title_hint = "Surgical outcomes of laparoscopic total extraperitoneal (TEP) inguinal hernia repair compared with Lichtenstein" },
+]

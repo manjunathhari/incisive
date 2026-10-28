@@ -12,6 +12,13 @@ name = "incisive-app"
 path = "src/main.rs"
 required-features = ["ssr"]
 
+# The gold-set runner (docs/goldset/README.md): runs the owner's questions as
+# real budgeted runs against a local database and writes a markdown report.
+[[bin]]
+name = "goldset"
+path = "src/bin/goldset.rs"
+required-features = ["ssr"]
+
 [dependencies]
 secrecy = "0.10"
 leptos = { version = "0.8" }
@@ -46,6 +53,8 @@ tower-http = { version = "0.6", default-features = false, features = ["limit", "
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 # PubMed efetch XML (abstracts, retraction notices).
 quick-xml = { version = "0.42", optional = true }
+# The gold-set runner's questions file.
+toml = { version = "1", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -90,6 +99,7 @@ ssr = [
     "dep:tower-http",
     "dep:futures-util",
     "dep:quick-xml",
+    "dep:toml",
     "dep:leptos_axum",
     "leptos/ssr",
     "leptos_meta/ssr",
@@ -99,6 +109,8 @@ ssr = [
 
 [package.metadata.leptos]
 output-name = "incisive-app"
+# The server binary; `goldset` is a local tool and is never part of the site.
+bin-target = "incisive-app"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 site-addr = "127.0.0.1:8080"

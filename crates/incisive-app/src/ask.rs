@@ -474,7 +474,11 @@ mod server {
     /// After the gate says Medical: create the run (one active run per user,
     /// enforced by the database), reserve its full cost limit under the run id,
     /// audit `run_started`, then hand it to the background worker.
-    async fn start_run(
+    ///
+    /// Public for the gold-set runner (`src/bin/goldset.rs`), which starts
+    /// its runs through this same path after its own checks (the questions
+    /// are the owner's, so the gate is not consulted).
+    pub async fn start_run(
         state: &AppState,
         request_id: Uuid,
         user: &User,
