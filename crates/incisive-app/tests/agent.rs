@@ -1825,3 +1825,576 @@ async fn pubmed_failure_on_refinement_keeps_previous_query_and_hits() {
     assert!(!l.iter().any(|x| x.starts_with("Refined search")), "{l:?}");
     assert_line_rules(&steps);
 }
+
+// =====================================================================
+// Screen and Retrieve (Task 10)
+// =====================================================================
+
+use incisive_app::agent::retrieve::{PaperText, UsedPaper, retrieve};
+use incisive_app::agent::screen::{EvidenceLevel, Screened, screen};
+use incisive_app::lit::{Paper, PaperSource};
+
+const EPMC_FULLTEXT: &str = "/europepmc/webservices/rest/PMC13375015/fullTextXML";
+
+fn paper(pmid: &str, title: &str, abs: Option<&str>, year: i32, types: &[&str]) -> Paper {
+    Paper {
+        pmid: Some(pmid.to_string()),
+        pmcid: None,
+        doi: None,
+        title: title.to_string(),
+        authors: vec!["A B".into()],
+        journal: Some("J".into()),
+        year: Some(year),
+        pub_types: types.iter().map(|s| s.to_string()).collect(),
+        abstract_text: abs.map(str::to_string),
+        oa_url: None,
+        oa_is_pdf: false,
+        retracted: false,
+        source: PaperSource::PubMed,
+    }
+}
+
+/// The user message of the `i`-th request.
+fn request_text(llm: &ScriptedLlm, i: usize) -> String {
+    format!("{:?}", llm.requests()[i].messages)
+}
+
+fn source_count(text: &str) -> usize {
+    text.matches("<source id=").count()
+}
+
+fn excluded(s: &Screened, reason: &str) -> u32 {
+    s.excluded_counts
+        .iter()
+        .find(|(r, _)| r == reason)
+        .map_or(0, |(_, n)| *n)
+}
+
+fn pmids(s: &Screened) -> Vec<String> {
+    s.included
+        .iter()
+        .map(|(p, _, _)| p.pmid.clone().unwrap())
+        .collect()
+}
+
+/// Every record in a batch included, by id.
+fn include_all(ids: std::ops::RangeInclusive<usize>) -> serde_json::Value {
+    serde_json::Value::Array(
+        ids.map(|i| json!({"id": format!("p-{i}"), "include": true, "reason": "relevant"}))
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn retracted_excluded_before_model() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let mut bad = paper("1", "Retracted ICG trial", Some("abstract"), 2020, &[]);
+    bad.retracted = true;
+    let mut bad2 = paper("2", "Another retracted one", Some("abstract"), 2021, &[]);
+    bad2.retracted = true;
+
+    // All retracted: no model call at all.
+    let llm = Arc::new(ScriptedLlm::new());
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), vec![bad.clone(), bad2])
+        .await
+        .unwrap();
+    assert!(llm.requests().is_empty());
+    assert!(s.included.is_empty());
+    assert_eq!(excluded(&s, "retracted"), 2);
+
+    // Mixed: the retracted record never reaches the model.
+    let good = paper("3", "ICG angiography trial", Some("abs"), 2022, &[]);
+    let llm = Arc::new(ScriptedLlm::new().reply_json(include_all(1..=1), u()));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), vec![bad, good])
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 1);
+    let text = request_text(&llm, 0);
+    assert_eq!(source_count(&text), 1);
+    assert!(!text.contains("Retracted ICG trial"), "{text}");
+    assert_eq!(pmids(&s), vec!["3"]);
+    assert_eq!(excluded(&s, "retracted"), 1);
+
+    let steps = steps_of(&ctx, uid).await;
+    assert_line_rules(&steps);
+    let l = lines(&steps);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Screened 2: included 0, excluded 2")),
+        "{l:?}"
+    );
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Screened 2: included 1, excluded 1")),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn missing_verdict_counts_as_excluded() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers = vec![
+        paper("11", "ICG RCT", Some("a"), 2020, &[]),
+        paper("12", "Paediatric ICG", Some("b"), 2021, &[]),
+        paper("13", "No verdict for me", Some("c"), 2022, &[]),
+    ];
+    let llm = Arc::new(ScriptedLlm::new().reply_json(agent_json("screen_batch_mixed.json"), u()));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    // p-1 included; p-2 excluded (first verdict wins); p-9 ignored; p-3 missing.
+    assert_eq!(pmids(&s), vec!["11"]);
+    assert_eq!(
+        s.included[0].2,
+        "Randomised trial of ICG angiography in colorectal resection"
+    );
+    assert_eq!(excluded(&s, "Wrong population: paediatric patients"), 1);
+    assert_eq!(excluded(&s, "not assessed"), 1);
+    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 2);
+
+    // A failed batch (bad JSON twice) is "not assessed", not an error.
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("include them all", u())
+            .reply_text("still prose", u()),
+    );
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    assert!(s.included.is_empty());
+    assert_eq!(excluded(&s, "not assessed"), 3);
+
+    // Reasons are cleaned: cut to 80 chars, and never echo the question.
+    let long = "x".repeat(200);
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!([
+            {"id": "p-1", "include": false, "reason": format!("  {long}  ")},
+            {"id": "p-2", "include": false, "reason": format!("Because: {QUESTION}")},
+            {"id": "p-3", "include": false, "reason": "   "}
+        ]),
+        u(),
+    ));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    for (r, _) in &s.excluded_counts {
+        assert!(r.chars().count() <= 80, "{r}");
+        assert!(!contains_question(r, QUESTION), "{r}");
+        assert!(!r.trim().is_empty());
+    }
+    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 3);
+    assert_line_rules(&steps_of(&ctx, uid).await);
+}
+
+#[tokio::test]
+async fn title_only_record_is_screened_and_counted() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    // A non-English abstract and a very long one go through unchanged / cut.
+    let long_abs = format!("{}{}", "é".repeat(2_990), "ABSTRACT-TAIL-MARKER".repeat(20));
+    let papers = vec![
+        paper("21", "ICG perfusion assessment trial", None, 2020, &[]),
+        paper("22", "Fluorescence in hernia", Some("   "), 2021, &[]),
+        paper(
+            "23",
+            "Angiografía con verde de indocianina",
+            Some("Estudio aleatorizado en cirugía colorrectal."),
+            2022,
+            &[],
+        ),
+        paper("24", "Long abstract", Some(&long_abs), 2023, &[]),
+    ];
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!([
+            {"id": "p-1", "include": true, "reason": "Title describes an ICG trial"},
+            {"id": "p-2", "include": false, "reason": "Wrong intervention"},
+            {"id": "p-3", "include": true, "reason": "Relevant"},
+            {"id": "p-4", "include": false, "reason": "Not relevant"}
+        ]),
+        u(),
+    ));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    // Both no-abstract records reached the model and got a verdict.
+    assert_eq!(s.title_only, 2);
+    assert_eq!(llm.requests().len(), 1);
+    let text = request_text(&llm, 0);
+    assert_eq!(source_count(&text), 4);
+    assert!(text.contains("ICG perfusion assessment trial"));
+    assert!(text.contains("Fluorescence in hernia"));
+    assert!(text.contains("Estudio aleatorizado en cirugía colorrectal."));
+    assert!(text.contains(&"é".repeat(2_990)));
+    assert!(!text.contains("ABSTRACT-TAIL-MARKER"), "abstract not cut");
+    assert_eq!(pmids(&s), vec!["23", "21"]);
+    assert_eq!(excluded(&s, "Wrong intervention"), 1);
+
+    let steps = steps_of(&ctx, uid).await;
+    assert_line_rules(&steps);
+    let l = lines(&steps);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Screened 4: included 2, excluded 2 (top reasons")),
+        "{l:?}"
+    );
+    assert!(l.iter().any(|x| x.contains("title only")), "{l:?}");
+}
+
+#[test]
+fn evidence_level_from_pub_types_and_title() {
+    let lv = |title: &str, types: &[&str]| EvidenceLevel::of(&paper("1", title, None, 2020, types));
+    assert_eq!(lv("x", &["Practice Guideline"]), EvidenceLevel::Guideline);
+    assert_eq!(lv("x", &["Guideline"]), EvidenceLevel::Guideline);
+    assert_eq!(
+        lv("x", &["Systematic Review"]),
+        EvidenceLevel::SystematicReview
+    );
+    assert_eq!(
+        lv("x", &["Meta-Analysis", "Review"]),
+        EvidenceLevel::MetaAnalysis
+    );
+    assert_eq!(
+        lv("x", &["Randomized Controlled Trial"]),
+        EvidenceLevel::Rct
+    );
+    assert_eq!(
+        lv("A prospective cohort", &["Journal Article"]),
+        EvidenceLevel::ProspectiveCohort
+    );
+    assert_eq!(
+        lv("x", &["Observational Study"]),
+        EvidenceLevel::ProspectiveCohort
+    );
+    assert_eq!(
+        lv("A retrospective review", &["Observational Study"]),
+        EvidenceLevel::Other
+    );
+    assert_eq!(lv("ICG: a meta-analysis", &[]), EvidenceLevel::MetaAnalysis);
+    assert_eq!(lv("A randomised trial", &[]), EvidenceLevel::Rct);
+    assert_eq!(lv("A non-randomized comparison", &[]), EvidenceLevel::Other);
+    assert_eq!(
+        lv("Consensus statement on ICG", &[]),
+        EvidenceLevel::Guideline
+    );
+    assert_eq!(lv("Case report", &["Case Reports"]), EvidenceLevel::Other);
+    // Guideline = systematic review = meta-analysis > RCT > cohort > other.
+    assert_eq!(
+        EvidenceLevel::Guideline.rank(),
+        EvidenceLevel::MetaAnalysis.rank()
+    );
+    assert_eq!(
+        EvidenceLevel::SystematicReview.rank(),
+        EvidenceLevel::MetaAnalysis.rank()
+    );
+    assert!(EvidenceLevel::MetaAnalysis.rank() < EvidenceLevel::Rct.rank());
+    assert!(EvidenceLevel::Rct.rank() < EvidenceLevel::ProspectiveCohort.rank());
+    assert!(EvidenceLevel::ProspectiveCohort.rank() < EvidenceLevel::Other.rank());
+}
+
+#[tokio::test]
+async fn ranking_by_level_then_year() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers = vec![
+        paper("31", "Case series", Some("a"), 2024, &["Case Reports"]),
+        paper(
+            "32",
+            "Trial A",
+            Some("a"),
+            2018,
+            &["Randomized Controlled Trial"],
+        ),
+        paper("33", "Prospective cohort", Some("a"), 2023, &[]),
+        paper(
+            "34",
+            "Trial B",
+            Some("a"),
+            2022,
+            &["Randomized Controlled Trial"],
+        ),
+        paper("35", "Review", Some("a"), 2015, &["Systematic Review"]),
+        paper("36", "Guideline", Some("a"), 2019, &["Practice Guideline"]),
+        paper(
+            "37",
+            "Trial C",
+            Some("a"),
+            2022,
+            &["Randomized Controlled Trial"],
+        ),
+        paper("38", "Meta", Some("a"), 2019, &["Meta-Analysis"]),
+    ];
+    let llm = Arc::new(ScriptedLlm::new().reply_json(include_all(1..=8), u()));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    // Top tier by year desc (ties keep original order), then RCTs, cohort, other.
+    assert_eq!(
+        pmids(&s),
+        vec!["36", "38", "35", "34", "37", "32", "33", "31"]
+    );
+    assert_eq!(s.included[0].1, EvidenceLevel::Guideline);
+    assert_eq!(s.included[3].1, EvidenceLevel::Rct);
+    assert_eq!(s.included[7].1, EvidenceLevel::Other);
+}
+
+#[tokio::test]
+async fn batches_of_ten_and_wrap_up_between_batches() {
+    let Some(pool) = pool().await else { return };
+    let papers: Vec<Paper> = (1..=25)
+        .map(|i| {
+            paper(
+                &format!("{}", 400 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+
+    // 25 records: batches of 10, 10, 5, ids numbered across batches.
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(include_all(1..=10), u())
+            // Ids from another batch are ignored: p-1 here is not p-11.
+            .reply_json(include_all(1..=10), u())
+            .reply_json(include_all(21..=25), u()),
+    );
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 3);
+    let counts: Vec<usize> = (0..3)
+        .map(|i| source_count(&request_text(&llm, i)))
+        .collect();
+    assert_eq!(counts, vec![10, 10, 5]);
+    assert!(request_text(&llm, 1).contains("p-11"));
+    assert_eq!(s.included.len(), 15);
+    assert_eq!(excluded(&s, "not assessed"), 10);
+    assert!(
+        lines(&steps_of(&ctx, uid).await)
+            .iter()
+            .any(|x| x.starts_with("Screened 25: included 15, excluded 10")),
+    );
+
+    // Past the 3-minute mark: the first batch runs, the rest is not assessed.
+    let (mut ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    ctx.budget = Arc::new(RunBudget::new(
+        ctx.run_id,
+        ctx.user.id,
+        10_000,
+        Instant::now() - Duration::from_secs(200),
+        prices(),
+        88.0,
+    ));
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(include_all(1..=10), u())
+            .reply_json(include_all(11..=20), u()),
+    );
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(s.included.len(), 10);
+    assert_eq!(excluded(&s, "not assessed (stopped early)"), 15);
+    assert_line_rules(&steps_of(&ctx, uid).await);
+
+    // Cancelled: no call, the error propagates.
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    ctx.cancel.cancel();
+    let llm = Arc::new(ScriptedLlm::new().reply_json(include_all(1..=10), u()));
+    let e = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap_err();
+    assert_eq!(e, StepError::Cancelled);
+    assert!(llm.requests().is_empty());
+}
+
+/// Included papers as Screen would return them.
+fn screened_of(papers: Vec<Paper>) -> Screened {
+    Screened {
+        included: papers
+            .into_iter()
+            .map(|p| {
+                let l = EvidenceLevel::of(&p);
+                (p, l, "relevant".to_string())
+            })
+            .collect(),
+        excluded_counts: vec![],
+        title_only: 0,
+    }
+}
+
+fn with_pmcid(mut p: Paper, pmcid: &str) -> Paper {
+    p.pmcid = Some(pmcid.to_string());
+    p
+}
+
+fn kind_of(u: &UsedPaper) -> &'static str {
+    match &u.text {
+        PaperText::FullText(_) => "full",
+        PaperText::AbstractOnly(_) => "abstract",
+        PaperText::TitleOnly => "title",
+    }
+}
+
+#[tokio::test]
+async fn quick_mode_never_fetches_full_text() {
+    let Some(pool) = pool().await else { return };
+    let quick = DepthSettings {
+        use_n: 2,
+        ..DepthSettings::QUICK
+    };
+    let (ctx, uid) = run_ctx(&pool, quick, 10_000).await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(EPMC_FULLTEXT))
+        .respond_with(ResponseTemplate::new(200).set_body_string(lit_fixture("epmc_fulltext.xml")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let papers = vec![
+        with_pmcid(
+            paper("51", "OA paper", Some("abstract 51"), 2024, &[]),
+            "PMC13375015",
+        ),
+        with_pmcid(paper("52", "No abstract", None, 2023, &[]), "PMC13375015"),
+        paper("53", "Beyond use_n", Some("abstract 53"), 2022, &[]),
+    ];
+    let used = retrieve(&ctx, &literature(&server), screened_of(papers))
+        .await
+        .unwrap();
+    assert_eq!(used.len(), 2);
+    assert_eq!(used[0].text, PaperText::AbstractOnly("abstract 51".into()));
+    assert_eq!(used[1].text, PaperText::TitleOnly);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Reading 2 papers (0 full text, 1 abstract only")),
+        "{l:?}"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn full_text_falls_back_to_abstract_when_unavailable() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        EPMC_FULLTEXT,
+        200,
+        lit_fixture("epmc_fulltext.xml"),
+    )
+    .await;
+    mount(
+        &server,
+        "/europepmc/webservices/rest/PMC1/fullTextXML",
+        404,
+        String::new(),
+    )
+    .await;
+    mount(
+        &server,
+        "/europepmc/webservices/rest/PMC2/fullTextXML",
+        200,
+        "<article><front></front></article>".into(),
+    )
+    .await;
+    let mut html = paper("64", "HTML OA only", Some("abstract 64"), 2020, &[]);
+    html.oa_url = Some("https://example.org/article/64".into());
+    let mut pdf = paper("65", "PDF OA only", Some("abstract 65"), 2020, &[]);
+    pdf.oa_url = Some("https://example.org/article/65.pdf".into());
+    pdf.oa_is_pdf = true;
+    let papers = vec![
+        with_pmcid(
+            paper("61", "Has full text", Some("abstract 61"), 2024, &[]),
+            "PMC13375015",
+        ),
+        with_pmcid(
+            paper("62", "EPMC 404", Some("abstract 62"), 2023, &[]),
+            "PMC1",
+        ),
+        with_pmcid(paper("63", "EPMC empty", None, 2022, &[]), "PMC2"),
+        html,
+        pdf,
+    ];
+    let used = retrieve(&ctx, &literature(&server), screened_of(papers))
+        .await
+        .unwrap();
+    assert_eq!(
+        used.iter().map(kind_of).collect::<Vec<_>>(),
+        vec!["full", "abstract", "title", "abstract", "abstract"]
+    );
+    let PaperText::FullText(ft) = &used[0].text else {
+        unreachable!()
+    };
+    assert!(!ft.sections.is_empty());
+    assert_eq!(used[1].text, PaperText::AbstractOnly("abstract 62".into()));
+    // Only Europe PMC was asked, once per PMCID; never the OA landing pages.
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        3,
+        "{:?}",
+        reqs.iter()
+            .map(|r| r.url.path().to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(reqs.iter().all(|r| r.url.path().ends_with("/fullTextXML")));
+    let steps = steps_of(&ctx, uid).await;
+    assert_line_rules(&steps);
+    let l = lines(&steps);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Reading 5 papers (1 full text, 3 abstract only")),
+        "{l:?}"
+    );
+
+    // Wrap-up between papers: nothing more is fetched.
+    let (mut ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    ctx.budget = Arc::new(RunBudget::new(
+        ctx.run_id,
+        ctx.user.id,
+        10_000,
+        Instant::now() - Duration::from_secs(200),
+        prices(),
+        88.0,
+    ));
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        EPMC_FULLTEXT,
+        200,
+        lit_fixture("epmc_fulltext.xml"),
+    )
+    .await;
+    let papers = vec![with_pmcid(
+        paper("66", "Has full text", Some("abstract 66"), 2024, &[]),
+        "PMC13375015",
+    )];
+    let used = retrieve(&ctx, &literature(&server), screened_of(papers))
+        .await
+        .unwrap();
+    assert_eq!(used[0].text, PaperText::AbstractOnly("abstract 66".into()));
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    // Cancelled: an error, no request.
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    ctx.cancel.cancel();
+    let papers = vec![with_pmcid(
+        paper("67", "x", Some("a"), 2024, &[]),
+        "PMC13375015",
+    )];
+    let e = retrieve(&ctx, &literature(&server), screened_of(papers))
+        .await
+        .unwrap_err();
+    assert_eq!(e, StepError::Cancelled);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

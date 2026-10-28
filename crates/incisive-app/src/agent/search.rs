@@ -318,7 +318,7 @@ pub fn to_epmc_query(pubmed: &str) -> String {
 }
 
 /// Fixed kind of a literature error, for logs.
-fn lit_kind(e: &LitError) -> &'static str {
+pub(crate) fn lit_kind(e: &LitError) -> &'static str {
     match e {
         LitError::Disallowed(_) => "disallowed",
         LitError::TooLarge => "too_large",

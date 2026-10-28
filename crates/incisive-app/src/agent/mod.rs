@@ -13,6 +13,8 @@
 
 pub mod frame;
 pub mod llm;
+pub mod retrieve;
+pub mod screen;
 pub mod search;
 
 use std::future::Future;
@@ -77,7 +79,8 @@ impl AgentLlm {
 ///
 /// Task 13/14 build one at startup and thread it through [`RunContext`] as an
 /// `Arc<Literature>` field; until then the step functions take it as a
-/// parameter. Retrieve (Task 10) adds the Unpaywall client here.
+/// parameter. Retrieve (Task 10) needs only Europe PMC's `full_text`
+/// (Ruling R-10a), so there is no Unpaywall client here in Phase 2.
 pub struct Literature {
     pub pubmed: PubMed,
     pub epmc: EuropePmc,
