@@ -3400,7 +3400,9 @@ fn middle_dot_decimals_are_one_number() {
 // =====================================================================
 
 use claude_client::ContentBlock;
-use incisive_app::agent::check::{CHECK_BATCH, Checked, ClaimVerdict, MEASURE_RULE, check};
+use incisive_app::agent::check::{
+    CLAIM_RULE, Checked, ClaimVerdict, MEASURE_RULE, SCOPE_RULE, check,
+};
 use incisive_app::agent::write::{Claim, Confidence, Draft, write};
 
 const ICG_TITLE: &str = "Indocyanine Green Fluorescence Imaging in Prevention of Colorectal Anastomotic Leakage: A Randomized Clinical Trial.";
@@ -3411,6 +3413,9 @@ const META_QUOTE: &str =
     "ICG fluorescence angiography reduced anastomotic leak (RR 0.67, 95% CI 0.55-0.82)";
 const PAPER_BODY: &str = "SECRET-PAPER-BODY: the discussion section speculates widely about costs";
 const EPMC_DOI: &str = "10.1007/s10151-026-03388-4";
+const EPMC_TITLE: &str = "Indocyanine green fluorescence angiography for prevention of anastomotic leak in colorectal surgery: a graded systematic review and meta-analysis with trial sequential analysis of randomized controlled trials.";
+const LASER_TITLE: &str = "Laser technology in urologic oncology.";
+const LASER_QUOTE: &str = "Laser energy has now reached an important role in focal therapy";
 
 /// The user message of the `i`-th request, as sent.
 fn user_text(llm: &ScriptedLlm, i: usize) -> String {
@@ -3465,7 +3470,7 @@ fn ext(
 
 /// Two real PubMed papers (ICG RCT, meta-analysis) as refs 1 and 2.
 fn two_papers() -> Vec<Extracted> {
-    vec![
+    let mut v = vec![
         ext(
             1,
             Some("40042831"),
@@ -3480,7 +3485,11 @@ fn two_papers() -> Vec<Extracted> {
             META_TITLE,
             &[META_QUOTE],
         ),
-    ]
+    ];
+    v[1].level = EvidenceLevel::MetaAnalysis;
+    v[1].design = "systematic review and meta-analysis".into();
+    v[1].n = None;
+    v
 }
 
 fn claim(text: &str, refs: &[u8]) -> Claim {
@@ -3491,6 +3500,13 @@ fn claim(text: &str, refs: &[u8]) -> Claim {
     }
 }
 
+fn strong(text: &str, refs: &[u8]) -> Claim {
+    Claim {
+        confidence: Confidence::Strong,
+        ..claim(text, refs)
+    }
+}
+
 fn draft(claims: Vec<Claim>) -> Draft {
     Draft {
         bottom_line: claims,
@@ -3498,19 +3514,24 @@ fn draft(claims: Vec<Claim>) -> Draft {
     }
 }
 
-fn verdicts(v: &[(usize, &str)]) -> serde_json::Value {
-    serde_json::Value::Array(
-        v.iter()
-            .map(|(i, s)| json!({"claim": i, "verdict": s}))
-            .collect(),
-    )
+fn verdict(s: &str) -> serde_json::Value {
+    json!([{"claim": 1, "verdict": s}])
 }
 
-/// PubMed esummary / efetch and the Europe PMC search, from fixtures.
-async fn verify_server(esummary: &str, efetch: &str) -> MockServer {
+/// A scripted checker answering `v` for successive claims.
+fn checker(v: &[&str]) -> Arc<ScriptedLlm> {
+    let mut llm = ScriptedLlm::new();
+    for s in v {
+        llm = llm.reply_json(verdict(s), u());
+    }
+    Arc::new(llm)
+}
+
+/// PubMed esummary / efetch and the Europe PMC search.
+async fn verify_server_with(esummary: String, efetch: String) -> MockServer {
     let server = MockServer::start().await;
-    mount(&server, ESUMMARY, 200, lit_fixture(esummary)).await;
-    mount(&server, EFETCH, 200, lit_fixture(efetch)).await;
+    mount(&server, ESUMMARY, 200, esummary).await;
+    mount(&server, EFETCH, 200, efetch).await;
     mount(
         &server,
         EPMC_SEARCH,
@@ -3521,8 +3542,33 @@ async fn verify_server(esummary: &str, efetch: &str) -> MockServer {
     server
 }
 
+async fn verify_server(esummary: &str, efetch: &str) -> MockServer {
+    verify_server_with(lit_fixture(esummary), lit_fixture(efetch)).await
+}
+
 async fn icg_verify_server() -> MockServer {
     verify_server("pubmed_esummary_icg.json", "pubmed_efetch_icg.xml").await
+}
+
+/// The ICG esummary with the retracted record (35422152) added, and the ICG
+/// efetch with its retracted article (RetractionIn) added.
+async fn icg_and_retracted_server() -> MockServer {
+    let mut sum: serde_json::Value =
+        serde_json::from_str(&lit_fixture("pubmed_esummary_icg.json")).unwrap();
+    let ret: serde_json::Value =
+        serde_json::from_str(&lit_fixture("pubmed_esummary_retracted.json")).unwrap();
+    sum["result"]["35422152"] = ret["result"]["35422152"].clone();
+    sum["result"]["uids"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("35422152"));
+    let icg = lit_fixture("pubmed_efetch_icg.xml");
+    let r = lit_fixture("pubmed_efetch_retracted.xml");
+    let art = &r[r.find("<PubmedArticle>").unwrap()
+        ..r.rfind("</PubmedArticle>").unwrap() + "</PubmedArticle>".len()];
+    let at = icg.rfind("</PubmedArticleSet>").unwrap();
+    let efetch = format!("{}{art}{}", &icg[..at], &icg[at..]);
+    verify_server_with(sum.to_string(), efetch).await
 }
 
 fn texts(c: &Checked) -> Vec<String> {
@@ -3544,8 +3590,8 @@ async fn write_prompt_contains_only_pico_and_quotes() {
     let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
     let llm = Arc::new(ScriptedLlm::new().reply_json(
         json!({"claims": [
-            {"text": "ICG angiography lowered anastomotic leak.", "refs": [1, 2], "confidence": "moderate"},
-            {"text": "Pooled data agree.", "refs": [2], "confidence": "strong"},
+            {"text": "ICG angiography lowered anastomotic leak.", "refs": [1, 2], "confidence": "strong"},
+            {"text": "Pooled data agree.", "refs": [2], "confidence": "moderate"},
             {"text": "Effects in rectal cancer are uncertain.", "refs": [1], "confidence": "Limited"},
         ], "insufficient": false}),
         u(),
@@ -3556,14 +3602,17 @@ async fn write_prompt_contains_only_pico_and_quotes() {
     assert!(!d.insufficient);
     assert_eq!(d.bottom_line.len(), 3);
     assert_eq!(d.bottom_line[0].refs, vec![1, 2]);
-    assert_eq!(d.bottom_line[0].confidence, Confidence::Moderate);
-    assert_eq!(d.bottom_line[1].confidence, Confidence::Strong);
+    assert_eq!(d.bottom_line[0].confidence, Confidence::Strong);
+    assert_eq!(d.bottom_line[1].confidence, Confidence::Moderate);
     assert_eq!(d.bottom_line[2].confidence, Confidence::Limited);
 
     assert_eq!(llm.requests().len(), 1);
     let req = &llm.requests()[0];
     assert_eq!(req.model, MODEL);
-    assert!(req.system.clone().unwrap().contains(SOURCE_RULE));
+    let sys = req.system.clone().unwrap();
+    assert!(sys.contains(SOURCE_RULE));
+    // R-12a: the confidence definitions.
+    assert!(sys.contains("\"strong\" only for consistent findings from at least 2 RCTs or systematic reviews/meta-analyses"), "{sys}");
     let text = user_text(&llm, 0);
     // The PICO as data, and each finding as a source with its quote.
     assert!(
@@ -3580,6 +3629,16 @@ async fn write_prompt_contains_only_pico_and_quotes() {
     assert!(text.contains(&format!("quote: \"{META_QUOTE}\"")), "{text}");
     assert!(text.contains("outcome: anastomotic leak"));
     assert!(text.contains("result: 5.8% vs 7.9%"));
+    // R-12a: design, n and evidence level as structured fields.
+    assert!(
+        text.contains("design: randomized controlled trial"),
+        "{text}"
+    );
+    assert!(text.contains("n: 1136"), "{text}");
+    assert!(text.contains("level: RCT"), "{text}");
+    assert!(text.contains("design: systematic review and meta-analysis"));
+    assert!(text.contains("n: not stated"));
+    assert!(text.contains("level: meta-analysis"));
     // Nothing else: no paper text, no titles, no question.
     assert!(!text.contains("SECRET-PAPER-BODY"), "{text}");
     assert!(!text.contains(ICG_TITLE));
@@ -3632,11 +3691,11 @@ async fn claims_citing_unknown_refs_dropped() {
             {"text": "", "refs": [1], "confidence": "strong"},
             {"refs": [1]},
             "not an object",
-            {"text": "e", "refs": [1], "confidence": "strong"},
-            {"text": "f", "refs": [2], "confidence": "strong"},
-            {"text": "g", "refs": [1], "confidence": "strong"},
-            {"text": "h", "refs": [2], "confidence": "strong"},
-            {"text": "i", "refs": [1], "confidence": "strong"},
+            {"text": "e", "refs": [1], "confidence": "moderate"},
+            {"text": "f", "refs": [2], "confidence": "moderate"},
+            {"text": "g", "refs": [1], "confidence": "moderate"},
+            {"text": "h", "refs": [2], "confidence": "moderate"},
+            {"text": "i", "refs": [1], "confidence": "moderate"},
         ], "insufficient": false}),
         u(),
     ));
@@ -3677,38 +3736,51 @@ async fn check_uses_fresh_request_without_draft_history() {
             .reply_json(
                 json!({"claims": [
                     {"text": "ICG angiography lowered anastomotic leak.", "refs": [1], "confidence": "moderate"},
-                    {"text": "Pooled trials agree on the direction.", "refs": [2], "confidence": "strong"},
+                    {"text": "Pooled trials agree on the direction.", "refs": [2], "confidence": "moderate"},
                 ], "insufficient": false, "drafting_note": "WRITE-HISTORY-MARKER"}),
                 u(),
             )
-            .reply_json(verdicts(&[(1, "supported"), (2, "supported")]), u()),
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u()),
     );
     let al = agent_llm(&llm);
     let papers = two_papers();
     let d = write(&ctx, &al, &pico(), &papers).await.unwrap();
     let c = check(&ctx, &al, &lit, d, &papers).await.unwrap();
     assert_eq!(c.claims.len(), 2);
+    assert!(!c.insufficient);
 
-    assert_eq!(llm.requests().len(), 2);
+    // R-12d: one call per claim.
+    assert_eq!(llm.requests().len(), 3);
     let write_sys = llm.requests()[0].system.clone().unwrap();
-    let req = &llm.requests()[1];
-    assert_eq!(req.model, MODEL);
-    let sys = req.system.clone().unwrap();
-    assert_ne!(sys, write_sys);
-    assert!(sys.contains(SOURCE_RULE));
-    // One new user message: the claims and their cited quotes only.
-    let text = user_text(&llm, 1);
-    assert!(text.contains("ICG angiography lowered anastomotic leak."));
-    assert!(text.contains(ICG_VERBATIM));
-    assert!(text.contains(META_QUOTE));
-    assert!(text.contains("<source id=\"ref-1\">"), "{text}");
-    assert!(!text.contains("WRITE-HISTORY-MARKER"));
-    assert!(!text.contains("insufficient"));
-    assert!(!text.contains("<pico>"));
-    assert!(!text.contains(&pico().population));
-    assert!(!text.contains(QUESTION));
-    assert!(!text.contains("SECRET-PAPER-BODY"));
-    assert!(!text.contains(ICG_TITLE));
+    for i in [1, 2] {
+        let req = &llm.requests()[i];
+        assert_eq!(req.model, MODEL);
+        let sys = req.system.clone().unwrap();
+        assert_ne!(sys, write_sys);
+        assert!(sys.contains(SOURCE_RULE));
+        let text = user_text(&llm, i);
+        assert!(!text.contains("WRITE-HISTORY-MARKER"));
+        assert!(!text.contains("insufficient"));
+        assert!(!text.contains("<pico>"));
+        assert!(!text.contains(&pico().population));
+        assert!(!text.contains(QUESTION));
+        assert!(!text.contains("SECRET-PAPER-BODY"));
+        assert!(!text.contains(ICG_TITLE));
+        assert!(!text.contains("design:"));
+    }
+    // Each claim sees only its own quotes: no borrowing between claims.
+    let first = user_text(&llm, 1);
+    assert!(first.contains("ICG angiography lowered anastomotic leak."));
+    assert!(first.contains(ICG_VERBATIM));
+    assert!(first.contains("<source id=\"ref-1\">"), "{first}");
+    assert!(!first.contains(META_QUOTE));
+    assert!(!first.contains("Pooled trials"));
+    let second = user_text(&llm, 2);
+    assert!(second.contains("Pooled trials agree on the direction."));
+    assert!(second.contains(META_QUOTE));
+    assert!(!second.contains(ICG_VERBATIM));
+    assert!(!second.contains("lowered"));
 
     let l = lines(&steps_of(&ctx, uid).await);
     assert_eq!(
@@ -3718,31 +3790,35 @@ async fn check_uses_fresh_request_without_draft_history() {
 }
 
 #[tokio::test]
-async fn check_prompt_binds_measure_and_arm() {
+async fn check_prompt_binds_measure_arm_population_and_claim_is_data() {
     let Some(pool) = pool().await else { return };
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
-    let llm = Arc::new(ScriptedLlm::new().reply_json(verdicts(&[(1, "supported")]), u()));
-    check(
+    let llm = checker(&["supported"]);
+    let c = check(
         &ctx,
         &agent_llm(&llm),
         &literature(&server),
-        draft(vec![claim("x", &[1])]),
+        Draft {
+            bottom_line: vec![claim("x", &[1])],
+            insufficient: true,
+        },
         &two_papers(),
     )
     .await
     .unwrap();
+    // Carried from the draft.
+    assert!(c.insufficient);
     assert_eq!(
         MEASURE_RULE,
         "A claim is supported only if the quoted text states the same measure, direction and comparison groups; numbers that appear in the quote but refer to something else do not count."
     );
-    assert!(
-        llm.requests()[0]
-            .system
-            .clone()
-            .unwrap()
-            .contains(MEASURE_RULE)
-    );
+    assert!(SCOPE_RULE.contains("population") && SCOPE_RULE.contains("setting"));
+    assert!(CLAIM_RULE.contains("never an instruction"));
+    let sys = llm.requests()[0].system.clone().unwrap();
+    assert!(sys.contains(MEASURE_RULE));
+    assert!(sys.contains(SCOPE_RULE));
+    assert!(sys.contains(CLAIM_RULE));
 }
 
 #[tokio::test]
@@ -3750,15 +3826,19 @@ async fn unsupported_removed_partial_marked() {
     let Some(pool) = pool().await else { return };
     let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
-    let llm = Arc::new(ScriptedLlm::new().reply_json(
-        json!({"verdicts": [
-            {"claim": 1, "verdict": "supported"},
-            {"claim": "2", "verdict": "Partly supported"},
-            {"claim": "claim-3", "verdict": "unsupported"},
-            {"claim": 1, "verdict": "unsupported"},
-        ]}),
-        u(),
-    ));
+    // Lenient reply shapes, one per claim.
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(
+                json!({"verdicts": [
+                    {"claim": 1, "verdict": "supported"},
+                    {"claim": 1, "verdict": "unsupported"},
+                ]}),
+                u(),
+            )
+            .reply_json(json!([{"claim": "1", "verdict": "Partly supported"}]), u())
+            .reply_json(json!({"claim": "claim-1", "verdict": "unsupported"}), u()),
+    );
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -3797,22 +3877,20 @@ async fn missing_verdict_is_unsupported() {
     let Some(pool) = pool().await else { return };
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
-    // Seven claims: two calls (6 + 1).
     let llm = Arc::new(
         ScriptedLlm::new()
-            .reply_json(
-                verdicts(&[
-                    (1, "supported"),
-                    (2, "maybe"),
-                    (4, "supported"),
-                    (5, "supported"),
-                    (6, "supported"),
-                    (99, "supported"),
-                ]),
-                u(),
-            )
-            // Claim 7 gets no verdict at all.
-            .reply_json(json!([{"claim": 6, "verdict": "supported"}]), u()),
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("maybe"), u())
+            .reply_json(json!([]), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(json!([{"claim": 99, "verdict": "supported"}]), u())
+            // Claim 6: Claude unreachable. The rest continue.
+            .fail(ClaudeError::Api {
+                status: 400,
+                error_type: "invalid_request_error".into(),
+                message: "x".into(),
+            })
+            .reply_json(verdict("supported"), u()),
     );
     let claims: Vec<Claim> = (1..=7).map(|i| claim(&format!("c{i}"), &[1])).collect();
     let c = check(
@@ -3824,14 +3902,18 @@ async fn missing_verdict_is_unsupported() {
     )
     .await
     .unwrap();
-    assert_eq!(CHECK_BATCH, 6);
-    assert_eq!(llm.requests().len(), 2);
-    assert!(user_text(&llm, 1).contains("c7"));
-    assert!(!user_text(&llm, 1).contains("c6"));
-    assert_eq!(texts(&c), vec!["c1", "c4", "c5", "c6"]);
-    assert_eq!(c.removed, 3);
+    // One call per claim, each with that claim alone.
+    assert_eq!(llm.requests().len(), 7);
+    for i in 0..7 {
+        let t = user_text(&llm, i);
+        for j in 1..=7 {
+            assert_eq!(t.contains(&format!("c{j}\n")), j == i + 1, "call {i}: {t}");
+        }
+    }
+    assert_eq!(texts(&c), vec!["c1", "c4", "c7"]);
+    assert_eq!(c.removed, 4);
 
-    // A failed batch is unsupported too: everything is removed.
+    // A reply that is not JSON twice is unsupported too.
     let llm = Arc::new(
         ScriptedLlm::new()
             .reply_text("no json", u())
@@ -3857,10 +3939,8 @@ async fn fabricated_pmid_removed_with_its_claims() {
     let server = icg_verify_server().await;
     let mut papers = two_papers();
     papers[1].paper.pmid = Some("12345678".into());
-    let llm = Arc::new(ScriptedLlm::new().reply_json(
-        verdicts(&[(1, "supported"), (2, "supported"), (3, "partial")]),
-        u(),
-    ));
+    // Only the two claims with a live ref are checked.
+    let llm = checker(&["supported", "partial"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -3874,16 +3954,24 @@ async fn fabricated_pmid_removed_with_its_claims() {
     )
     .await
     .unwrap();
-    // The claim with a valid ref stays, minus the dead one.
+    // The claim with a valid ref stays, minus the dead one, and was judged
+    // against ref 1's quotes alone (R-12c).
     assert_eq!(texts(&c), vec!["both", "real only"]);
     assert_eq!(c.claims[0].0.refs, vec![1]);
     assert_eq!(c.removed, 1);
     assert_eq!((c.refs_verified, c.refs_removed), (1, 1));
+    assert_eq!(llm.requests().len(), 2);
+    let both = user_text(&llm, 0);
+    assert!(both.contains("both") && both.contains(ICG_VERBATIM));
+    assert!(!both.contains(META_QUOTE), "{both}");
+    assert!(!both.contains("ref-2"));
+    assert!(user_text(&llm, 1).contains("real only"));
+    assert!((0..2).all(|i| !user_text(&llm, i).contains("fake only")));
     assert_eq!(
         check_line(&lines(&steps_of(&ctx, uid).await)),
         "Checked 3 claims: 1 supported, 1 partly, 1 removed; 1/2 references verified"
     );
-    // Both PMIDs were looked up live.
+    // Both PMIDs were looked up live, once.
     let q = requests_to(&server, ESUMMARY).await;
     assert_eq!(q.len(), 1);
     let ids = q[0]
@@ -3895,6 +3983,50 @@ async fn fabricated_pmid_removed_with_its_claims() {
         .into_owned();
     assert_eq!(ids, "40042831,12345678");
     assert_eq!(requests_to(&server, EFETCH).await.len(), 1);
+}
+
+#[tokio::test]
+async fn support_only_in_retracted_ref_is_unsupported() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = icg_and_retracted_server().await;
+    let papers = vec![
+        ext(
+            1,
+            Some("40042831"),
+            Some(ICG_DOI),
+            ICG_TITLE,
+            &[ICG_VERBATIM],
+        ),
+        ext(
+            2,
+            Some("35422152"),
+            Some("10.1177/03915603221088721"),
+            LASER_TITLE,
+            &[LASER_QUOTE],
+        ),
+    ];
+    // The checker sees only ref 1's quote, which does not state the claim.
+    let llm = checker(&["unsupported"]);
+    let c = check(
+        &ctx,
+        &agent_llm(&llm),
+        &literature(&server),
+        draft(vec![claim(
+            "Laser energy has a role in focal therapy.",
+            &[1, 2],
+        )]),
+        &papers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(llm.requests().len(), 1);
+    let t = user_text(&llm, 0);
+    assert!(t.contains(ICG_VERBATIM));
+    assert!(!t.contains(LASER_QUOTE), "{t}");
+    assert!(c.claims.is_empty());
+    assert_eq!(c.removed, 1);
+    assert_eq!((c.refs_verified, c.refs_removed), (1, 1));
 }
 
 #[tokio::test]
@@ -3910,9 +4042,7 @@ async fn mismatched_title_removed() {
     );
     // A different paper's title.
     papers[1].paper.title = "Laparoscopic versus open hernia repair: a randomised trial".into();
-    let llm = Arc::new(
-        ScriptedLlm::new().reply_json(verdicts(&[(1, "supported"), (2, "supported")]), u()),
-    );
+    let llm = checker(&["supported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -3924,13 +4054,12 @@ async fn mismatched_title_removed() {
     .unwrap();
     assert_eq!(texts(&c), vec!["icg"]);
     assert_eq!((c.refs_verified, c.refs_removed), (1, 1));
+    assert_eq!(llm.requests().len(), 1);
 
     // Same title, different DOI: removed.
     let mut papers = two_papers();
     papers[1].paper.doi = Some("10.9999/not-this-one".into());
-    let llm = Arc::new(
-        ScriptedLlm::new().reply_json(verdicts(&[(1, "supported"), (2, "supported")]), u()),
-    );
+    let llm = checker(&["supported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -3942,13 +4071,12 @@ async fn mismatched_title_removed() {
     .unwrap();
     assert_eq!(texts(&c), vec!["icg"]);
 
-    // DOI case does not matter, and a missing DOI on one side is no mismatch.
+    // DOI case and resolver prefixes do not matter, and a missing DOI on one
+    // side is no mismatch.
     let mut papers = two_papers();
-    papers[0].paper.doi = Some(ICG_DOI.to_uppercase());
+    papers[0].paper.doi = Some(format!("http://dx.doi.org/{}", ICG_DOI.to_uppercase()));
     papers[1].paper.doi = None;
-    let llm = Arc::new(
-        ScriptedLlm::new().reply_json(verdicts(&[(1, "supported"), (2, "supported")]), u()),
-    );
+    let llm = checker(&["supported", "supported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -3962,37 +4090,54 @@ async fn mismatched_title_removed() {
 }
 
 #[tokio::test]
+async fn title_markup_is_stripped_on_both_sides() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let live = "Fluorescence imaging and <i>Escherichia coli</i> colonisation &lt;i&gt;in vivo&lt;/i&gt; after colorectal anastomosis: a trial.";
+    let esummary = json!({"header": {"type": "esummary"}, "result": {
+        "uids": ["40042831"],
+        "40042831": {"uid": "40042831", "pubdate": "2025", "source": "J",
+            "authors": [], "title": live, "pubtype": ["Randomized Controlled Trial"],
+            "articleids": []}
+    }});
+    let server =
+        verify_server_with(esummary.to_string(), lit_fixture("pubmed_efetch_icg.xml")).await;
+    let plain = "Fluorescence imaging and Escherichia coli colonisation in vivo after colorectal anastomosis: a trial.";
+    for ours in [plain, live] {
+        let papers = vec![ext(1, Some("40042831"), None, ours, &[ICG_VERBATIM])];
+        let llm = checker(&["supported"]);
+        let c = check(
+            &ctx,
+            &agent_llm(&llm),
+            &literature(&server),
+            draft(vec![claim("x", &[1])]),
+            &papers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(texts(&c), vec!["x"], "{ours}");
+        assert_eq!(c.refs_verified, 1);
+    }
+}
+
+#[tokio::test]
 async fn retracted_at_check_removed() {
     let Some(pool) = pool().await else { return };
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
-    let title = "Laser technology in urologic oncology.";
     let papers = vec![ext(
         1,
         Some("35422152"),
         Some("10.1177/03915603221088721"),
-        title,
-        &["Laser energy has now reached an important role in focal therapy"],
+        LASER_TITLE,
+        &[LASER_QUOTE],
     )];
     // Flagged in esummary, and flagged only by efetch's RetractionIn (R-6c).
-    for (sum, dir) in [
-        ("pubmed_esummary_retracted.json", "lit"),
-        ("pubmed_esummary_retracted_unflagged.json", "agent"),
+    for sum in [
+        lit_fixture("pubmed_esummary_retracted.json"),
+        agent_fixture("pubmed_esummary_retracted_unflagged.json"),
     ] {
-        let server = MockServer::start().await;
-        let body = if dir == "lit" {
-            lit_fixture(sum)
-        } else {
-            agent_fixture(sum)
-        };
-        mount(&server, ESUMMARY, 200, body).await;
-        mount(
-            &server,
-            EFETCH,
-            200,
-            lit_fixture("pubmed_efetch_retracted.xml"),
-        )
-        .await;
-        let llm = Arc::new(ScriptedLlm::new().reply_json(verdicts(&[(1, "supported")]), u()));
+        let server = verify_server_with(sum, lit_fixture("pubmed_efetch_retracted.xml")).await;
+        let llm = checker(&["supported"]);
         let c = check(
             &ctx,
             &agent_llm(&llm),
@@ -4002,8 +4147,10 @@ async fn retracted_at_check_removed() {
         )
         .await
         .unwrap();
-        assert!(c.claims.is_empty(), "{sum}");
-        assert_eq!((c.refs_verified, c.refs_removed), (0, 1), "{sum}");
+        assert!(c.claims.is_empty());
+        assert_eq!((c.refs_verified, c.refs_removed), (0, 1));
+        // Removed before the claim check: nothing to check.
+        assert!(llm.requests().is_empty());
     }
 }
 
@@ -4029,7 +4176,7 @@ async fn pmid_absent_from_esummary_removed() {
             &[META_QUOTE],
         ),
     ];
-    let llm = Arc::new(ScriptedLlm::new().reply_json(verdicts(&[(1, "supported")]), u()));
+    let llm = checker(&["supported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -4041,6 +4188,7 @@ async fn pmid_absent_from_esummary_removed() {
     .unwrap();
     assert!(c.claims.is_empty());
     assert_eq!((c.refs_verified, c.refs_removed), (0, 1));
+    assert!(llm.requests().is_empty());
     assert_eq!(
         check_line(&lines(&steps_of(&ctx, uid).await)),
         "Checked 1 claims: 0 supported, 0 partly, 1 removed; 0/1 references verified"
@@ -4052,9 +4200,7 @@ async fn all_claims_removed_gives_empty_checked() {
     let Some(pool) = pool().await else { return };
     let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
-    let llm = Arc::new(
-        ScriptedLlm::new().reply_json(verdicts(&[(1, "unsupported"), (2, "unsupported")]), u()),
-    );
+    let llm = checker(&["unsupported", "unsupported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
@@ -4069,20 +4215,20 @@ async fn all_claims_removed_gives_empty_checked() {
         Checked {
             claims: vec![],
             removed: 2,
-            refs_verified: 0,
+            refs_verified: 2,
             refs_removed: 0,
+            insufficient: false,
         }
     );
-    // Nothing left cited: no live lookups.
-    assert!(requests_to(&server, ESUMMARY).await.is_empty());
     let steps = steps_of(&ctx, uid).await;
     assert_line_rules(&steps);
     assert_eq!(
         check_line(&lines(&steps)),
-        "Checked 2 claims: 0 supported, 0 partly, 2 removed; 0/0 references verified"
+        "Checked 2 claims: 0 supported, 0 partly, 2 removed; 2/2 references verified"
     );
 
-    // An empty draft makes no call.
+    // An empty draft makes no call and no lookup.
+    let server = icg_verify_server().await;
     let llm = Arc::new(ScriptedLlm::new());
     let c = check(
         &ctx,
@@ -4095,6 +4241,7 @@ async fn all_claims_removed_gives_empty_checked() {
     .unwrap();
     assert!(c.claims.is_empty());
     assert!(llm.requests().is_empty());
+    assert!(requests_to(&server, ESUMMARY).await.is_empty());
 }
 
 #[tokio::test]
@@ -4103,34 +4250,38 @@ async fn doi_only_ref_verified_through_europe_pmc() {
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
     let papers = vec![
-        ext(1, None, Some(EPMC_DOI), "EPMC only", &[ICG_VERBATIM]),
+        ext(1, None, Some(EPMC_DOI), EPMC_TITLE, &[ICG_VERBATIM]),
+        ext(2, None, Some("10.5555/nowhere"), EPMC_TITLE, &[META_QUOTE]),
+        ext(3, None, None, "No identifier at all", &[META_QUOTE]),
+        // Right DOI, wrong title.
         ext(
-            2,
+            4,
             None,
-            Some("10.5555/nowhere"),
-            "EPMC only, wrong DOI",
+            Some(EPMC_DOI),
+            "A different paper entirely",
             &[META_QUOTE],
         ),
-        ext(3, None, None, "No identifier at all", &[META_QUOTE]),
     ];
-    let llm = Arc::new(ScriptedLlm::new().reply_json(
-        verdicts(&[(1, "supported"), (2, "supported"), (3, "supported")]),
-        u(),
-    ));
+    let llm = checker(&["supported"]);
     let c = check(
         &ctx,
         &agent_llm(&llm),
         &literature(&server),
-        draft(vec![claim("a", &[1]), claim("b", &[2]), claim("c", &[3])]),
+        draft(vec![
+            claim("a", &[1]),
+            claim("b", &[2]),
+            claim("c", &[3]),
+            claim("d", &[4]),
+        ]),
         &papers,
     )
     .await
     .unwrap();
     assert_eq!(texts(&c), vec!["a"]);
-    assert_eq!((c.refs_verified, c.refs_removed), (1, 2));
+    assert_eq!((c.refs_verified, c.refs_removed), (1, 3));
     // Looked up by DOI on Europe PMC, never on PubMed.
     let q = requests_to(&server, EPMC_SEARCH).await;
-    assert_eq!(q.len(), 2);
+    assert_eq!(q.len(), 3);
     let query = q[0]
         .url
         .query_pairs()
@@ -4140,4 +4291,96 @@ async fn doi_only_ref_verified_through_europe_pmc() {
         .into_owned();
     assert_eq!(query, format!("DOI:\"{EPMC_DOI}\""));
     assert!(requests_to(&server, ESUMMARY).await.is_empty());
+}
+
+#[tokio::test]
+async fn confidence_capped_by_evidence_level() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = icg_verify_server().await;
+    let with_levels = |a: EvidenceLevel, b: EvidenceLevel| {
+        let mut p = two_papers();
+        p[0].level = a;
+        p[1].level = b;
+        p
+    };
+    use EvidenceLevel::{MetaAnalysis, Other, ProspectiveCohort, Rct};
+    let cases = [
+        // (levels, refs, claimed, expected)
+        (
+            (Rct, MetaAnalysis),
+            vec![1, 2],
+            Confidence::Strong,
+            Confidence::Strong,
+        ),
+        // A single ref, even an RCT: at most moderate.
+        (
+            (Rct, MetaAnalysis),
+            vec![1],
+            Confidence::Strong,
+            Confidence::Moderate,
+        ),
+        // No RCT / SR / MA: at most moderate.
+        (
+            (ProspectiveCohort, Other),
+            vec![1, 2],
+            Confidence::Strong,
+            Confidence::Moderate,
+        ),
+        // Other only: limited.
+        (
+            (Other, Other),
+            vec![1, 2],
+            Confidence::Strong,
+            Confidence::Limited,
+        ),
+        (
+            (Other, Other),
+            vec![1],
+            Confidence::Moderate,
+            Confidence::Limited,
+        ),
+        // Never raised.
+        (
+            (Rct, MetaAnalysis),
+            vec![1, 2],
+            Confidence::Limited,
+            Confidence::Limited,
+        ),
+    ];
+    for ((a, b), refs, claimed, want) in cases {
+        let llm = checker(&["supported"]);
+        let c = check(
+            &ctx,
+            &agent_llm(&llm),
+            &literature(&server),
+            draft(vec![Claim {
+                confidence: claimed,
+                ..claim("x", &refs)
+            }]),
+            &with_levels(a, b),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            c.claims[0].0.confidence, want,
+            "{a:?} {b:?} {refs:?} {claimed:?}"
+        );
+    }
+
+    // The cap uses verified refs only: a strong claim whose second ref is
+    // fabricated rests on one ref.
+    let mut papers = two_papers();
+    papers[1].paper.pmid = Some("12345678".into());
+    let llm = checker(&["supported"]);
+    let c = check(
+        &ctx,
+        &agent_llm(&llm),
+        &literature(&server),
+        draft(vec![strong("x", &[1, 2])]),
+        &papers,
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.claims[0].0.confidence, Confidence::Moderate);
 }

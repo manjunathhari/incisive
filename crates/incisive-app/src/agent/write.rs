@@ -3,9 +3,14 @@
 //!
 //! * One `write` call. The prompt holds **only** the PICO (inside
 //!   `<pico>…</pico>`, as data) and the findings, each as
-//!   `wrap_source("ref-N", "outcome: … result: … quote: \"…\"")`, N being the
-//!   paper's `ref_id`. No question text beyond the PICO, and no paper text
-//!   beyond the verbatim quotes (no title, abstract, design or population).
+//!   `wrap_source("ref-N", "design: … n: … level: … outcome: … result: …
+//!   quote: \"…\"")`, N being the paper's `ref_id`. Design, n and evidence
+//!   level are the extracted structured fields (Ruling R-12a). No question
+//!   text beyond the PICO, and no paper text beyond the verbatim quotes (no
+//!   title, abstract or population).
+//! * Confidence (R-12a): the prompt defines strong / moderate / limited by
+//!   design, and [`cap_confidence`] enforces it in code (here, and again in
+//!   Check over the verified refs only).
 //! * The reply is strict JSON,
 //!   `{"claims":[{"text","refs":[n,…],"confidence":"strong|moderate|limited"}],
 //!   "insufficient":bool}`, read claim by claim (it is untrusted). At most
@@ -29,7 +34,7 @@ use serde_json::Value;
 use super::extract::Extracted;
 use super::frame::Pico;
 use super::llm::{StepError, wrap_source};
-use super::screen::neutralise_pico_tags;
+use super::screen::{EvidenceLevel, neutralise_pico_tags};
 use super::{AgentLlm, RunContext, add_line, clip};
 use crate::runs::StepKind;
 
@@ -61,6 +66,19 @@ impl Confidence {
         }
     }
 
+    fn rank(self) -> u8 {
+        match self {
+            Confidence::Strong => 2,
+            Confidence::Moderate => 1,
+            Confidence::Limited => 0,
+        }
+    }
+
+    /// The weaker of `self` and `cap`.
+    fn at_most(self, cap: Confidence) -> Confidence {
+        if self.rank() <= cap.rank() { self } else { cap }
+    }
+
     /// The model's word, ignoring case; anything else is the weakest.
     fn read(v: Option<&Value>) -> Confidence {
         match v
@@ -73,6 +91,27 @@ impl Confidence {
             _ => Confidence::Limited,
         }
     }
+}
+
+/// The highest confidence the cited evidence allows (Ruling R-12a), given
+/// the evidence level of each distinct cited ref:
+/// * every ref `Other` (or none): **limited**;
+/// * fewer than two refs that are an RCT, systematic review, meta-analysis
+///   or guideline (so also any claim resting on a single ref): **moderate**;
+/// * otherwise **strong**.
+pub fn confidence_cap(levels: &[EvidenceLevel]) -> Confidence {
+    if levels.iter().all(|l| *l == EvidenceLevel::Other) {
+        Confidence::Limited
+    } else if levels.iter().filter(|l| l.rank() <= 1).count() < 2 {
+        Confidence::Moderate
+    } else {
+        Confidence::Strong
+    }
+}
+
+/// `c` lowered to [`confidence_cap`] of `levels`; never raised.
+pub fn cap_confidence(c: Confidence, levels: &[EvidenceLevel]) -> Confidence {
+    c.at_most(confidence_cap(levels))
 }
 
 /// One sentence of the bottom line, citing extracted papers by `ref_id`.
@@ -97,7 +136,9 @@ The only evidence you may use is the findings inside <source id=\"ref-N\"> tags.
 Use nothing else: no background knowledge, no other studies, no numbers that are not in a quote. \
 Write 3 to 6 short claims, each one sentence that answers the PICO, most important first. \
 Each claim cites the number N of every source it relies on, and only sources whose quotes support it. \
-Give each claim a confidence word: strong, moderate or limited, reflecting how consistent and direct the cited findings are. \
+Each source also states the study's design, its number of participants (n) and its evidence level. \
+Give each claim a confidence word: \"strong\" only for consistent findings from at least 2 RCTs or systematic reviews/meta-analyses; \
+\"moderate\" for a single RCT or consistent observational evidence; \"limited\" otherwise. \
 When the findings disagree, say so explicitly in a claim that cites both sides. \
 If the findings are too few or too indirect to answer the question, set insufficient to true and only describe what was found. \
 Reply with one JSON object only, exactly in this form: \
@@ -108,9 +149,20 @@ fn sources(extracted: &[Extracted]) -> String {
     let mut out = String::new();
     for e in extracted {
         let id = format!("ref-{}", e.ref_id);
+        let n =
+            e.n.map_or_else(|| "not stated".to_string(), |n| n.to_string());
+        let study = format!(
+            "design: {}\nn: {n}\nlevel: {}",
+            if e.design.is_empty() {
+                "not stated"
+            } else {
+                &e.design
+            },
+            e.level.as_str()
+        );
         for f in &e.findings {
             let body = format!(
-                "outcome: {}\nresult: {}\nquote: \"{}\"",
+                "{study}\noutcome: {}\nresult: {}\nquote: \"{}\"",
                 f.outcome, f.result, f.quote
             );
             out.push_str(&wrap_source(&id, &body));
@@ -152,7 +204,8 @@ fn read_ref(v: &Value) -> Option<u8> {
 
 /// The usable claims of a reply and how many were dropped for citing no
 /// extracted paper.
-fn read_claims(reply: &Value, known: &[u8]) -> (Vec<Claim>, usize) {
+fn read_claims(reply: &Value, extracted: &[Extracted]) -> (Vec<Claim>, usize) {
+    let known: Vec<u8> = extracted.iter().map(|e| e.ref_id).collect();
     let mut kept = Vec::new();
     let mut dropped = 0;
     let list = reply
@@ -190,10 +243,15 @@ fn read_claims(reply: &Value, known: &[u8]) -> (Vec<Claim>, usize) {
             dropped += 1;
             continue;
         }
+        let levels: Vec<EvidenceLevel> = extracted
+            .iter()
+            .filter(|e| refs.contains(&e.ref_id))
+            .map(|e| e.level)
+            .collect();
         kept.push(Claim {
             text,
             refs,
-            confidence: Confidence::read(c.get("confidence")),
+            confidence: cap_confidence(Confidence::read(c.get("confidence")), &levels),
         });
     }
     (kept, dropped)
@@ -228,8 +286,7 @@ pub async fn write(
     let reply: Value = call
         .json(SYSTEM, &prompt(pico, extracted), MAX_TOKENS)
         .await?;
-    let known: Vec<u8> = extracted.iter().map(|e| e.ref_id).collect();
-    let (claims, dropped) = read_claims(&reply, &known);
+    let (claims, dropped) = read_claims(&reply, extracted);
     let said_insufficient = reply
         .get("insufficient")
         .and_then(Value::as_bool)

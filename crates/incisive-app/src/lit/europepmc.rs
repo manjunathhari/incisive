@@ -340,7 +340,7 @@ fn open_access_link(is_oa: bool, list: Option<&UrlList>) -> Option<OaLink> {
 /// Removes markup from an abstract or title: inline tags (`<i>`, `<sub>`) vanish,
 /// block tags (`<h4>`, `<p>`, `<br>`) become a space, entities are decoded and
 /// whitespace is collapsed.
-fn strip_markup(s: &str) -> String {
+pub(crate) fn strip_markup(s: &str) -> String {
     const INLINE: [&str; 11] = [
         "i", "b", "u", "em", "strong", "sub", "sup", "italic", "bold", "span", "a",
     ];
