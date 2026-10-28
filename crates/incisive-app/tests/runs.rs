@@ -1411,48 +1411,57 @@ where
     let tag = Uuid::new_v4().simple().to_string();
     let func = format!("incisive.test_trig_{tag}");
     let trig = format!("test_trig_{tag}");
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query(&format!(
-        "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
-           IF {when} THEN {act} END IF; RETURN NEW; END $$"
-    ))
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::query(&format!(
-        "CREATE TRIGGER {trig} BEFORE INSERT OR UPDATE ON {table} \
-         FOR EACH ROW EXECUTE FUNCTION {func}()"
-    ))
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    ddl(
+        pool,
+        &format!(
+            "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+               IF {when} THEN {act} END IF; RETURN NEW; END $$"
+        ),
+    )
+    .await;
+    ddl(
+        pool,
+        &format!(
+            "CREATE TRIGGER {trig} BEFORE INSERT OR UPDATE ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {func}()"
+        ),
+    )
+    .await;
 
     // In its own task, so a panic is caught and the trigger still dropped.
     let res = tokio::spawn(body).await;
 
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL lock_timeout = '5s'")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query(&format!("DROP TRIGGER {trig} ON {table}"))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query(&format!("DROP FUNCTION {func}()"))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
+    ddl(pool, &format!("DROP TRIGGER {trig} ON {table}")).await;
+    ddl(pool, &format!("DROP FUNCTION {func}()")).await;
     match res {
         Ok(v) => v,
         Err(e) => std::panic::resume_unwind(e.into_panic()),
     }
+}
+
+/// Run one DDL statement in its own transaction, never waiting long for a
+/// table lock. A lock timeout (SQLSTATE 55P03) means a parallel test is using
+/// the table right now: back off and retry instead of failing the test.
+async fn ddl(pool: &PgPool, sql: &str) {
+    for attempt in 1..=40u64 {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '2s'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        match sqlx::query(sql).execute(&mut *tx).await {
+            Ok(_) => {
+                tx.commit().await.unwrap();
+                return;
+            }
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => {
+                drop(tx);
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt.min(10))).await;
+            }
+            Err(e) => panic!("ddl failed: {sql}: {e}"),
+        }
+    }
+    panic!("ddl still blocked by a lock after 40 attempts: {sql}");
 }
 
 #[tokio::test]

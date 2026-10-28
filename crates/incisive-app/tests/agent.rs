@@ -513,13 +513,7 @@ where
              FOR EACH ROW EXECUTE FUNCTION {func}()"
         ),
     ] {
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL lock_timeout = '5s'")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query(&sql).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
+        ddl(pool, &sql).await;
     }
     let res = tokio::spawn(body).await;
     for sql in [
@@ -527,15 +521,34 @@ where
         format!("DROP FUNCTION {func}()"),
         format!("DROP SEQUENCE {seq}"),
     ] {
+        ddl(pool, &sql).await;
+    }
+    res.unwrap()
+}
+
+/// Run one DDL statement in its own transaction, never waiting long for a
+/// table lock. A lock timeout (SQLSTATE 55P03) means a parallel test is using
+/// the table right now: back off and retry instead of failing the test.
+async fn ddl(pool: &PgPool, sql: &str) {
+    for attempt in 1..=40u64 {
         let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL lock_timeout = '5s'")
+        sqlx::query("SET LOCAL lock_timeout = '2s'")
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query(&sql).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
+        match sqlx::query(sql).execute(&mut *tx).await {
+            Ok(_) => {
+                tx.commit().await.unwrap();
+                return;
+            }
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => {
+                drop(tx);
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt.min(10))).await;
+            }
+            Err(e) => panic!("ddl failed: {sql}: {e}"),
+        }
     }
-    res.unwrap()
+    panic!("ddl still blocked by a lock after 40 attempts: {sql}");
 }
 
 fn good() -> Arc<ScriptedLlm> {

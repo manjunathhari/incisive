@@ -906,14 +906,28 @@ async fn run_started_audit_failure_undoes_the_run() {
     let ddl = |sql: String| {
         let pool = pool.clone();
         async move {
-            // Never wait long for the audit table's lock.
-            let mut tx = pool.begin().await.unwrap();
-            sqlx::query("SET LOCAL lock_timeout = '5s'")
-                .execute(&mut *tx)
-                .await
-                .unwrap();
-            sqlx::query(&sql).execute(&mut *tx).await.unwrap();
-            tx.commit().await.unwrap();
+            // Never wait long for the audit table's lock: on a lock timeout
+            // (SQLSTATE 55P03) a parallel test holds it, so back off and retry.
+            for attempt in 1..=40u64 {
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::query("SET LOCAL lock_timeout = '2s'")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                match sqlx::query(&sql).execute(&mut *tx).await {
+                    Ok(_) => {
+                        tx.commit().await.unwrap();
+                        return;
+                    }
+                    Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55P03") => {
+                        drop(tx);
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempt.min(10)))
+                            .await;
+                    }
+                    Err(e) => panic!("ddl failed: {sql}: {e}"),
+                }
+            }
+            panic!("ddl still blocked by a lock after 40 attempts: {sql}");
         }
     };
     ddl(format!(
