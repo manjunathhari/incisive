@@ -12,7 +12,9 @@
 //!   excluded for lacking an abstract (Review Focus 4).
 //! * The PICO is sent inside `<pico>…</pico>` as data describing the question.
 //!   Screening is a recall step: the prompt says to include when uncertain.
-//! * The model answers `[{"id":"p-N","include":bool,"code":…,"reason":"…"}]`.
+//! * The model answers through the forced `submit` tool with
+//!   `{"verdicts":[{"id":"p-N","include":bool,"code":…,"reason":"…"}]}` (a
+//!   bare array, from the text fallback, is read too).
 //!   The reply is untrusted and read entry by entry, so one odd entry never
 //!   voids the batch: `id` may be a string or a number (`3` is `p-3`);
 //!   `include` may be a boolean or "true"/"yes"/"include" /
@@ -41,10 +43,10 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::frame::Pico;
-use super::llm::{StepError, wrap_source};
+use super::llm::{StepError, SubmitTool, wrap_source};
 use super::{AgentLlm, MAX_STEP_LINE, RunContext, add_line, clip, contains_question};
 use crate::lit::{Paper, PaperId};
 use crate::runs::StepKind;
@@ -283,10 +285,40 @@ The comparison and outcomes may differ. When uncertain, include the record \u{20
 Records may be in any language; judge them as they are. \
 A record marked as having no abstract must be judged on its title alone: include it if the title suggests it may be relevant, \
 and never exclude it only because the abstract is missing. \
-Reply with a JSON array only, one object per record, in this form: \
-[{\"id\": \"p-N\", \"include\": true or false, \"code\": string, \"reason\": \"one short phrase\"}]. \
+Call the submit tool with one verdict per record, in this form: \
+{\"verdicts\": [{\"id\": \"p-N\", \"include\": true or false, \"code\": string, \"reason\": \"one short phrase\"}]}. \
 For an included record, code is \"relevant\". For an excluded record, code is exactly one of: \
 population, intervention, comparison, outcome, design, not_relevant, other.";
+
+/// The submit tool: the verdict array wrapped in an object (a tool input is
+/// always an object).
+static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
+    SubmitTool::new(
+        "Submit one screening verdict per record.",
+        json!({
+            "type": "object",
+            "properties": {
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "include": {"type": "boolean"},
+                            "code": {
+                                "type": "string",
+                                "enum": ["relevant", "population", "intervention", "comparison", "outcome", "design", "not_relevant", "other"]
+                            },
+                            "reason": {"type": "string"}
+                        },
+                        "required": ["id", "include", "code", "reason"]
+                    }
+                }
+            },
+            "required": ["verdicts"]
+        }),
+    )
+});
 
 /// Exclusion codes the model may give, with the label tallied for the
 /// trail. Anything else (or none) is "other".
@@ -494,7 +526,7 @@ pub async fn screen(
         let n = u32::try_from(records.len()).unwrap_or(u32::MAX);
         let (prompt, batch_title_only) = batch_prompt(pico, &records);
 
-        let reply: Value = match call.json(SYSTEM, &prompt, MAX_TOKENS).await {
+        let reply: Value = match call.submit(SYSTEM, &prompt, &TOOL, MAX_TOKENS).await {
             Ok(v) => v,
             Err(e @ (StepError::Llm | StepError::Parse)) => {
                 tracing::warn!(%run_id, step = "screen", error_kind = e.kind(), records = n, "screening batch failed; not assessed");

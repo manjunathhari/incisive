@@ -14,7 +14,8 @@
 //!   are checked against exactly what was sent.
 //! * A title-only paper is never sent: a title cannot support a finding. It is
 //!   skipped and counted in a Note line.
-//! * The reply's JSON (reasoning around it is allowed: `llm::parse_reply`), read field by field (it is untrusted):
+//! * The answer, through the forced `submit` tool (`LlmCall::submit`; a reply without a ToolUse block falls back to
+//!   the text, read with `llm::parse_reply`), read field by field (it is untrusted):
 //!   `{"design","n","population","intervention","comparison",
 //!   "findings":[{"outcome","result","quote"}]}`. Only the first
 //!   [`MAX_FINDINGS`] (6) findings are considered; the rest are ignored.
@@ -61,10 +62,10 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::frame::Pico;
-use super::llm::{StepError, neutralise_source_tags, wrap_source};
+use super::llm::{StepError, SubmitTool, neutralise_source_tags, wrap_source};
 use super::retrieve::{PaperText, UsedPaper};
 use super::screen::{EvidenceLevel, neutralise_pico_tags};
 use super::{AgentLlm, RunContext, add_line, clip};
@@ -410,9 +411,39 @@ including every number the result gives. \
 Do not paraphrase, shorten, correct or reword it; do not use an ellipsis or join separate passages; \
 do not include the section label or the title; do not add quotation marks around it. \
 A finding without such a quote will be discarded. If the paper reports nothing relevant, give an empty findings list. \
-Reply with one JSON object only, exactly in this form: \
+Call the submit tool with one object, exactly in this form: \
 {\"design\": string, \"n\": integer or null, \"population\": string, \"intervention\": string, \"comparison\": string or null, \
 \"findings\": [{\"outcome\": string, \"result\": string, \"quote\": string}]}";
+
+/// The submit tool: the paper's design, n, PICO fields and findings.
+static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
+    SubmitTool::new(
+        "Submit the evidence extracted from the paper.",
+        json!({
+            "type": "object",
+            "properties": {
+                "design": {"type": "string"},
+                "n": {"type": ["integer", "null"]},
+                "population": {"type": "string"},
+                "intervention": {"type": "string"},
+                "comparison": {"type": ["string", "null"]},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "outcome": {"type": "string"},
+                            "result": {"type": "string"},
+                            "quote": {"type": "string"}
+                        },
+                        "required": ["outcome", "result", "quote"]
+                    }
+                }
+            },
+            "required": ["design", "n", "population", "intervention", "comparison", "findings"]
+        }),
+    )
+});
 
 /// A section label: lower-case ASCII letters only.
 fn label(name: &str) -> String {
@@ -652,7 +683,7 @@ pub async fn extract(
         let id = format!("ref-{}", i + 1);
         calls += 1;
         let reply: Value = match call
-            .json(SYSTEM, &prompt(pico, &id, body), MAX_TOKENS)
+            .submit(SYSTEM, &prompt(pico, &id, body), &TOOL, MAX_TOKENS)
             .await
         {
             Ok(v) => v,

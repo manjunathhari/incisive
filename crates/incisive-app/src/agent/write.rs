@@ -11,7 +11,8 @@
 //! * Confidence (R-12a): the prompt defines strong / moderate / limited by
 //!   design, and [`cap_confidence`] enforces it in code (here, and again in
 //!   Check over the verified refs only).
-//! * The reply's JSON (reasoning around it is allowed: `llm::parse_reply`),
+//! * The answer, through the forced `submit` tool (`LlmCall::submit`; a reply
+//!   without a ToolUse block falls back to the text, `llm::parse_reply`),
 //!   `{"claims":[{"text","refs":[n,…],"confidence":"strong|moderate|limited"}],
 //!   "insufficient":bool}`, read claim by claim (it is untrusted). At most
 //!   [`MAX_CLAIMS`] (6) usable claims are kept, in order. A ref may be a
@@ -28,12 +29,14 @@
 //! Privacy: nothing here logs claims, quotes, the PICO or the question; only
 //! the run id and counts. The step line holds counts only.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::extract::Extracted;
 use super::frame::Pico;
-use super::llm::{StepError, wrap_source};
+use super::llm::{StepError, SubmitTool, wrap_source};
 use super::screen::{EvidenceLevel, neutralise_pico_tags};
 use super::{AgentLlm, RunContext, add_line, clip};
 use crate::runs::StepKind;
@@ -141,8 +144,34 @@ Give each claim a confidence word: \"strong\" only for consistent findings from 
 \"moderate\" for a single RCT or consistent observational evidence; \"limited\" otherwise. \
 When the findings disagree, say so explicitly in a claim that cites both sides. \
 If the findings are too few or too indirect to answer the question, set insufficient to true and only describe what was found. \
-Reply with one JSON object only, exactly in this form: \
+Call the submit tool with one object, exactly in this form: \
 {\"claims\": [{\"text\": string, \"refs\": [integer], \"confidence\": \"strong\" or \"moderate\" or \"limited\"}], \"insufficient\": true or false}";
+
+/// The submit tool: the claims and the insufficient flag.
+static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
+    SubmitTool::new(
+        "Submit the bottom line: the claims and whether the evidence is insufficient.",
+        json!({
+            "type": "object",
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "refs": {"type": "array", "items": {"type": "integer"}},
+                            "confidence": {"type": "string", "enum": ["strong", "moderate", "limited"]}
+                        },
+                        "required": ["text", "refs", "confidence"]
+                    }
+                },
+                "insufficient": {"type": "boolean"}
+            },
+            "required": ["claims", "insufficient"]
+        }),
+    )
+});
 
 /// One source block per finding: outcome, result and the verbatim quote.
 fn sources(extracted: &[Extracted]) -> String {
@@ -185,6 +214,7 @@ pub fn hold_for(
         &llm.models.write,
         SYSTEM,
         &prompt(pico, extracted),
+        Some(&TOOL),
         MAX_TOKENS,
     )
 }
@@ -301,7 +331,7 @@ pub async fn write(
     }
     let call = llm.call(ctx, &llm.models.write, "write");
     let reply: Value = call
-        .json(SYSTEM, &prompt(pico, extracted), MAX_TOKENS)
+        .submit(SYSTEM, &prompt(pico, extracted), &TOOL, MAX_TOKENS)
         .await?;
     let (claims, dropped) = read_claims(&reply, extracted);
     let said_insufficient = reply

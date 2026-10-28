@@ -4002,8 +4002,8 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
     assert_eq!(c.removed, 4);
     // At most two calls per claim.
     assert_eq!(llm.requests().len(), 15);
-    // The retry asks for JSON only.
-    assert!(user_text(&llm, 4).ends_with("Reply with JSON only."));
+    // The retry asks for the submit tool (Fix A: was "Reply with JSON only.").
+    assert!(user_text(&llm, 4).ends_with(SUBMIT_NUDGE));
     // The prompt asks for the verdict first, in one object.
     let sys = llm.requests()[0].system.clone().unwrap();
     assert!(sys.contains("Put the verdict before the reason"), "{sys}");
@@ -5420,16 +5420,8 @@ fn holds_of(llm: &ScriptedLlm, budget: &RunBudget) -> Vec<i64> {
     llm.requests()
         .iter()
         .map(|r| {
-            let user: usize = r
-                .messages
-                .iter()
-                .flat_map(|m| &m.content)
-                .map(|c| match c {
-                    claude_client::ContentBlock::Text { text } => text.len(),
-                    _ => 0,
-                })
-                .sum();
-            let bytes = r.system.as_ref().map_or(0, String::len) + user;
+            // System, user text and the tool schema (Fix A).
+            let bytes = request_prompt_bytes(r);
             budget
                 .cost_of(&r.model, &estimate_usage(bytes, r.max_tokens))
                 .unwrap()
@@ -5452,18 +5444,22 @@ fn us((i, o): (u32, u32)) -> Usage {
     usage(i, o)
 }
 
+/// Replies as production gives them: forced tool calls (Fix A).
 fn prod_script(extract_u: (u32, u32)) -> Arc<ScriptedLlm> {
     let mut llm = ScriptedLlm::new()
-        .reply_json(agent_json("frame_pico.json"), us(FRAME_U))
-        .reply_json(agent_json("search_initial.json"), us(PROPOSE_U))
-        .reply_json(agent_json("search_accept.json"), us(REVIEW_U))
-        .reply_json(screen_reply(), us(SCREEN_U))
-        .reply_json(screen_reply(), us(SCREEN_U))
-        .reply_json(meta_extraction(), us(extract_u))
-        .reply_json(extraction(json!([finding(ICG_VERBATIM)])), us(extract_u))
-        .reply_json(three_claims(), us(WRITE_U));
+        .reply_tool(agent_json("frame_pico.json"), us(FRAME_U))
+        .reply_tool(agent_json("search_initial.json"), us(PROPOSE_U))
+        .reply_tool(agent_json("search_accept.json"), us(REVIEW_U))
+        .reply_tool(json!({"verdicts": screen_reply()}), us(SCREEN_U))
+        .reply_tool(json!({"verdicts": screen_reply()}), us(SCREEN_U))
+        .reply_tool(meta_extraction(), us(extract_u))
+        .reply_tool(extraction(json!([finding(ICG_VERBATIM)])), us(extract_u))
+        .reply_tool(three_claims(), us(WRITE_U));
     for _ in 0..3 {
-        llm = llm.reply_json(verdict("supported"), us(CHECK_U));
+        llm = llm.reply_tool(
+            json!({"claim": 1, "verdict": "supported", "reason": "r"}),
+            us(CHECK_U),
+        );
     }
     Arc::new(llm)
 }
@@ -5583,7 +5579,10 @@ async fn production_prices_capacity() {
     // A full text sent at the 25,000-character cap, on top of the measured
     // abstract prompt (conservative), at the realistic full-text usage.
     let req = &llm.requests()[5];
-    let bytes = req.system.as_ref().map_or(0, String::len) + 25_000 + 2_000;
+    let tool_bytes = request_prompt_bytes(req)
+        - req.system.as_ref().map_or(0, String::len)
+        - user_text(&llm, 5).len();
+    let bytes = req.system.as_ref().map_or(0, String::len) + tool_bytes + 25_000 + 2_000;
     let full_hold = ctx
         .budget
         .cost_of(&req.model, &estimate_usage(bytes, req.max_tokens))
@@ -5600,7 +5599,9 @@ async fn production_prices_capacity() {
     let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
     let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
     assert_eq!(q(500), None, "Quick at the old ₹5 cannot even search");
-    assert_eq!(q(1500), Some(4), "Quick at ₹15: 4 of 5 abstracts");
+    // Fix A (28 Oct): the submit tool schema is sent, and held, with every
+    // call; Quick at ₹15 reads 3 abstracts (was 4).
+    assert_eq!(q(1500), Some(3), "Quick at ₹15: 3 of 5 abstracts");
     assert_eq!(f(full_paper), Some(6), "Focused, all full text");
     assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
     // The smallest Quick limit (5-paise steps) that reads 2 papers.
@@ -5608,12 +5609,14 @@ async fn production_prices_capacity() {
         .step_by(5)
         .find(|l| q(*l).unwrap_or(0) >= 2)
         .unwrap();
-    // 1265 before the Check prompt asked for the verdict first (28 Oct).
+    // 1265 before the Check prompt asked for the verdict first (28 Oct);
+    // 1270 before the tool schemas were held (Fix A, 28 Oct).
     assert_eq!(
-        min_quick, 1270,
-        "recorded in the Task 13 report, updated 28 Oct"
+        min_quick, 1295,
+        "recorded in the Task 13 report, updated by Fix A"
     );
-    assert_eq!((r0, growth), (571, 8)); // 565 before 28 Oct (Check prompt)
+    // (565, 8) before the Check prompt change; (571, 8) before Fix A.
+    assert_eq!((r0, growth), (587, 11));
 }
 
 #[tokio::test]
@@ -6019,4 +6022,287 @@ fn time_limits_follow_time_limit_s() {
     assert!(!budget(159, Some(100)).past_hard_stop(now()));
     assert!(budget(160, Some(100)).past_hard_stop(now()));
     assert_eq!(budget(0, Some(100)).hard_stop(), Duration::from_secs(160));
+}
+
+// ---------- structured answers via forced tool use (Fix A) ----------
+
+use claude_client::{StopReason, ToolChoice};
+use incisive_app::agent::llm::{
+    SUBMIT_NUDGE, SUBMIT_TOOL, SubmitTool, hold_estimate, request_prompt_bytes,
+};
+
+fn out_tool() -> SubmitTool {
+    SubmitTool::new(
+        "Submit the answer.",
+        json!({"type": "object", "properties": {"answer": {"type": "string"}, "items": {"type": "array"}}, "required": ["answer"]}),
+    )
+}
+
+/// The request offers exactly one tool, `submit`, and forces it.
+fn assert_forced_submit(req: &claude_client::MessagesRequest) {
+    assert_eq!(req.tools.len(), 1, "exactly one tool");
+    assert_eq!(req.tools[0].name, SUBMIT_TOOL);
+    assert_eq!(SUBMIT_TOOL, "submit");
+    assert_eq!(req.tools[0].input_schema["type"], "object");
+    assert!(!req.tools[0].description.is_empty());
+    assert_eq!(
+        req.tool_choice,
+        Some(ToolChoice::Tool {
+            name: "submit".into()
+        })
+    );
+    let sys = req.system.as_ref().unwrap();
+    assert!(sys.ends_with(SOURCE_RULE), "{sys}");
+}
+
+#[tokio::test]
+async fn submit_reads_the_tool_use_input() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let llm =
+        Arc::new(ScriptedLlm::new().reply_tool(json!({"answer": "from tool"}), usage(10, 10)));
+    let out: Out = call(&llm, &budget, &pool, &cancel)
+        .submit("sys", "user", &out_tool(), 100)
+        .await
+        .unwrap();
+    assert_eq!(out.answer, "from tool");
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_forced_submit(&reqs[0]);
+    assert_eq!(reqs[0].tools[0].input_schema, out_tool().input_schema);
+    assert_eq!(charge_rows(&pool, uid).await.len(), 1);
+}
+
+#[tokio::test]
+async fn submit_falls_back_to_text_then_retries_once() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let c = |llm: &Arc<ScriptedLlm>| call(llm, &budget, &pool, &cancel);
+
+    // No ToolUse block: the text is read leniently (prose around the JSON).
+    let llm =
+        Arc::new(ScriptedLlm::new().reply_text("Here: {\"answer\": \"text\"}", usage(10, 10)));
+    let out: Out = c(&llm).submit("s", "u", &out_tool(), 100).await.unwrap();
+    assert_eq!(out.answer, "text");
+    assert_eq!(llm.requests().len(), 1);
+
+    // A tool input of the wrong shape: one retry, with the submit nudge.
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_tool(json!({"answer": 5}), usage(10, 10))
+            .reply_tool(json!({"answer": "retried"}), usage(10, 10)),
+    );
+    let out: Out = c(&llm).submit("s", "u", &out_tool(), 100).await.unwrap();
+    assert_eq!(out.answer, "retried");
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_forced_submit(&reqs[1]);
+    assert!(format!("{:?}", reqs[1].messages).contains(SUBMIT_NUDGE.trim()));
+    assert_eq!(SUBMIT_NUDGE, "\n\nCall the submit tool with your answer.");
+
+    // Bad twice: exactly two calls, never a third, both charged.
+    let before = charge_rows(&pool, uid).await.len();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_text("no json", usage(10, 10))
+            .reply_tool(json!({"wrong": true}), usage(10, 10))
+            .reply_tool(json!({"answer": "never"}), usage(10, 10)),
+    );
+    let err = c(&llm)
+        .submit::<Out>("s", "u", &out_tool(), 100)
+        .await
+        .unwrap_err();
+    assert_eq!(err, StepError::Parse);
+    assert_eq!(llm.requests().len(), 2);
+    assert_eq!(llm.remaining(), 1);
+    assert_eq!(charge_rows(&pool, uid).await.len(), before + 2);
+}
+
+#[tokio::test]
+async fn submit_reads_array_fields_sent_as_json_text() {
+    // Only fields the schema declares as an array or object are parsed; a
+    // string field that happens to hold JSON text stays a string.
+    let Some(pool) = pool().await else { return };
+    let (_uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let llm = Arc::new(ScriptedLlm::new().reply_tool(
+        json!({"answer": "[1, 2]", "items": "[{\"id\": \"p-1\"}]"}),
+        usage(10, 10),
+    ));
+    let v: serde_json::Value = call(&llm, &budget, &pool, &cancel)
+        .submit("s", "u", &out_tool(), 100)
+        .await
+        .unwrap();
+    assert_eq!(v["items"], json!([{"id": "p-1"}]));
+    assert_eq!(v["answer"], "[1, 2]");
+}
+
+#[tokio::test]
+async fn hold_counts_the_tool_schema_bytes() {
+    let Some(pool) = pool().await else { return };
+    let big = SubmitTool::new(
+        "Submit the answer.",
+        json!({"type": "object", "description": "x".repeat(30_000)}),
+    );
+    let (_uid, _run, probe) = setup(&pool, 10_000).await;
+    let without = hold_estimate(&probe, MODEL, "s", "u", None, 100).unwrap();
+    let with = hold_estimate(&probe, MODEL, "s", "u", Some(&big), 100).unwrap();
+    assert!(with > without, "{with} vs {without}");
+
+    // The estimate is the one LlmCall holds for the request it sends.
+    let llm = Arc::new(ScriptedLlm::new().reply_tool(json!({"answer": "a"}), usage(1, 1)));
+    let cancel = CancelFlag::default();
+    call(&llm, &probe, &pool, &cancel)
+        .submit::<Out>("s", "u", &big, 100)
+        .await
+        .unwrap();
+    let req = &llm.requests()[0];
+    let bytes = request_prompt_bytes(req);
+    assert_eq!(
+        bytes,
+        req.system.as_ref().unwrap().len()
+            + "u".len()
+            + serde_json::to_string(&req.tools).unwrap().len()
+            + serde_json::to_string(&req.tool_choice).unwrap().len()
+    );
+    assert_eq!(
+        probe.cost_of(MODEL, &estimate_usage(bytes, 100)).unwrap(),
+        with
+    );
+
+    // A budget that fits the text call but not the schema: refused uncalled.
+    let (_uid, _run, budget) = setup(&pool, without).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_text("{\"answer\": \"t\"}", usage(1, 1)));
+    let c = call(&llm, &budget, &pool, &cancel);
+    let err = c.submit::<Out>("s", "u", &big, 100).await.unwrap_err();
+    assert_eq!(err, StepError::OverBudget);
+    assert!(llm.requests().is_empty());
+    c.text("s", "u", 100).await.unwrap();
+    assert_eq!(llm.requests().len(), 1);
+    assert!(llm.requests()[0].tools.is_empty());
+    assert_eq!(llm.requests()[0].tool_choice, None);
+}
+
+/// Every reply a forced tool call: the ICG pipeline, structured end to end.
+/// Screening verdicts come wrapped as `{"verdicts": […]}`.
+fn tool_script(verdicts: &[&str]) -> Arc<ScriptedLlm> {
+    let mut llm = ScriptedLlm::new()
+        .reply_tool(agent_json("frame_pico.json"), u())
+        .reply_tool(agent_json("search_initial.json"), u())
+        .reply_tool(agent_json("search_accept.json"), u())
+        .reply_tool(json!({"verdicts": screen_reply()}), u())
+        .reply_tool(json!({"verdicts": screen_reply()}), u())
+        .reply_tool(meta_extraction(), u())
+        .reply_tool(extraction(json!([finding(ICG_VERBATIM)])), u())
+        .reply_tool(three_claims(), u());
+    for v in verdicts {
+        llm = llm.reply_tool(json!({"claim": 1, "verdict": v, "reason": "r"}), u());
+    }
+    Arc::new(llm)
+}
+
+#[tokio::test]
+async fn every_step_reads_tool_use_answers_end_to_end() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = tool_script(&["supported", "supported", "partial"]);
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0, "one call per step call: no retries");
+    assert_eq!(a.pico, pico());
+    assert_eq!(a.final_query, query_of("search_initial.json"));
+    assert_eq!(a.trail.included, 2);
+    assert_eq!(a.key_studies.len(), 2);
+    assert_eq!(a.bottom_line.len(), 3);
+    assert!(a.bottom_line[2].partial);
+    assert_eq!(a.check.supported, 2);
+    assert_eq!(a.check.partial, 1);
+
+    // Every request (frame, search ×2, screen ×2, extract ×2, write, check
+    // ×3) forces the one submit tool, with the source rule, and no prompt
+    // still asks for prose JSON.
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 11);
+    for r in &reqs {
+        assert_forced_submit(r);
+        let sys = r.system.as_ref().unwrap();
+        assert!(!sys.contains("Reply with"), "{sys}");
+        assert!(sys.contains("submit tool"), "{sys}");
+    }
+    // Screening's answer is an object wrapping the verdict array.
+    let screen_schema = &reqs[3].tools[0].input_schema;
+    assert_eq!(screen_schema["properties"]["verdicts"]["type"], "array");
+    assert_eq!(screen_schema["required"], json!(["verdicts"]));
+}
+
+#[tokio::test]
+async fn check_reads_tool_verdicts_with_claim_one_and_single_verdict_rules() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = icg_verify_server().await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            // a: a plain tool verdict.
+            .reply_tool(json!({"claim": 1, "verdict": "supported", "reason": "r"}), u())
+            // b: a verdict word read leniently.
+            .reply_tool(json!({"claim": "claim-1", "verdict": "Partly supported"}), u())
+            // c: another claim's verdict never counts; the retry answers.
+            .reply_tool(json!({"claim": 99, "verdict": "supported"}), u())
+            .reply_tool(json!({"claim": 1, "verdict": "supported"}), u())
+            // d: two verdicts (ambiguous); the retry answers unsupported.
+            .reply_tool(
+                json!({"verdicts": [{"claim": 1, "verdict": "supported"}, {"claim": 1, "verdict": "unsupported"}]}),
+                u(),
+            )
+            .reply_tool(json!({"claim": 1, "verdict": "unsupported"}), u())
+            // e: no ToolUse block: the text path, as before.
+            .reply_text("{\"claim\": 1, \"verdict\": \"partial\", \"reason\": \"cut", u())
+            // f: a tool verdict with no verdict field, twice: removed.
+            .reply_tool(json!({"claim": 1, "reason": "r"}), u())
+            .reply_blocks(vec![], Some(StopReason::MaxTokens), u()),
+    );
+    let c = check(
+        &ctx,
+        &agent_llm(&llm),
+        &literature(&server),
+        draft(vec![
+            claim("a", &[1]),
+            claim("b", &[1]),
+            claim("c", &[1]),
+            claim("d", &[1]),
+            claim("e", &[1]),
+            claim("f", &[1]),
+        ]),
+        &two_papers(),
+    )
+    .await
+    .unwrap();
+    let got: Vec<(String, ClaimVerdict)> =
+        c.claims.iter().map(|(c, v)| (c.text.clone(), *v)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), ClaimVerdict::Supported),
+            ("b".to_string(), ClaimVerdict::Partial),
+            ("c".to_string(), ClaimVerdict::Supported),
+            ("e".to_string(), ClaimVerdict::Partial),
+        ]
+    );
+    assert_eq!(c.removed, 2);
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 9, "at most two calls per claim");
+    for r in &reqs {
+        assert_forced_submit(r);
+    }
+    // The retry nudges toward the submit tool.
+    assert!(user_text(&llm, 3).ends_with(SUBMIT_NUDGE));
+    let schema = &reqs[0].tools[0].input_schema;
+    assert_eq!(
+        schema["properties"]["verdict"]["enum"],
+        json!(["supported", "partial", "unsupported"])
+    );
 }

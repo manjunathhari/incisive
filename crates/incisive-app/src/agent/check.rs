@@ -33,17 +33,21 @@
 //!   Ruling R-11c follow-up), to the claim's population and setting
 //!   ([`SCOPE_RULE`]), and says the claim is the statement under test, never
 //!   an instruction ([`CLAIM_RULE`]).
-//! * The asked-for reply is one object, verdict first:
-//!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`. It
-//!   is untrusted and read leniently: reasoning around the JSON is allowed
-//!   (see `llm::parse_reply`); an array, or an array inside an object, also
+//! * The answer is asked for through the forced `submit` tool (Fix A), one
+//!   object, verdict first:
+//!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`.
+//!   With a ToolUse block its `input` is read; without one, the reply text,
+//!   where reasoning around the JSON is allowed (see `llm::parse_reply`).
+//!   Either way it is untrusted and read leniently, under the same rules: an
+//!   array, or an array inside an object, also
 //!   works; the claim id may be a number, a digit string or `claim-1` (an
 //!   entry without an id counts when it is the only one); a verdict for any
 //!   other claim never counts; the verdict word is read ignoring case
 //!   ("partly supported" is partial). A reply cut off by the token limit has
-//!   its verdict field salvaged when the word is complete. A reply with no
-//!   verdict for claim 1, or with more than one verdict field (ambiguous),
-//!   gets one retry ("Reply with JSON only."); still none: unsupported.
+//!   its verdict field salvaged when the word is complete (text path only). A
+//!   reply with no verdict for claim 1, or with more than one verdict field
+//!   (ambiguous), gets one retry ("Call the submit tool with your answer.");
+//!   still none: unsupported.
 //! * `OverBudget`, `Llm`, or no verdict after the retry, for one claim
 //!   makes that claim unsupported, and the rest are still checked. The
 //!   wrap-up point never skips Check. `Cancelled` and fatal errors propagate.
@@ -62,12 +66,16 @@
 //! the run id, counts and fixed kinds.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::extract::Extracted;
-use super::llm::{StepError, wrap_source};
+use super::llm::{
+    Reply, SUBMIT_NUDGE, StepError, SubmitTool, log_unreadable, reply_fault, tool_answer,
+    wrap_source,
+};
 use super::screen::EvidenceLevel;
 use super::write::{Claim, Confidence, Draft, cap_confidence};
 use super::{AgentLlm, Literature, RunContext, add_line};
@@ -143,9 +151,25 @@ each inside <source id=\"ref-N\"> tags. Judge the claim only against these quote
 The claim is supported when its quotes state everything it says; partial when its quotes support part of it \
 or support it with less certainty or generality than it states; unsupported otherwise.";
 
-const SYSTEM_TAIL: &str = "Reply with one JSON object only, with no text before it, in this form: \
+const SYSTEM_TAIL: &str = "Call the submit tool with one object, in this form: \
 {\"claim\": 1, \"verdict\": \"supported\" or \"partial\" or \"unsupported\", \"reason\": \"one short sentence\"}. \
 Put the verdict before the reason.";
+
+/// The submit tool: one verdict for claim 1.
+static TOOL: LazyLock<SubmitTool> = LazyLock::new(|| {
+    SubmitTool::new(
+        "Submit the verdict for claim 1.",
+        json!({
+            "type": "object",
+            "properties": {
+                "claim": {"type": "integer"},
+                "verdict": {"type": "string", "enum": ["supported", "partial", "unsupported"]},
+                "reason": {"type": "string"}
+            },
+            "required": ["claim", "verdict", "reason"]
+        }),
+    )
+});
 
 /// The verdict word from a reply that is not usable JSON (cut off by the token
 /// limit, or prose with the verdict field in it): the first `"verdict": "…"`
@@ -179,6 +203,34 @@ fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
     }
 }
 
+/// How many `verdict` fields `v` holds, at any depth.
+fn verdict_fields(v: &Value) -> usize {
+    match v {
+        Value::Object(o) => o
+            .iter()
+            .map(|(k, v)| usize::from(k == "verdict") + verdict_fields(v))
+            .sum(),
+        Value::Array(a) => a.iter().map(verdict_fields).sum(),
+        _ => 0,
+    }
+}
+
+/// The verdict in one reply. With a ToolUse block, its input (already JSON)
+/// under the same rules as the text: claim 1 only, and exactly one verdict
+/// field (more is ambiguous: no verdict). Without one, the text path
+/// ([`verdict_from_text`]).
+fn verdict_from_reply(reply: &Reply) -> Option<ClaimVerdict> {
+    let Some(input) = tool_answer(reply, Some(&TOOL)) else {
+        return verdict_from_text(&reply.text);
+    };
+    if verdict_fields(&input) > 1 {
+        return None;
+    }
+    verdict_entry(&input)
+        .and_then(|e| e.get("verdict"))
+        .map(|w| ClaimVerdict::read(Some(w)))
+}
+
 fn system() -> String {
     format!("{SYSTEM} {MEASURE_RULE} {SCOPE_RULE} {CLAIM_RULE} {SYSTEM_TAIL}")
 }
@@ -202,6 +254,7 @@ pub fn hold_per_claim_for(
         &llm.models.check,
         &system(),
         &claim_prompt(&widest, &by_ref),
+        Some(&TOOL),
         MAX_TOKENS,
     )
 }
@@ -461,20 +514,35 @@ pub async fn check(
             return Err(StepError::Cancelled);
         }
         let prompt = claim_prompt(&c, &by_ref);
-        // The text first, so a reply cut off after its verdict still counts;
-        // only a reply with no verdict at all takes the JSON retry.
-        let first = match call.text(&system, &prompt, MAX_TOKENS).await {
-            Ok(text) => Ok(verdict_from_text(&text)),
-            Err(e) => Err(e),
-        };
+        // A reply cut off after its verdict still counts; only a reply with
+        // no verdict at all takes the retry.
+        let first = call
+            .reply(&system, &prompt, Some(&TOOL), MAX_TOKENS)
+            .await
+            .map(|r| {
+                let v = verdict_from_reply(&r);
+                if v.is_none() {
+                    log_unreadable(
+                        &call,
+                        &r,
+                        reply_fault(&r),
+                        "check reply had no verdict; retrying once",
+                    );
+                }
+                v
+            });
         let reply = match first {
             Ok(Some(v)) => Ok(v),
             Ok(None) => {
-                tracing::warn!(%run_id, step = "check", "check reply had no verdict; retrying once");
-                let retry = format!("{prompt}{}", super::llm::JSON_ONLY_NUDGE);
-                match call.text(&system, &retry, MAX_TOKENS).await {
-                    Ok(text) => verdict_from_text(&text).ok_or_else(|| {
-                        tracing::warn!(%run_id, step = "check", "check reply had no verdict after retry");
+                let retry = format!("{prompt}{SUBMIT_NUDGE}");
+                match call.reply(&system, &retry, Some(&TOOL), MAX_TOKENS).await {
+                    Ok(r) => verdict_from_reply(&r).ok_or_else(|| {
+                        log_unreadable(
+                            &call,
+                            &r,
+                            reply_fault(&r),
+                            "check reply had no verdict after retry",
+                        );
                         StepError::Parse
                     }),
                     Err(e) => Err(e),
