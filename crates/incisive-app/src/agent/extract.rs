@@ -27,9 +27,12 @@
 //!     `(` or `[` (optionally followed by a space). A suffix of a clause ("…
 //!     did not | reduce the rate") can never pass as the clause;
 //!   - the character just before it is not a letter or digit, nor one of
-//!     `- . + ± $ <` (so no sign, decimal point or digit is cut off);
+//!     `- . + ± $ <` or a middle dot (so no sign, decimal point or digit is
+//!     cut off);
 //!   - the character just after it is not a letter or digit, not `%`, and not
-//!     `.` or `,` followed by a digit (so "12%" never reads as "1").
+//!     `.`, `,` or a middle dot followed by a digit (so "12%" never reads as
+//!     "1"). A middle dot between two digits (`0·52`, Lancet style) folds to
+//!     `.` on both sides (Ruling R-11e), so it is one number throughout.
 //!
 //!   Every occurrence is tried. Case and digits must match; the normalised
 //!   quote must be [`MIN_QUOTE`] (20) to [`MAX_QUOTE`] (1,000) characters. A
@@ -150,8 +153,16 @@ enum Fold {
     Char(char),
 }
 
-fn fold(c: char) -> Fold {
+/// Middle dots used as decimal points (Lancet style): U+00B7, U+2219, U+22C5.
+const MIDDLE_DOTS: &[char] = &['\u{b7}', '\u{2219}', '\u{22c5}'];
+
+/// The folded form of `c`, whose neighbours in the source are `prev` and
+/// `next`. A middle dot between two ASCII digits is a decimal point (Ruling
+/// R-11e); elsewhere it is left alone.
+fn fold(c: char, prev: Option<char>, next: Option<char>) -> Fold {
+    let digit = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit());
     match c {
+        c if MIDDLE_DOTS.contains(&c) && digit(prev) && digit(next) => Fold::Char('.'),
         '\u{ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' => Fold::Skip,
         c if c.is_whitespace() => Fold::Space,
         '\u{2018}' | '\u{2019}' => Fold::Char('\''),
@@ -177,9 +188,12 @@ fn normalise_mapped(s: &str) -> Mapped {
     let mut paragraphs = HashSet::new();
     // (start, end, newlines) of the pending whitespace run.
     let mut gap: Option<(usize, usize, usize)> = None;
-    for (i, c) in s.char_indices() {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for (k, &(i, c)) in chars.iter().enumerate() {
         let end = i + c.len_utf8();
-        match fold(c) {
+        let prev = k.checked_sub(1).map(|j| chars[j].1);
+        let next = chars.get(k + 1).map(|&(_, c)| c);
+        match fold(c, prev, next) {
             Fold::Skip => {}
             Fold::Space => {
                 let nl = usize::from(c == '\n');
@@ -211,8 +225,9 @@ fn normalise_mapped(s: &str) -> Mapped {
 /// The form both sides are compared in: every run of Unicode whitespace
 /// becomes one space, the ends are trimmed, soft hyphens and zero-width
 /// characters (U+00AD, U+200B to U+200D, U+2060, U+FEFF) are removed, ‘’
-/// become `'`, “” become `"`, and hyphen, dash and minus characters (U+2010 to
-/// U+2015, U+2212) become `-`. Case is kept.
+/// become `'`, “” become `"`, hyphen, dash and minus characters (U+2010 to
+/// U+2015, U+2212) become `-`, and a middle dot (U+00B7, U+2219, U+22C5)
+/// between two ASCII digits becomes `.`. Case is kept.
 pub fn normalise(s: &str) -> String {
     normalise_mapped(s).text
 }
@@ -221,7 +236,9 @@ pub fn normalise(s: &str) -> String {
 
 /// Characters that may not sit right before a quote: they would be cut off
 /// from the number or sign the quote starts with.
-const BAD_BEFORE: &[char] = &['-', '.', '+', '\u{b1}', '$', '<'];
+const BAD_BEFORE: &[char] = &[
+    '-', '.', '+', '\u{b1}', '$', '<', '\u{b7}', '\u{2219}', '\u{22c5}',
+];
 /// Characters a quote may start right after (the clause starts).
 const CLAUSE_OPENERS: &[char] = &['.', ';', ':', '(', '['];
 
@@ -265,7 +282,9 @@ impl Section {
         match rest.next() {
             None => true,
             Some(c) if c.is_alphanumeric() || c == '%' => false,
-            Some('.' | ',') => !rest.next().is_some_and(|d| d.is_ascii_digit()),
+            Some(c) if c == '.' || c == ',' || MIDDLE_DOTS.contains(&c) => {
+                !rest.next().is_some_and(|d| d.is_ascii_digit())
+            }
             Some(_) => true,
         }
     }
@@ -310,14 +329,16 @@ pub fn find_verbatim<'a>(section: &'a str, quote: &str) -> Option<&'a str> {
 
 // ---------- the result must come from the quote ----------
 
-static NUMBER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"-?\d+(?:[.,]\d+)?%?").expect("number pattern is valid"));
+static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-?(?:\d+(?:[.,]\d+)?|\.\d+)%?").expect("number pattern is valid")
+});
 static THOUSANDS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-?\d{1,3},\d{3}%?$").expect("thousands pattern is valid"));
 
-/// The number tokens of `s` (normalised first). A `-` right after a digit or
-/// `%` is a range dash, not a sign; a comma before exactly three final digits
-/// is a thousands separator.
+/// The number tokens of `s`, read from its normalised (folded) form, so a
+/// middle-dot decimal is one number. A `-` right after a digit or `%` is a
+/// range dash, not a sign; a comma before exactly three final digits is a
+/// thousands separator; a leading `.` reads as `0.` (".52" is 0.52).
 fn numbers(s: &str) -> Vec<String> {
     let s = normalise(s);
     NUMBER
@@ -332,10 +353,15 @@ fn numbers(s: &str) -> Vec<String> {
             {
                 t = &t[1..];
             }
-            if THOUSANDS.is_match(t) {
+            let t = if THOUSANDS.is_match(t) {
                 t.replace(',', "")
             } else {
                 t.to_string()
+            };
+            match t.strip_prefix('-') {
+                Some(r) if r.starts_with('.') => format!("-0{r}"),
+                _ if t.starts_with('.') => format!("0{t}"),
+                _ => t,
             }
         })
         .collect()

@@ -3351,3 +3351,46 @@ async fn text_sent_is_capped_with_discussion_dropped_first() {
         ]
     );
 }
+
+#[test]
+fn middle_dot_decimals_are_one_number() {
+    // Between two digits, U+00B7, U+2219 and U+22C5 are decimal points;
+    // elsewhere they are left alone.
+    assert_eq!(
+        normalise("0\u{b7}52 0\u{2219}5 1\u{22c5}25"),
+        "0.52 0.5 1.25"
+    );
+    assert_eq!(
+        normalise("a \u{b7} b 3\u{b7} \u{b7}4"),
+        "a \u{b7} b 3\u{b7} \u{b7}4"
+    );
+
+    // "12" cannot be cut from "12·5%".
+    let src = "Anastomotic leak was seen in 12\u{b7}5% of the ICG group.";
+    assert_eq!(find_verbatim(src, "Anastomotic leak was seen in 12"), None);
+    assert_eq!(
+        find_verbatim(src, "Anastomotic leak was seen in 12.5% of the ICG group"),
+        Some("Anastomotic leak was seen in 12\u{b7}5% of the ICG group")
+    );
+    // "(HR 0" cannot be cut from "HR 0·52".
+    let hr = "Mortality fell (HR 0\u{b7}52, 95% CI 0\u{b7}31\u{2013}0\u{b7}87).";
+    assert_eq!(find_verbatim(hr, "Mortality fell (HR 0"), None);
+    assert_eq!(
+        find_verbatim(hr, "Mortality fell (HR 0.52, 95% CI 0.31-0.87)"),
+        Some("Mortality fell (HR 0\u{b7}52, 95% CI 0\u{b7}31\u{2013}0\u{b7}87)")
+    );
+
+    // Results: the number is read whole on both sides.
+    assert!(finding_consistent("mortality", "HR 0.52", hr));
+    assert!(finding_consistent(
+        "mortality",
+        "HR 0\u{b7}52 (0.31 to 0.87)",
+        hr
+    ));
+    let q = "Leak was 12\u{b7}5% with ICG and mortality fell (HR 0\u{b7}52)";
+    assert!(!finding_consistent("mortality", "HR 0\u{b7}12", q));
+    assert!(!finding_consistent("mortality", "HR 0.12", q));
+    // ".52" is 0.52, not 52.
+    assert!(finding_consistent("mortality", "HR .52", hr));
+    assert!(!finding_consistent("mortality", "52% lower", hr));
+}
