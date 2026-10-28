@@ -35,7 +35,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::frame::Pico;
-use super::llm::{LlmCall, OutputSchema, StepError, wrap_source};
+use super::llm::{Effort, LlmCall, OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, Literature, RunContext, add_line, clip, contains_question};
 use crate::lit::europepmc::merge_results;
 use crate::lit::http::LitError;
@@ -49,7 +49,9 @@ pub const MAX_QUERY: usize = 1000;
 pub const REVIEW_TITLES: usize = 20;
 /// Characters of a refinement reason kept (step line and trail).
 const MAX_REASON: usize = 120;
-const MAX_TOKENS: u32 = 1000;
+/// Room for adaptive thinking before the answer (Ruling R-FA2: a live review
+/// call used 997 of 1,000).
+const MAX_TOKENS: u32 = 2000;
 
 /// What Search produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +359,7 @@ pub static PROPOSE_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
         "required": ["query", "reason"],
         "additionalProperties": false
     }))
+    .with_effort(Effort::Low)
 });
 
 /// The review's JSON Schema: `{"accept"}`, or a new query with a reason.
@@ -371,6 +374,7 @@ pub static REVIEW_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
         "required": ["accept"],
         "additionalProperties": false
     }))
+    .with_effort(Effort::Low)
 });
 
 /// Model reply proposing a query.

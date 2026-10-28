@@ -22,6 +22,21 @@ pub struct MessagesRequest {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OutputConfig {
     pub format: OutputFormat,
+    /// How much the model thinks (thinking counts toward `max_tokens`).
+    /// Unset: omitted (the model's default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+}
+
+/// `output_config.effort`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
 }
 
 /// `output_config.format`: `{"type":"json_schema","schema":{…}}`.

@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 
 use serde_json::json;
 
-use super::llm::{OutputSchema, StepError};
+use super::llm::{Effort, OutputSchema, StepError};
 use super::{AgentLlm, RunContext, add_line, clip, contains_question};
 use crate::gate::neutralise_close_tag;
 use crate::runs::StepKind;
@@ -58,6 +58,7 @@ pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
         "required": ["population", "intervention", "comparison", "outcomes", "limits"],
         "additionalProperties": false
     }))
+    .with_effort(Effort::Low)
 });
 
 /// Frame `question` as a PICO, using the `frame` model. Adds the step line

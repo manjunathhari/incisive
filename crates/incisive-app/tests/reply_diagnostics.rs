@@ -171,6 +171,7 @@ async fn unreadable_replies_are_logged_without_content() {
         "reply_chars=",
         "error_line=",
         "error_column=",
+        "output_tokens=10",
     ] {
         assert!(first.contains(want), "{want} missing: {first}");
     }
@@ -183,5 +184,14 @@ async fn unreadable_replies_are_logged_without_content() {
     }
     let refused = line("claude refused; call failed");
     assert!(refused.contains("stop_reason=Some(Refusal)"), "{refused}");
+    assert!(refused.contains("error_kind=\"refusal\""), "{refused}");
+    // Every call logs its output tokens (Ruling R-FA2, review N-3).
+    assert_eq!(
+        logs.lines()
+            .filter(|l| l.contains("claude call done") && l.contains("output_tokens=10"))
+            .count(),
+        3,
+        "{logs}"
+    );
     assert!(!refused.contains("reply_chars"), "{refused}");
 }

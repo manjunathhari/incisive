@@ -72,8 +72,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::extract::Extracted;
+
 use super::llm::{
-    OutputSchema, Reply, SCHEMA_NUDGE, StepError, log_unreadable, reply_fault, wrap_source,
+    Effort, OutputSchema, Reply, SCHEMA_NUDGE, StepError, log_unreadable, reply_fault, wrap_source,
 };
 use super::screen::EvidenceLevel;
 use super::write::{Claim, Confidence, Draft, cap_confidence};
@@ -168,11 +169,14 @@ pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
         "required": ["claim", "verdict"],
         "additionalProperties": false
     }))
+    .with_effort(Effort::Low)
 });
 
-/// The verdict word from a reply that is not usable JSON (cut off by the token
-/// limit, or prose with the verdict field in it): the first `"verdict": "…"`
-/// whose word is complete (closing quote present).
+/// The verdict word from a reply that ended normally but is not usable JSON
+/// (prose with the verdict field in it): the first `"verdict": "…"` whose
+/// word is complete (closing quote present). A defensive path: a reply cut
+/// off by the token limit is never read (Ruling R-FA1), and structured
+/// outputs should not produce prose.
 fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
     let i = text.find("\"verdict\"")?;
     let rest = text[i + "\"verdict\"".len()..].trim_start();
@@ -186,7 +190,8 @@ fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
 /// The verdict in one reply's text. A reply with usable JSON gives its
 /// claim-1 entry's `verdict` (`None` when that entry or field is missing: a
 /// verdict for another claim never counts). Only a reply with no usable JSON
-/// (cut off by the token limit) has its verdict field salvaged.
+/// has its verdict field salvaged; a reply cut off by the token limit never
+/// reaches here ([`verdict_from_reply`]).
 fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
     // The asked-for reply has exactly one verdict field. More than one (an
     // echoed example, or two answers, complete or cut off) is ambiguous: no

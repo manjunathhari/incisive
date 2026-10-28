@@ -48,7 +48,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::frame::Pico;
-use super::llm::{OutputSchema, StepError, wrap_source};
+use super::llm::{Effort, OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, MAX_STEP_LINE, RunContext, add_line, clip, contains_question};
 use crate::lit::{Paper, PaperId};
 use crate::runs::StepKind;
@@ -319,6 +319,7 @@ pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
         "required": ["verdicts"],
         "additionalProperties": false
     }))
+    .with_effort(Effort::Low)
 });
 
 /// Exclusion codes the model may give, with the label tallied for the

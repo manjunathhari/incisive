@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use claude_client::{
-    ClaudeError, Client, ContentBlock, Message, MessagesRequest, OutputConfig, OutputFormat,
-    RetryPolicy, Role, StopReason, ToolChoice, ToolDef,
+    ClaudeError, Client, ContentBlock, Effort, Message, MessagesRequest, OutputConfig,
+    OutputFormat, RetryPolicy, Role, StopReason, ToolChoice, ToolDef,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -358,6 +358,7 @@ fn output_config_is_omitted_when_unset_and_serialises_json_schema() {
         format: OutputFormat::JsonSchema {
             schema: json!({"type": "object", "additionalProperties": false}),
         },
+        effort: None,
     });
     let body = serde_json::to_value(&req).unwrap();
     assert_eq!(
@@ -386,4 +387,38 @@ async fn refusal_stop_reason_is_parsed_and_unknown_is_other() {
     assert_eq!(resp.stop_reason, Some(StopReason::Refusal));
     let other: StopReason = serde_json::from_value(json!("pause_turn")).unwrap();
     assert_eq!(other, StopReason::Other);
+}
+
+#[test]
+fn output_config_effort_serialises_beside_format_and_is_omitted_when_unset() {
+    let mut req = request();
+    req.output_config = Some(OutputConfig {
+        format: OutputFormat::JsonSchema {
+            schema: json!({"type": "object"}),
+        },
+        effort: Some(Effort::Low),
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {"type": "object"}}, "effort": "low"})
+    );
+    for (e, want) in [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+        (Effort::Xhigh, "xhigh"),
+        (Effort::Max, "max"),
+    ] {
+        assert_eq!(serde_json::to_value(e).unwrap(), json!(want));
+    }
+    req.output_config.as_mut().unwrap().effort = None;
+    let body = serde_json::to_value(&req).unwrap();
+    assert!(
+        !body["output_config"]
+            .as_object()
+            .unwrap()
+            .contains_key("effort"),
+        "{body}"
+    );
 }

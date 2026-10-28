@@ -3918,6 +3918,11 @@ async fn check_prompt_binds_measure_arm_population_and_claim_is_data() {
 /// Real reply shapes must give the verdict they state.
 #[tokio::test]
 async fn check_reads_verdicts_from_real_reply_shapes() {
+    // These are text replies that end normally (`EndTurn`), including prose
+    // shapes that look cut off. Since Ruling R-FA1 a reply whose stop reason
+    // is `max_tokens` is never read (see
+    // `check_retries_a_cut_off_reply_and_fails_a_refusal`), so the salvage
+    // cases here are the defensive prose path.
     let Some(pool) = pool().await else { return };
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
@@ -5602,10 +5607,38 @@ async fn production_prices_capacity() {
 
     let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
     let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
+    // Ruling R-FA2 guard: the live smoke test (28 Oct, default effort) saw
+    // propose use 560 and review 997 output tokens (thinking included).
+    // Even at those charges, Quick at ₹15 still reads 2 papers.
+    let sonnet = |io| ctx.budget.cost_of("claude-sonnet-5-5", &us(io)).unwrap();
+    let live_propose = (propose.0, sonnet((900, 560)));
+    let live_review = (review.0, sonnet((1_500, 997)));
+    let quick_live = vec![live_propose, live_review, screen, screen];
+    let mut focused_live = vec![live_propose, live_review, live_review, live_review];
+    focused_live.extend(std::iter::repeat_n(screen, 10));
+    let ql =
+        |limit| papers_before_wrap_up(limit, frame, &quick_live, abstract_paper, (r0, growth), 5);
+    let fl = |paper| papers_before_wrap_up(4000, frame, &focused_live, paper, (r0, growth), 10);
+    assert_eq!(
+        ql(1500),
+        Some(2),
+        "Quick at ₹15, live search output: 2 abstracts"
+    );
+    assert_eq!(
+        fl(full_paper),
+        Some(5),
+        "Focused, live search output, full text"
+    );
+    assert_eq!(
+        fl(abstract_paper),
+        Some(10),
+        "Focused, live search output, abstracts"
+    );
     assert_eq!(q(500), None, "Quick at the old ₹5 cannot even search");
     // Fix A (28 Oct, R-FA1): each step's JSON Schema is sent as
     // output_config, and held, with every call; Quick at ₹15 reads 3
-    // abstracts (was 4 before Fix A).
+    // abstracts (was 4 before Fix A). R-FA2 doubled the search holds
+    // (max_tokens 2,000): the counts are unchanged.
     assert_eq!(q(1500), Some(3), "Quick at ₹15: 3 of 5 abstracts");
     assert_eq!(f(full_paper), Some(6), "Focused, all full text");
     assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
@@ -6265,6 +6298,22 @@ async fn every_step_requests_structured_output_end_to_end() {
     assert_eq!(reqs.len(), order.len());
     for (r, step) in reqs.iter().zip(order) {
         assert_structured(r, s[step]);
+        // Ruling R-FA2: low effort for the five short-answer steps; Extract
+        // and Write keep the model default (no effort sent).
+        let body = serde_json::to_value(r).unwrap();
+        let want = match step {
+            "extract" | "write" => serde_json::Value::Null,
+            _ => json!("low"),
+        };
+        assert_eq!(body["output_config"]["effort"], want, "{step}");
+        assert_eq!(
+            body["output_config"]
+                .as_object()
+                .unwrap()
+                .contains_key("effort"),
+            !want.is_null(),
+            "{step}"
+        );
         let sys = r.system.as_ref().unwrap();
         assert!(sys.contains("matching the given schema"), "{step}: {sys}");
         assert!(!sys.contains("submit tool"), "{step}");

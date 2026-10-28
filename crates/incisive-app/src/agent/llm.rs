@@ -34,6 +34,8 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+/// `output_config.effort`, per step (Ruling R-FA2).
+pub use claude_client::Effort;
 use claude_client::{
     ClaudeError, Client, ContentBlock, Message, MessagesRequest, MessagesResponse, OutputConfig,
     OutputFormat, Role, StopReason, Usage,
@@ -394,15 +396,33 @@ pub const FINISHING_STEPS: [&str; 2] = ["write", "check"];
 /// `required` list, and no unsupported keyword. It is sent with every call,
 /// so it counts in the hold.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OutputSchema(pub serde_json::Value);
+pub struct OutputSchema {
+    schema: serde_json::Value,
+    effort: Option<Effort>,
+}
 
 impl OutputSchema {
+    /// `schema`, at the model's default effort (none sent).
     pub fn new(schema: serde_json::Value) -> OutputSchema {
-        OutputSchema(schema)
+        OutputSchema {
+            schema,
+            effort: None,
+        }
+    }
+
+    /// The step's constant effort, sent as `output_config.effort` (Ruling
+    /// R-FA2: thinking counts toward `max_tokens`; effort is what bounds it).
+    pub fn with_effort(mut self, effort: Effort) -> OutputSchema {
+        self.effort = Some(effort);
+        self
     }
 
     pub fn schema(&self) -> &serde_json::Value {
-        &self.0
+        &self.schema
+    }
+
+    pub fn effort(&self) -> Option<Effort> {
+        self.effort
     }
 }
 
@@ -431,8 +451,9 @@ fn build_request(
         tool_choice: None,
         output_config: schema.map(|s| OutputConfig {
             format: OutputFormat::JsonSchema {
-                schema: s.0.clone(),
+                schema: s.schema.clone(),
             },
+            effort: s.effort,
         }),
     }
 }
@@ -574,6 +595,8 @@ pub(crate) fn parse_reply<T: DeserializeOwned>(text: &str) -> Option<T> {
 pub struct Reply {
     pub text: String,
     pub stop_reason: Option<StopReason>,
+    /// Output tokens billed (thinking included), for diagnostics.
+    pub output_tokens: u32,
 }
 
 impl Reply {
@@ -581,6 +604,7 @@ impl Reply {
         Reply {
             text: response_text(resp),
             stop_reason: resp.stop_reason,
+            output_tokens: resp.usage.output_tokens,
         }
     }
 
@@ -637,6 +661,7 @@ pub fn log_unreadable(call: &LlmCall, reply: &Reply, fault: ReplyFault, what: &'
         step = call.step,
         model = %call.model,
         stop_reason = ?reply.stop_reason,
+        output_tokens = reply.output_tokens,
         reply_chars = reply.chars(),
         error_category = fault.category,
         error_line = fault.line,
@@ -862,7 +887,7 @@ impl Attempt {
                 );
                 self.settle(hold, &resp.usage).await?;
                 if resp.stop_reason == Some(StopReason::Refusal) {
-                    tracing::warn!(%run_id, step = c.step, model = %c.model, stop_reason = ?resp.stop_reason, "claude refused; call failed");
+                    tracing::warn!(%run_id, step = c.step, model = %c.model, stop_reason = ?resp.stop_reason, error_kind = "refusal", "claude refused; call failed");
                     return Err(StepError::Llm);
                 }
                 Ok(Reply::of(&resp))
