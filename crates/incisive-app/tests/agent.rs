@@ -1950,7 +1950,20 @@ async fn missing_verdict_counts_as_excluded() {
         s.included[0].2,
         "Randomised trial of ICG angiography in colorectal resection"
     );
-    assert_eq!(excluded(&s, "Wrong population: paediatric patients"), 1);
+    // Exclusions are tallied by code; the free text is kept aside, never shown.
+    assert_eq!(excluded(&s, "wrong population"), 1);
+    assert_eq!(
+        s.excluded_notes,
+        vec![(
+            "12".to_string(),
+            "Paediatric patients, not adults".to_string()
+        )]
+    );
+    let text = request_text(&llm, 0);
+    assert!(
+        text.contains("<pico>") && text.contains("</pico>"),
+        "{text}"
+    );
     assert_eq!(excluded(&s, "not assessed"), 1);
     assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 2);
 
@@ -1979,13 +1992,67 @@ async fn missing_verdict_counts_as_excluded() {
     let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
         .await
         .unwrap();
-    for (r, _) in &s.excluded_counts {
+    // No code: "other".
+    assert_eq!(excluded(&s, "other"), 3);
+    assert_eq!(s.excluded_notes.len(), 3);
+    for (_, r) in &s.excluded_notes {
         assert!(r.chars().count() <= 80, "{r}");
         assert!(!contains_question(r, QUESTION), "{r}");
         assert!(!r.trim().is_empty());
     }
-    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 3);
-    assert_line_rules(&steps_of(&ctx, uid).await);
+    let steps = steps_of(&ctx, uid).await;
+    assert_line_rules(&steps);
+    for l in lines(&steps) {
+        assert!(
+            !l.contains("Paediatric patients"),
+            "free-text reason shown: {l}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lenient_verdicts_never_void_the_batch() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers: Vec<Paper> = (1..=6)
+        .map(|i| {
+            paper(
+                &format!("{}", 700 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!([
+            {"id": "p-1", "include": "true", "code": "relevant", "reason": "ok"},
+            {"id": 2, "include": "No", "code": "population", "reason": "adults only"},
+            {"id": "p-3", "include": null, "code": "design", "reason": "?"},
+            {"id": "p-4", "include": "maybe"},
+            {"id": 5, "include": true},
+            {"id": "p-6", "include": "EXCLUDE", "code": "made_up"},
+            "not an object",
+            {"id": {"nested": 1}, "include": true}
+        ]),
+        u(),
+    ));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 1);
+    assert_eq!(pmids(&s), vec!["701", "705"]);
+    assert_eq!(excluded(&s, "wrong population"), 1);
+    // No usable include value: not assessed, never excluded under its reason.
+    assert_eq!(excluded(&s, "not assessed"), 2);
+    assert_eq!(excluded(&s, "wrong study design"), 0);
+    // An unknown code is "other".
+    assert_eq!(excluded(&s, "other"), 1);
+
+    // Screening is recall-first: the prompt says so.
+    let sys = format!("{:?}", llm.requests()[0].system);
+    assert!(sys.contains("When uncertain, include the record"), "{sys}");
 }
 
 #[tokio::test]
@@ -2009,7 +2076,7 @@ async fn title_only_record_is_screened_and_counted() {
     let llm = Arc::new(ScriptedLlm::new().reply_json(
         json!([
             {"id": "p-1", "include": true, "reason": "Title describes an ICG trial"},
-            {"id": "p-2", "include": false, "reason": "Wrong intervention"},
+            {"id": "p-2", "include": false, "code": "intervention", "reason": "Wrong intervention"},
             {"id": "p-3", "include": true, "reason": "Relevant"},
             {"id": "p-4", "include": false, "reason": "Not relevant"}
         ]),
@@ -2029,7 +2096,7 @@ async fn title_only_record_is_screened_and_counted() {
     assert!(text.contains(&"é".repeat(2_990)));
     assert!(!text.contains("ABSTRACT-TAIL-MARKER"), "abstract not cut");
     assert_eq!(pmids(&s), vec!["23", "21"]);
-    assert_eq!(excluded(&s, "Wrong intervention"), 1);
+    assert_eq!(excluded(&s, "wrong intervention"), 1);
 
     let steps = steps_of(&ctx, uid).await;
     assert_line_rules(&steps);
@@ -2063,8 +2130,10 @@ fn evidence_level_from_pub_types_and_title() {
         lv("A prospective cohort", &["Journal Article"]),
         EvidenceLevel::ProspectiveCohort
     );
+    // Observational Study alone is not known to be prospective.
+    assert_eq!(lv("x", &["Observational Study"]), EvidenceLevel::Other);
     assert_eq!(
-        lv("x", &["Observational Study"]),
+        lv("A prospective study of ICG", &["Observational Study"]),
         EvidenceLevel::ProspectiveCohort
     );
     assert_eq!(
@@ -2079,6 +2148,55 @@ fn evidence_level_from_pub_types_and_title() {
         EvidenceLevel::Guideline
     );
     assert_eq!(lv("Case report", &["Case Reports"]), EvidenceLevel::Other);
+    // R-10c: pub types decide first; non-research types force Other.
+    assert_eq!(
+        lv(
+            "Adherence to guidelines in a retrospective cohort",
+            &["Journal Article"]
+        ),
+        EvidenceLevel::Other
+    );
+    assert_eq!(
+        lv("Comment on: meta-analysis of ICG angiography", &["Comment"]),
+        EvidenceLevel::Other
+    );
+    assert_eq!(
+        lv(
+            "Randomized controlled trial of ICG",
+            &["Letter", "Randomized Controlled Trial"]
+        ),
+        EvidenceLevel::Other
+    );
+    assert_eq!(
+        lv("A Delphi consensus on ICG use", &["Journal Article"]),
+        EvidenceLevel::Other
+    );
+    assert_eq!(
+        lv(
+            "ICG trial: a systematic review of designs",
+            &["Randomized Controlled Trial"]
+        ),
+        EvidenceLevel::Rct
+    );
+    assert_eq!(lv("Guidelines for ICG use", &[]), EvidenceLevel::Guideline);
+    assert_eq!(
+        lv("European clinical practice guidelines on ICG", &[]),
+        EvidenceLevel::Guideline
+    );
+    assert_eq!(
+        lv("Consensus guideline on ICG", &[]),
+        EvidenceLevel::Guideline
+    );
+    assert_eq!(lv("Randomised trials are hard", &[]), EvidenceLevel::Rct);
+    assert_eq!(
+        lv("Randomized patients in surgery", &[]),
+        EvidenceLevel::Other
+    );
+    assert_eq!(lv("A prospective look at ICG", &[]), EvidenceLevel::Other);
+    assert_eq!(
+        lv("Non-randomized controlled trial", &[]),
+        EvidenceLevel::Other
+    );
     // Guideline = systematic review = meta-analysis > RCT > cohort > other.
     assert_eq!(
         EvidenceLevel::Guideline.rank(),
@@ -2225,6 +2343,7 @@ fn screened_of(papers: Vec<Paper>) -> Screened {
             })
             .collect(),
         excluded_counts: vec![],
+        excluded_notes: vec![],
         title_only: 0,
     }
 }
