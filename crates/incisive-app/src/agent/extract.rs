@@ -14,7 +14,7 @@
 //!   are checked against exactly what was sent.
 //! * A title-only paper is never sent: a title cannot support a finding. It is
 //!   skipped and counted in a Note line.
-//! * The reply is strict JSON, read field by field (it is untrusted):
+//! * The reply's JSON (reasoning around it is allowed: `llm::parse_reply`), read field by field (it is untrusted):
 //!   `{"design","n","population","intervention","comparison",
 //!   "findings":[{"outcome","result","quote"}]}`. Only the first
 //!   [`MAX_FINDINGS`] (6) findings are considered; the rest are ignored.

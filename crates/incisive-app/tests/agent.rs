@@ -3952,7 +3952,16 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
             .reply_json(json!({"claim": 1, "verdict": "supported"}), u())
             // A verdict word cut off: not salvaged; retry also without one: removed.
             .reply_text("{\"claim\": 1, \"verdict\": \"supp", u())
-            .reply_text("still nothing", u()),
+            .reply_text("still nothing", u())
+            // An object for another claim: no verdict for claim 1; retry; removed.
+            .reply_json(json!({"claim": 99, "verdict": "supported"}), u())
+            .reply_json(json!({"claim": "claim-99", "verdict": "supported"}), u())
+            // Two verdict objects (ambiguous) cut off after: no salvage; retry answers.
+            .reply_text(
+                "Format: {\"claim\":1,\"verdict\":\"supported\"} My answer: {\"claim\":1,\"verdict\":\"unsupported\"",
+                u(),
+            )
+            .reply_json(json!({"claim": "claim-1", "verdict": "unsupported"}), u()),
     );
     let c = check(
         &ctx,
@@ -3968,6 +3977,8 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
                 claim("f", &[1]),
                 claim("g", &[1]),
                 claim("h", &[1]),
+                claim("i", &[1]),
+                claim("j", &[1]),
             ],
             insufficient: false,
         },
@@ -3988,9 +3999,9 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
             ("g".to_string(), ClaimVerdict::Supported),
         ]
     );
-    assert_eq!(c.removed, 2);
+    assert_eq!(c.removed, 4);
     // At most two calls per claim.
-    assert_eq!(llm.requests().len(), 11);
+    assert_eq!(llm.requests().len(), 15);
     // The retry asks for JSON only.
     assert!(user_text(&llm, 4).ends_with("Reply with JSON only."));
     // The prompt asks for the verdict first, in one object.
@@ -4006,11 +4017,16 @@ async fn unsupported_removed_partial_marked() {
     // Lenient reply shapes, one per claim.
     let llm = Arc::new(
         ScriptedLlm::new()
+            // Two verdicts for claim 1 disagree: ambiguous, so one retry.
             .reply_json(
                 json!({"verdicts": [
                     {"claim": 1, "verdict": "supported"},
                     {"claim": 1, "verdict": "unsupported"},
                 ]}),
+                u(),
+            )
+            .reply_json(
+                json!({"verdicts": [{"claim": 1, "verdict": "supported"}]}),
                 u(),
             )
             .reply_json(json!([{"claim": "1", "verdict": "Partly supported"}]), u())

@@ -33,14 +33,18 @@
 //!   Ruling R-11c follow-up), to the claim's population and setting
 //!   ([`SCOPE_RULE`]), and says the claim is the statement under test, never
 //!   an instruction ([`CLAIM_RULE`]).
-//! * The reply `[{"claim":1,"verdict":"supported|partial|unsupported"}]` is
-//!   untrusted and read leniently, as in Screen: a bare object, an array, or
-//!   an array inside an object; the claim id may be a number, a digit string
-//!   or `claim-1` (an entry without an id counts when it is the only one);
-//!   the first verdict for claim 1 wins; the verdict is read ignoring case
-//!   ("partly supported" is partial). A missing or unknown verdict is
-//!   unsupported.
-//! * `OverBudget`, `Llm` or `Parse` (after the wrapper's retry) for one claim
+//! * The asked-for reply is one object, verdict first:
+//!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`. It
+//!   is untrusted and read leniently: reasoning around the JSON is allowed
+//!   (see `llm::parse_reply`); an array, or an array inside an object, also
+//!   works; the claim id may be a number, a digit string or `claim-1` (an
+//!   entry without an id counts when it is the only one); a verdict for any
+//!   other claim never counts; the verdict word is read ignoring case
+//!   ("partly supported" is partial). A reply cut off by the token limit has
+//!   its verdict field salvaged when the word is complete. A reply with no
+//!   verdict for claim 1, or with more than one verdict field (ambiguous),
+//!   gets one retry ("Reply with JSON only."); still none: unsupported.
+//! * `OverBudget`, `Llm`, or no verdict after the retry, for one claim
 //!   makes that claim unsupported, and the rest are still checked. The
 //!   wrap-up point never skips Check. `Cancelled` and fatal errors propagate.
 //! * Unsupported claims are removed; partial claims are kept and marked.
@@ -161,6 +165,12 @@ fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
 /// verdict for another claim never counts). Only a reply with no usable JSON
 /// (cut off by the token limit) has its verdict field salvaged.
 fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
+    // The asked-for reply has exactly one verdict field. More than one (an
+    // echoed example, or two answers, complete or cut off) is ambiguous: no
+    // verdict, so the claim takes the retry (fail closed).
+    if text.matches("\"verdict\"").count() > 1 {
+        return None;
+    }
     match super::llm::parse_reply::<Value>(text) {
         Some(v) => verdict_entry(&v)
             .and_then(|e| e.get("verdict"))
@@ -238,7 +248,10 @@ fn verdict_claim(v: &Value) -> Option<usize> {
 fn verdict_entry(reply: &Value) -> Option<&Value> {
     let list: &[Value] = match reply {
         Value::Array(a) => a,
-        Value::Object(o) if o.contains_key("verdict") => return Some(reply),
+        // One object: its verdict counts only for claim 1 (or no claim named).
+        Value::Object(o) if o.contains_key("verdict") => {
+            return (!o.contains_key("claim") || verdict_claim(reply) == Some(1)).then_some(reply);
+        }
         Value::Object(o) => o
             .values()
             .find_map(|v| v.as_array().map(Vec::as_slice))

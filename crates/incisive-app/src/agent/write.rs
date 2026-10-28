@@ -11,7 +11,7 @@
 //! * Confidence (R-12a): the prompt defines strong / moderate / limited by
 //!   design, and [`cap_confidence`] enforces it in code (here, and again in
 //!   Check over the verified refs only).
-//! * The reply is strict JSON,
+//! * The reply's JSON (reasoning around it is allowed: `llm::parse_reply`),
 //!   `{"claims":[{"text","refs":[n,…],"confidence":"strong|moderate|limited"}],
 //!   "insufficient":bool}`, read claim by claim (it is untrusted). At most
 //!   [`MAX_CLAIMS`] (6) usable claims are kept, in order. A ref may be a
