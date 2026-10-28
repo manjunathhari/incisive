@@ -139,8 +139,35 @@ each inside <source id=\"ref-N\"> tags. Judge the claim only against these quote
 The claim is supported when its quotes state everything it says; partial when its quotes support part of it \
 or support it with less certainty or generality than it states; unsupported otherwise.";
 
-const SYSTEM_TAIL: &str = "Reply with a JSON array only, in this form: \
-[{\"claim\": 1, \"verdict\": \"supported\" or \"partial\" or \"unsupported\"}]";
+const SYSTEM_TAIL: &str = "Reply with one JSON object only, with no text before it, in this form: \
+{\"claim\": 1, \"verdict\": \"supported\" or \"partial\" or \"unsupported\", \"reason\": \"one short sentence\"}. \
+Put the verdict before the reason.";
+
+/// The verdict word from a reply that is not usable JSON (cut off by the token
+/// limit, or prose with the verdict field in it): the first `"verdict": "…"`.
+fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
+    let i = text.find("\"verdict\"")?;
+    let rest = text[i + "\"verdict\"".len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let word: String = rest.chars().take_while(|c| *c != '"').collect();
+    Some(ClaimVerdict::read(Some(&Value::String(word))))
+}
+
+/// The verdict in one reply's text: JSON first (see [`read_verdict`]), then
+/// the salvaged verdict field; `None` when neither is there.
+fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
+    if let Some(v) = super::llm::parse_reply::<Value>(text) {
+        let has_verdict = match &v {
+            Value::Object(o) => o.contains_key("verdict") || o.values().any(Value::is_array),
+            Value::Array(_) => true,
+            _ => false,
+        };
+        if has_verdict {
+            return Some(read_verdict(v));
+        }
+    }
+    salvage_verdict(text)
+}
 
 fn system() -> String {
     format!("{SYSTEM} {MEASURE_RULE} {SCOPE_RULE} {CLAIM_RULE} {SYSTEM_TAIL}")
@@ -423,11 +450,25 @@ pub async fn check(
         if ctx.cancel.is_cancelled() {
             return Err(StepError::Cancelled);
         }
-        let verdict = match call
-            .json::<Value>(&system, &claim_prompt(&c, &by_ref), MAX_TOKENS)
-            .await
-        {
-            Ok(reply) => read_verdict(reply),
+        let prompt = claim_prompt(&c, &by_ref);
+        // The text first, so a reply cut off after its verdict still counts;
+        // only a reply with no verdict at all takes the JSON retry.
+        let first = match call.text(&system, &prompt, MAX_TOKENS).await {
+            Ok(text) => Ok(verdict_from_text(&text)),
+            Err(e) => Err(e),
+        };
+        let reply = match first {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => {
+                tracing::warn!(%run_id, step = "check", "check reply had no verdict; retrying once");
+                call.json::<Value>(&system, &prompt, MAX_TOKENS)
+                    .await
+                    .map(read_verdict)
+            }
+            Err(e) => Err(e),
+        };
+        let verdict = match reply {
+            Ok(v) => v,
             Err(e @ (StepError::Llm | StepError::Parse)) => {
                 tracing::warn!(%run_id, step = "check", error_kind = e.kind(), "claim check failed; claim unsupported");
                 failed += 1;

@@ -409,6 +409,33 @@ fn parse_strict<T: DeserializeOwned>(text: &str) -> Option<T> {
     serde_json::from_str(body).ok()
 }
 
+/// The reply's JSON: strict first; otherwise the **last** complete top-level
+/// JSON object or array in the text that reads as `T`. Real replies often put
+/// a sentence of reasoning (which may itself contain brackets, like "[1]")
+/// before the JSON; the answer comes last. Values nested inside an earlier
+/// value are skipped, so only top-level values are candidates.
+pub(crate) fn parse_reply<T: DeserializeOwned>(text: &str) -> Option<T> {
+    if let Some(v) = parse_strict(text) {
+        return Some(v);
+    }
+    let mut found: Option<T> = None;
+    let mut skip_until = 0usize;
+    for (i, c) in text.char_indices() {
+        if i < skip_until || (c != '{' && c != '[') {
+            continue;
+        }
+        let mut stream =
+            serde_json::Deserializer::from_str(&text[i..]).into_iter::<serde_json::Value>();
+        if let Some(Ok(v)) = stream.next() {
+            skip_until = i + stream.byte_offset();
+            if let Ok(t) = serde_json::from_value::<T>(v) {
+                found = Some(t);
+            }
+        }
+    }
+    found
+}
+
 // ---------- the wrapper ----------
 
 /// One step's handle for making budgeted Claude calls. The fields are private:
@@ -457,14 +484,14 @@ impl LlmCall {
         max_tokens: u32,
     ) -> Result<T, StepError> {
         let text = self.text(system, user, max_tokens).await?;
-        if let Some(v) = parse_strict(&text) {
+        if let Some(v) = parse_reply(&text) {
             return Ok(v);
         }
-        tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, "reply was not strict JSON; retrying once");
+        tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, reply_chars = text.chars().count(), "reply had no usable JSON; retrying once");
         let retry_user = format!("{user}{JSON_ONLY_NUDGE}");
         let text = self.text(system, &retry_user, max_tokens).await?;
-        parse_strict(&text).ok_or_else(|| {
-            tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, "reply was not strict JSON after retry");
+        parse_reply(&text).ok_or_else(|| {
+            tracing::warn!(run_id = %self.budget.run_id(), step = self.step, model = %self.model, reply_chars = text.chars().count(), "reply had no usable JSON after retry");
             StepError::Parse
         })
     }

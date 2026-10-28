@@ -217,6 +217,11 @@ async fn fenced_json_accepted() {
             .reply_text("```json\n{\"answer\": \"fenced\"}\n```", usage(10, 10))
             .reply_text("```\n{\"answer\": \"bare fence\"}\n```", usage(10, 10))
             .reply_text("Here you go: {\"answer\": \"prose\"}", usage(10, 10))
+            .reply_text(
+                "Draft {\"answer\": \"first\"} then [1] and finally {\"answer\": \"last\"} done.",
+                usage(10, 10),
+            )
+            .reply_text("{\"answer\": \"cut off", usage(10, 10))
             .reply_json(json!({"answer": "second try"}), usage(10, 10)),
     );
     let c = call(&llm, &budget, &pool, &cancel);
@@ -225,11 +230,16 @@ async fn fenced_json_accepted() {
         c.json::<Out>("s", "u", 100).await.unwrap().answer,
         "bare fence"
     );
-    // Prose around the object is not strict JSON: it takes the retry.
+    // Prose around the object (live replies do this): the object is used.
+    assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "prose");
+    // Several values: the last one that reads as the type.
+    assert_eq!(c.json::<Out>("s", "u", 100).await.unwrap().answer, "last");
+    // A cut-off reply has no complete value: it takes the retry.
     assert_eq!(
         c.json::<Out>("s", "u", 100).await.unwrap().answer,
         "second try"
     );
+    assert_eq!(llm.requests().len(), 6);
 }
 
 #[tokio::test]
@@ -3867,6 +3877,69 @@ async fn check_prompt_binds_measure_arm_population_and_claim_is_data() {
     assert!(sys.contains(CLAIM_RULE));
 }
 
+/// Live run 28 Oct: every Check reply had reasoning around the JSON (or was cut
+/// off by the token limit), and all 6 claims were removed as "unsupported".
+/// Real reply shapes must give the verdict they state.
+#[tokio::test]
+async fn check_reads_verdicts_from_real_reply_shapes() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = icg_verify_server().await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            // Reasoning first (with a bracketed citation), then the JSON.
+            .reply_text(
+                "Looking at the quote from ref [1], it reports the same measure and groups.\n\n{\"claim\": 1, \"verdict\": \"supported\", \"reason\": \"Same measure.\"}",
+                u(),
+            )
+            // Cut off by the token limit after the verdict.
+            .reply_text(
+                "{\"claim\": 1, \"verdict\": \"partial\", \"reason\": \"The quote supports the dire",
+                u(),
+            )
+            // The old array form inside a fence after prose.
+            .reply_text(
+                "Here is my verdict:\n```json\n[{\"claim\": 1, \"verdict\": \"unsupported\"}]\n```",
+                u(),
+            )
+            // No verdict at all: one JSON retry, which answers.
+            .reply_text("The quotes concern a different population.", u())
+            .reply_json(json!({"claim": 1, "verdict": "supported"}), u()),
+    );
+    let c = check(
+        &ctx,
+        &agent_llm(&llm),
+        &literature(&server),
+        Draft {
+            bottom_line: vec![
+                claim("a", &[1]),
+                claim("b", &[1]),
+                claim("c", &[1]),
+                claim("d", &[1]),
+            ],
+            insufficient: false,
+        },
+        &two_papers(),
+    )
+    .await
+    .unwrap();
+    let got: Vec<(String, ClaimVerdict)> =
+        c.claims.iter().map(|(c, v)| (c.text.clone(), *v)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), ClaimVerdict::Supported),
+            ("b".to_string(), ClaimVerdict::Partial),
+            ("d".to_string(), ClaimVerdict::Supported),
+        ]
+    );
+    assert_eq!(c.removed, 1);
+    assert_eq!(llm.requests().len(), 5);
+    // The prompt asks for the verdict first, in one object.
+    let sys = llm.requests()[0].system.clone().unwrap();
+    assert!(sys.contains("Put the verdict before the reason"), "{sys}");
+}
+
 #[tokio::test]
 async fn unsupported_removed_partial_marked() {
     let Some(pool) = pool().await else { return };
@@ -5456,8 +5529,12 @@ async fn production_prices_capacity() {
         .step_by(5)
         .find(|l| q(*l).unwrap_or(0) >= 2)
         .unwrap();
-    assert_eq!(min_quick, 1265, "recorded in the Task 13 report");
-    assert_eq!((r0, growth), (565, 8));
+    // 1265 before the Check prompt asked for the verdict first (28 Oct).
+    assert_eq!(
+        min_quick, 1270,
+        "recorded in the Task 13 report, updated 28 Oct"
+    );
+    assert_eq!((r0, growth), (571, 8)); // 565 before 28 Oct (Check prompt)
 }
 
 #[tokio::test]
