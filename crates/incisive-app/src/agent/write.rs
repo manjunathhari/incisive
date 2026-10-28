@@ -8,11 +8,11 @@
 //!   level are the extracted structured fields (Ruling R-12a). No question
 //!   text beyond the PICO, and no paper text beyond the verbatim quotes (no
 //!   title, abstract or population).
-//! * Outcomes (Fix B, [`OUTCOME_RULE`], prompt only): claims address the
-//!   PICO's outcomes (operative time or cost only when listed), never an
-//!   outcome outside the PICO, never an invented finding; at most one claim
-//!   may name the PICO outcomes the findings do not cover. Nothing in code
-//!   matches outcomes.
+//! * Outcomes (Fix B, [`OUTCOME_RULE`], prompt only): claims address only
+//!   the PICO outcomes and together cover as many as the findings allow; at
+//!   most one claim may name asked outcomes with no evidence; operative time
+//!   or cost only when listed; no invented finding. Nothing in code matches
+//!   outcomes.
 //! * Confidence (R-12a): the prompt defines strong / moderate / limited by
 //!   design, and [`cap_confidence`] enforces it in code (here, and again in
 //!   Check over the verified refs only).
@@ -141,12 +141,10 @@ pub struct Draft {
 /// The text of [`OUTCOME_RULE`], as a macro so `SYSTEM` can include it.
 macro_rules! outcome_rule {
     () => {
-        "Each claim must address the outcomes listed in the PICO \
-(operative time or cost only when the PICO lists them). \
-Never write a claim about an outcome the PICO does not list, even when a source reports one. \
-Never invent a finding: an outcome with no finding among the sources gets no claim of its own. \
-When some PICO outcomes have no finding among the sources, at most one claim may say which of the PICO outcomes the findings do not cover, \
-citing the sources that were found."
+        "Claims address only the PICO outcomes; together they cover as many of them as the findings allow; \
+at most one claim may name asked outcomes with no evidence among the findings, citing the sources that were found. \
+Operative time or cost count as PICO outcomes only when the PICO lists them. \
+Never invent a finding for an outcome."
     };
 }
 

@@ -66,7 +66,9 @@
 //!   and Check prompts (about 8 paise for one abstract finding at production
 //!   prices; more for six long full-text quotes). The holds usually leave
 //!   that much slack (each holds its full `max_tokens`, so a full-text
-//!   extraction at realistic usage leaves about 170 paise); if not, Write is
+//!   extraction at realistic usage leaves about 170 paise), but a full-text
+//!   paper can add 125 paise (six 300-character quotes) to 384 (six at the
+//!   1,000-character maximum); if the slack does not cover it, Write is
 //!   refused and the run ends `partial` (pipeline), never over the limit.
 //!
 //! Privacy: nothing here logs quotes, text, the PICO or the question; only the
@@ -705,7 +707,9 @@ pub async fn extract(
     papers: Vec<UsedPaper>,
 ) -> Result<Extraction, StepError> {
     let run_id = ctx.run_id;
-    let call = llm.call(ctx, &llm.models.extract, "extract");
+    let call = llm
+        .call(ctx, &llm.models.extract, "extract")
+        .reporting_rate_limits();
 
     let prepared: Vec<_> = papers.iter().map(prepare).collect();
     // Every paper's prompt, built up front so the calls in flight can

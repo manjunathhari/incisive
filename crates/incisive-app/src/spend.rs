@@ -14,6 +14,15 @@
 //! sees it (charges count toward every total) and blocks accordingly.
 //!
 //! Run overshoots (Phase 2), each bounded and accepted:
+//! * **Input estimates** (`agent::llm::estimate_usage`). A run's Claude call
+//!   can cost more than its hold when its input is token-dense (output is
+//!   held in full). One call alone: by its input excess (about 194 paise
+//!   for a Haiku screening batch, 520 for a Sonnet full-text extraction, at
+//!   a 3× underestimate). Calls in flight together (Screen and Extract run
+//!   several, Fix B) launch only with their holds counted twice (Ruling
+//!   R-FB3), so the group exceeds the room it was given only by what it
+//!   costs beyond twice its holds (about 124 paise for four Haiku batches at
+//!   3×). The run's finish reserve absorbs either first.
 //! * **Deleting an active run** (final review M-4). `runs::api::delete_one`
 //!   releases the whole reservation at once (Ruling R-1b), even while the
 //!   worker still has Claude calls in flight. Their late charges then book

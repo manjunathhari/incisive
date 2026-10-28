@@ -541,7 +541,9 @@ pub async fn screen(
     papers: Vec<Paper>,
 ) -> Result<Screened, StepError> {
     let run_id = ctx.run_id;
-    let call = llm.call(ctx, &llm.models.screen, "screen");
+    let call = llm
+        .call(ctx, &llm.models.screen, "screen")
+        .reporting_rate_limits();
     let total = papers.len();
 
     let mut tally = Tally::default();

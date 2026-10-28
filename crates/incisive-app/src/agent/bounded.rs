@@ -17,9 +17,12 @@
 //!   left above the finish reserve, with every in-flight hold counted) are
 //!   checked; once wrap-up is reached no new item is launched (the first
 //!   item is always launched, as before Fix B);
-//! * every hold is taken atomically against `spent + held + estimate +
-//!   finish reserve` ([`RunBudget::try_hold_gathering`]), so concurrent
-//!   holds can never together pass the run's limit. A hold refused while
+//! * every hold is taken atomically ([`RunBudget::try_hold_gathering`]):
+//!   with nothing in flight against `spent + estimate + finish reserve`
+//!   (the single-call rule); with calls in flight against `spent + 2 ×
+//!   (held + estimate) + finish reserve` (Ruling R-FB3, room for the calls
+//!   in flight to cost more than their holds), so concurrent holds can never
+//!   together pass the run's limit, and near it fewer calls run at once. A hold refused while
 //!   other calls are in flight is tried again (same item, wrap-up checked
 //!   again) after the next one settles, since a settled call usually frees
 //!   part of its hold; refused with nothing in flight (`OverBudget`, as
@@ -38,7 +41,7 @@
 //! future is dropped (Ruling R-8d).
 
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
@@ -58,13 +61,35 @@ pub enum Outcome<T> {
     Skipped,
 }
 
+/// Times an item that hit a rate limit is put back (Fix B review I-3).
+pub const MAX_REQUEUES: u8 = 2;
+/// Longest wait before a re-queued item is tried again.
+pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(20);
+/// The wait when the server gave no `retry-after`.
+pub const DEFAULT_RATE_LIMIT_WAIT: Duration = Duration::from_secs(5);
+
 /// Run the items `0..items` with at most `max_in_flight` in flight (see the
 /// module docs).
 ///
 /// * `launch(i)`: `None` when item `i` needs no call; otherwise the result
 ///   of starting its first call, which must take its hold before returning.
-/// * `settled(i, r)`: called as each item finishes (in completion order),
-///   before the next launch decision, e.g. to raise the finish reserve.
+///   It may be called again for the same item (a deferred hold, or a
+///   re-queue after a rate limit).
+/// * `settled(i, r)`: called once per item as it finishes for good (in
+///   completion order), before the next launch decision, e.g. to raise the
+///   finish reserve.
+///
+/// **Rate limits** (Fix B review I-3). An item whose call still hits a rate
+/// limit or overload after the client's own attempts
+/// ([`StepError::RateLimited`], never billed) is not failed at once: it is
+/// put back up to [`MAX_REQUEUES`] (2) times, after the server's
+/// `retry-after` ([`DEFAULT_RATE_LIMIT_WAIT`] without one, at most
+/// [`MAX_RATE_LIMIT_WAIT`]), but only if that wait ends before the run's
+/// wrap-up time; and the step's concurrency is halved for the rest of the
+/// step (at least 1). Still rate limited after that, it is
+/// `Done(Err(RateLimited))`: the step counts it as failed (not assessed). A
+/// re-queued item the step stops before re-launching is [`Outcome::Stopped`].
+/// The count of rate limits is logged (no content).
 pub async fn run<T, F>(
     budget: &RunBudget,
     cancel: &CancelFlag,
@@ -78,25 +103,45 @@ where
     F: Future<Output = Result<T, StepError>>,
 {
     let run_id = budget.run_id();
-    let max_in_flight = max_in_flight.max(1);
+    let mut cap = max_in_flight.max(1);
     let mut out: Vec<Option<Outcome<T>>> = (0..items).map(|_| None).collect();
+    let mut requeues: Vec<u8> = vec![0; items];
+    // (ready at, item), for items put back after a rate limit.
+    let mut waiting: Vec<(Instant, usize)> = Vec::new();
     let mut in_flight = FuturesUnordered::new();
     let mut next = 0usize;
     let mut launched = 0usize;
     let mut launching = true;
+    let mut rate_limited = 0u32;
 
     loop {
-        while launching && in_flight.len() < max_in_flight && next < items {
+        while launching && in_flight.len() < cap {
+            let now = Instant::now();
+            // A re-queued item that is due goes first, then the next new one.
+            let due = waiting
+                .iter()
+                .enumerate()
+                .filter(|(_, (at, _))| *at <= now)
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k);
+            if due.is_none() && next >= items {
+                break;
+            }
             if cancel.is_cancelled() {
                 return Err(StepError::Cancelled);
             }
-            if launched > 0 && budget.should_wrap_up(Instant::now()) {
+            if launched > 0 && budget.should_wrap_up(now) {
                 tracing::info!(%run_id, step, launched, "wrap-up reached; no further calls launched");
                 launching = false;
                 break;
             }
-            let i = next;
-            next += 1;
+            let i = match due {
+                Some(k) => waiting.swap_remove(k).1,
+                None => {
+                    next += 1;
+                    next - 1
+                }
+            };
             match launch(i) {
                 None => out[i] = Some(Outcome::Skipped),
                 Some(Ok(f)) => {
@@ -107,7 +152,11 @@ where
                     // The hold does not fit beside the calls in flight; their
                     // real charges are usually below their holds, so try
                     // this item again once one has settled.
-                    next = i;
+                    if due.is_some() {
+                        waiting.push((now, i));
+                    } else {
+                        next = i;
+                    }
                     break;
                 }
                 Some(Err(StepError::OverBudget)) => {
@@ -124,7 +173,28 @@ where
                 Some(Err(e)) => return Err(e),
             }
         }
-        let Some((i, r)) = in_flight.next().await else {
+
+        // Wait for a call to finish, or for a re-queued item to be due.
+        let next_due = if launching {
+            waiting.iter().map(|(at, _)| *at).min()
+        } else {
+            None
+        };
+        let finished = match (in_flight.is_empty(), next_due) {
+            (true, None) => break,
+            (true, Some(at)) => {
+                tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
+                continue;
+            }
+            (false, None) => in_flight.next().await,
+            (false, Some(at)) => {
+                tokio::select! {
+                    r = in_flight.next() => r,
+                    () = tokio::time::sleep(at.saturating_duration_since(Instant::now())) => continue,
+                }
+            }
+        };
+        let Some((i, r)) = finished else {
             break;
         };
         match r {
@@ -133,12 +203,32 @@ where
                 out[i] = Some(Outcome::Stopped);
                 launching = false;
             }
+            Err(StepError::RateLimited(retry_after)) => {
+                rate_limited += 1;
+                cap = (cap / 2).max(1);
+                let now = Instant::now();
+                let wait = retry_after
+                    .unwrap_or(DEFAULT_RATE_LIMIT_WAIT)
+                    .min(MAX_RATE_LIMIT_WAIT);
+                if launching && requeues[i] < MAX_REQUEUES && wait < budget.until_wrap_up(now) {
+                    requeues[i] += 1;
+                    tracing::info!(%run_id, step, wait_ms = wait.as_millis() as u64, max_in_flight = cap, "rate limited; item re-queued");
+                    waiting.push((now + wait, i));
+                } else {
+                    tracing::warn!(%run_id, step, max_in_flight = cap, "rate limited; item not read");
+                    settled(i, &r);
+                    out[i] = Some(Outcome::Done(r));
+                }
+            }
             Ok(_) | Err(StepError::Llm | StepError::Parse) => {
                 settled(i, &r);
                 out[i] = Some(Outcome::Done(r));
             }
             Err(e) => return Err(e),
         }
+    }
+    if rate_limited > 0 {
+        tracing::warn!(%run_id, step, rate_limited, max_in_flight = cap, "step hit rate limits");
     }
     Ok(out
         .into_iter()
@@ -248,10 +338,12 @@ mod tests {
 
     #[tokio::test]
     async fn no_launch_once_wrap_up_is_due_and_never_past_the_limit() {
-        // Limit 1,000, reserve 100, holds and charges 100 each, 4 in flight.
-        // After the 5th charge, spent 500 + 3 held (300) + reserve = 1,000:
-        // no headroom left, so wrap-up is due; nothing more is launched,
-        // the calls in flight finish.
+        // Limit 1,000, reserve 100, holds and charges 100, up to 4 in
+        // flight. With calls in flight the holds count twice (R-FB3): four
+        // go out (100 + 2 × 300 ... 2 × 400 + 100 = 900), then one more each
+        // time the doubled rule fits again (after charges 1, 3 and 5); after
+        // the 7th charge spend is at 70%: wrap-up is due, nothing more is
+        // launched.
         let b = budget(1_000);
         b.set_finish_reserve(100);
         let ms = vec![10; 12];
@@ -260,9 +352,9 @@ mod tests {
         assert_eq!(max, 4);
         assert!(log.iter().skip(1).all(|l| !l.wrap_up_due), "{log:?}");
         assert!(log.iter().all(|l| l.committed <= 1_000), "{log:?}");
-        assert_eq!(log.len(), 9, "4, then one per settled call until wrap-up");
+        assert_eq!(log.len(), 7, "{log:?}");
         let launched: Vec<usize> = log.iter().map(|l| l.item).collect();
-        assert_eq!(launched, (0..9).collect::<Vec<_>>(), "in item order");
+        assert_eq!(launched, (0..7).collect::<Vec<_>>(), "in item order");
         assert!(b.should_wrap_up(Instant::now()));
         let stopped: Vec<usize> = out
             .iter()
@@ -270,39 +362,40 @@ mod tests {
             .filter(|(_, o)| matches!(o, Outcome::Stopped))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(stopped, vec![9, 10, 11]);
-        assert_eq!(b.spent(), 900);
+        assert_eq!(stopped, (7..12).collect::<Vec<_>>());
+        assert_eq!(b.spent(), 700);
         assert!(b.spent() + b.finish_reserve() <= 1_000);
         assert_eq!(b.held(), 0);
     }
 
     #[tokio::test]
     async fn seventy_percent_spent_stops_launching() {
-        // Limit 2,000, holds and charges 100: the holds always fit (at most
-        // 1,400 + 400), so only the 70% rule stops launching: 4, then one
-        // per charge until the 14th charge (1,400) makes wrap-up due; the
-        // 3 in flight finish.
-        let b = budget(2_000);
-        let ms = vec![10; 20];
+        // Limit 3,000, holds and charges 100: the doubled holds always fit
+        // up to the 22nd charge (100 × 22 + 2 × 400 = 3,000), so only the
+        // 70% rule stops launching: 4, then one per charge until the 21st
+        // (2,100) makes wrap-up due; the 3 in flight finish.
+        let b = budget(3_000);
+        let ms = vec![5; 30];
         let (r, log, _) = drive(&b, &CancelFlag::default(), 4, &ms, 100, 100).await;
         let out = r.unwrap();
         assert!(log.iter().skip(1).all(|l| !l.wrap_up_due), "{log:?}");
-        assert_eq!(log.len(), 17);
+        assert_eq!(log.len(), 24);
         assert_eq!(
             out.iter().filter(|o| matches!(o, Outcome::Stopped)).count(),
-            3
+            6
         );
-        assert_eq!(b.spent(), 1_700, "the calls in flight finish");
+        assert_eq!(b.spent(), 2_400, "the calls in flight finish");
     }
 
     #[tokio::test]
     async fn refused_hold_waits_for_a_call_to_settle() {
-        // Room for two holds of 400 in 1,000; each call costs 100. The third
-        // hold is refused while two are in flight, then fits once one has
-        // settled: every item runs, never more than two at once.
+        // Holds of 200 counted twice in flight (R-FB3): two fit in 1,000
+        // (2 × 400), a third (2 × 600) does not; each call costs 100, so it
+        // fits once one has settled (100 + 2 × 400 = 900): every item runs,
+        // never more than two at once.
         let b = budget(1_000);
         let ms = vec![10; 5];
-        let (r, log, max) = drive(&b, &CancelFlag::default(), 4, &ms, 400, 100).await;
+        let (r, log, max) = drive(&b, &CancelFlag::default(), 4, &ms, 200, 100).await;
         let out = r.unwrap();
         assert_eq!(max, 2);
         assert!(log.iter().all(|l| l.committed <= 1_000), "{log:?}");
@@ -376,5 +469,107 @@ mod tests {
         )
         .await;
         assert_eq!(r.unwrap_err(), StepError::Unrecorded);
+    }
+
+    /// Items 0..n taking `ms` each; item 0's first `fails` attempts are rate
+    /// limited (retry-after `ra`). Returns the outcomes and, per launch,
+    /// (item, calls in flight including it).
+    async fn rate_limited_run(
+        b: &Arc<RunBudget>,
+        n: usize,
+        k: usize,
+        fails: usize,
+        ra: Option<Duration>,
+    ) -> (Vec<Outcome<usize>>, Vec<(usize, usize)>) {
+        let attempts = Mutex::new(vec![0usize; n]);
+        let log = Mutex::new(Vec::new());
+        let now_in_flight = Arc::new(AtomicUsize::new(0));
+        let out = run(
+            b,
+            &CancelFlag::default(),
+            "test",
+            k,
+            n,
+            |i| {
+                let a = {
+                    let mut at = attempts.lock().unwrap();
+                    at[i] += 1;
+                    at[i]
+                };
+                let f = now_in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                log.lock().unwrap().push((i, f));
+                let now_in_flight = now_in_flight.clone();
+                Some(Ok(async move {
+                    let limited = i == 0 && a <= fails;
+                    if !limited {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    now_in_flight.fetch_sub(1, Ordering::SeqCst);
+                    if limited {
+                        Err(StepError::RateLimited(ra))
+                    } else {
+                        Ok(i)
+                    }
+                }))
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        (out, log.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn rate_limited_item_is_requeued_and_concurrency_halved() {
+        let b = budget(1_000_000);
+        let (out, log) = rate_limited_run(&b, 8, 4, 1, Some(Duration::from_millis(10))).await;
+        // Item 0 failed at once, was put back and then read.
+        assert!(
+            out.iter().all(|o| matches!(o, Outcome::Done(Ok(_)))),
+            "{out:?}"
+        );
+        assert_eq!(log.iter().filter(|(i, _)| *i == 0).count(), 2);
+        // The first four went out together; after the rate limit, never
+        // more than 2 at once.
+        assert_eq!(log[3].1, 4);
+        assert!(log[4..].iter().all(|(_, f)| *f <= 2), "{log:?}");
+    }
+
+    #[tokio::test]
+    async fn persistent_rate_limit_fails_the_item_after_two_requeues() {
+        let b = budget(1_000_000);
+        let (out, log) = rate_limited_run(&b, 3, 4, 10, Some(Duration::from_millis(5))).await;
+        assert!(matches!(
+            out[0],
+            Outcome::Done(Err(StepError::RateLimited(_)))
+        ));
+        assert!(matches!(out[1], Outcome::Done(Ok(1))));
+        assert_eq!(
+            log.iter().filter(|(i, _)| *i == 0).count(),
+            3,
+            "1 + 2 re-queues"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_requeue_when_the_wait_would_pass_the_wrap_up_time() {
+        // 179.9 s into a 300 s run: wrap-up at 180 s, retry-after 5 s.
+        let b = Arc::new(
+            RunBudget::new(
+                Uuid::new_v4(),
+                0,
+                1_000_000,
+                Instant::now(),
+                Prices::from_json(r#"{"m": {"input": 1.0, "output": 5.0}}"#).unwrap(),
+                88.0,
+            )
+            .aged_for_test(Duration::from_millis(179_900)),
+        );
+        let (out, log) = rate_limited_run(&b, 1, 4, 1, Some(Duration::from_secs(5))).await;
+        assert!(matches!(
+            out[0],
+            Outcome::Done(Err(StepError::RateLimited(_)))
+        ));
+        assert_eq!(log.len(), 1, "not waited for");
     }
 }

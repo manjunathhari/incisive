@@ -192,6 +192,14 @@ impl RunBudget {
     /// [`RunBudget::try_hold`] for a gathering call (Frame through Extract):
     /// it must also leave the finish reserve free, so the evidence gathered
     /// can always be written up and checked. Ruling R-13c.
+    ///
+    /// With other calls in flight (`held > 0`; Screen and Extract run several
+    /// at once, Fix B), the holds count twice (Ruling R-FB3): it needs
+    /// `spent + 2 × (held + estimate) + finish_reserve <= limit`. The doubled
+    /// part is room for the calls in flight to cost more than their holds
+    /// (input tokens are estimated), so concurrency does not widen the
+    /// worst-case overshoot. With nothing in flight it is exactly the
+    /// single-call rule `spent + estimate + finish_reserve <= limit`.
     pub fn try_hold_gathering(self: &Arc<Self>, estimate_paise: i64) -> Option<Hold> {
         self.hold_leaving(estimate_paise, true)
     }
@@ -202,9 +210,13 @@ impl RunBudget {
         }
         let mut st = self.state();
         let kept = if reserve { st.finish_reserve } else { 0 };
+        // In-flight headroom (Ruling R-FB3): a gathering call launched while
+        // others are in flight must fit with every in-flight hold, its own
+        // included, counted twice. With nothing in flight the rule is the
+        // one a single call always had.
+        let factor = if reserve && st.held > 0 { 2 } else { 1 };
         let total = i128::from(st.spent)
-            + i128::from(st.held)
-            + i128::from(estimate_paise)
+            + factor * (i128::from(st.held) + i128::from(estimate_paise))
             + i128::from(kept);
         if total > i128::from(self.limit_paise) {
             return None;
@@ -222,7 +234,10 @@ impl RunBudget {
     /// The caller makes `call_id` once per Claude call and reuses it on every
     /// retry of that call: the ledger holds at most one charge per call id, and
     /// this budget counts it, adds it to the run's cost and audits it once.
-    /// `hold` is consumed: its amount is replaced by the real cost.
+    /// `hold` is consumed: its amount is replaced by the real cost, or freed
+    /// when nothing was booked. A caller that will re-send the charge should
+    /// use [`RunBudget::charge_held`], which keeps the hold until the money is
+    /// booked.
     ///
     /// Order: book against the reservation, count it in `spent`, add it to the
     /// run's cost, then audit it (ids, model, tokens and paise only).
@@ -235,7 +250,25 @@ impl RunBudget {
         model: &str,
         usage: &Usage,
     ) -> Result<i64, BudgetError> {
-        // On every early return the hold is dropped, freeing its amount.
+        let mut hold = hold;
+        self.charge_held(pool, &mut hold, call_id, model, usage)
+            .await
+    }
+
+    /// [`RunBudget::charge`] that leaves `hold` in place unless the charge is
+    /// booked (Fix B review I-2): on `UnknownModel` or `NotBooked` the hold
+    /// still counts in `held`, so no concurrent call can take that headroom
+    /// while the caller re-sends the charge or counts the money as unbooked.
+    /// Once booked (including `BookedButNotRecorded`), the hold's amount is
+    /// zero: it has become spend.
+    pub async fn charge_held(
+        &self,
+        pool: &PgPool,
+        hold: &mut Hold,
+        call_id: Uuid,
+        model: &str,
+        usage: &Usage,
+    ) -> Result<i64, BudgetError> {
         let paise = spend::cost_paise(&self.prices, self.usd_inr, model, usage).map_err(|_| {
             // Unpriced model or unusable rate: fail closed, never free.
             tracing::error!(run_id = %self.run_id, "run call has no usable price");
@@ -258,9 +291,7 @@ impl RunBudget {
         })?;
 
         // Booked. Convert the hold into spend exactly once per call id.
-        let mut hold = hold;
         let held = std::mem::take(&mut hold.amount);
-        drop(hold);
         let (paise, mut call) = {
             let mut st = self.state();
             st.held -= held;
@@ -426,6 +457,12 @@ impl RunBudget {
 
     pub fn limit_paise(&self) -> i64 {
         self.limit_paise
+    }
+
+    /// Time left before the wrap-up time (60% of `time_limit_s`); zero once
+    /// it has passed.
+    pub fn until_wrap_up(&self, now: Instant) -> Duration {
+        self.wrap_up_after.saturating_sub(self.age(now))
     }
 
     /// True when [`RunBudget::wrap_up_reason`] gives a reason.
