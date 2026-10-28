@@ -32,7 +32,7 @@ jobs:
         run: |
           docker run -d --network host \
             -e APP_ENV=dev -e LEPTOS_SITE_ADDR=0.0.0.0:8080 \
-            -e ANTHROPIC_API_KEY=sk-ant-FAKE-diag \
+            -e ANTHROPIC_API_KEY=sk-ant-FAKE-diag -e CLAUDE_MODEL=claude-sonnet-5-5 -e GATE_MODEL=claude-haiku-5-5 \
             -e OWNER_EMAIL=owner@example.com \
             -e DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres \
             --name app incisive-app:diag
