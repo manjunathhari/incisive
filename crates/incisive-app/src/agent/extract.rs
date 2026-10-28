@@ -14,7 +14,8 @@
 //!   are checked against exactly what was sent.
 //! * A title-only paper is never sent: a title cannot support a finding. It is
 //!   skipped and counted in a Note line.
-//! * The reply's JSON (reasoning around it is allowed: `llm::parse_reply`), read field by field (it is untrusted):
+//! * The answer, JSON matching [`SCHEMA`] (structured outputs, `LlmCall::structured`; the text is read strictly,
+//!   then with `llm::parse_reply`), read field by field (it is untrusted):
 //!   `{"design","n","population","intervention","comparison",
 //!   "findings":[{"outcome","result","quote"}]}`. Only the first
 //!   [`MAX_FINDINGS`] (6) findings are considered; the rest are ignored.
@@ -61,10 +62,10 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::frame::Pico;
-use super::llm::{StepError, neutralise_source_tags, wrap_source};
+use super::llm::{OutputSchema, StepError, neutralise_source_tags, wrap_source};
 use super::retrieve::{PaperText, UsedPaper};
 use super::screen::{EvidenceLevel, neutralise_pico_tags};
 use super::{AgentLlm, RunContext, add_line, clip};
@@ -410,9 +411,39 @@ including every number the result gives. \
 Do not paraphrase, shorten, correct or reword it; do not use an ellipsis or join separate passages; \
 do not include the section label or the title; do not add quotation marks around it. \
 A finding without such a quote will be discarded. If the paper reports nothing relevant, give an empty findings list. \
-Reply with one JSON object only, exactly in this form: \
+Reply with one JSON object matching the given schema, exactly in this form: \
 {\"design\": string, \"n\": integer or null, \"population\": string, \"intervention\": string, \"comparison\": string or null, \
 \"findings\": [{\"outcome\": string, \"result\": string, \"quote\": string}]}";
+
+/// The answer's JSON Schema (structured outputs): the paper's design, n,
+/// PICO fields and findings.
+pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "design": {"type": "string"},
+            "n": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+            "population": {"type": "string"},
+            "intervention": {"type": "string"},
+            "comparison": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "outcome": {"type": "string"},
+                        "result": {"type": "string"},
+                        "quote": {"type": "string"}
+                    },
+                    "required": ["outcome", "result", "quote"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["design", "n", "population", "intervention", "comparison", "findings"],
+        "additionalProperties": false
+    }))
+});
 
 /// A section label: lower-case ASCII letters only.
 fn label(name: &str) -> String {
@@ -652,7 +683,7 @@ pub async fn extract(
         let id = format!("ref-{}", i + 1);
         calls += 1;
         let reply: Value = match call
-            .json(SYSTEM, &prompt(pico, &id, body), MAX_TOKENS)
+            .structured(SYSTEM, &prompt(pico, &id, body), &SCHEMA, MAX_TOKENS)
             .await
         {
             Ok(v) => v,

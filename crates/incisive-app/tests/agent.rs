@@ -126,7 +126,7 @@ async fn charges_real_usage_even_when_parse_fails() {
     );
     let cancel = CancelFlag::default();
     let err = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("sys", "user", 500)
+        .structured::<Out>("sys", "user", &out_schema(), 500)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::Parse);
@@ -141,21 +141,22 @@ async fn retries_once_on_bad_json_then_errors() {
     let (uid, _run, budget) = setup(&pool, 10_000).await;
     let cancel = CancelFlag::default();
 
-    // Bad then good: the retry succeeds, both calls charged, retry says JSON only.
+    // Bad then good: the retry succeeds, both calls charged, retry nudges
+    // toward the schema.
     let llm = Arc::new(
         ScriptedLlm::new()
             .reply_text("nope", usage(100, 10))
             .reply_json(json!({"answer": "ok"}), usage(100, 10)),
     );
     let out: Out = call(&llm, &budget, &pool, &cancel)
-        .json("sys", "the question", 500)
+        .structured("sys", "the question", &out_schema(), 500)
         .await
         .unwrap();
     assert_eq!(out.answer, "ok");
     let reqs = llm.requests();
     assert_eq!(reqs.len(), 2);
     let last = format!("{:?}", reqs[1].messages);
-    assert!(last.contains("Reply with JSON only"), "{last}");
+    assert!(last.contains(SCHEMA_NUDGE.trim()), "{last}");
     assert_eq!(charge_rows(&pool, uid).await.len(), 2);
 
     // Bad twice: exactly two calls, never a third.
@@ -166,7 +167,7 @@ async fn retries_once_on_bad_json_then_errors() {
             .reply_json(json!({"answer": "never"}), usage(100, 10)),
     );
     let err = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("sys", "q", 500)
+        .structured::<Out>("sys", "q", &out_schema(), 500)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::Parse);
@@ -182,7 +183,7 @@ async fn refuses_call_when_over_budget_without_calling() {
     let llm = Arc::new(ScriptedLlm::new().reply_json(json!({"answer": "x"}), usage(1, 1)));
     let cancel = CancelFlag::default();
     let err = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("sys", "user", 4000)
+        .structured::<Out>("sys", "user", &out_schema(), 4000)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::OverBudget);
@@ -199,7 +200,7 @@ async fn cancelled_run_makes_no_call() {
     let cancel = CancelFlag::default();
     cancel.cancel();
     let err = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("sys", "user", 100)
+        .structured::<Out>("sys", "user", &out_schema(), 100)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::Cancelled);
@@ -236,7 +237,12 @@ async fn fenced_json_accepted() {
             .reply_json(json!({"answer": "after cut off"}), usage(10, 10)),
     );
     let c = call(&llm, &budget, &pool, &cancel);
-    let next = async || c.json::<Out>("s", "u", 100).await.unwrap().answer;
+    let next = async || {
+        c.structured::<Out>("s", "u", &out_schema(), 100)
+            .await
+            .unwrap()
+            .answer
+    };
     assert_eq!(next().await, "fenced");
     assert_eq!(next().await, "bare fence");
     // Prose around the object (live replies do this): the object is used.
@@ -267,9 +273,9 @@ async fn value_replies_ignore_citations() {
             ),
     );
     let c = call(&llm, &budget, &pool, &cancel);
-    let v: serde_json::Value = c.json("s", "u", 100).await.unwrap();
+    let v: serde_json::Value = c.structured("s", "u", &out_schema(), 100).await.unwrap();
     assert_eq!(v["claims"][0]["refs"], json!([1, 2]));
-    let v: serde_json::Value = c.json("s", "u", 100).await.unwrap();
+    let v: serde_json::Value = c.structured("s", "u", &out_schema(), 100).await.unwrap();
     assert_eq!(v[0]["id"], "r1");
     assert_eq!(llm.requests().len(), 2);
 }
@@ -286,7 +292,7 @@ async fn every_request_system_prompt_contains_source_rule() {
             .reply_text("prose", usage(10, 10)),
     );
     let c = call(&llm, &budget, &pool, &cancel);
-    c.json::<Out>("You are a screener.", "u", 100)
+    c.structured::<Out>("You are a screener.", "u", &out_schema(), 100)
         .await
         .unwrap();
     c.text("Write.", "u", 100).await.unwrap();
@@ -314,7 +320,7 @@ async fn http_error_drops_hold_without_charge() {
         message: "bad".into(),
     }));
     let err = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("s", "u", 1000)
+        .structured::<Out>("s", "u", &out_schema(), 1000)
         .await
         .unwrap_err();
     assert_eq!(err, StepError::Llm);
@@ -347,14 +353,11 @@ async fn timeout_charges_the_estimate() {
     assert!(err.is_timeout());
     let llm = Arc::new(ScriptedLlm::new().fail(ClaudeError::Transport(err)));
     let e = call(&llm, &budget, &pool, &cancel)
-        .json::<Out>("sys", "user", 1000)
+        .structured::<Out>("sys", "user", &out_schema(), 1000)
         .await
         .unwrap_err();
     assert_eq!(e, StepError::Llm);
-    let sys_len = "sys".len() + "\n\n".len() + SOURCE_RULE.len();
-    let est = budget
-        .cost_of(MODEL, &estimate_usage(sys_len + "user".len(), 1000))
-        .unwrap();
+    let est = hold_estimate(&budget, MODEL, "sys", "user", Some(&out_schema()), 1000).unwrap();
     assert_eq!(charge_rows(&pool, uid).await, vec![est]);
     assert_eq!(budget.spent(), est);
 }
@@ -617,7 +620,7 @@ async fn not_booked_once_then_success() {
     let when = format!("NEW.kind = 'charge' AND NEW.user_id = {uid}");
     let out = with_failures(&pool, "incisive.spend", &when, 1, async move {
         call(&l, &b, &p, &CancelFlag::default())
-            .json::<Out>("s", "u", 500)
+            .structured::<Out>("s", "u", &out_schema(), 500)
             .await
     })
     .await;
@@ -642,7 +645,7 @@ async fn not_booked_twice_is_unrecorded_and_still_counted() {
     let when = format!("NEW.kind = 'charge' AND NEW.user_id = {uid}");
     let err = with_failures(&pool, "incisive.spend", &when, 1000, async move {
         call(&l, &b, &p, &CancelFlag::default())
-            .json::<Out>("s", "u", 100)
+            .structured::<Out>("s", "u", &out_schema(), 100)
             .await
     })
     .await
@@ -654,7 +657,7 @@ async fn not_booked_twice_is_unrecorded_and_still_counted() {
     assert_eq!(budget.spent(), 88);
     // So no further call can be made.
     let again = call(&llm, &budget, &pool, &CancelFlag::default())
-        .json::<Out>("s", "u", 100)
+        .structured::<Out>("s", "u", &out_schema(), 100)
         .await
         .unwrap_err();
     assert_eq!(again, StepError::OverBudget);
@@ -671,7 +674,7 @@ async fn booked_but_not_recorded_never_recalls_claude() {
     let when = format!("NEW.id = '{run}'");
     let out = with_failures(&pool, "incisive.runs", &when, 1, async move {
         call(&l, &b, &p, &CancelFlag::default())
-            .json::<Out>("s", "u", 500)
+            .structured::<Out>("s", "u", &out_schema(), 500)
             .await
     })
     .await;
@@ -688,7 +691,7 @@ async fn booked_but_not_recorded_never_recalls_claude() {
     let when = format!("NEW.id = '{run}'");
     let out = with_failures(&pool, "incisive.runs", &when, 1000, async move {
         call(&l, &b, &p, &CancelFlag::default())
-            .json::<Out>("s", "u", 500)
+            .structured::<Out>("s", "u", &out_schema(), 500)
             .await
     })
     .await;
@@ -709,7 +712,7 @@ async fn rate_limit_and_overload_charge_nothing() {
     ] {
         let llm = Arc::new(ScriptedLlm::new().fail(err));
         let e = call(&llm, &budget, &pool, &CancelFlag::default())
-            .json::<Out>("s", "u", 500)
+            .structured::<Out>("s", "u", &out_schema(), 500)
             .await
             .unwrap_err();
         assert_eq!(e, StepError::Llm);
@@ -734,8 +737,9 @@ async fn dropping_the_future_mid_call_still_charges() {
     // The hard-stop timeout drops the pipeline future while Claude is working.
     // Drop it only once Claude has actually received the request, so a slow
     // machine can't drop it before the call starts.
+    let schema = out_schema();
     {
-        let fut = c.json::<Out>("s", "u", 500);
+        let fut = c.structured::<Out>("s", "u", &schema, 500);
         tokio::pin!(fut);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -3914,6 +3918,11 @@ async fn check_prompt_binds_measure_arm_population_and_claim_is_data() {
 /// Real reply shapes must give the verdict they state.
 #[tokio::test]
 async fn check_reads_verdicts_from_real_reply_shapes() {
+    // These are text replies that end normally (`EndTurn`), including prose
+    // shapes that look cut off. Since Ruling R-FA1 a reply whose stop reason
+    // is `max_tokens` is never read (see
+    // `check_retries_a_cut_off_reply_and_fails_a_refusal`), so the salvage
+    // cases here are the defensive prose path.
     let Some(pool) = pool().await else { return };
     let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
     let server = icg_verify_server().await;
@@ -4002,8 +4011,8 @@ async fn check_reads_verdicts_from_real_reply_shapes() {
     assert_eq!(c.removed, 4);
     // At most two calls per claim.
     assert_eq!(llm.requests().len(), 15);
-    // The retry asks for JSON only.
-    assert!(user_text(&llm, 4).ends_with("Reply with JSON only."));
+    // The retry nudges toward the schema (Fix A: was "Reply with JSON only.").
+    assert!(user_text(&llm, 4).ends_with(SCHEMA_NUDGE));
     // The prompt asks for the verdict first, in one object.
     let sys = llm.requests()[0].system.clone().unwrap();
     assert!(sys.contains("Put the verdict before the reason"), "{sys}");
@@ -5420,16 +5429,8 @@ fn holds_of(llm: &ScriptedLlm, budget: &RunBudget) -> Vec<i64> {
     llm.requests()
         .iter()
         .map(|r| {
-            let user: usize = r
-                .messages
-                .iter()
-                .flat_map(|m| &m.content)
-                .map(|c| match c {
-                    claude_client::ContentBlock::Text { text } => text.len(),
-                    _ => 0,
-                })
-                .sum();
-            let bytes = r.system.as_ref().map_or(0, String::len) + user;
+            // System, user text and the tool schema (Fix A).
+            let bytes = request_prompt_bytes(r);
             budget
                 .cost_of(&r.model, &estimate_usage(bytes, r.max_tokens))
                 .unwrap()
@@ -5452,18 +5453,22 @@ fn us((i, o): (u32, u32)) -> Usage {
     usage(i, o)
 }
 
+/// Replies as production gives them: structured-output JSON text (Fix A).
 fn prod_script(extract_u: (u32, u32)) -> Arc<ScriptedLlm> {
     let mut llm = ScriptedLlm::new()
         .reply_json(agent_json("frame_pico.json"), us(FRAME_U))
         .reply_json(agent_json("search_initial.json"), us(PROPOSE_U))
         .reply_json(agent_json("search_accept.json"), us(REVIEW_U))
-        .reply_json(screen_reply(), us(SCREEN_U))
-        .reply_json(screen_reply(), us(SCREEN_U))
+        .reply_json(json!({"verdicts": screen_reply()}), us(SCREEN_U))
+        .reply_json(json!({"verdicts": screen_reply()}), us(SCREEN_U))
         .reply_json(meta_extraction(), us(extract_u))
         .reply_json(extraction(json!([finding(ICG_VERBATIM)])), us(extract_u))
         .reply_json(three_claims(), us(WRITE_U));
     for _ in 0..3 {
-        llm = llm.reply_json(verdict("supported"), us(CHECK_U));
+        llm = llm.reply_json(
+            json!({"claim": 1, "verdict": "supported", "reason": "r"}),
+            us(CHECK_U),
+        );
     }
     Arc::new(llm)
 }
@@ -5583,7 +5588,10 @@ async fn production_prices_capacity() {
     // A full text sent at the 25,000-character cap, on top of the measured
     // abstract prompt (conservative), at the realistic full-text usage.
     let req = &llm.requests()[5];
-    let bytes = req.system.as_ref().map_or(0, String::len) + 25_000 + 2_000;
+    let schema_bytes = request_prompt_bytes(req)
+        - req.system.as_ref().map_or(0, String::len)
+        - user_text(&llm, 5).len();
+    let bytes = req.system.as_ref().map_or(0, String::len) + schema_bytes + 25_000 + 2_000;
     let full_hold = ctx
         .budget
         .cost_of(&req.model, &estimate_usage(bytes, req.max_tokens))
@@ -5599,8 +5607,39 @@ async fn production_prices_capacity() {
 
     let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
     let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
+    // Ruling R-FA2 guard: the live smoke test (28 Oct, default effort) saw
+    // propose use 560 and review 997 output tokens (thinking included).
+    // Even at those charges, Quick at ₹15 still reads 2 papers.
+    let sonnet = |io| ctx.budget.cost_of("claude-sonnet-5-5", &us(io)).unwrap();
+    let live_propose = (propose.0, sonnet((900, 560)));
+    let live_review = (review.0, sonnet((1_500, 997)));
+    let quick_live = vec![live_propose, live_review, screen, screen];
+    let mut focused_live = vec![live_propose, live_review, live_review, live_review];
+    focused_live.extend(std::iter::repeat_n(screen, 10));
+    let ql =
+        |limit| papers_before_wrap_up(limit, frame, &quick_live, abstract_paper, (r0, growth), 5);
+    let fl = |paper| papers_before_wrap_up(4000, frame, &focused_live, paper, (r0, growth), 10);
+    assert_eq!(
+        ql(1500),
+        Some(2),
+        "Quick at ₹15, live search output: 2 abstracts"
+    );
+    assert_eq!(
+        fl(full_paper),
+        Some(5),
+        "Focused, live search output, full text"
+    );
+    assert_eq!(
+        fl(abstract_paper),
+        Some(10),
+        "Focused, live search output, abstracts"
+    );
     assert_eq!(q(500), None, "Quick at the old ₹5 cannot even search");
-    assert_eq!(q(1500), Some(4), "Quick at ₹15: 4 of 5 abstracts");
+    // Fix A (28 Oct, R-FA1): each step's JSON Schema is sent as
+    // output_config, and held, with every call; Quick at ₹15 reads 3
+    // abstracts (was 4 before Fix A). R-FA2 doubled the search holds
+    // (max_tokens 2,000): the counts are unchanged.
+    assert_eq!(q(1500), Some(3), "Quick at ₹15: 3 of 5 abstracts");
     assert_eq!(f(full_paper), Some(6), "Focused, all full text");
     assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
     // The smallest Quick limit (5-paise steps) that reads 2 papers.
@@ -5608,12 +5647,14 @@ async fn production_prices_capacity() {
         .step_by(5)
         .find(|l| q(*l).unwrap_or(0) >= 2)
         .unwrap();
-    // 1265 before the Check prompt asked for the verdict first (28 Oct).
+    // 1265 before the Check prompt asked for the verdict first (28 Oct);
+    // 1270 before the schemas were held (Fix A, 28 Oct).
     assert_eq!(
-        min_quick, 1270,
-        "recorded in the Task 13 report, updated 28 Oct"
+        min_quick, 1295,
+        "recorded in the Task 13 report, updated by Fix A"
     );
-    assert_eq!((r0, growth), (571, 8)); // 565 before 28 Oct (Check prompt)
+    // (565, 8) before the Check prompt change; (571, 8) before Fix A.
+    assert_eq!((r0, growth), (587, 8));
 }
 
 #[tokio::test]
@@ -6019,4 +6060,461 @@ fn time_limits_follow_time_limit_s() {
     assert!(!budget(159, Some(100)).past_hard_stop(now()));
     assert!(budget(160, Some(100)).past_hard_stop(now()));
     assert_eq!(budget(0, Some(100)).hard_stop(), Duration::from_secs(160));
+}
+
+// ---------- structured outputs (Fix A, Ruling R-FA1) ----------
+
+use std::collections::HashMap;
+
+use claude_client::{OutputFormat, StopReason};
+use incisive_app::agent::llm::{OutputSchema, SCHEMA_NUDGE, hold_estimate, request_prompt_bytes};
+
+fn out_schema() -> OutputSchema {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": false
+    }))
+}
+
+/// The request asks for structured output with `schema` and carries no
+/// tools and no `tool_choice` (Sonnet 5.5 rejects a forced tool choice).
+fn assert_structured(req: &claude_client::MessagesRequest, schema: &OutputSchema) {
+    assert!(req.tools.is_empty(), "no tools");
+    assert_eq!(req.tool_choice, None, "no tool_choice");
+    let format = &req.output_config.as_ref().expect("output_config").format;
+    let OutputFormat::JsonSchema { schema: sent } = format;
+    assert_eq!(sent, schema.schema());
+    let body = serde_json::to_value(req).unwrap();
+    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    let o = body.as_object().unwrap();
+    assert!(
+        !o.contains_key("tools") && !o.contains_key("tool_choice"),
+        "{body}"
+    );
+    assert!(!o.contains_key("output_format"), "deprecated parameter");
+    let sys = req.system.as_ref().unwrap();
+    assert!(sys.ends_with(SOURCE_RULE), "{sys}");
+}
+
+#[tokio::test]
+async fn structured_request_carries_output_config_and_no_tools() {
+    let Some(pool) = pool().await else { return };
+    let (_uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(json!({"answer": "ok"}), usage(10, 10))
+            .reply_text("plain", usage(10, 10)),
+    );
+    let c = call(&llm, &budget, &pool, &cancel);
+    let out: Out = c.structured("s", "u", &out_schema(), 100).await.unwrap();
+    assert_eq!(out.answer, "ok");
+    c.text("s", "u", 100).await.unwrap();
+    let reqs = llm.requests();
+    assert_structured(&reqs[0], &out_schema());
+    // The plain text call asks for no format.
+    assert_eq!(reqs[1].output_config, None);
+    assert!(reqs[1].tools.is_empty());
+}
+
+#[tokio::test]
+async fn max_tokens_reply_is_never_read_and_takes_the_retry() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let c = |llm: &Arc<ScriptedLlm>| call(llm, &budget, &pool, &cancel);
+
+    // Valid JSON, but cut off by the token limit: the retry answers.
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_stop(
+                "{\"answer\": \"partial\"}",
+                StopReason::MaxTokens,
+                usage(10, 10),
+            )
+            .reply_json(json!({"answer": "retried"}), usage(10, 10)),
+    );
+    let out: Out = c(&llm)
+        .structured("s", "u", &out_schema(), 100)
+        .await
+        .unwrap();
+    assert_eq!(out.answer, "retried");
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_structured(&reqs[1], &out_schema());
+    assert!(format!("{:?}", reqs[1].messages).contains(SCHEMA_NUDGE.trim()));
+    assert_eq!(
+        SCHEMA_NUDGE,
+        "\n\nReply with JSON matching the given schema only."
+    );
+
+    // Cut off twice: Parse after exactly two calls, both charged.
+    let before = charge_rows(&pool, uid).await.len();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_stop("{\"answer\": \"a\"}", StopReason::MaxTokens, usage(10, 10))
+            .reply_stop("{\"answer\": \"b\"}", StopReason::MaxTokens, usage(10, 10))
+            .reply_json(json!({"answer": "never"}), usage(10, 10)),
+    );
+    let err = c(&llm)
+        .structured::<Out>("s", "u", &out_schema(), 100)
+        .await
+        .unwrap_err();
+    assert_eq!(err, StepError::Parse);
+    assert_eq!(llm.remaining(), 1);
+    assert_eq!(charge_rows(&pool, uid).await.len(), before + 2);
+}
+
+#[tokio::test]
+async fn refusal_is_charged_and_fails_the_call_without_retry() {
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 10_000).await;
+    let cancel = CancelFlag::default();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_stop(
+                "{\"answer\": \"looks valid\"}",
+                StopReason::Refusal,
+                usage(1000, 200),
+            )
+            .reply_json(json!({"answer": "never"}), usage(10, 10)),
+    );
+    let err = call(&llm, &budget, &pool, &cancel)
+        .structured::<Out>("s", "u", &out_schema(), 500)
+        .await
+        .unwrap_err();
+    assert_eq!(err, StepError::Llm);
+    assert_eq!(llm.requests().len(), 1, "no retry");
+    assert_eq!(llm.remaining(), 1);
+    // Billed: 1000*1 + 200*5 = 2000 µ$ -> 18 paise.
+    assert_eq!(charge_rows(&pool, uid).await, vec![18]);
+}
+
+#[tokio::test]
+async fn hold_counts_the_schema_bytes() {
+    let Some(pool) = pool().await else { return };
+    let big = OutputSchema::new(json!({
+        "type": "object",
+        "description": "x".repeat(30_000),
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": false
+    }));
+    let (_uid, _run, probe) = setup(&pool, 10_000).await;
+    let without = hold_estimate(&probe, MODEL, "s", "u", None, 100).unwrap();
+    let with = hold_estimate(&probe, MODEL, "s", "u", Some(&big), 100).unwrap();
+    assert!(with > without, "{with} vs {without}");
+
+    // The estimate is the one LlmCall holds for the request it sends.
+    let llm = Arc::new(ScriptedLlm::new().reply_json(json!({"answer": "a"}), usage(1, 1)));
+    let cancel = CancelFlag::default();
+    call(&llm, &probe, &pool, &cancel)
+        .structured::<Out>("s", "u", &big, 100)
+        .await
+        .unwrap();
+    let req = &llm.requests()[0];
+    let bytes = request_prompt_bytes(req);
+    assert_eq!(
+        bytes,
+        req.system.as_ref().unwrap().len()
+            + "u".len()
+            + serde_json::to_string(req.output_config.as_ref().unwrap())
+                .unwrap()
+                .len()
+    );
+    assert_eq!(
+        probe.cost_of(MODEL, &estimate_usage(bytes, 100)).unwrap(),
+        with
+    );
+
+    // A budget that fits the plain call but not the schema: refused uncalled.
+    let (_uid, _run, budget) = setup(&pool, without).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_text("{\"answer\": \"t\"}", usage(1, 1)));
+    let c = call(&llm, &budget, &pool, &cancel);
+    let err = c.structured::<Out>("s", "u", &big, 100).await.unwrap_err();
+    assert_eq!(err, StepError::OverBudget);
+    assert!(llm.requests().is_empty());
+    c.text("s", "u", 100).await.unwrap();
+    assert_eq!(llm.requests().len(), 1);
+}
+
+/// The ICG pipeline, every reply structured-output JSON text; screening
+/// verdicts wrapped as `{"verdicts": […]}`.
+fn structured_script(verdicts: &[&str]) -> Arc<ScriptedLlm> {
+    let mut llm = ScriptedLlm::new()
+        .reply_json(agent_json("frame_pico.json"), u())
+        .reply_json(agent_json("search_initial.json"), u())
+        .reply_json(agent_json("search_accept.json"), u())
+        .reply_json(json!({"verdicts": screen_reply()}), u())
+        .reply_json(json!({"verdicts": screen_reply()}), u())
+        .reply_json(meta_extraction(), u())
+        .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+        .reply_json(three_claims(), u());
+    for v in verdicts {
+        llm = llm.reply_json(json!({"claim": 1, "verdict": v, "reason": "r"}), u());
+    }
+    Arc::new(llm)
+}
+
+/// Every step's schema, by step, for the request and strictness checks.
+fn step_schemas() -> Vec<(&'static str, &'static OutputSchema)> {
+    vec![
+        ("frame", &*incisive_app::agent::frame::SCHEMA),
+        ("propose", &*incisive_app::agent::search::PROPOSE_SCHEMA),
+        ("review", &*incisive_app::agent::search::REVIEW_SCHEMA),
+        ("screen", &*incisive_app::agent::screen::SCHEMA),
+        ("extract", &*incisive_app::agent::extract::SCHEMA),
+        ("write", &*incisive_app::agent::write::SCHEMA),
+        ("check", &*incisive_app::agent::check::SCHEMA),
+    ]
+}
+
+#[tokio::test]
+async fn every_step_requests_structured_output_end_to_end() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = structured_script(&["supported", "supported", "partial"]);
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0, "one call per step call: no retries");
+    assert_eq!(a.pico, pico());
+    assert_eq!(a.trail.included, 2);
+    assert_eq!(a.bottom_line.len(), 3);
+    assert_eq!((a.check.supported, a.check.partial), (2, 1));
+
+    // Frame, search ×2, screen ×2, extract ×2, write, check ×3: each with
+    // its own step's schema, no tools, and a prompt asking for JSON that
+    // matches the schema.
+    let s: HashMap<_, _> = step_schemas().into_iter().collect();
+    let order = [
+        "frame", "propose", "review", "screen", "screen", "extract", "extract", "write", "check",
+        "check", "check",
+    ];
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), order.len());
+    for (r, step) in reqs.iter().zip(order) {
+        assert_structured(r, s[step]);
+        // Ruling R-FA2: low effort for the five short-answer steps; Extract
+        // and Write keep the model default (no effort sent).
+        let body = serde_json::to_value(r).unwrap();
+        let want = match step {
+            "extract" | "write" => serde_json::Value::Null,
+            _ => json!("low"),
+        };
+        assert_eq!(body["output_config"]["effort"], want, "{step}");
+        assert_eq!(
+            body["output_config"]
+                .as_object()
+                .unwrap()
+                .contains_key("effort"),
+            !want.is_null(),
+            "{step}"
+        );
+        let sys = r.system.as_ref().unwrap();
+        assert!(sys.contains("matching the given schema"), "{step}: {sys}");
+        assert!(!sys.contains("submit tool"), "{step}");
+    }
+}
+
+#[tokio::test]
+async fn production_models_get_structured_output_and_never_a_forced_tool() {
+    // Review C-1: Sonnet 5.5 rejects a forced tool_choice with a 400. At the
+    // default models, no request carries tools or tool_choice.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = prod_script(EXTRACT_ABSTRACT_U);
+    let (ctx, _uid) = prod_ctx(&pool, RunMode::Quick, 1500, &llm, &server).await;
+    assert!(matches!(run_pipeline(&ctx).await, PipelineOutcome::Done(_)));
+    let reqs = llm.requests();
+    assert!(reqs.iter().any(|r| r.model == "claude-sonnet-5-5"));
+    assert!(reqs.iter().any(|r| r.model == "claude-haiku-5-5"));
+    for r in &reqs {
+        let body = serde_json::to_value(r).unwrap();
+        assert!(body.get("tool_choice").is_none(), "{}", r.model);
+        assert!(body.get("tools").is_none(), "{}", r.model);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+}
+
+#[tokio::test]
+async fn check_retries_a_cut_off_reply_and_fails_a_refusal() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let server = icg_verify_server().await;
+    let complete = "{\"claim\": 1, \"verdict\": \"partial\", \"reason\": \"r\"}";
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            // a: cut off (even with a complete verdict): the retry answers.
+            .reply_stop(complete, StopReason::MaxTokens, u())
+            .reply_json(json!({"claim": 1, "verdict": "supported"}), u())
+            // b: a refusal fails the claim with no retry.
+            .reply_stop(complete, StopReason::Refusal, u())
+            // c: cut off twice: removed.
+            .reply_stop(complete, StopReason::MaxTokens, u())
+            .reply_stop(complete, StopReason::MaxTokens, u())
+            // d: the text path is unchanged (prose around the JSON).
+            .reply_text("Verdict: {\"claim\": 1, \"verdict\": \"PARTIAL\"}", u()),
+    );
+    let c = check(
+        &ctx,
+        &agent_llm(&llm),
+        &literature(&server),
+        draft(vec![
+            claim("a", &[1]),
+            claim("b", &[1]),
+            claim("c", &[1]),
+            claim("d", &[1]),
+        ]),
+        &two_papers(),
+    )
+    .await
+    .unwrap();
+    let got: Vec<(String, ClaimVerdict)> =
+        c.claims.iter().map(|(c, v)| (c.text.clone(), *v)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), ClaimVerdict::Supported),
+            ("d".to_string(), ClaimVerdict::Partial),
+        ]
+    );
+    assert_eq!(c.removed, 2);
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 6);
+    for r in &reqs {
+        assert_structured(r, &incisive_app::agent::check::SCHEMA);
+    }
+    assert!(user_text(&llm, 1).ends_with(SCHEMA_NUDGE));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Check failed for 2 claims; they were removed"),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn screen_reads_verdicts_first_and_fails_closed_on_other_arrays() {
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers = vec![paper("11", "ICG RCT", Some("a"), 2020, &[])];
+    let v = |include: bool| json!([{"id": "p-1", "include": include, "code": "relevant", "reason": "r"}]);
+    // An echoed array sorting before `verdicts` is ignored.
+    let llm =
+        Arc::new(ScriptedLlm::new().reply_json(json!({"aaa": v(false), "verdicts": v(true)}), u()));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    assert_eq!(pmids(&s), vec!["11"]);
+}
+
+#[tokio::test]
+async fn several_arrays_without_verdicts_are_unreadable() {
+    let v = json!([{"id": "p-1", "include": true, "code": "relevant", "reason": "r"}]);
+    screen_reply_without_usable_verdict_is_service_failure(json!({"a": v, "b": v})).await;
+}
+
+/// Problems with `v` as a structured-outputs schema: an unsupported keyword,
+/// an object without `additionalProperties: false` or `required`, a
+/// `required` key not in `properties`, a type list, or `minItems` over 1.
+fn strict_problems(path: &str, v: &serde_json::Value, out: &mut Vec<String>) {
+    const ALLOWED: &[&str] = &[
+        "type",
+        "properties",
+        "items",
+        "required",
+        "enum",
+        "const",
+        "anyOf",
+        "description",
+        "additionalProperties",
+        "minItems",
+    ];
+    let Some(o) = v.as_object() else {
+        out.push(format!("{path}: not a schema object"));
+        return;
+    };
+    for k in o.keys() {
+        if !ALLOWED.contains(&k.as_str()) {
+            out.push(format!("{path}: unsupported keyword {k}"));
+        }
+    }
+    if o.get("type").is_some_and(|t| !t.is_string()) {
+        out.push(format!("{path}: type must be one string (use anyOf)"));
+    }
+    if o.get("minItems")
+        .and_then(|m| m.as_u64())
+        .is_some_and(|m| m > 1)
+    {
+        out.push(format!("{path}: minItems over 1"));
+    }
+    if o.get("type") == Some(&json!("object")) || o.contains_key("properties") {
+        if o.get("additionalProperties") != Some(&json!(false)) {
+            out.push(format!("{path}: additionalProperties must be false"));
+        }
+        let props = o.get("properties").and_then(|p| p.as_object());
+        match (o.get("required").and_then(|r| r.as_array()), props) {
+            (Some(req), Some(props)) => {
+                for r in req {
+                    if !r.as_str().is_some_and(|r| props.contains_key(r)) {
+                        out.push(format!("{path}: required {r} not in properties"));
+                    }
+                }
+            }
+            _ => out.push(format!("{path}: object needs properties and required")),
+        }
+        for (k, p) in props.into_iter().flatten() {
+            strict_problems(&format!("{path}.{k}"), p, out);
+        }
+    }
+    if let Some(items) = o.get("items") {
+        strict_problems(&format!("{path}[]"), items, out);
+    }
+    for (i, alt) in o
+        .get("anyOf")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        strict_problems(&format!("{path}|{i}"), alt, out);
+    }
+}
+
+#[test]
+fn step_schemas_are_strict_compatible() {
+    for (step, schema) in step_schemas() {
+        assert_eq!(schema.schema()["type"], "object", "{step}: top level");
+        let mut problems = Vec::new();
+        strict_problems(step, schema.schema(), &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+    // The walker is not vacuous.
+    let mut problems = Vec::new();
+    strict_problems(
+        "bad",
+        &json!({"type": "object", "properties": {
+            "n": {"type": "integer", "minimum": 0},
+            "s": {"type": ["string", "null"], "maxLength": 3},
+            "o": {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+            "a": {"type": "array", "maxItems": 2, "minItems": 2, "items": {"type": "string"}}
+        }, "required": ["n", "missing"]}),
+        &mut problems,
+    );
+    for want in [
+        "bad: additionalProperties must be false",
+        "bad: required \"missing\" not in properties",
+        "bad.n: unsupported keyword minimum",
+        "bad.s: unsupported keyword maxLength",
+        "bad.s: type must be one string (use anyOf)",
+        "bad.o: additionalProperties must be false",
+        "bad.a: unsupported keyword maxItems",
+        "bad.a: minItems over 1",
+    ] {
+        assert!(problems.iter().any(|p| p == want), "{want}: {problems:?}");
+    }
 }

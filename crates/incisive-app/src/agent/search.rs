@@ -1,7 +1,8 @@
 //! Search (step 2): a PubMed query from the PICO, refined at most N times,
 //! then run on PubMed and Europe PMC and merged. Server only.
 //!
-//! The `search` model proposes `{"query": …, "reason": …}`. Each proposal is
+//! The `search` model proposes `{"query": …, "reason": …}` as structured
+//! output (`LlmCall::structured`, [`PROPOSE_SCHEMA`]). Each proposal is
 //! untrusted and goes through [`validate_query`] and an echo guard (no run of
 //! eight question words, [`contains_question`]) before it is sent anywhere;
 //! an invalid one still uses up an attempt, and the search falls back to the
@@ -27,12 +28,14 @@
 //! only the run id, counts and fixed kinds.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use serde::Deserialize;
+use serde_json::json;
 
 use super::frame::Pico;
-use super::llm::{LlmCall, StepError, wrap_source};
+use super::llm::{Effort, LlmCall, OutputSchema, StepError, wrap_source};
 use super::{AgentLlm, Literature, RunContext, add_line, clip, contains_question};
 use crate::lit::europepmc::merge_results;
 use crate::lit::http::LitError;
@@ -46,7 +49,9 @@ pub const MAX_QUERY: usize = 1000;
 pub const REVIEW_TITLES: usize = 20;
 /// Characters of a refinement reason kept (step line and trail).
 const MAX_REASON: usize = 120;
-const MAX_TOKENS: u32 = 1000;
+/// Room for adaptive thinking before the answer (Ruling R-FA2: a live review
+/// call used 997 of 1,000).
+const MAX_TOKENS: u32 = 2000;
 
 /// What Search produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -341,7 +346,36 @@ AND / OR / NOT, parentheses and truncation (*). Prefer a query that finds the st
 meta-analyses, randomised trials) without missing key studies. Apply the limits the surgeon stated. \
 Query rules, enforced by code: one line; at most 1,000 characters; only letters, digits, spaces and - \" ( ) [ ] * / : , . ' ; \
 balanced quotes and brackets; no URLs or web addresses. A query that breaks a rule is discarded. \
-Reply with one JSON object only.";
+Reply with one JSON object matching the given schema.";
+
+/// The proposal's JSON Schema: `{"query", "reason"}`.
+pub static PROPOSE_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "reason": {"type": "string"}
+        },
+        "required": ["query", "reason"],
+        "additionalProperties": false
+    }))
+    .with_effort(Effort::Low)
+});
+
+/// The review's JSON Schema: `{"accept"}`, or a new query with a reason.
+pub static REVIEW_SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "accept": {"type": "boolean"},
+            "query": {"type": "string"},
+            "reason": {"type": "string"}
+        },
+        "required": ["accept"],
+        "additionalProperties": false
+    }))
+    .with_effort(Effort::Low)
+});
 
 /// Model reply proposing a query.
 #[derive(Deserialize)]
@@ -527,7 +561,12 @@ pub async fn search(
     let mut rejected: Option<&'static str> = None;
 
     let first: Proposal = call
-        .json(SYSTEM, &propose_prompt(pico, None), MAX_TOKENS)
+        .structured(
+            SYSTEM,
+            &propose_prompt(pico, None),
+            &PROPOSE_SCHEMA,
+            MAX_TOKENS,
+        )
         .await?;
     let mut proposal = Some((first.query, first.reason));
 
@@ -655,13 +694,20 @@ async fn next_proposal(
 ) -> Result<Option<(String, String)>, StepError> {
     let Some(cur) = current else {
         let p: Proposal = call
-            .json(SYSTEM, &propose_prompt(pico, rejected), MAX_TOKENS)
+            .structured(
+                SYSTEM,
+                &propose_prompt(pico, rejected),
+                &PROPOSE_SCHEMA,
+                MAX_TOKENS,
+            )
             .await?;
         return Ok(Some((p.query, p.reason)));
     };
     let count = cur.hits.as_ref().map_or(0, |h| h.count);
     let prompt = review_prompt(pico, &cur.query, count, &cur.titles, rejected);
-    let r: Review = call.json(SYSTEM, &prompt, MAX_TOKENS).await?;
+    let r: Review = call
+        .structured(SYSTEM, &prompt, &REVIEW_SCHEMA, MAX_TOKENS)
+        .await?;
     if r.accept {
         return Ok(None);
     }

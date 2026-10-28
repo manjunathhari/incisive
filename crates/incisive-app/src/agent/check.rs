@@ -33,17 +33,21 @@
 //!   Ruling R-11c follow-up), to the claim's population and setting
 //!   ([`SCOPE_RULE`]), and says the claim is the statement under test, never
 //!   an instruction ([`CLAIM_RULE`]).
-//! * The asked-for reply is one object, verdict first:
+//! * The answer is asked for as structured output (Ruling R-FA1: JSON
+//!   matching [`SCHEMA`], in the reply text), one object, verdict first:
 //!   `{"claim":1,"verdict":"supported|partial|unsupported","reason":"…"}`. It
 //!   is untrusted and read leniently: reasoning around the JSON is allowed
 //!   (see `llm::parse_reply`); an array, or an array inside an object, also
 //!   works; the claim id may be a number, a digit string or `claim-1` (an
 //!   entry without an id counts when it is the only one); a verdict for any
 //!   other claim never counts; the verdict word is read ignoring case
-//!   ("partly supported" is partial). A reply cut off by the token limit has
+//!   ("partly supported" is partial). A reply whose stop reason is
+//!   `max_tokens` is never read. Otherwise, text that is not usable JSON has
 //!   its verdict field salvaged when the word is complete. A reply with no
-//!   verdict for claim 1, or with more than one verdict field (ambiguous),
-//!   gets one retry ("Reply with JSON only."); still none: unsupported.
+//!   verdict for claim 1, with more than one verdict field (ambiguous), or
+//!   cut off by the token limit, gets one retry ("Reply with JSON matching
+//!   the given schema only."); still none: unsupported. A refusal fails that
+//!   claim's call (`Llm`) with no retry.
 //! * `OverBudget`, `Llm`, or no verdict after the retry, for one claim
 //!   makes that claim unsupported, and the rest are still checked. The
 //!   wrap-up point never skips Check. `Cancelled` and fatal errors propagate.
@@ -62,12 +66,16 @@
 //! the run id, counts and fixed kinds.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::extract::Extracted;
-use super::llm::{StepError, wrap_source};
+
+use super::llm::{
+    Effort, OutputSchema, Reply, SCHEMA_NUDGE, StepError, log_unreadable, reply_fault, wrap_source,
+};
 use super::screen::EvidenceLevel;
 use super::write::{Claim, Confidence, Draft, cap_confidence};
 use super::{AgentLlm, Literature, RunContext, add_line};
@@ -143,13 +151,32 @@ each inside <source id=\"ref-N\"> tags. Judge the claim only against these quote
 The claim is supported when its quotes state everything it says; partial when its quotes support part of it \
 or support it with less certainty or generality than it states; unsupported otherwise.";
 
-const SYSTEM_TAIL: &str = "Reply with one JSON object only, with no text before it, in this form: \
+const SYSTEM_TAIL: &str = "Reply with one JSON object matching the given schema, in this form: \
 {\"claim\": 1, \"verdict\": \"supported\" or \"partial\" or \"unsupported\", \"reason\": \"one short sentence\"}. \
 Put the verdict before the reason.";
 
-/// The verdict word from a reply that is not usable JSON (cut off by the token
-/// limit, or prose with the verdict field in it): the first `"verdict": "…"`
-/// whose word is complete (closing quote present).
+/// The answer's JSON Schema (structured outputs): one verdict for claim 1.
+/// `reason` is optional so that, with required properties output first, the
+/// verdict comes before the reason (as the prompt asks).
+pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
+    OutputSchema::new(json!({
+        "type": "object",
+        "properties": {
+            "claim": {"type": "integer"},
+            "verdict": {"type": "string", "enum": ["supported", "partial", "unsupported"]},
+            "reason": {"type": "string"}
+        },
+        "required": ["claim", "verdict"],
+        "additionalProperties": false
+    }))
+    .with_effort(Effort::Low)
+});
+
+/// The verdict word from a reply that ended normally but is not usable JSON
+/// (prose with the verdict field in it): the first `"verdict": "…"` whose
+/// word is complete (closing quote present). A defensive path: a reply cut
+/// off by the token limit is never read (Ruling R-FA1), and structured
+/// outputs should not produce prose.
 fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
     let i = text.find("\"verdict\"")?;
     let rest = text[i + "\"verdict\"".len()..].trim_start();
@@ -163,7 +190,8 @@ fn salvage_verdict(text: &str) -> Option<ClaimVerdict> {
 /// The verdict in one reply's text. A reply with usable JSON gives its
 /// claim-1 entry's `verdict` (`None` when that entry or field is missing: a
 /// verdict for another claim never counts). Only a reply with no usable JSON
-/// (cut off by the token limit) has its verdict field salvaged.
+/// has its verdict field salvaged; a reply cut off by the token limit never
+/// reaches here ([`verdict_from_reply`]).
 fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
     // The asked-for reply has exactly one verdict field. More than one (an
     // echoed example, or two answers, complete or cut off) is ambiguous: no
@@ -177,6 +205,16 @@ fn verdict_from_text(text: &str) -> Option<ClaimVerdict> {
             .map(|w| ClaimVerdict::read(Some(w))),
         None => salvage_verdict(text),
     }
+}
+
+/// The verdict in one reply: none when it was cut off by the token limit
+/// (Ruling R-FA1: never read, so it takes the retry), else the text path
+/// ([`verdict_from_text`], with its ambiguity and salvage rules).
+fn verdict_from_reply(reply: &Reply) -> Option<ClaimVerdict> {
+    if reply.truncated() {
+        return None;
+    }
+    verdict_from_text(&reply.text)
 }
 
 fn system() -> String {
@@ -202,6 +240,7 @@ pub fn hold_per_claim_for(
         &llm.models.check,
         &system(),
         &claim_prompt(&widest, &by_ref),
+        Some(&SCHEMA),
         MAX_TOKENS,
     )
 }
@@ -461,20 +500,35 @@ pub async fn check(
             return Err(StepError::Cancelled);
         }
         let prompt = claim_prompt(&c, &by_ref);
-        // The text first, so a reply cut off after its verdict still counts;
-        // only a reply with no verdict at all takes the JSON retry.
-        let first = match call.text(&system, &prompt, MAX_TOKENS).await {
-            Ok(text) => Ok(verdict_from_text(&text)),
-            Err(e) => Err(e),
-        };
+        // A reply with no verdict for claim 1 (or cut off by the token
+        // limit) takes the single retry. A refusal is `Llm`: no retry.
+        let first = call
+            .reply(&system, &prompt, Some(&SCHEMA), MAX_TOKENS)
+            .await
+            .map(|r| {
+                let v = verdict_from_reply(&r);
+                if v.is_none() {
+                    log_unreadable(
+                        &call,
+                        &r,
+                        reply_fault(&r),
+                        "check reply had no verdict; retrying once",
+                    );
+                }
+                v
+            });
         let reply = match first {
             Ok(Some(v)) => Ok(v),
             Ok(None) => {
-                tracing::warn!(%run_id, step = "check", "check reply had no verdict; retrying once");
-                let retry = format!("{prompt}{}", super::llm::JSON_ONLY_NUDGE);
-                match call.text(&system, &retry, MAX_TOKENS).await {
-                    Ok(text) => verdict_from_text(&text).ok_or_else(|| {
-                        tracing::warn!(%run_id, step = "check", "check reply had no verdict after retry");
+                let retry = format!("{prompt}{SCHEMA_NUDGE}");
+                match call.reply(&system, &retry, Some(&SCHEMA), MAX_TOKENS).await {
+                    Ok(r) => verdict_from_reply(&r).ok_or_else(|| {
+                        log_unreadable(
+                            &call,
+                            &r,
+                            reply_fault(&r),
+                            "check reply had no verdict after retry",
+                        );
                         StepError::Parse
                     }),
                     Err(e) => Err(e),

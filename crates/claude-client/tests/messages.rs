@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use claude_client::{
-    ClaudeError, Client, ContentBlock, Message, MessagesRequest, RetryPolicy, Role, StopReason,
+    ClaudeError, Client, ContentBlock, Effort, Message, MessagesRequest, OutputConfig,
+    OutputFormat, RetryPolicy, Role, StopReason, ToolChoice, ToolDef,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -18,6 +19,8 @@ fn request() -> MessagesRequest {
             content: vec![ContentBlock::Text { text: "Hi".into() }],
         }],
         tools: vec![],
+        tool_choice: None,
+        output_config: None,
     }
 }
 
@@ -273,4 +276,149 @@ fn debug_does_not_leak_key() {
     let shown = format!("{c:?}");
     assert!(!shown.contains("sk-live-SECRET"), "leaked: {shown}");
     assert!(shown.contains("[redacted]"));
+}
+
+#[test]
+fn tool_choice_is_omitted_when_unset() {
+    let body = serde_json::to_value(request()).unwrap();
+    let o = body.as_object().unwrap();
+    assert!(!o.contains_key("tool_choice"), "{body}");
+    assert!(!o.contains_key("tools"), "{body}");
+}
+
+#[test]
+fn forced_tool_choice_serialises_as_the_api_expects() {
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "submit".into(),
+        description: "Submit the answer.".into(),
+        input_schema: json!({"type": "object", "properties": {}}),
+    }];
+    req.tool_choice = Some(ToolChoice::Tool {
+        name: "submit".into(),
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "tool", "name": "submit"})
+    );
+    assert_eq!(body["tools"][0]["name"], "submit");
+    assert_eq!(
+        serde_json::to_value(ToolChoice::Auto).unwrap(),
+        json!({"type": "auto"})
+    );
+    assert_eq!(
+        serde_json::to_value(ToolChoice::Any).unwrap(),
+        json!({"type": "any"})
+    );
+}
+
+#[tokio::test]
+async fn forced_tool_choice_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(
+            json!({"tool_choice": {"type": "tool", "name": "submit"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_t",
+            "content": [{"type": "tool_use", "id": "tu_1", "name": "submit", "input": {"a": 1}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "submit".into(),
+        description: "d".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+    req.tool_choice = Some(ToolChoice::Tool {
+        name: "submit".into(),
+    });
+    let resp = client(&server).create_message(&req).await.unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert!(
+        matches!(&resp.content[0], ContentBlock::ToolUse { input, .. } if input == &json!({"a": 1}))
+    );
+}
+
+#[test]
+fn output_config_is_omitted_when_unset_and_serialises_json_schema() {
+    let body = serde_json::to_value(request()).unwrap();
+    assert!(
+        !body.as_object().unwrap().contains_key("output_config"),
+        "{body}"
+    );
+    let mut req = request();
+    req.output_config = Some(OutputConfig {
+        format: OutputFormat::JsonSchema {
+            schema: json!({"type": "object", "additionalProperties": false}),
+        },
+        effort: None,
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {"type": "object", "additionalProperties": false}}})
+    );
+    // The deprecated parameter is never sent.
+    assert!(!body.as_object().unwrap().contains_key("output_format"));
+    assert!(!body.as_object().unwrap().contains_key("tool_choice"));
+}
+
+#[tokio::test]
+async fn refusal_stop_reason_is_parsed_and_unknown_is_other() {
+    let server = MockServer::start().await;
+    serve(
+        &server,
+        json!({
+            "id": "msg_r",
+            "content": [{"type": "text", "text": "I can't help with that."}],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        }),
+    )
+    .await;
+    let resp = client(&server).create_message(&request()).await.unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::Refusal));
+    let other: StopReason = serde_json::from_value(json!("pause_turn")).unwrap();
+    assert_eq!(other, StopReason::Other);
+}
+
+#[test]
+fn output_config_effort_serialises_beside_format_and_is_omitted_when_unset() {
+    let mut req = request();
+    req.output_config = Some(OutputConfig {
+        format: OutputFormat::JsonSchema {
+            schema: json!({"type": "object"}),
+        },
+        effort: Some(Effort::Low),
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {"type": "object"}}, "effort": "low"})
+    );
+    for (e, want) in [
+        (Effort::Low, "low"),
+        (Effort::Medium, "medium"),
+        (Effort::High, "high"),
+        (Effort::Xhigh, "xhigh"),
+        (Effort::Max, "max"),
+    ] {
+        assert_eq!(serde_json::to_value(e).unwrap(), json!(want));
+    }
+    req.output_config.as_mut().unwrap().effort = None;
+    let body = serde_json::to_value(&req).unwrap();
+    assert!(
+        !body["output_config"]
+            .as_object()
+            .unwrap()
+            .contains_key("effort"),
+        "{body}"
+    );
 }
