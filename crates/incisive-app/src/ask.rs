@@ -100,6 +100,10 @@ pub struct MeView {
     pub role: String,
     pub today_paise: i64,
     pub daily_cap_paise: i64,
+    /// Cost limit of a Quick run in paise (`RUN_LIMITS`), for the toggle's hint.
+    pub quick_limit_paise: i64,
+    /// Cost limit of a Focused run in paise (`RUN_LIMITS`).
+    pub focused_limit_paise: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +588,8 @@ mod server {
             role: user.role.as_str().to_string(),
             today_paise: totals.today_paise,
             daily_cap_paise: user.daily_cap_paise,
+            quick_limit_paise: state.runs.quick.limit_paise,
+            focused_limit_paise: state.runs.focused.limit_paise,
         })
     }
 

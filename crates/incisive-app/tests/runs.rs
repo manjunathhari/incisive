@@ -2616,3 +2616,376 @@ async fn history_page_lists_up_to_100() {
         assert!(body.contains(&format!("history item {i:02}")), "item {i}");
     }
 }
+
+// ---------- Task 14: Quick/Focused toggle and production settings ----------
+
+use incisive_app::agent::answer::{initial_mode, mode_hint};
+use incisive_app::config::Config;
+
+/// `application/x-www-form-urlencoded` value (the browser's form encoding).
+fn form_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(char::from(b))
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Records the mode and depth settings the worker received, then waits to be
+/// cancelled (so the reservation can be read while the run is active).
+fn reports_settings(ctx: &RunContext) -> PipelineFuture<'_> {
+    Box::pin(async move {
+        let s = ctx.settings;
+        let line = format!(
+            "{} limit={} screen={} use={} full_text={} refinements={}",
+            ctx.mode.as_str(),
+            s.limit_paise,
+            s.screen_n,
+            s.use_n,
+            s.full_text,
+            s.refinements
+        );
+        add_step(&ctx.state.pool, ctx.run_id, StepKind::Frame, &line)
+            .await
+            .unwrap();
+        for _ in 0..500 {
+            if ctx.cancel.is_cancelled() {
+                return PipelineOutcome::Failed("cancelled");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        PipelineOutcome::Done(json!({"not": "cancelled"}))
+    })
+}
+
+/// Send the question box's form (as the browser does) and return the run's
+/// first step line and its reservation while it is still running.
+async fn ask_through_form(
+    pool: &PgPool,
+    st: &AppState,
+    email: &str,
+    body: String,
+) -> (Uuid, String, Option<i64>, i64) {
+    let req = Request::post("/api/fn/ask")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-dev-user-email", email)
+        .body(Body::from(body))
+        .unwrap();
+    let (s, body) = send(router(st.clone()), req).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = as_json(&body);
+    assert_eq!(v["status"], "run_started", "{body}");
+    let run = Uuid::parse_str(v["run_id"].as_str().unwrap()).unwrap();
+    let mut line = None;
+    for _ in 0..500 {
+        let rv = sqlx::query_scalar::<_, String>(
+            "SELECT line FROM incisive.run_steps WHERE run_id = $1 ORDER BY seq LIMIT 1",
+        )
+        .bind(run)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        if rv.is_some() {
+            line = rv;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let line = line.expect("the worker wrote its settings line");
+    let held = reservation(pool, run).await;
+    let limit: i64 = sqlx::query_scalar("SELECT limit_paise FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert!(st.worker.cancel(run));
+    wait_idle(st, run).await;
+    (run, line, held, limit)
+}
+
+#[tokio::test]
+async fn quick_request_uses_quick_limits_and_reservation() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut st = app_state(pool.clone());
+    st.worker = WorkerHandle::with_pipeline(reports_settings);
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let (run, line, held, limit) = ask_through_form(
+        &pool,
+        &st,
+        &email,
+        format!("question={}&mode=quick", form_encode(RULE_QUESTION)),
+    )
+    .await;
+    assert_eq!(
+        line,
+        "quick limit=1500 screen=20 use=5 full_text=false refinements=1"
+    );
+    // The full Quick limit (owner ruling: 1500 paise) is reserved up front.
+    assert_eq!(held, Some(1500));
+    assert_eq!(limit, 1500);
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.mode, RunMode::Quick);
+    // Ended: nothing left reserved.
+    assert_eq!(reservation(&pool, run).await, None);
+}
+
+#[tokio::test]
+async fn mode_defaults_to_focused() {
+    // The type, the toggle's choice of starting mode, and the wire default.
+    assert_eq!(RunMode::default(), RunMode::Focused);
+    assert_eq!(initial_mode(None, None), RunMode::Focused);
+    assert_eq!(initial_mode(None, Some("nonsense")), RunMode::Focused);
+    assert_eq!(initial_mode(None, Some("focused")), RunMode::Focused);
+    // The browser's remembered choice applies when nothing else says otherwise.
+    assert_eq!(initial_mode(None, Some("quick")), RunMode::Quick);
+    // Edit & re-run's fragment beats the remembered choice for that page load.
+    assert_eq!(
+        initial_mode(Some(RunMode::Quick), Some("focused")),
+        RunMode::Quick
+    );
+    assert_eq!(
+        initial_mode(Some(RunMode::Focused), Some("quick")),
+        RunMode::Focused
+    );
+
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut st = app_state(pool.clone());
+    st.worker = WorkerHandle::with_pipeline(reports_settings);
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    // No `mode` field at all: Focused.
+    let (run, line, held, limit) = ask_through_form(
+        &pool,
+        &st,
+        &email,
+        format!("question={}", form_encode(RULE_QUESTION)),
+    )
+    .await;
+    assert_eq!(
+        line,
+        "focused limit=4000 screen=100 use=10 full_text=true refinements=3"
+    );
+    assert_eq!(held, Some(4000));
+    assert_eq!(limit, 4000);
+    let v = get_run_for_user(&pool, uid, run).await.unwrap().unwrap();
+    assert_eq!(v.summary.mode, RunMode::Focused);
+}
+
+#[test]
+fn mode_hint_text() {
+    assert_eq!(
+        mode_hint(RunMode::Quick, 1500),
+        "Quick \u{b7} up to \u{20b9}15"
+    );
+    assert_eq!(
+        mode_hint(RunMode::Focused, 4000),
+        "Focused \u{b7} up to \u{20b9}40"
+    );
+    // Not whole rupees: shown with paise.
+    assert_eq!(
+        mode_hint(RunMode::Quick, 1250),
+        "Quick \u{b7} up to \u{20b9}12.50"
+    );
+}
+
+#[tokio::test]
+async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut st = app_state(pool.clone());
+    // The hints come from config (`RUN_LIMITS`), not from constants.
+    st.runs.quick.limit_paise = 1200;
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let (s, body) = send(router(st.clone()), api("GET", "/", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains(r#"name="mode""#), "{body}");
+    assert!(body.contains(r#"value="quick""#), "{body}");
+    assert!(body.contains(r#"value="focused""#), "{body}");
+    assert!(body.contains("Quick \u{b7} up to \u{20b9}12"), "{body}");
+    assert!(body.contains("Focused \u{b7} up to \u{20b9}40"), "{body}");
+    // Focused is the one checked before the browser applies a saved choice.
+    let focused = body.find(r#"value="focused""#).unwrap();
+    let tag_start = body[..focused].rfind('<').unwrap();
+    let tag_end = focused + body[focused..].find('>').unwrap();
+    assert!(
+        body[tag_start..tag_end].contains("checked"),
+        "{}",
+        &body[tag_start..=tag_end]
+    );
+    let quick = body.find(r#"value="quick""#).unwrap();
+    let q_start = body[..quick].rfind('<').unwrap();
+    let q_end = quick + body[quick..].find('>').unwrap();
+    assert!(!body[q_start..q_end].contains("checked"));
+
+    // `/api/fn/me` carries the figures the hints use.
+    let req = Request::post("/api/fn/me")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-dev-user-email", &email)
+        .body(Body::empty())
+        .unwrap();
+    let (s, body) = send(router(st), req).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let me = as_json(&body);
+    assert_eq!(me["quick_limit_paise"], 1200);
+    assert_eq!(me["focused_limit_paise"], 4000);
+}
+
+#[tokio::test]
+async fn ssr_run_page_shows_mode_badge() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let run = finished_run(&pool, uid, "badge question", 10).await;
+    let (s, body) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        body.contains(r#"<span class="badge mode">Quick</span>"#),
+        "{body}"
+    );
+}
+
+#[test]
+fn ncbi_key_optional_and_redacted_in_debug() {
+    use secrecy::ExposeSecret;
+    let base = [
+        ("CLAUDE_MODEL", "claude-sonnet-5-5"),
+        ("DATABASE_URL", "postgres://u:p@127.0.0.1:1/x"),
+        ("APP_ENV", "dev"),
+        ("OWNER_EMAIL", "owner@example.com"),
+    ];
+    let cfg = |extra: &[(&'static str, &'static str)]| {
+        let pairs: Vec<(&str, &str)> = base.iter().chain(extra).copied().collect();
+        Config::from_lookup(move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        })
+        .unwrap()
+    };
+    // Optional: absent or blank means no key (PubMed then paces at 3/s).
+    assert!(cfg(&[]).ncbi_api_key.is_none());
+    assert!(cfg(&[("NCBI_API_KEY", "   ")]).ncbi_api_key.is_none());
+    // Present: kept as a secret, trimmed, and never shown by Debug.
+    let c = cfg(&[("NCBI_API_KEY", " ncbi-FAKE-key-0123456789 ")]);
+    assert_eq!(
+        c.ncbi_api_key.as_ref().unwrap().expose_secret(),
+        "ncbi-FAKE-key-0123456789"
+    );
+    let dbg = format!("{c:?}");
+    assert!(!dbg.contains("ncbi-FAKE-key-0123456789"), "{dbg}");
+    assert!(dbg.contains("ncbi_api_key"), "{dbg}");
+}
+
+// ---------- Task 14: workflow files ----------
+
+fn workflow(name: &str) -> String {
+    let path = format!(
+        "{}/../../.github/workflows/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// The `run: |` scripts of a workflow, by step name (blank when unnamed).
+fn run_scripts(yaml: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = yaml.lines().collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut out = Vec::new();
+    let mut step = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        if let Some(n) = t.strip_prefix("- name:") {
+            step = n.trim().to_string();
+        }
+        if t == "run: |" {
+            let key = indent(lines[i]);
+            let mut script = String::new();
+            i += 1;
+            while i < lines.len() && (lines[i].trim().is_empty() || indent(lines[i]) > key) {
+                script.push_str(lines[i]);
+                script.push('\n');
+                i += 1;
+            }
+            out.push((step.clone(), script));
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+#[test]
+fn unpaywall_email_in_smoke_env() {
+    let ci = workflow("ci.yml");
+    let scripts = run_scripts(&ci);
+    let smoke = scripts
+        .iter()
+        .find(|(n, _)| n == "smoke test image")
+        .map(|(_, s)| s)
+        .expect("ci.yml has the smoke test step");
+    // Prod mode requires it; a dummy `.invalid` address can never be contacted.
+    assert!(smoke.contains("-e APP_ENV=prod"), "{smoke}");
+    assert!(smoke.contains("-e UNPAYWALL_EMAIL="), "{smoke}");
+}
+
+#[test]
+fn deploy_workflow_wires_phase2_settings() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    // No inline expressions in any script: values arrive through `env:`.
+    for (name, s) in &scripts {
+        assert!(
+            !s.contains("${{"),
+            "inline expression in run script {name:?}"
+        );
+    }
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    for v in ["AGENT_MODELS", "RUN_LIMITS", "UNPAYWALL_EMAIL"] {
+        assert!(check.contains(v), "fail-fast check misses {v}");
+    }
+    let run = &scripts
+        .iter()
+        .find(|(n, _)| n == "Deploy to Cloud Run")
+        .expect("deploy step")
+        .1;
+    for v in ["\"AGENT_MODELS\"", "\"RUN_LIMITS\"", "\"UNPAYWALL_EMAIL\""] {
+        assert!(run.contains(v), "env-vars file misses {v}");
+    }
+    assert!(run.contains("NCBI_API_KEY=ncbi-api-key:latest"));
+    assert!(run.contains(r#""$HAS_NCBI_KEY" = "true""#));
+    assert!(run.contains(r#""$CPU_ALWAYS" = "true""#));
+    assert!(run.contains("--no-cpu-throttling"));
+    assert!(run.contains("--cpu-throttling"));
+    // The Deploy step's `env:` passes the guards in from repository variables.
+    for v in [
+        "HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}",
+        "CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}",
+        "AGENT_MODELS: ${{ vars.AGENT_MODELS }}",
+        "RUN_LIMITS: ${{ vars.RUN_LIMITS }}",
+        "UNPAYWALL_EMAIL: ${{ vars.UNPAYWALL_EMAIL }}",
+    ] {
+        assert!(deploy.contains(v), "deploy.yml misses `{v}`");
+    }
+}

@@ -35,12 +35,17 @@ jobs:
           MODEL_PRICES: ${{ vars.MODEL_PRICES }}
           USD_INR: ${{ vars.USD_INR }}
           GLOBAL_MONTHLY_CAP_INR: ${{ vars.GLOBAL_MONTHLY_CAP_INR }}
+          UNPAYWALL_EMAIL: ${{ vars.UNPAYWALL_EMAIL }}
+          AGENT_MODELS: ${{ vars.AGENT_MODELS }}
+          RUN_LIMITS: ${{ vars.RUN_LIMITS }}
+          HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
+          CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
           missing=0
           for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL IAP_AUDIENCE OWNER_EMAIL \
-                   GATE_MODEL MODEL_PRICES USD_INR GLOBAL_MONTHLY_CAP_INR; do
+                   GATE_MODEL MODEL_PRICES USD_INR GLOBAL_MONTHLY_CAP_INR UNPAYWALL_EMAIL; do
             if [ -z "${!v//[[:space:]]/}" ]; then
-              echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md sections 6 and 10)"
+              echo "::error::Repository variable vars.$v is empty or unset (see infra/README.md sections 6, 10 and 11)"
               missing=1
             fi
           done
@@ -57,6 +62,25 @@ jobs:
             echo "::error::vars.GLOBAL_MONTHLY_CAP_INR must be whole rupees, e.g. 9000 (see infra/README.md section 10)"
             exit 1
           fi
+          # Same rule as the app's config: an address with @ and no spaces.
+          if ! [[ "$UNPAYWALL_EMAIL" =~ ^[[:space:]]*[^[:space:]]*@[^[:space:]]*[[:space:]]*$ ]]; then
+            echo "::error::vars.UNPAYWALL_EMAIL must be an email address (see infra/README.md section 11)"
+            exit 1
+          fi
+          # Optional; when set they must be valid JSON (the app applies defaults otherwise).
+          for v in AGENT_MODELS RUN_LIMITS; do
+            if [ -n "${!v//[[:space:]]/}" ] && ! printf '%s' "${!v}" | python3 -m json.tool >/dev/null 2>&1; then
+              echo "::error::vars.$v is set but is not valid JSON (see infra/README.md section 11)"
+              exit 1
+            fi
+          done
+          # Optional switches: unset, true or false (a typo must not silently mean off).
+          for v in HAS_NCBI_KEY CPU_ALWAYS; do
+            case "${!v//[[:space:]]/}" in
+              ""|true|false) ;;
+              *) echo "::error::vars.$v must be true or false (see infra/README.md section 11)"; exit 1 ;;
+            esac
+          done
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -78,6 +102,11 @@ jobs:
           MODEL_PRICES: ${{ vars.MODEL_PRICES }}
           USD_INR: ${{ vars.USD_INR }}
           GLOBAL_MONTHLY_CAP_INR: ${{ vars.GLOBAL_MONTHLY_CAP_INR }}
+          UNPAYWALL_EMAIL: ${{ vars.UNPAYWALL_EMAIL }}
+          AGENT_MODELS: ${{ vars.AGENT_MODELS }}
+          RUN_LIMITS: ${{ vars.RUN_LIMITS }}
+          HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
+          CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
           set -euo pipefail
           # MODEL_PRICES is JSON and contains commas, which `--set-env-vars=A=x,B=y`
@@ -90,18 +119,37 @@ jobs:
           python3 - "$envfile" <<'PY'
           import json, os, sys
           names = ["CLAUDE_MODEL", "IAP_AUDIENCE", "OWNER_EMAIL", "GATE_MODEL",
-                   "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR"]
+                   "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR", "UNPAYWALL_EMAIL"]
+          # Optional: written only when set, so the app's defaults apply otherwise.
+          optional = ["AGENT_MODELS", "RUN_LIMITS"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
+          lines += [f"{n}: {json.dumps(os.environ[n].strip())}"
+                    for n in optional if os.environ.get(n, "").strip()]
           open(sys.argv[1], "w").write("\n".join(lines) + "\n")
           PY
+          # Flags built from the switches (infra/README.md section 11). --set-secrets
+          # replaces the whole list, so turning HAS_NCBI_KEY off removes the key.
+          HAS_NCBI_KEY="${HAS_NCBI_KEY//[[:space:]]/}"
+          CPU_ALWAYS="${CPU_ALWAYS//[[:space:]]/}"
+          secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest"
+          if [ "$HAS_NCBI_KEY" = "true" ]; then
+            secrets="${secrets},NCBI_API_KEY=ncbi-api-key:latest"
+          fi
+          # CPU always on lets a run keep working after its HTTP response; it
+          # costs more, so the owner turns it on after checking the price.
+          if [ "$CPU_ALWAYS" = "true" ]; then
+            cpu_flag="--no-cpu-throttling"
+          else
+            cpu_flag="--cpu-throttling"
+          fi
           gcloud run deploy incisive-app --image="$IMAGE" --region=asia-south1 \
             --project="$PROJECT_ID" \
             --service-account="incisive-run@${PROJECT_ID}.iam.gserviceaccount.com" \
-            --set-secrets=ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest \
+            --set-secrets="$secrets" \
             --env-vars-file="$envfile" \
             --timeout=3600 --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi \
-            --cpu-throttling --no-allow-unauthenticated
+            "$cpu_flag" --no-allow-unauthenticated
           # Access is gated by Google sign-in (Identity-Aware Proxy), enabled once on the
           # service (infra/README.md section 8). The IAP setting persists across deploys;
           # --no-allow-unauthenticated guarantees a deploy can never reopen the service.

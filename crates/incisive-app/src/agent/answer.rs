@@ -178,6 +178,29 @@ pub fn rupees(paise: i64) -> String {
     format!("{sign}\u{20b9}{}.{:02}", p / 100, p % 100)
 }
 
+/// The cost hint beside a depth option: `Quick · up to ₹15` (whole rupees
+/// drop the paise; otherwise `₹12.50`).
+pub fn mode_hint(m: RunMode, limit_paise: i64) -> String {
+    let amount = if limit_paise >= 0 && limit_paise % 100 == 0 {
+        format!("\u{20b9}{}", limit_paise / 100)
+    } else {
+        rupees(limit_paise)
+    };
+    format!("{} \u{b7} up to {amount}", mode_label(m))
+}
+
+/// localStorage key for the browser's remembered depth choice.
+pub const MODE_STORAGE_KEY: &str = "incisive.mode";
+
+/// The depth the question box starts on: the Edit & re-run fragment's mode
+/// for that page load, else the browser's remembered choice (`quick` or
+/// `focused`), else Focused. Anything unreadable counts as no choice.
+pub fn initial_mode(rerun: Option<RunMode>, stored: Option<&str>) -> RunMode {
+    rerun
+        .or_else(|| stored.and_then(|s| RunMode::parse(s.trim())))
+        .unwrap_or_default()
+}
+
 /// `2 min 41 s`, or `41 s` under a minute.
 pub fn duration_text(s: u64) -> String {
     if s >= 60 {

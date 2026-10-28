@@ -17,8 +17,9 @@ use leptos_router::{
 
 use crate::agent::answer::{
     self, Answer, DECISION_SUPPORT, INSUFFICIENT, PARTIAL_MARK, Reference, check_text, date_ist,
-    duration_text, empty_bottom_line, exclusions_text, key_study_text, mode_label, render_text,
-    rerun_href, screened_text, show_insufficient, stopped_text, unavailable_text,
+    duration_text, empty_bottom_line, exclusions_text, initial_mode, key_study_text, mode_hint,
+    mode_label, render_text, rerun_href, screened_text, show_insufficient, stopped_text,
+    unavailable_text,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
@@ -75,6 +76,16 @@ button.small { padding:4px 12px; font-size:.85rem; }
 .conf { color:var(--muted); font-size:.9rem; }
 .partial-mark { color:var(--amber); font-weight:600; }
 .answer a { color:var(--accent); word-break:break-word; }
+.badge.mode { background:#e6edf5; color:var(--accent); }
+fieldset.depth { border:0; padding:0; margin:0 0 14px; min-width:0; }
+fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
+.seg { display:inline-flex; flex-wrap:wrap; border:1px solid var(--accent); border-radius:6px; overflow:hidden; background:var(--card); }
+.seg label { display:block; position:relative; margin:0; font-weight:400; }
+.seg input { position:absolute; opacity:0; width:1px; height:1px; margin:0; }
+.seg span { display:block; padding:6px 14px; cursor:pointer; color:var(--accent); font-size:.95rem; }
+.seg label + label span { border-left:1px solid var(--accent); }
+.seg input:checked + span { background:var(--accent); color:#fff; }
+.seg input:focus-visible + span { outline:2px solid var(--fg); outline-offset:-4px; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -278,7 +289,9 @@ fn error_text(e: &ServerFnError) -> String {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
-    let me = Resource::new(|| (), |_| get_me());
+    let me: MeResource = Resource::new(|| (), |_| get_me());
+    // The Ask page reads the depth limits from it (one `/api/fn/me` per load).
+    provide_context(me);
     view! {
         <Title text="Incisive" />
         <Router>
@@ -324,21 +337,29 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Who is signed in, and the depth limits (provided by [`App`]).
+type MeResource = Resource<Result<MeView, ServerFnError>>;
+
 #[component]
 fn AskPage() -> impl IntoView {
     let (question, set_question) = signal(String::new());
+    // Focused until the browser says otherwise (the server always renders Focused).
     let mode = RwSignal::new(RunMode::default());
     let action = ServerAction::<AskQuestion>::new();
     let pending = action.pending();
     let navigate = use_navigate();
     // Edit & re-run arrives as `/#q=<question>&mode=<mode>`. The fragment never
     // reaches the server; after hydration (effects run in the browser only)
-    // it fills the box and is removed from the address bar.
+    // it fills the box and is removed from the address bar. Its mode wins for
+    // this page load (and is not remembered); otherwise the browser's saved
+    // choice applies. The question box is only ever filled here, client-side.
     Effect::new(move |_| {
-        if let Some((q, m)) = take_rerun_fragment() {
+        let rerun = take_rerun_fragment();
+        let rerun_mode = rerun.as_ref().map(|(_, m)| *m);
+        if let Some((q, _)) = rerun {
             set_question.set(q);
-            mode.set(m);
         }
+        mode.set(initial_mode(rerun_mode, load_mode().as_deref()));
     });
     // Once the question is accepted, follow its run.
     Effect::new(move |_| {
@@ -368,6 +389,7 @@ fn AskPage() -> impl IntoView {
             <p class="hint">
                 "Leave out names, phone numbers, exact dates, addresses and hospital IDs. Ages, sex and post-op day are fine."
             </p>
+            <DepthToggle mode />
             <button
                 type="submit"
                 disabled=move || pending.get() || question.with(|q| q.trim().is_empty())
@@ -377,6 +399,82 @@ fn AskPage() -> impl IntoView {
         </form>
         {move || action.value().get().map(outcome_view)}
     }
+}
+
+/// Quick or Focused: two radio buttons drawn as a segmented control, each
+/// with its cost limit from config. The choice is remembered in this browser.
+#[component]
+fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
+    let me = use_context::<MeResource>();
+    let option = move |m: RunMode| {
+        let hint = move || match me.and_then(|r| r.get()) {
+            Some(Ok(v)) => mode_hint(
+                m,
+                match m {
+                    RunMode::Quick => v.quick_limit_paise,
+                    RunMode::Focused => v.focused_limit_paise,
+                },
+            ),
+            _ => mode_label(m).to_string(),
+        };
+        view! {
+            <label>
+                <input
+                    type="radio"
+                    name="mode"
+                    value=m.as_str()
+                    // `checked` is what the server renders; `prop:checked` follows the signal.
+                    checked=m == RunMode::default()
+                    prop:checked=move || mode.get() == m
+                    on:change=move |_| {
+                        mode.set(m);
+                        save_mode(m);
+                    }
+                />
+                <span>
+                    <Suspense fallback=move || mode_label(m)>{hint}</Suspense>
+                </span>
+            </label>
+        }
+    };
+    view! {
+        <fieldset class="depth">
+            <legend>"Depth"</legend>
+            <div class="seg">{option(RunMode::Quick)} {option(RunMode::Focused)}</div>
+            <p class="hint">
+                "Quick reads abstracts only. Focused reads more papers, with free full text where available. The amount is each run's cost limit."
+            </p>
+        </fieldset>
+    }
+}
+
+/// The depth this browser last chose (`None` when storage is absent, blocked
+/// or throws; browser only).
+fn load_mode() -> Option<String> {
+    #[cfg(feature = "hydrate")]
+    {
+        // Every step returns a Result or Option: a storage exception is caught
+        // by web-sys and ends here as `None`.
+        web_sys::window()?
+            .local_storage()
+            .ok()??
+            .get_item(answer::MODE_STORAGE_KEY)
+            .ok()?
+    }
+    #[cfg(not(feature = "hydrate"))]
+    None
+}
+
+/// Remember the depth choice in this browser; any storage failure is ignored.
+fn save_mode(m: RunMode) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = s.set_item(answer::MODE_STORAGE_KEY, m.as_str());
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = m;
 }
 
 fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
@@ -545,7 +643,10 @@ fn run_view(v: RunView) -> impl IntoView {
     let answer = v.answer.map(|a| serde_json::from_value::<Answer>(a).ok());
     view! {
         <h2>{v.summary.title}</h2>
-        <p>{status_badge(status)} " " <span class="meta">{rupees(v.summary.cost_paise)}</span></p>
+        <p>
+            {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
+            <span class="meta">{rupees(v.summary.cost_paise)}</span>
+        </p>
         <h3>"Progress"</h3>
         {if v.steps.is_empty() {
             view! { <p class="hint">"Nothing yet. This page updates by itself."</p> }.into_any()

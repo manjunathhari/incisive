@@ -42,6 +42,10 @@ pub struct Config {
     pub unpaywall_email: String,
     /// Model per agent step (`AGENT_MODELS`, optional JSON; missing keys take defaults).
     pub agent_models: AgentModels,
+    /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
+    /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
+    /// never logged.
+    pub ncbi_api_key: Option<SecretString>,
 }
 
 /// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
@@ -250,6 +254,7 @@ impl Config {
             runs,
             unpaywall_email,
             agent_models,
+            ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
 }

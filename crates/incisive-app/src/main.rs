@@ -121,12 +121,17 @@ async fn main() {
         })
     });
     // One allowlisted client and one open-access policy for all literature
-    // calls. The NCBI key (optional) arrives with Task 14's config.
+    // calls. With the optional NCBI key PubMed is paced at 10 requests a
+    // second, else 3. Only whether a key is set is logged, never the key.
     let oa = OaPolicy::default();
+    tracing::info!(
+        ncbi_api_key = config.ncbi_api_key.is_some(),
+        "literature clients configured"
+    );
     let lit = Arc::new(Literature::new(
         AllowlistedClient::new(default_user_agent(), oa.clone()),
         oa,
-        None,
+        config.ncbi_api_key.clone(),
         Some(config.unpaywall_email.clone()),
     ));
     if config.model_prices.get(&config.gate_model).is_none() {

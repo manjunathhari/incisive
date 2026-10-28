@@ -1060,7 +1060,8 @@ async fn me_reports_name_role_and_spend() {
         assert_eq!(
             b,
             json!({"display_name": "Dr me", "role": "surgeon",
-                   "today_paise": 9, "daily_cap_paise": 30_000})
+                   "today_paise": 9, "daily_cap_paise": 30_000,
+                   "quick_limit_paise": 1500, "focused_limit_paise": 4000})
         );
         break;
     }

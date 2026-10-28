@@ -91,7 +91,8 @@ use the USD equivalent of Rs 500 (for example `--budget-amount=6USD`).
 
 In GitHub: repo `manjunathhari/incisive` > Settings > Secrets and variables > Actions > **Variables**
 (variables, not secrets; none are sensitive). Create these four now; the six Phase 1
-settings are in section 10 and the deploy refuses to run until they are set too:
+settings are in section 10 and the Phase 2 settings in section 11, and the deploy
+refuses to run until the required ones are set too:
 
 | Variable | Value |
 |---|---|
@@ -249,3 +250,118 @@ VALUES ('colleague@example.com', 'Dr Colleague', 'surgeon', 30000, 300000);
 
 Without the `incisive.users` row they can sign in through IAP but the app refuses them.
 To suspend someone, `UPDATE incisive.users SET active = false WHERE email = '...';`.
+
+## 11. Phase 2 settings: evidence agent, NCBI key, CPU always on
+
+Phase 2 adds five repository variables (same place as section 6) and one optional
+secret. Only `UNPAYWALL_EMAIL` is required; the rest have defaults. The Deploy
+workflow fails fast if `UNPAYWALL_EMAIL` is missing or is not an email address, if
+`AGENT_MODELS` or `RUN_LIMITS` is set but is not valid JSON, or if `HAS_NCBI_KEY` or
+`CPU_ALWAYS` is set to anything other than `true` or `false`.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `UNPAYWALL_EMAIL` | yes | Contact address sent to Unpaywall (which requires one) and to NCBI | none; the app will not start in prod without it |
+| `AGENT_MODELS` | no | Model per agent step (JSON) | `screen` = `claude-haiku-5-5`; `frame`, `search`, `extract`, `write`, `check` = `claude-sonnet-5-5` |
+| `RUN_LIMITS` | no | Limits for Quick and Focused (JSON) | see the table below |
+| `HAS_NCBI_KEY` | no | `true` once the `ncbi-api-key` secret exists (see below) | `false` |
+| `CPU_ALWAYS` | no | `true` keeps the CPU on between requests (see below) | `false` |
+
+**`AGENT_MODELS`.** Any of the keys `frame`, `search`, `screen`, `extract`, `write`,
+`check`; keys you leave out keep their default. Every model named here must also
+have an entry in `MODEL_PRICES` (section 10), or the app refuses to start.
+
+```json
+{"screen": "claude-haiku-5-5", "extract": "claude-sonnet-5-5"}
+```
+
+**`RUN_LIMITS`.** Either or both of `quick` and `focused`, each with only the
+fields you want to change. Money is in paise (100 paise = 1 rupee). The defaults:
+
+| Field | Quick | Focused | Meaning |
+|---|---|---|---|
+| `refinements` | 1 | 3 | times the search may be refined |
+| `screen_n` | 20 | 100 | records screened |
+| `use_n` | 5 | 10 | papers read |
+| `full_text` | `false` | `true` | fetch free full text (otherwise abstracts only) |
+| `limit_paise` | 1500 (₹15) | 4000 (₹40) | cost limit, reserved in full when the run starts |
+| `time_limit_s` | 300 | 300 | time limit in seconds |
+
+```json
+{"quick": {"limit_paise": 2000}, "focused": {"screen_n": 80}}
+```
+
+The question box shows each cost limit next to Quick and Focused, read from these
+settings, so the figures there change when you change `RUN_LIMITS`.
+
+**`UNPAYWALL_EMAIL`.** A real address you read. Unpaywall and NCBI use it only to
+contact you if the app misbehaves on their service.
+
+### NCBI API key (optional)
+
+Without a key PubMed allows 3 requests a second; with one, 10. The app works
+either way; a key just makes searches faster.
+
+1. Sign in (or create a free account) at https://account.ncbi.nlm.nih.gov/.
+2. Open **Account Settings** (your name, top right → Account settings).
+3. Under **API Key Management**, click **Create an API Key** and copy it.
+4. Store it in Secret Manager (paste the key, then Ctrl-D, so it never touches a
+   file or your shell history) and let the runtime account read it:
+
+```bash
+gcloud secrets create ncbi-api-key --replication-policy=user-managed \
+  --locations=asia-south1 --data-file=-   # paste key, then Ctrl-D
+gcloud secrets add-iam-policy-binding ncbi-api-key \
+  --member="serviceAccount:incisive-run@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role=roles/secretmanager.secretAccessor
+```
+
+5. Set the repository variable `HAS_NCBI_KEY` to `true`. The next deploy adds
+   `NCBI_API_KEY` as a Secret Manager reference. Set it only after step 4 is done:
+   a deploy that names a missing secret, or one the runtime account cannot read,
+   fails.
+
+To remove the key later, set `HAS_NCBI_KEY` to `false` and deploy; the deploy
+replaces the secret list, so the key is no longer attached. The app never logs the
+key (only whether one is set).
+
+### CPU always on (optional; costs more)
+
+**Why it helps.** A question runs in the background for up to about 5 minutes
+after the Send request has already returned. With the default (`--cpu-throttling`,
+request-based billing) Cloud Run gives the instance CPU only while it is serving a
+request. While the run page is open it polls every 2 seconds, which keeps the run
+moving; if the user leaves the page, the run can stall, and a stalled run may end
+as `interrupted`. `CPU_ALWAYS=true` deploys with `--no-cpu-throttling` (instance-based
+billing): the CPU stays on for the life of the instance, so runs finish whether or
+not anyone is watching.
+
+**What it costs.** With instance-based billing you pay for every second an
+instance exists, busy or idle, not just while it serves requests. With
+`--min-instances=0` there is no instance (and no charge) when nobody is using the
+app; but after the last request Google may keep the instance alive, and billed,
+for up to about 15 minutes before shutting it down.
+
+Work out the cost per instance-hour for this service (1 vCPU, 512 MiB = 0.5 GiB)
+from the current asia-south1 prices on https://cloud.google.com/run/pricing
+(choose "instance-based billing"):
+
+```
+per instance-hour (USD) = 3600 × (1 × <price per vCPU-second>
+                                  + 0.5 × <price per GiB-second>)
+per instance-hour (INR) = that × USD_INR
+```
+
+For example, if the page lists $0.000018 per vCPU-second and $0.000002 per
+GiB-second (the Tier 1 rates when this was written; check them), that is
+3600 × (0.000018 + 0.000001) = about $0.068 per instance-hour. A single question
+then keeps an instance alive for roughly its run time plus the idle period (up
+to about 20 minutes, about a third of an instance-hour); questions asked close
+together share the same instance. Multiply your expected busy hours per month by
+the per-instance-hour figure, and compare it with the Rs 500 budget alert (section
+5). Cloud Run's monthly free tier may cover some or all of it; the pricing page
+says how much.
+
+When you are happy with the figure, set the repository variable `CPU_ALWAYS` to
+`true`; the next deploy switches billing. Set it back to `false` to return to
+request-based billing.
