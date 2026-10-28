@@ -690,8 +690,24 @@ async fn dropping_the_future_mid_call_still_charges() {
     );
     let c = call(&llm, &budget, &pool, &CancelFlag::default());
     // The hard-stop timeout drops the pipeline future while Claude is working.
-    let r = tokio::time::timeout(Duration::from_millis(50), c.json::<Out>("s", "u", 500)).await;
-    assert!(r.is_err(), "the call should still be running");
+    // Drop it only once Claude has actually received the request, so a slow
+    // machine can't drop it before the call starts.
+    {
+        let fut = c.json::<Out>("s", "u", 500);
+        tokio::pin!(fut);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                _ = &mut fut => panic!("the call should still be running"),
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if !llm.requests().is_empty() {
+                        break;
+                    }
+                    assert!(tokio::time::Instant::now() < deadline, "the call never started");
+                }
+            }
+        }
+    }
     let mut rows = vec![];
     for _ in 0..100 {
         rows = charge_rows(&pool, uid).await;
