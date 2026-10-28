@@ -177,7 +177,7 @@ The full suite passes, including on a fresh database squeezed onto 2 CPUs.
 
 ## Stage D: Writing and checking ✅
 
-**Date:** 28 Oct 2026 · **Commits:** `dc414ee..d3d1127`, plus the CI fixes `7a371d7` and `149d77f` · **GitHub CI:** run 40632901642 on `149d77f` (result pending at time of writing; updated below when known).
+**Date:** 28 Oct 2026 · **Commits:** `dc414ee..d3d1127`, plus the CI fixes `7a371d7` and `149d77f` · **GitHub CI:** run 40632901642 on `149d77f`, all checks passed (tests with Postgres, lint, security audit, container build, smoke test).
 
 ### What was built (plain English)
 - **Writing the answer.** Sonnet writes the answer from only two things: the PICO, and the verified findings with each paper's design, size and evidence level. It never sees the papers' full text at this point. The confidence wording ("strong", "moderate" and so on) is capped by code. "Strong" needs at least 2 RCTs, systematic reviews, meta-analyses or guidelines.
