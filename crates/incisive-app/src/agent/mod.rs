@@ -11,6 +11,7 @@
 //! [`answer::Answer`].
 
 pub mod answer;
+mod bounded;
 pub mod check;
 pub mod extract;
 pub mod frame;

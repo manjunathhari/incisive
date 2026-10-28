@@ -12,8 +12,9 @@
 //! (Ruling R-13c). Once it is reached, the remaining gathering steps are
 //! skipped (one Note line) and the run goes straight to Write and Check
 //! with what it has; the trail says "search stopped early (cost limit / time
-//! limit)". A step that stops itself (Screen between batches, Extract between
-//! papers, each reporting how much it left unread) marks the same.
+//! limit)". A step that stops itself (Screen and Extract check it before
+//! launching each batch or paper, up to 4 / 3 of which run at once, Fix B;
+//! each reports how much it left unread) marks the same.
 //! `OverBudget` from a gathering step wraps up the same way ("cost limit").
 //!
 //! The finish reserve is what Write and Check (at `MAX_CLAIMS`) would hold
@@ -37,8 +38,10 @@
 //! * Check handles its own per-claim failures.
 //!
 //! **Answer.** References and key studies are the papers whose refs Check
-//! verified live, renumbered 1..K in their original order (claims are
-//! renumbered with them). Key studies are Focused only. `insufficient` is set
+//! verified live and that a surviving claim cites (Fix B), renumbered 1..K
+//! in their original order (claims are renumbered with them). With no
+//! surviving claim, every verified paper is listed (Review Focus 2). The
+//! Check line still counts the refs verified of those the draft cited. Key studies are Focused only. `insufficient` is set
 //! when Write said so (fewer than two papers, or the model's judgement) and
 //! recomputed after Check: fewer than two distinct verified refs across the
 //! surviving claims is insufficient (Ruling R-12e). If Check removed every
@@ -82,7 +85,7 @@ use super::extract::{Extracted, extract};
 use super::frame::frame;
 use super::llm::StepError;
 use super::retrieve::{UsedPaper, retrieve};
-use super::screen::{REASON_STOPPED, screen};
+use super::screen::screen;
 use super::search::search;
 use super::write::{Draft, MAX_CLAIMS, MIN_PAPERS, write};
 use super::{PipelineOutcome, RunContext, add_line};
@@ -235,22 +238,17 @@ async fn gather(ctx: &RunContext, pico: &Pico) -> Result<Gathered, Stop> {
         return Ok(g);
     };
     g.trail.included = u32::try_from(screened.included.len()).unwrap_or(u32::MAX);
-    // Records left unscreened at the wrap-up point were not assessed, not
-    // excluded: counted apart.
-    g.trail.not_assessed = screened
-        .excluded_counts
-        .iter()
-        .filter(|(r, _)| r == REASON_STOPPED)
-        .map(|(_, n)| *n)
-        .sum();
+    // Records not assessed (no verdict, a failed batch, or left unscreened
+    // when Screen stopped) are neither included nor excluded: counted apart
+    // and never among the exclusion reasons (Fix B).
+    g.trail.not_assessed = screened.not_assessed.saturating_add(screened.stopped);
     g.trail.excluded_top = screened
         .excluded_counts
         .iter()
-        .filter(|(r, _)| r != REASON_STOPPED)
         .take(EXCLUDED_TOP)
         .cloned()
         .collect();
-    if g.trail.not_assessed > 0 {
+    if screened.stopped > 0 {
         // Screen stopped between batches at the wrap-up point.
         let reason = Gathered::stopped_by_step(ctx);
         g.stop(ctx, reason).await;
@@ -411,14 +409,80 @@ fn assemble(
                 .collect()
         })
         .unwrap_or_default();
-    // Verified refs renumbered 1..K in their original order.
-    let renumber: HashMap<u8, u8> = verified
+    // Claims that survived Check, with their verified refs (original ids).
+    let mut check_summary = CheckSummary {
+        checked: count(drafted),
+        ..CheckSummary::default()
+    };
+    let mut surviving: Vec<(AnswerClaim, Vec<u8>)> = Vec::new();
+    let mut draft_says_insufficient = draft_insufficient;
+    if let Some(c) = &checked {
+        draft_says_insufficient |= c.insufficient;
+        for (claim, verdict) in &c.claims {
+            let refs: Vec<u8> = claim
+                .refs
+                .iter()
+                .copied()
+                .filter(|r| verified.contains(r))
+                .collect();
+            surviving.push((
+                AnswerClaim {
+                    text: claim.text.clone(),
+                    refs: vec![],
+                    confidence: claim.confidence.as_str().to_string(),
+                    partial: *verdict == ClaimVerdict::Partial,
+                },
+                refs,
+            ));
+        }
+        check_summary.supported = count(
+            c.claims
+                .iter()
+                .filter(|(_, v)| *v == ClaimVerdict::Supported)
+                .count(),
+        );
+        check_summary.partial = count(
+            c.claims
+                .iter()
+                .filter(|(_, v)| *v == ClaimVerdict::Partial)
+                .count(),
+        );
+        check_summary.removed = c.removed;
+        check_summary.refs_verified = c.refs_verified;
+        check_summary.refs_total = c.refs_verified.saturating_add(c.refs_removed);
+    }
+    // A claim with no verified ref cannot survive Check; drop defensively.
+    surviving.retain(|(_, refs)| !refs.is_empty());
+
+    // References: the verified refs cited by a surviving claim (Fix B), in
+    // their original order, renumbered 1..K. With no surviving claim, every
+    // verified ref is listed (Review Focus 2: the references are still
+    // shown).
+    let listed: Vec<u8> = if surviving.is_empty() {
+        verified
+    } else {
+        verified
+            .into_iter()
+            .filter(|r| surviving.iter().any(|(_, refs)| refs.contains(r)))
+            .collect()
+    };
+    let renumber: HashMap<u8, u8> = listed
         .iter()
         .enumerate()
         .map(|(i, r)| (*r, u8::try_from(i + 1).unwrap_or(u8::MAX)))
         .collect();
+    let bottom_line: Vec<AnswerClaim> = surviving
+        .into_iter()
+        .map(|(mut claim, refs)| {
+            claim.refs = refs
+                .iter()
+                .filter_map(|r| renumber.get(r).copied())
+                .collect();
+            claim
+        })
+        .collect();
 
-    let references: Vec<Reference> = verified
+    let references: Vec<Reference> = listed
         .iter()
         .map(|r| {
             let e = by_ref[r];
@@ -435,7 +499,7 @@ fn assemble(
         .collect();
 
     let key_studies: Vec<KeyStudy> = if ctx.mode == RunMode::Focused {
-        verified
+        listed
             .iter()
             .map(|r| {
                 let e = by_ref[r];
@@ -461,45 +525,6 @@ fn assemble(
     } else {
         Vec::new()
     };
-
-    let mut check_summary = CheckSummary {
-        checked: count(drafted),
-        ..CheckSummary::default()
-    };
-    let mut bottom_line: Vec<AnswerClaim> = Vec::new();
-    let mut draft_says_insufficient = draft_insufficient;
-    if let Some(c) = &checked {
-        draft_says_insufficient |= c.insufficient;
-        for (claim, verdict) in &c.claims {
-            bottom_line.push(AnswerClaim {
-                text: claim.text.clone(),
-                refs: claim
-                    .refs
-                    .iter()
-                    .filter_map(|r| renumber.get(r).copied())
-                    .collect(),
-                confidence: claim.confidence.as_str().to_string(),
-                partial: *verdict == ClaimVerdict::Partial,
-            });
-        }
-        check_summary.supported = count(
-            c.claims
-                .iter()
-                .filter(|(_, v)| *v == ClaimVerdict::Supported)
-                .count(),
-        );
-        check_summary.partial = count(
-            c.claims
-                .iter()
-                .filter(|(_, v)| *v == ClaimVerdict::Partial)
-                .count(),
-        );
-        check_summary.removed = c.removed;
-        check_summary.refs_verified = c.refs_verified;
-        check_summary.refs_total = c.refs_verified.saturating_add(c.refs_removed);
-    }
-    // A claim with no verified ref cannot survive Check; drop defensively.
-    bottom_line.retain(|c| !c.refs.is_empty());
 
     // Ruling R-12e: thin evidence is judged on what survived Check.
     let distinct: BTreeSet<u8> = bottom_line

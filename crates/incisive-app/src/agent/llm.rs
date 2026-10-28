@@ -28,6 +28,7 @@
 #[cfg(any(test, feature = "test-util"))]
 use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 #[cfg(any(test, feature = "test-util"))]
@@ -152,6 +153,12 @@ pub enum StepError {
     /// after a retry. The cost is counted locally and logged for
     /// reconciliation. **Fatal**: the pipeline must end the run `failed`.
     Unrecorded,
+    /// Claude was rate limited or overloaded (429 / 529) even after the
+    /// client's own attempts; not billed. Only returned by a call made with
+    /// [`LlmCall::reporting_rate_limits`] (Screen and Extract, whose items are
+    /// re-queued by `bounded`); every other call reports [`StepError::Llm`].
+    /// Carries the server's `retry-after`, if any.
+    RateLimited(Option<std::time::Duration>),
     /// The literature databases could not be searched (both PubMed and Europe
     /// PMC failed). Ends the run (`failed`), but it is **not** fatal in the
     /// money sense: every Claude call so far was charged normally, so the
@@ -168,6 +175,7 @@ impl StepError {
             StepError::Parse => "parse",
             StepError::Cancelled => "cancelled",
             StepError::Unrecorded => "unrecorded",
+            StepError::RateLimited(_) => "rate_limited",
             StepError::Lit => "lit",
         }
     }
@@ -202,12 +210,27 @@ impl LlmClient for Client {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+type Scripted = Result<MessagesResponse, ClaudeError>;
+
+/// A condition a scripted request waits for ([`ScriptedLlm::until`]).
+#[cfg(any(test, feature = "test-util"))]
+pub type Gate = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Test double: queued replies in order, every request recorded, and an error
 /// once the queue is empty.
+///
+/// A reply queued after [`ScriptedLlm::when`] is keyed: it answers only a
+/// request whose user text contains the needle (keyed replies first, in the
+/// order queued). Steps that run calls concurrently (Fix B) use keys, since
+/// the order their requests arrive in is not fixed.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
 pub struct ScriptedLlm {
-    replies: Mutex<VecDeque<Result<MessagesResponse, ClaudeError>>>,
+    replies: Mutex<VecDeque<Scripted>>,
+    keyed: Mutex<Vec<(String, Scripted)>>,
+    next_key: Option<String>,
+    gates: Vec<(String, Gate)>,
     requests: Mutex<Vec<MessagesRequest>>,
     delay: std::time::Duration,
 }
@@ -218,11 +241,34 @@ impl ScriptedLlm {
         ScriptedLlm::default()
     }
 
-    fn push(self, r: Result<MessagesResponse, ClaudeError>) -> ScriptedLlm {
-        self.replies
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(r);
+    fn push(mut self, r: Scripted) -> ScriptedLlm {
+        match self.next_key.take() {
+            Some(k) => self
+                .keyed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((k, r)),
+            None => self
+                .replies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(r),
+        }
+        self
+    }
+
+    /// Requests whose user text contains `needle` answer only once `ready()`
+    /// is true (polled every 5 ms, for at most 30 s), so a test can fix the
+    /// order in which concurrent calls finish without relying on timing.
+    pub fn until(mut self, needle: &str, ready: Gate) -> ScriptedLlm {
+        self.gates.push((needle.to_string(), ready));
+        self
+    }
+
+    /// Key the next queued reply: it answers only a request whose user text
+    /// contains `needle`.
+    pub fn when(mut self, needle: &str) -> ScriptedLlm {
+        self.next_key = Some(needle.to_string());
         self
     }
 
@@ -289,9 +335,10 @@ impl ScriptedLlm {
             .clone()
     }
 
-    /// Replies not yet used.
+    /// Replies not yet used (keyed ones included).
     pub fn remaining(&self) -> usize {
         self.replies.lock().unwrap_or_else(|e| e.into_inner()).len()
+            + self.keyed.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
@@ -303,8 +350,31 @@ impl LlmClient for ScriptedLlm {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(req.clone());
+        let user: String = req
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
+        }
+        for (_, ready) in self.gates.iter().filter(|(k, _)| user.contains(k.as_str())) {
+            for _ in 0..6_000 {
+                if ready() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        {
+            let mut keyed = self.keyed.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(i) = keyed.iter().position(|(k, _)| user.contains(k.as_str())) {
+                return keyed.remove(i).1;
+            }
         }
         self.replies
             .lock()
@@ -510,9 +580,23 @@ pub fn hold_estimate(
 /// `max_tokens` (the most it can cost). This is an estimate, not a bound on
 /// the input side: token-dense text (for example some non-Latin scripts or
 /// symbol-heavy input) can need more than a token per three bytes, so a call
-/// can cost more than its hold. The overshoot is bounded per call (the real
-/// charge is still booked, and holds are checked before every call), so the
-/// run can pass its limit by at most one call's excess.
+/// can cost more than its hold. Output is never underestimated (`max_tokens`
+/// is held in full), so the excess is input tokens only. It is bounded per
+/// call (the real charge is still booked, and holds are checked before every
+/// call):
+/// * one call alone can exceed its hold by its input excess: at a 3×
+///   underestimate about 194 paise for a Haiku screening batch (33 KB
+///   prompt) and about 520 paise for a Sonnet full-text extraction;
+/// * calls in flight together (Screen, Extract; Fix B) launch only with their
+///   holds counted twice (`RunBudget::try_hold_gathering`, Ruling R-FB3), so
+///   as a group they pass `limit - finish_reserve` only by what they exceed
+///   **twice** their holds: about 4 × 31 = 124 paise for four Haiku batches
+///   at 3×, nothing for Sonnet extractions (their output hold is as large as
+///   their input), nothing for either at 1.5×. Below the single-call figure.
+///
+/// For gathering calls the finish reserve (about 590 paise) lies in front of
+/// the limit and absorbs such excess first: the run then loses the write-up
+/// (Write refused, `partial`), not the limit.
 pub fn estimate_usage(prompt_bytes: usize, max_tokens: u32) -> Usage {
     let input = prompt_bytes.div_ceil(3).saturating_add(50);
     Usage {
@@ -719,6 +803,8 @@ pub struct LlmCall {
     cancel: CancelFlag,
     model: String,
     step: &'static str,
+    /// Report 429 / 529 as [`StepError::RateLimited`] instead of `Llm`.
+    rate_limits: bool,
 }
 
 impl LlmCall {
@@ -737,7 +823,16 @@ impl LlmCall {
             cancel,
             model: model.into(),
             step,
+            rate_limits: false,
         }
+    }
+
+    /// This handle's calls report a rate limit or overload that outlasted the
+    /// client's own attempts as [`StepError::RateLimited`] (with the server's
+    /// `retry-after`), so the step can re-queue the item (Fix B review I-3).
+    pub fn reporting_rate_limits(mut self) -> LlmCall {
+        self.rate_limits = true;
+        self
     }
 
     /// The structured path, used by every JSON step: the request carries
@@ -755,23 +850,42 @@ impl LlmCall {
         schema: &OutputSchema,
         max_tokens: u32,
     ) -> Result<T, StepError> {
-        let reply = self.reply(system, user, Some(schema), max_tokens).await?;
-        match read_structured(&reply) {
-            Ok(v) => return Ok(v),
-            Err(fault) => log_unreadable(
-                self,
-                &reply,
-                fault,
-                "reply had no usable JSON; retrying once",
-            ),
-        }
-        let retry_user = format!("{user}{SCHEMA_NUDGE}");
-        let reply = self
-            .reply(system, &retry_user, Some(schema), max_tokens)
-            .await?;
-        read_structured(&reply).map_err(|fault| {
-            log_unreadable(self, &reply, fault, "reply had no usable JSON after retry");
-            StepError::Parse
+        self.start_structured(system, user, schema, max_tokens)?
+            .await
+    }
+
+    /// [`LlmCall::structured`] in two phases, for steps that run several
+    /// items at once (Fix B): the first call is started **now**
+    /// ([`LlmCall::start`]: cancel check, hold taken, call spawned), and the
+    /// returned future waits for it, reads it and makes the one retry if
+    /// needed. An error here means no call was made.
+    pub fn start_structured<'a, T: DeserializeOwned + 'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+        schema: &'a OutputSchema,
+        max_tokens: u32,
+    ) -> Result<impl Future<Output = Result<T, StepError>> + 'a, StepError> {
+        let first = self.start(system, user, Some(schema), max_tokens)?;
+        Ok(async move {
+            let reply = first.wait().await?;
+            match read_structured(&reply) {
+                Ok(v) => return Ok(v),
+                Err(fault) => log_unreadable(
+                    self,
+                    &reply,
+                    fault,
+                    "reply had no usable JSON; retrying once",
+                ),
+            }
+            let retry_user = format!("{user}{SCHEMA_NUDGE}");
+            let reply = self
+                .reply(system, &retry_user, Some(schema), max_tokens)
+                .await?;
+            read_structured(&reply).map_err(|fault| {
+                log_unreadable(self, &reply, fault, "reply had no usable JSON after retry");
+                StepError::Parse
+            })
         })
     }
 
@@ -801,6 +915,22 @@ impl LlmCall {
         schema: Option<&OutputSchema>,
         max_tokens: u32,
     ) -> Result<Reply, StepError> {
+        self.start(system, user, schema, max_tokens)?.wait().await
+    }
+
+    /// Start one logical call (see [`LlmCall::reply`]) without waiting for
+    /// it: check the cancel flag, hold the estimate against the run's budget
+    /// and spawn the call and its charge. Synchronous, so when it returns
+    /// `Ok` the hold is already counted: a step launching several calls in
+    /// a row decides each launch with the earlier ones' holds in force
+    /// (Fix B). Over budget or cancelled: no call is made.
+    pub fn start(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&OutputSchema>,
+        max_tokens: u32,
+    ) -> Result<Started, StepError> {
         let run_id = self.budget.run_id();
         if self.cancel.is_cancelled() {
             return Err(StepError::Cancelled);
@@ -832,19 +962,68 @@ impl LlmCall {
             estimate_usage,
             call_id: Uuid::new_v4(),
         };
-        // Owned by the spawned task: dropping this await does not stop it.
-        match tokio::spawn(task.run(hold)).await {
+        // Owned by the spawned task: dropping the `Started` (or the future
+        // awaiting it) does not stop it.
+        Ok(Started {
+            handle: tokio::spawn(task.run(hold)),
+            budget: self.budget.clone(),
+            pool: self.pool.clone(),
+            step: self.step,
+            estimate,
+        })
+    }
+}
+
+/// A Claude call already launched by [`LlmCall::start`]: its hold is taken
+/// and the call and its charge run in their own task. Dropping this does not
+/// stop the call; its charge is still booked.
+#[must_use = "the call runs regardless; wait() gives its reply"]
+pub struct Started {
+    handle: tokio::task::JoinHandle<Result<Reply, StepError>>,
+    budget: Arc<RunBudget>,
+    pool: PgPool,
+    step: &'static str,
+    estimate: i64,
+}
+
+impl Started {
+    /// The call's reply (see [`LlmCall::reply`]).
+    pub async fn wait(self) -> Result<Reply, StepError> {
+        match self.handle.await {
             Ok(r) => r,
             Err(_) => {
-                // The task panicked (its hold was dropped while unwinding).
-                // Claude may have been called and billed, with no charge
-                // booked: count the estimate so the headroom is not reused,
-                // and fail closed (Ruling: JoinError is Unrecorded).
-                self.budget.count_unbooked(estimate);
-                tracing::error!(%run_id, step = self.step, paise = estimate, "claude call task failed; estimate counted as unbooked, reconcile manually");
+                // The task panicked. Its panic guard already counted the
+                // estimate as unbooked and logged it for reconciliation (so
+                // that happens even when nobody waits, Fix B review M-2);
+                // fail closed (Ruling: JoinError is Unrecorded).
+                let run_id = self.budget.run_id();
+                tracing::error!(%run_id, step = self.step, paise = self.estimate, "claude call task failed");
                 self.budget.release_if_finished(&self.pool).await;
                 Err(StepError::Unrecorded)
             }
+        }
+    }
+}
+
+/// Armed while a call and its charge are in progress. Dropped armed (the
+/// task unwound from a panic), Claude may have been called and billed with
+/// no charge booked: count the estimate so the headroom is not reused, and
+/// log ids and paise for manual reconciliation.
+struct PanicGuard {
+    budget: Arc<RunBudget>,
+    estimate: i64,
+    step: &'static str,
+    armed: bool,
+}
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.budget.count_unbooked(self.estimate);
+            tracing::error!(
+                run_id = %self.budget.run_id(), step = self.step, paise = self.estimate,
+                "claude call task failed; estimate counted as unbooked, reconcile manually"
+            );
         }
     }
 }
@@ -867,9 +1046,20 @@ impl Attempt {
     /// periodic sweep releases it, at least `LATE_CHARGE_GRACE_MIN` (10)
     /// minutes after the run finished. Bounded by the call's hold, and
     /// recovered; not a leak.
+    ///
+    /// A panic inside the call is caught by [`PanicGuard`]: it counts the
+    /// estimate as unbooked and logs it for reconciliation, whether or not
+    /// anyone still waits for this task (Fix B review M-2).
     async fn run(self, hold: Hold) -> Result<Reply, StepError> {
         let (budget, pool) = (self.call.budget.clone(), self.call.pool.clone());
+        let mut guard = PanicGuard {
+            budget: budget.clone(),
+            estimate: self.estimate,
+            step: self.call.step,
+            armed: true,
+        };
         let r = self.call_and_settle(hold).await;
+        guard.armed = false;
         budget.release_if_finished(&pool).await;
         r
     }
@@ -900,7 +1090,13 @@ impl Attempt {
                 } else {
                     drop(hold);
                 }
-                Err(StepError::Llm)
+                match e {
+                    ClaudeError::RateLimited { retry_after } if c.rate_limits => {
+                        Err(StepError::RateLimited(retry_after))
+                    }
+                    ClaudeError::Overloaded if c.rate_limits => Err(StepError::RateLimited(None)),
+                    _ => Err(StepError::Llm),
+                }
             }
         }
     }
@@ -913,21 +1109,28 @@ impl Attempt {
         let c = &self.call;
         let run_id = c.budget.run_id();
         let call_id = self.call_id;
+        // The hold stays in `held` until the money is booked or counted as
+        // unbooked (Fix B review I-2): a concurrent launch can never take
+        // the headroom of a charge that is being re-sent.
+        let mut hold = hold;
         let first = c
             .budget
-            .charge(&c.pool, hold, call_id, &c.model, usage)
+            .charge_held(&c.pool, &mut hold, call_id, &c.model, usage)
             .await;
         let err = match first {
             Ok(_) => return Ok(()),
             Err(e) => e,
         };
         if matches!(err, BudgetError::UnknownModel) {
-            return Err(self.unrecorded(usage));
+            let e = self.unrecorded(usage);
+            drop(hold);
+            return Err(e);
         }
         tracing::warn!(%run_id, %call_id, step = c.step, outcome = %err, "charge needs a retry");
+        // After `BookedButNotRecorded` the hold is already spend (amount 0).
         match c
             .budget
-            .charge(&c.pool, c.budget.empty_hold(), call_id, &c.model, usage)
+            .charge_held(&c.pool, &mut hold, call_id, &c.model, usage)
             .await
         {
             Ok(_) => Ok(()),
@@ -935,7 +1138,12 @@ impl Attempt {
                 tracing::error!(%run_id, %call_id, step = c.step, "charge booked but its record is incomplete; continuing");
                 Ok(())
             }
-            Err(_) => Err(self.unrecorded(usage)),
+            Err(_) => {
+                // Counted first, then the hold freed: no gap in between.
+                let e = self.unrecorded(usage);
+                drop(hold);
+                Err(e)
+            }
         }
     }
 

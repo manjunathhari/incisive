@@ -83,6 +83,27 @@ struct State {
     /// `MAX_CLAIMS`): gathering calls may not hold into it
     /// ([`RunBudget::try_hold_gathering`]). Ruling R-13c.
     finish_reserve: i64,
+    /// What the papers still being extracted may add to the finish reserve
+    /// once their findings are in ([`InFlightReserve`], Ruling R-FB4).
+    /// Counted with `finish_reserve` everywhere.
+    in_flight_reserve: i64,
+}
+
+/// A share of the finish reserve kept for one paper being extracted: what
+/// its findings may add to Write's and Check's holds (Ruling R-FB4).
+/// Dropped when the paper's call finishes, just before Extract raises the
+/// finish reserve for the findings it actually gave.
+#[derive(Debug)]
+#[must_use = "the share is released when dropped"]
+pub struct InFlightReserve {
+    budget: Arc<RunBudget>,
+    amount: i64,
+}
+
+impl Drop for InFlightReserve {
+    fn drop(&mut self) {
+        self.budget.state().in_flight_reserve -= self.amount;
+    }
 }
 
 /// An in-flight reservation of part of the run's limit, taken before a Claude
@@ -192,6 +213,14 @@ impl RunBudget {
     /// [`RunBudget::try_hold`] for a gathering call (Frame through Extract):
     /// it must also leave the finish reserve free, so the evidence gathered
     /// can always be written up and checked. Ruling R-13c.
+    ///
+    /// With other calls in flight (`held > 0`; Screen and Extract run several
+    /// at once, Fix B), the holds count twice (Ruling R-FB3): it needs
+    /// `spent + 2 × (held + estimate) + finish_reserve <= limit`. The doubled
+    /// part is room for the calls in flight to cost more than their holds
+    /// (input tokens are estimated), so concurrency does not widen the
+    /// worst-case overshoot. With nothing in flight it is exactly the
+    /// single-call rule `spent + estimate + finish_reserve <= limit`.
     pub fn try_hold_gathering(self: &Arc<Self>, estimate_paise: i64) -> Option<Hold> {
         self.hold_leaving(estimate_paise, true)
     }
@@ -201,10 +230,18 @@ impl RunBudget {
             return None;
         }
         let mut st = self.state();
-        let kept = if reserve { st.finish_reserve } else { 0 };
+        let kept = if reserve {
+            st.finish_reserve + st.in_flight_reserve
+        } else {
+            0
+        };
+        // In-flight headroom (Ruling R-FB3): a gathering call launched while
+        // others are in flight must fit with every in-flight hold, its own
+        // included, counted twice. With nothing in flight the rule is the
+        // one a single call always had.
+        let factor = if reserve && st.held > 0 { 2 } else { 1 };
         let total = i128::from(st.spent)
-            + i128::from(st.held)
-            + i128::from(estimate_paise)
+            + factor * (i128::from(st.held) + i128::from(estimate_paise))
             + i128::from(kept);
         if total > i128::from(self.limit_paise) {
             return None;
@@ -222,7 +259,10 @@ impl RunBudget {
     /// The caller makes `call_id` once per Claude call and reuses it on every
     /// retry of that call: the ledger holds at most one charge per call id, and
     /// this budget counts it, adds it to the run's cost and audits it once.
-    /// `hold` is consumed: its amount is replaced by the real cost.
+    /// `hold` is consumed: its amount is replaced by the real cost, or freed
+    /// when nothing was booked. A caller that will re-send the charge should
+    /// use [`RunBudget::charge_held`], which keeps the hold until the money is
+    /// booked.
     ///
     /// Order: book against the reservation, count it in `spent`, add it to the
     /// run's cost, then audit it (ids, model, tokens and paise only).
@@ -235,7 +275,25 @@ impl RunBudget {
         model: &str,
         usage: &Usage,
     ) -> Result<i64, BudgetError> {
-        // On every early return the hold is dropped, freeing its amount.
+        let mut hold = hold;
+        self.charge_held(pool, &mut hold, call_id, model, usage)
+            .await
+    }
+
+    /// [`RunBudget::charge`] that leaves `hold` in place unless the charge is
+    /// booked (Fix B review I-2): on `UnknownModel` or `NotBooked` the hold
+    /// still counts in `held`, so no concurrent call can take that headroom
+    /// while the caller re-sends the charge or counts the money as unbooked.
+    /// Once booked (including `BookedButNotRecorded`), the hold's amount is
+    /// zero: it has become spend.
+    pub async fn charge_held(
+        &self,
+        pool: &PgPool,
+        hold: &mut Hold,
+        call_id: Uuid,
+        model: &str,
+        usage: &Usage,
+    ) -> Result<i64, BudgetError> {
         let paise = spend::cost_paise(&self.prices, self.usd_inr, model, usage).map_err(|_| {
             // Unpriced model or unusable rate: fail closed, never free.
             tracing::error!(run_id = %self.run_id, "run call has no usable price");
@@ -258,9 +316,7 @@ impl RunBudget {
         })?;
 
         // Booked. Convert the hold into spend exactly once per call id.
-        let mut hold = hold;
         let held = std::mem::take(&mut hold.amount);
-        drop(hold);
         let (paise, mut call) = {
             let mut st = self.state();
             st.held -= held;
@@ -396,6 +452,25 @@ impl RunBudget {
         self.state().finish_reserve
     }
 
+    /// Keep `paise` more of the finish reserve free while one paper is being
+    /// extracted, for what its findings may add (Ruling R-FB4). Extract takes
+    /// it right after the paper's hold, so a paper never reserves for itself
+    /// (with one paper at a time nothing changes): it counts for every
+    /// launch while the paper is in flight.
+    pub fn reserve_in_flight(self: &Arc<Self>, paise: i64) -> InFlightReserve {
+        let amount = paise.max(0);
+        self.state().in_flight_reserve += amount;
+        InFlightReserve {
+            budget: Arc::clone(self),
+            amount,
+        }
+    }
+
+    /// The finish-reserve share kept for papers in flight.
+    pub fn in_flight_reserve(&self) -> i64 {
+        self.state().in_flight_reserve
+    }
+
     /// Why the run should wrap up, if it should. "cost limit": 70% of the
     /// limit spent, or no headroom left above the finish reserve
     /// (`spent + held + finish_reserve >= limit`; each gathering call also
@@ -405,7 +480,7 @@ impl RunBudget {
     pub fn wrap_up_reason(&self, now: Instant) -> Option<&'static str> {
         let (spent, held, reserve) = {
             let st = self.state();
-            (st.spent, st.held, st.finish_reserve)
+            (st.spent, st.held, st.finish_reserve + st.in_flight_reserve)
         };
         let limit = i128::from(self.limit_paise);
         if i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
@@ -426,6 +501,30 @@ impl RunBudget {
 
     pub fn limit_paise(&self) -> i64 {
         self.limit_paise
+    }
+
+    /// Time left before the wrap-up time (60% of `time_limit_s`); zero once
+    /// it has passed.
+    pub fn until_wrap_up(&self, now: Instant) -> Duration {
+        self.wrap_up_after.saturating_sub(self.age(now))
+    }
+
+    /// [`RunBudget::should_wrap_up`] leaving out what calls in flight hold
+    /// and the finish-reserve shares of papers in flight: 70% spent, the
+    /// wrap-up time, or no headroom above the finish reserve for what is
+    /// already spent. A step with calls in flight stops launching only on
+    /// these; the transient lack of headroom that in-flight amounts cause
+    /// is left to the hold check, which refuses (and the step waits for a
+    /// call to settle). With nothing in flight it equals `should_wrap_up`.
+    pub fn should_wrap_up_settled(&self, now: Instant) -> bool {
+        let (spent, reserve) = {
+            let st = self.state();
+            (st.spent, st.finish_reserve)
+        };
+        let limit = i128::from(self.limit_paise);
+        i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
+            || (reserve > 0 && i128::from(spent) + i128::from(reserve) >= limit)
+            || self.age(now) >= self.wrap_up_after
     }
 
     /// True when [`RunBudget::wrap_up_reason`] gives a reason.

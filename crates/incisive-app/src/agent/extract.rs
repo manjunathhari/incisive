@@ -1,7 +1,10 @@
 //! Extract (step 5): per paper, the design, size, PICO and key findings, each
 //! finding carrying a verbatim supporting quote. Server only.
 //!
-//! * One `extract` call per used paper, in the input (ranked) order. The paper
+//! * One `extract` call per used paper, launched in the input (ranked) order,
+//!   up to [`EXTRACT_CONCURRENCY`] (3) in flight at once (Fix B, `bounded`);
+//!   results are used in input order, so `ref_id`s and step lines are the
+//!   same as one paper after another. The paper
 //!   is sent as `wrap_source("ref-N", text)`, N being its position in the
 //!   input, and the PICO inside `<pico>…</pico>` as data. The text is the
 //!   title (context only), then each section under a `[name]` label: for full
@@ -49,21 +52,35 @@
 //!   a paper left with no finding is dropped too.
 //! * `ref_id` is 1..K over the papers that survive, in input order.
 //! * A paper whose call fails (`Llm`, or `Parse` after the wrapper's retry) is
-//!   dropped with a Note. `OverBudget` stops extraction and returns what was
-//!   extracted so far; so does the wrap-up point, checked before each paper
-//!   once one call has been made (so the first paper is always read).
-//!   `Cancelled` and fatal errors propagate.
+//!   dropped with a Note. `OverBudget` (with no paper in flight) stops
+//!   extraction and returns what was extracted; so does the wrap-up point,
+//!   checked before each paper is launched once one has been (so the first
+//!   paper is always read). Papers in flight finish and are used; those never
+//!   sent count as "not read". A hold that does not fit beside the papers in
+//!   flight waits for one to settle. `Cancelled` and fatal errors propagate.
+//! * **Finish reserve** (Ruling R-13c): as each paper finishes, the reserve
+//!   is raised to what Write and Check need for the papers kept so far,
+//!   before the next paper is launched. Papers still in flight (up to two
+//!   besides the one just launched; one at a time, the paper being read was
+//!   not in it either) are not yet in it: each adds its quotes to the Write
+//!   and Check prompts (about 8 paise for one abstract finding at production
+//!   prices; more for six long full-text quotes). The holds usually leave
+//!   that much slack (each holds its full `max_tokens`, so a full-text
+//!   extraction at realistic usage leaves about 170 paise), but a full-text
+//!   paper can add 125 paise (six 300-character quotes) to 384 (six at the
+//!   1,000-character maximum); if the slack does not cover it, Write is
+//!   refused and the run ends `partial` (pipeline), never over the limit.
 //!
 //! Privacy: nothing here logs quotes, text, the PICO or the question; only the
 //! run id, counts and fixed kinds. Step lines hold counts only.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
-use std::time::Instant;
 
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::bounded::{self, Outcome};
 use super::frame::Pico;
 use super::llm::{OutputSchema, StepError, neutralise_source_tags, wrap_source};
 use super::retrieve::{PaperText, UsedPaper};
@@ -91,6 +108,8 @@ const MAX_FIELD: usize = 300;
 /// Characters kept of a finding's `result`.
 const MAX_RESULT: usize = 600;
 const MAX_TOKENS: u32 = 2_000;
+/// Papers in flight at once (Fix B).
+pub const EXTRACT_CONCURRENCY: usize = 3;
 
 /// Where a paper's text came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -623,6 +642,86 @@ fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, Extracte
     (kept, dropped, fields)
 }
 
+/// The most one extracted paper can add to the finish reserve (Ruling
+/// R-FB4): Write's and Check's holds with a paper of [`MAX_FINDINGS`]
+/// findings at the field limits (outcome, result, a [`MAX_QUOTE`]-character
+/// quote, design, n) minus without it, plus one paisa per finishing call for
+/// rounding. Quotes are measured in ASCII characters: a quote with many
+/// multi-byte characters or collapsed whitespace can be a little longer.
+pub fn max_growth(llm: &AgentLlm, budget: &crate::runs::budget::RunBudget, pico: &Pico) -> i64 {
+    let finding = Finding {
+        outcome: "x".repeat(MAX_FIELD),
+        result: "x".repeat(MAX_RESULT),
+        quote: "x".repeat(MAX_QUOTE),
+    };
+    let paper = Extracted {
+        ref_id: 1,
+        paper: Paper {
+            pmid: None,
+            pmcid: None,
+            doi: None,
+            title: String::new(),
+            authors: vec![],
+            journal: None,
+            year: None,
+            pub_types: vec![],
+            abstract_text: None,
+            oa_url: None,
+            oa_is_pdf: false,
+            retracted: false,
+            source: crate::lit::PaperSource::PubMed,
+        },
+        level: EvidenceLevel::Other,
+        source: SourceKind::FullText,
+        design: "x".repeat(MAX_DESIGN),
+        n: Some(u32::MAX),
+        population: String::new(),
+        intervention: String::new(),
+        comparison: None,
+        findings: vec![finding; MAX_FINDINGS],
+    };
+    let with = super::finish_reserve(llm, budget, pico, &[paper]);
+    let without = super::finish_reserve(llm, budget, pico, &[]);
+    let calls = i64::try_from(super::write::MAX_CLAIMS).unwrap_or(0) + 1;
+    (with - without).max(0) + calls
+}
+
+/// One paper's reply, read and verified.
+enum PaperResult {
+    /// At least one finding verified (`ref_id` is set when the step
+    /// numbers the kept papers), and the findings dropped.
+    Kept(Box<Extracted>, usize),
+    /// No finding survived; the findings dropped.
+    Empty(usize),
+    /// The reply was not an object: counted as a failure.
+    NotObject,
+}
+
+fn read_paper(reply: Value, u: &UsedPaper, sections: &[Section]) -> PaperResult {
+    let Some(reply) = reply_object(reply) else {
+        return PaperResult::NotObject;
+    };
+    let (findings, dropped, f) = verify(&reply, sections);
+    if findings.is_empty() {
+        return PaperResult::Empty(dropped);
+    }
+    PaperResult::Kept(
+        Box::new(Extracted {
+            ref_id: 0,
+            source: SourceKind::of(&u.text),
+            paper: u.paper.clone(),
+            level: u.level,
+            design: f.design,
+            n: f.n,
+            population: f.population,
+            intervention: f.intervention,
+            comparison: f.comparison,
+            findings,
+        }),
+        dropped,
+    )
+}
+
 // ---------- the step ----------
 
 /// What Extract produced.
@@ -652,11 +751,77 @@ pub async fn extract(
     papers: Vec<UsedPaper>,
 ) -> Result<Extraction, StepError> {
     let run_id = ctx.run_id;
-    let call = llm.call(ctx, &llm.models.extract, "extract");
+    let call = llm
+        .call(ctx, &llm.models.extract, "extract")
+        .reporting_rate_limits();
 
     let prepared: Vec<_> = papers.iter().map(prepare).collect();
-    // Papers from `i` on that would have been sent (title-only ones never are).
-    let unread = |i: usize| prepared[i..].iter().filter(|p| p.is_some()).count();
+    // Every paper's prompt, built up front so the calls in flight can
+    // borrow it (title-only papers have none and are never sent).
+    let prompts: Vec<Option<String>> = prepared
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.as_ref()
+                .map(|(body, _)| prompt(pico, &format!("ref-{}", i + 1), body))
+        })
+        .collect();
+
+    // Papers kept so far (by input position), for the finish reserve.
+    let mut kept_so_far: Vec<(usize, Extracted)> = Vec::new();
+    let reserve_for = |kept: &[(usize, Extracted)]| {
+        let papers: Vec<Extracted> = kept
+            .iter()
+            .enumerate()
+            .map(|(k, (_, e))| Extracted {
+                ref_id: u8::try_from(k + 1).unwrap_or(u8::MAX),
+                ..e.clone()
+            })
+            .collect();
+        super::finish_reserve(&ctx.llm, &ctx.budget, pico, &papers)
+    };
+
+    // While a paper is in flight, the most its findings could add to the
+    // finish reserve is kept free for every other launch (Ruling R-FB4).
+    let growth = max_growth(&ctx.llm, &ctx.budget, pico);
+
+    // Up to EXTRACT_CONCURRENCY papers in flight; outcomes come back in
+    // input order (see `bounded`). Each paper's reply is read and its
+    // quotes verified as it finishes, and the finish reserve raised before
+    // the next paper is launched.
+    let outcomes = bounded::run(
+        &ctx.budget,
+        &ctx.cancel,
+        "extract",
+        EXTRACT_CONCURRENCY,
+        papers.len(),
+        |i| {
+            let user = prompts[i].as_deref()?;
+            let sections = &prepared[i].as_ref()?.1;
+            let u = &papers[i];
+            Some(
+                call.start_structured::<Value>(SYSTEM, user, &SCHEMA, MAX_TOKENS)
+                    .map(|reply| {
+                        // Taken after this paper's hold: it counts for the
+                        // launches after it, never for itself.
+                        let share = ctx.budget.reserve_in_flight(growth);
+                        async move {
+                            let r = reply.await;
+                            drop(share);
+                            Ok(read_paper(r?, u, sections))
+                        }
+                    }),
+            )
+        },
+        |i, r| {
+            if let Ok(PaperResult::Kept(e, _)) = r {
+                let at = kept_so_far.partition_point(|(j, _)| *j < i);
+                kept_so_far.insert(at, (i, (**e).clone()));
+                ctx.budget.set_finish_reserve(reserve_for(&kept_so_far));
+            }
+        },
+    )
+    .await?;
 
     let mut out: Vec<Extracted> = Vec::new();
     let mut dropped_findings = 0usize;
@@ -664,65 +829,37 @@ pub async fn extract(
     let mut failed = 0usize;
     let mut empty = 0usize;
     let mut stopped = 0usize;
-    let mut calls = 0usize;
 
-    for (i, (u, prep)) in papers.into_iter().zip(prepared.iter()).enumerate() {
-        if ctx.cancel.is_cancelled() {
-            return Err(StepError::Cancelled);
-        }
-        let Some((body, sections)) = prep else {
+    for (i, outcome) in outcomes.into_iter().enumerate() {
+        if prepared[i].is_none() {
+            // Never sent, whether or not extraction stopped before it.
             title_only += 1;
             continue;
-        };
-        if calls > 0 && ctx.budget.should_wrap_up(Instant::now()) {
-            tracing::info!(%run_id, step = "extract", read = calls, "wrap-up reached; extraction stopped");
-            stopped = unread(i);
-            title_only += prepared[i..].iter().filter(|p| p.is_none()).count();
-            break;
         }
-        let id = format!("ref-{}", i + 1);
-        calls += 1;
-        let reply: Value = match call
-            .structured(SYSTEM, &prompt(pico, &id, body), &SCHEMA, MAX_TOKENS)
-            .await
-        {
-            Ok(v) => v,
-            Err(e @ (StepError::Llm | StepError::Parse)) => {
+        match outcome {
+            Outcome::Done(Ok(PaperResult::Kept(mut e, dropped))) => {
+                dropped_findings += dropped;
+                e.ref_id = u8::try_from(out.len() + 1).unwrap_or(u8::MAX);
+                out.push(*e);
+            }
+            Outcome::Done(Ok(PaperResult::Empty(dropped))) => {
+                dropped_findings += dropped;
+                empty += 1;
+            }
+            Outcome::Done(Ok(PaperResult::NotObject)) => {
+                tracing::warn!(%run_id, step = "extract", "extraction reply was not an object; not used");
+                failed += 1;
+            }
+            Outcome::Done(Err(e)) => {
                 tracing::warn!(%run_id, step = "extract", error_kind = e.kind(), "extraction failed for a paper; not used");
                 failed += 1;
-                continue;
             }
-            Err(StepError::OverBudget) => {
-                tracing::info!(%run_id, step = "extract", read = calls - 1, "over budget; extraction stopped");
-                stopped = unread(i);
-                title_only += prepared[i..].iter().filter(|p| p.is_none()).count();
-                break;
-            }
-            Err(e) => return Err(e),
-        };
-        let Some(reply) = reply_object(reply) else {
-            tracing::warn!(%run_id, step = "extract", "extraction reply was not an object; not used");
-            failed += 1;
-            continue;
-        };
-        let (findings, dropped, f) = verify(&reply, sections);
-        dropped_findings += dropped;
-        if findings.is_empty() {
-            empty += 1;
-            continue;
+            // Wrap-up point or budget: not read.
+            Outcome::Stopped | Outcome::Skipped => stopped += 1,
         }
-        out.push(Extracted {
-            ref_id: u8::try_from(out.len() + 1).unwrap_or(u8::MAX),
-            source: SourceKind::of(&u.text),
-            paper: u.paper,
-            level: u.level,
-            design: f.design,
-            n: f.n,
-            population: f.population,
-            intervention: f.intervention,
-            comparison: f.comparison,
-            findings,
-        });
+    }
+    // The reserve for exactly what is kept, numbered as it will be written.
+    if !out.is_empty() {
         ctx.budget
             .set_finish_reserve(super::finish_reserve(&ctx.llm, &ctx.budget, pico, &out));
     }

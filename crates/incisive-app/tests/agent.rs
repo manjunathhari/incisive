@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use claude_client::{ClaudeError, Usage};
 use incisive_app::agent::llm::{
-    AgentModels, LlmCall, SOURCE_RULE, ScriptedLlm, StepError, estimate_usage,
+    AgentModels, LlmCall, LlmClient, SOURCE_RULE, ScriptedLlm, StepError, estimate_usage,
     neutralise_source_tags, wrap_source,
 };
 use incisive_app::config::{Config, ConfigError};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::runs::RunMode;
-use incisive_app::runs::budget::RunBudget;
+use incisive_app::runs::budget::{BudgetError, Hold, RunBudget};
 use incisive_app::runs::store::{create_run, get_run_for_user};
 use incisive_app::runs::worker::CancelFlag;
 use incisive_app::spend::{CapCheck, CapsConfig, Prices, reserve};
@@ -630,6 +630,73 @@ async fn not_booked_once_then_success() {
     assert_eq!(charge_rows(&pool, uid).await, vec![18]);
     assert_eq!(budget.spent(), 18);
     assert_eq!(run_cost(&pool, uid, run).await, 18);
+}
+
+#[tokio::test]
+async fn hold_stays_held_while_a_charge_is_resent() {
+    // Fix B review I-2: between a charge that was not booked and its retry,
+    // the call's hold still counts, so a concurrent launch cannot take that
+    // headroom; once booked, the hold has become spend.
+    let Some(pool) = pool().await else { return };
+    let (uid, _run, budget) = setup(&pool, 150).await;
+    let (p, b) = (pool.clone(), budget.clone());
+    let when = format!("NEW.kind = 'charge' AND NEW.user_id = {uid}");
+    let (first, held_between, sibling, second, held_after, spent_after) =
+        with_failures(&pool, "incisive.spend", &when, 1, async move {
+            let mut hold = b.try_hold_gathering(100).unwrap();
+            let call_id = Uuid::new_v4();
+            let first = b
+                .charge_held(&p, &mut hold, call_id, MODEL, &usage(1000, 1000))
+                .await;
+            let held_between = b.held();
+            // A sibling launch now: 100 held + 60 > 150.
+            let sibling = b.try_hold_gathering(60).is_some();
+            let second = b
+                .charge_held(&p, &mut hold, call_id, MODEL, &usage(1000, 1000))
+                .await;
+            drop(hold);
+            (first, held_between, sibling, second, b.held(), b.spent())
+        })
+        .await;
+    assert!(matches!(first, Err(BudgetError::NotBooked(_))), "{first:?}");
+    assert_eq!(
+        held_between, 100,
+        "the hold is kept until the money is booked"
+    );
+    assert!(!sibling, "no concurrent launch takes that headroom");
+    assert_eq!(second.unwrap(), 53);
+    assert_eq!((held_after, spent_after), (0, 53));
+    assert_eq!(charge_rows(&pool, uid).await, vec![53]);
+}
+
+#[test]
+fn in_flight_holds_count_twice_for_gathering_calls() {
+    // Ruling R-FB3. Limit 1,000, finish reserve 100.
+    let b = Arc::new(RunBudget::new(
+        Uuid::new_v4(),
+        0,
+        1_000,
+        Instant::now(),
+        prices(),
+        88.0,
+    ));
+    b.set_finish_reserve(100);
+    // Nothing in flight: the single-call rule, to the paisa.
+    assert!(b.try_hold_gathering(901).is_none());
+    let h1 = b.try_hold_gathering(900).unwrap();
+    drop(h1);
+    b.record_spent_for_test(200);
+    assert!(b.try_hold_gathering(701).is_none());
+    let h1 = b.try_hold_gathering(300).unwrap();
+    // One in flight: 200 + 2 × (300 + 100) + 100 = 1,100 > 1,000, though
+    // the single-call rule (200 + 300 + 100 + 100 = 700) would allow it.
+    assert!(b.try_hold_gathering(100).is_none());
+    // 200 + 2 × (300 + 50) + 100 = 1,000: fits.
+    let h2 = b.try_hold_gathering(50).unwrap();
+    // Finishing calls (Write, Check) are never concurrent: single rule.
+    assert!(b.try_hold(450).is_some());
+    drop((h1, h2));
+    assert_eq!(b.held(), 0);
 }
 
 #[tokio::test]
@@ -1910,7 +1977,7 @@ async fn pubmed_failure_on_refinement_keeps_previous_query_and_hits() {
 // =====================================================================
 
 use incisive_app::agent::retrieve::{PaperText, UsedPaper, retrieve};
-use incisive_app::agent::screen::{EvidenceLevel, Screened, screen};
+use incisive_app::agent::screen::{EvidenceLevel, SCREEN_CONCURRENCY, Screened, screen};
 use incisive_app::lit::{Paper, PaperSource};
 
 const EPMC_FULLTEXT: &str = "/europepmc/webservices/rest/PMC13375015/fullTextXML";
@@ -2043,8 +2110,10 @@ async fn missing_verdict_counts_as_excluded() {
         text.contains("<pico>") && text.contains("</pico>"),
         "{text}"
     );
-    assert_eq!(excluded(&s, "not assessed"), 1);
-    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 2);
+    // Not assessed is counted apart, never as excluded (Fix B).
+    assert_eq!(s.not_assessed, 1);
+    assert_eq!(excluded(&s, "not assessed"), 0);
+    assert_eq!(s.excluded_counts.iter().map(|(_, n)| n).sum::<u32>(), 1);
 
     // A failed batch (bad JSON twice) is "not assessed", not an error.
     let llm = Arc::new(
@@ -2056,7 +2125,7 @@ async fn missing_verdict_counts_as_excluded() {
         .await
         .unwrap();
     assert!(s.included.is_empty());
-    assert_eq!(excluded(&s, "not assessed"), 3);
+    assert_eq!((s.not_assessed, s.excluded()), (3, 0));
 
     // Reasons are cleaned: cut to 80 chars, and never echo the question.
     let long = "x".repeat(200);
@@ -2124,7 +2193,7 @@ async fn lenient_verdicts_never_void_the_batch() {
     assert_eq!(pmids(&s), vec!["701", "705"]);
     assert_eq!(excluded(&s, "wrong population"), 1);
     // No usable include value: not assessed, never excluded under its reason.
-    assert_eq!(excluded(&s, "not assessed"), 2);
+    assert_eq!(s.not_assessed, 2);
     assert_eq!(excluded(&s, "wrong study design"), 0);
     // An unknown code is "other".
     assert_eq!(excluded(&s, "other"), 1);
@@ -2370,11 +2439,11 @@ async fn batches_of_ten_and_wrap_up_between_batches() {
     assert_eq!(counts, vec![10, 10, 5]);
     assert!(request_text(&llm, 1).contains("p-11"));
     assert_eq!(s.included.len(), 15);
-    assert_eq!(excluded(&s, "not assessed"), 10);
+    assert_eq!((s.not_assessed, s.excluded()), (10, 0));
     assert!(
         lines(&steps_of(&ctx, uid).await)
             .iter()
-            .any(|x| x.starts_with("Screened 25: included 15, excluded 10")),
+            .any(|x| x == "Screened 15 of 25: included 15, excluded 0; 10 not assessed"),
     );
 
     // Past the 3-minute mark: the first batch runs, the rest is not assessed.
@@ -2397,7 +2466,7 @@ async fn batches_of_ten_and_wrap_up_between_batches() {
         .unwrap();
     assert_eq!(llm.requests().len(), 1);
     assert_eq!(s.included.len(), 10);
-    assert_eq!(excluded(&s, "not assessed (stopped early)"), 15);
+    assert_eq!((s.stopped, s.not_assessed), (15, 0));
     assert_line_rules(&steps_of(&ctx, uid).await);
 
     // Cancelled: no call, the error propagates.
@@ -2409,6 +2478,206 @@ async fn batches_of_ten_and_wrap_up_between_batches() {
         .unwrap_err();
     assert_eq!(e, StepError::Cancelled);
     assert!(llm.requests().is_empty());
+}
+
+/// A Claude double for concurrency tests (Fix B): every call checks, as it
+/// arrives, that `spent + held + finish reserve` is within the run's limit
+/// (every in-flight hold counted), counts the calls in flight, waits
+/// `delay`, then answers excluding every record, at `usage`.
+struct Probe {
+    budget: std::sync::OnceLock<Arc<RunBudget>>,
+    usage: Usage,
+    delay: Duration,
+    calls: std::sync::atomic::AtomicUsize,
+    in_flight: std::sync::atomic::AtomicUsize,
+    max_in_flight: std::sync::atomic::AtomicUsize,
+    over_limit: std::sync::Mutex<Vec<(i64, i64, i64)>>,
+}
+
+impl Probe {
+    fn new(usage: Usage, delay: Duration) -> Probe {
+        Probe {
+            budget: std::sync::OnceLock::new(),
+            usage,
+            delay,
+            calls: Default::default(),
+            in_flight: Default::default(),
+            max_in_flight: Default::default(),
+            over_limit: Default::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for Probe {
+    async fn call(
+        &self,
+        _req: &claude_client::MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, ClaudeError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let b = self.budget.get().expect("budget set");
+        let (spent, held, reserve) = (b.spent(), b.held(), b.finish_reserve());
+        if spent + held + reserve > b.limit_paise() {
+            self.over_limit.lock().unwrap().push((spent, held, reserve));
+        }
+        self.calls.fetch_add(1, SeqCst);
+        let n = self.in_flight.fetch_add(1, SeqCst) + 1;
+        self.max_in_flight.fetch_max(n, SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.in_flight.fetch_sub(1, SeqCst);
+        let verdicts: Vec<serde_json::Value> = (1..=200)
+            .map(|i| json!({"id": format!("p-{i}"), "include": false, "code": "population", "reason": "r"}))
+            .collect();
+        Ok(claude_client::MessagesResponse {
+            id: "msg_probe".into(),
+            content: vec![claude_client::ContentBlock::Text {
+                text: json!({ "verdicts": verdicts }).to_string(),
+            }],
+            stop_reason: Some(claude_client::StopReason::EndTurn),
+            usage: self.usage,
+        })
+    }
+}
+
+#[tokio::test]
+async fn concurrent_screening_keeps_the_limit_reserve_and_wrap_up_rules() {
+    // Item 7 of Fix B. 160 records: 16 batches, up to 4 in flight. Each
+    // call costs 71 paise (hold 80); limit 1,000 with a finish reserve of
+    // 100, so wrap-up (70% = 700) is reached after the 10th charge.
+    let Some(pool) = pool().await else { return };
+    let papers: Vec<Paper> = (1..=160)
+        .map(|i| {
+            paper(
+                &format!("{}", 5000 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    let limit = 1_000;
+    let (ctx, uid) = run_ctx(&pool, settings(1), limit).await;
+    ctx.budget.set_finish_reserve(100);
+    let probe = Arc::new(Probe::new(usage(1_000, 1_400), Duration::from_millis(30)));
+    probe.budget.set(ctx.budget.clone()).ok().unwrap();
+    let llm = AgentLlm {
+        client: probe.clone(),
+        models: agent_llm(&Arc::new(ScriptedLlm::new())).models,
+    };
+    let s = screen(&ctx, &llm, &pico(), papers).await.unwrap();
+
+    use std::sync::atomic::Ordering::SeqCst;
+    let calls = probe.calls.load(SeqCst);
+    let charges = charge_rows(&pool, uid).await;
+    let per_call = charges[0];
+    assert_eq!(per_call, 71);
+    assert!(charges.iter().all(|c| *c == per_call));
+    assert_eq!(charges.len(), calls, "every call charged once");
+    // Concurrency was used, and never more than 4 at once.
+    assert_eq!(probe.max_in_flight.load(SeqCst), SCREEN_CONCURRENCY);
+    // Never past the limit: at every call, spent + held + reserve fit.
+    assert!(
+        probe.over_limit.lock().unwrap().is_empty(),
+        "{:?}",
+        probe.over_limit
+    );
+    assert!(charges.iter().sum::<i64>() + ctx.budget.finish_reserve() <= limit);
+    // No call launched once wrap-up was due: it is due after the 10th
+    // charge (710 >= 700); at most the 3 calls then in flight follow.
+    let due_after = usize::try_from((limit * 70 / 100 + per_call - 1) / per_call).unwrap();
+    assert_eq!(due_after, 10);
+    assert!(
+        calls >= due_after && calls <= due_after + 3,
+        "{calls} calls"
+    );
+    assert!(ctx.budget.should_wrap_up(Instant::now()));
+    // Exact accounting: every record is excluded or not assessed (stopped).
+    let stopped = 160 - 10 * u32::try_from(calls).unwrap();
+    assert!(stopped > 0);
+    assert_eq!(s.failed_batches, 0);
+    assert_eq!(excluded(&s, "wrong population"), 160 - stopped);
+    assert_eq!((s.stopped, s.not_assessed), (stopped, 0));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.contains(&format!(
+            "Screening stopped early; {stopped} records not assessed"
+        )),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn hard_stop_with_batches_in_flight_still_charges_each_and_releases_last() {
+    // Fix B item 3 (Ruling R-8d with 4 calls in flight): the step's future
+    // is dropped (hard stop) while 4 screening calls are in flight. Each
+    // still books its charge; the worker keeps their holds reserved, and
+    // the last to settle releases the rest of the reservation.
+    let Some(pool) = pool().await else { return };
+    let papers: Vec<Paper> = (1..=60)
+        .map(|i| {
+            paper(
+                &format!("{}", 6000 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let probe = Arc::new(Probe::new(usage(1_000, 1_400), Duration::from_millis(300)));
+    probe.budget.set(ctx.budget.clone()).ok().unwrap();
+    let llm = AgentLlm {
+        client: probe.clone(),
+        models: agent_llm(&Arc::new(ScriptedLlm::new())).models,
+    };
+    let cut = tokio::time::timeout(
+        Duration::from_millis(100),
+        screen(&ctx, &llm, &pico(), papers),
+    )
+    .await;
+    assert!(cut.is_err(), "dropped mid-flight");
+    use std::sync::atomic::Ordering::SeqCst;
+    assert_eq!(probe.in_flight.load(SeqCst), 4);
+    // The worker's end of run: keep what the calls in flight hold.
+    let keep = ctx.budget.finish();
+    assert_eq!(keep, ctx.budget.held());
+    assert!(keep > 0);
+    incisive_app::spend::release_keeping(&pool, uid, ctx.run_id, keep)
+        .await
+        .unwrap();
+    // The calls finish on their own and charge.
+    for _ in 0..100 {
+        if charge_rows(&pool, uid).await.len() == 4 && ctx.budget.held() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let charges = charge_rows(&pool, uid).await;
+    assert_eq!(charges.len(), 4, "every in-flight call charged");
+    assert_eq!(ctx.budget.spent(), charges.iter().sum::<i64>());
+    assert_eq!(ctx.budget.held(), 0);
+    let mut left: Option<i64> = Some(-1);
+    for _ in 0..100 {
+        left = sqlx::query_scalar(
+            "SELECT paise FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation'",
+        )
+        .bind(ctx.run_id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        if left.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(left, None, "the last call released the reservation");
+    assert_eq!(
+        probe.calls.load(SeqCst),
+        4,
+        "nothing launched after the drop"
+    );
 }
 
 /// Included papers as Screen would return them.
@@ -2425,6 +2694,8 @@ fn screened_of(papers: Vec<Paper>) -> Screened {
         excluded_notes: vec![],
         title_only: 0,
         failed_batches: 0,
+        not_assessed: 0,
+        stopped: 0,
     }
 }
 
@@ -2603,8 +2874,8 @@ async fn full_text_falls_back_to_abstract_when_unavailable() {
 // =====================================================================
 
 use incisive_app::agent::extract::{
-    Extracted, MAX_TEXT, MIN_QUOTE, SourceKind, extract, find_verbatim, finding_consistent,
-    normalise,
+    EXTRACT_CONCURRENCY, Extracted, MAX_TEXT, MIN_QUOTE, SourceKind, extract, find_verbatim,
+    finding_consistent, normalise,
 };
 use incisive_app::lit::europepmc::{FullText, full_text_from_xml};
 use incisive_app::lit::pubmed::parse_efetch;
@@ -3254,16 +3525,23 @@ async fn failed_paper_dropped_findings_capped_and_over_budget_keeps_progress() {
         .collect();
     let mut seven = eight.clone();
     seven[0] = finding(ICG_VERBATIM);
+    // Keyed by paper: up to EXTRACT_CONCURRENCY papers are in flight, so
+    // the order the requests arrive in is not fixed (Fix B).
     let llm = Arc::new(
         ScriptedLlm::new()
+            .when("from ref-1.")
             .fail(ClaudeError::Api {
                 status: 500,
                 error_type: "api_error".into(),
                 message: "x".into(),
             })
+            .when("from ref-2.")
             .reply_text("not json", u())
+            .when("from ref-2.")
             .reply_text("still not json", u())
+            .when("from ref-3.")
             .reply_json(extraction(json!(seven)), u())
+            .when("from ref-4.")
             .reply_json(extraction(json!(eight)), u()),
     );
     let papers = vec![
@@ -4634,9 +4912,14 @@ async fn pipeline_ctx(
 /// Screening verdicts for every id up to p-30: p-1 and p-2 (the ICG RCT and
 /// the meta-analysis) included, the rest excluded.
 fn screen_reply() -> serde_json::Value {
+    screen_reply_including(2)
+}
+
+/// Verdicts including the first `k` records of the first batch.
+fn screen_reply_including(k: usize) -> serde_json::Value {
     let v: Vec<serde_json::Value> = (1..=30)
         .map(|i| {
-            json!({"id": format!("p-{i}"), "include": i <= 2, "code": "population", "reason": "r"})
+            json!({"id": format!("p-{i}"), "include": i <= k, "code": "population", "reason": "r"})
         })
         .collect();
     json!(v)
@@ -4693,6 +4976,15 @@ fn answer_of(outcome: &PipelineOutcome) -> Answer {
         }
         other => panic!("no answer: {other:?}"),
     }
+}
+
+/// The run's budget, once the test has built it (for `ScriptedLlm::until`).
+type BudgetGate = Arc<std::sync::OnceLock<Arc<RunBudget>>>;
+
+/// Ready once the run has spent at least `paise`.
+fn spent_at_least(gate: &BudgetGate, paise: i64) -> incisive_app::agent::llm::Gate {
+    let gate = gate.clone();
+    Arc::new(move || gate.get().is_some_and(|b| b.spent() >= paise))
 }
 
 fn kinds(steps: &[StepLine]) -> Vec<StepKind> {
@@ -4822,11 +5114,29 @@ async fn quick_mode_has_no_key_studies_and_no_full_text_fetch() {
 async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
     let Some(pool) = pool().await else { return };
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
-    // The first extraction is expensive (~3,080 paise of 4,000): spend
-    // passes 70% and Extract stops before the second paper.
+    // Six records included; three papers go out at once (Fix B). The first
+    // extraction is expensive (~3,080 paise of 4,000): spend passes 70%, so
+    // no further paper is launched; the two already in flight finish (they
+    // give no matchable finding).
+    let gate = BudgetGate::default();
     let llm = Arc::new(
-        gathering_script()
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .reply_json(screen_reply_including(6), u())
+            .reply_json(screen_reply_including(6), u())
+            // The cheap papers answer only once the expensive one is
+            // charged, so the launch decision after them sees 70% passed.
+            .until("from ref-3.", spent_at_least(&gate, 3_000))
+            .until("from ref-4.", spent_at_least(&gate, 3_000))
+            .when("from ref-1.")
             .reply_json(meta_extraction(), usage(100, 70_000))
+            // ref-2 is title-only (never sent): the third paper out is ref-4.
+            .when("from ref-3.")
+            .reply_json(extraction(json!([])), u())
+            .when("from ref-4.")
+            .reply_json(extraction(json!([])), u())
             .reply_json(
                 json!({"claims": [{"text": "ICG angiography reduced anastomotic leak", "refs": [1], "confidence": "strong"}], "insufficient": false}),
                 u(),
@@ -4834,6 +5144,7 @@ async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
             .reply_json(verdict("supported"), u()),
     );
     let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    gate.set(ctx.budget.clone()).ok().unwrap();
 
     let outcome = run_pipeline(&ctx).await;
     assert!(
@@ -4842,8 +5153,8 @@ async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
     );
     let a = answer_of(&outcome);
     assert_eq!(llm.remaining(), 0);
-    // frame + 2 search + 2 screen + 1 extract + write + check
-    assert_eq!(llm.requests().len(), 8);
+    // frame + 2 search + 2 screen + 3 extract + write + check
+    assert_eq!(llm.requests().len(), 10);
     assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
     assert!(a.insufficient, "one paper is thin evidence");
     assert_eq!(a.bottom_line.len(), 1);
@@ -4855,6 +5166,11 @@ async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
     assert!(
         l.iter()
             .any(|x| x.starts_with("Search stopped early (cost limit)")),
+        "{l:?}"
+    );
+    assert!(
+        l.iter()
+            .any(|x| x == "Extraction stopped early; 2 papers not read"),
         "{l:?}"
     );
     assert!(render_text(&a).contains("Search stopped early (cost limit)."));
@@ -5273,6 +5589,14 @@ async fn panicking_call_task_is_unrecorded_and_counts_the_estimate() {
     assert!(StepError::Unrecorded.is_fatal());
     assert!(budget.spent() > 0, "the estimate is counted");
     assert_eq!(budget.held(), 0, "the hold was dropped");
+    // Counted once: by the task's panic guard, not again by the waiter.
+    let estimate = budget
+        .cost_of(
+            MODEL,
+            &estimate_usage("system".len() + SOURCE_RULE.len() + 2 + "user".len(), 500),
+        )
+        .unwrap();
+    assert_eq!(budget.spent(), estimate);
     assert!(charge_rows(&pool, uid).await.is_empty());
 }
 
@@ -5290,8 +5614,10 @@ async fn insufficient_recomputed_after_check() {
     assert_eq!(a.bottom_line.len(), 1);
     assert!(a.insufficient);
     assert!(!a.no_verified_claims);
-    // Both refs verified live, so both are listed.
-    assert_eq!(a.references.len(), 2);
+    // Both refs verified live, but only the one a surviving claim cites is
+    // listed (Fix B, item 10; was 2); the Check line still counts both.
+    assert_eq!(a.references.len(), 1);
+    assert_eq!((a.check.refs_verified, a.check.refs_total), (2, 2));
     assert!(render_text(&a).contains("Insufficient evidence"));
 }
 
@@ -5519,19 +5845,92 @@ async fn production_prices_focused_reaches_check_within_the_reserve() {
     assert!(finishing <= ctx.budget.finish_reserve(), "{holds:?}");
 }
 
+/// Calls launched by a concurrent step (Fix B), applying the real budget
+/// rules: up to `k` `(hold, real charge)` calls in flight; before each
+/// launch, wrap-up is checked (except for the first) and the hold must fit
+/// beside the in-flight holds and the finish reserve (if not, it is tried
+/// again after the next completion; with none in flight, launching stops);
+/// calls finish oldest
+/// first, and `done(n)` runs after the n-th completion (Extract raises the
+/// reserve there). Returns how many were launched.
+fn launched_concurrently(
+    b: &Arc<RunBudget>,
+    now: Instant,
+    k: usize,
+    calls: &[(i64, i64)],
+    share: i64,
+    mut done: impl FnMut(usize),
+) -> usize {
+    type InFlight = (Hold, incisive_app::runs::budget::InFlightReserve, i64);
+    let mut in_flight: std::collections::VecDeque<InFlight> = Default::default();
+    let (mut launched, mut finished, mut launching) = (0, 0, true);
+    loop {
+        while launching && in_flight.len() < k && launched < calls.len() {
+            // As `bounded`: with calls in flight, only the settled reasons.
+            let wrap_up = if in_flight.is_empty() {
+                b.should_wrap_up(now)
+            } else {
+                b.should_wrap_up_settled(now)
+            };
+            if launched > 0 && wrap_up {
+                launching = false;
+                break;
+            }
+            let (hold, real) = calls[launched];
+            match b.try_hold_gathering(hold) {
+                Some(h) => {
+                    // Extract's reserve share, taken after the hold (R-FB4).
+                    in_flight.push_back((h, b.reserve_in_flight(share), real));
+                    launched += 1;
+                }
+                // Tried again once an in-flight call has settled.
+                None if !in_flight.is_empty() => break,
+                None => launching = false,
+            }
+        }
+        let Some((h, share, real)) = in_flight.pop_front() else {
+            return launched;
+        };
+        drop((h, share));
+        b.record_spent_for_test(b.spent() + real);
+        finished += 1;
+        done(finished);
+    }
+}
+
 /// Papers Extract reads before wrap-up, applying the real budget rules
 /// (`try_hold`, `try_hold_gathering`, `should_wrap_up`) to the given
-/// `(hold, real charge)` calls: Frame, then the gathering calls with the
-/// finish reserve in force, then up to `max` extractions (the reserve
-/// grows by `growth` per paper read). `None`: gathering itself wrapped up.
+/// `(hold, real charge)` calls: Frame, then the search calls one by one,
+/// then the screening batches ([`SCREEN_CONCURRENCY`] at once), all with
+/// the finish reserve in force, then up to `max` extractions
+/// ([`EXTRACT_CONCURRENCY`] at once; the reserve grows by `growth` per paper
+/// read, and each paper in flight keeps `share` more of it free, R-FB4). `None`: gathering itself wrapped up (before or during Screen).
 fn papers_before_wrap_up(
     limit: i64,
     frame: (i64, i64),
-    gathering: &[(i64, i64)],
+    search: &[(i64, i64)],
+    screen: &[(i64, i64)],
     extract: (i64, i64),
-    reserve: (i64, i64),
+    reserve: (i64, i64, i64),
     max: usize,
 ) -> Option<usize> {
+    let (read, write_fits) = simulate(limit, frame, search, screen, extract, reserve, max)?;
+    // The finishing calls (Write, Check) still fit beside what was spent.
+    assert!(write_fits, "R-13c");
+    Some(read)
+}
+
+/// [`papers_before_wrap_up`] without the R-13c assertion: the papers read,
+/// and whether Write and Check still fit beside what was spent.
+fn simulate(
+    limit: i64,
+    frame: (i64, i64),
+    search: &[(i64, i64)],
+    screen: &[(i64, i64)],
+    extract: (i64, i64),
+    reserve: (i64, i64, i64),
+    max: usize,
+) -> Option<(usize, bool)> {
     let now = Instant::now();
     let b = Arc::new(RunBudget::new(
         Uuid::new_v4(),
@@ -5544,7 +5943,7 @@ fn papers_before_wrap_up(
     drop(b.try_hold(frame.0)?);
     b.record_spent_for_test(frame.1);
     b.set_finish_reserve(reserve.0);
-    for &(hold, real) in gathering {
+    for &(hold, real) in search {
         if b.should_wrap_up(now) {
             return None;
         }
@@ -5552,22 +5951,20 @@ fn papers_before_wrap_up(
         b.record_spent_for_test(b.spent() + real);
     }
     if b.should_wrap_up(now) {
-        return Some(0);
+        return None;
     }
-    let mut read = 0;
-    while read < max {
-        if read > 0 && b.should_wrap_up(now) {
-            break;
-        }
-        let Some(h) = b.try_hold_gathering(extract.0) else {
-            break;
-        };
-        drop(h);
-        b.record_spent_for_test(b.spent() + extract.1);
-        read += 1;
-        b.set_finish_reserve(reserve.0 + reserve.1 * i64::try_from(read).unwrap());
+    if launched_concurrently(&b, now, SCREEN_CONCURRENCY, screen, 0, |_| {}) < screen.len() {
+        // Records were left unscreened: the pipeline wraps up.
+        return None;
     }
-    Some(read)
+    if b.should_wrap_up(now) {
+        return Some((0, true));
+    }
+    let papers = vec![extract; max];
+    let read = launched_concurrently(&b, now, EXTRACT_CONCURRENCY, &papers, reserve.2, |n| {
+        b.set_finish_reserve(reserve.0 + reserve.1 * i64::try_from(n).unwrap());
+    });
+    Some((read, b.spent() + b.finish_reserve() <= limit))
 }
 
 #[tokio::test]
@@ -5583,6 +5980,20 @@ async fn production_prices_capacity() {
     let h = holds_of(&llm, &ctx.budget);
     let c = charge_rows(&pool, uid).await;
     let growth = (ctx.budget.finish_reserve() - r0) / 2;
+    // Fix B review M-3: a full-text paper adds more to the finish reserve
+    // than an abstract: up to 6 findings, each quote in the Write prompt
+    // and in its Check calls. Typical: 6 findings with 300-character quotes;
+    // pessimistic: 6 at the 1,000-character maximum.
+    let ft_growth = |quote_chars: usize| {
+        let quote = "x ".repeat(quote_chars / 2);
+        let quotes = vec![quote.as_str(); 6];
+        let p = ext(1, Some("1"), None, "t", &quotes);
+        incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[p]) - r0
+    };
+    let (ft_typical, ft_max) = (ft_growth(300), ft_growth(1_000));
+    // R-FB4: the share each paper in flight keeps free (its largest
+    // possible growth).
+    let share = incisive_app::agent::extract::max_growth(&ctx.llm, &ctx.budget, &pico());
     let (frame, propose, review, screen) = ((h[0], c[0]), (h[1], c[1]), (h[2], c[2]), (h[3], c[3]));
     let abstract_paper = (h[5], c[5]);
     // A full text sent at the 25,000-character cap, on top of the measured
@@ -5600,37 +6011,76 @@ async fn production_prices_capacity() {
     let full_paper = (full_hold, full_real);
 
     // Quick: one refinement, 20 records (2 screening batches), 5 abstracts.
-    let quick: Vec<_> = vec![propose, review, screen, screen];
+    let quick = vec![propose, review];
+    let quick_screen = vec![screen; 2];
     // Focused: three refinements, 100 records (10 batches), 10 papers.
-    let mut focused = vec![propose, review, review, review];
-    focused.extend(std::iter::repeat_n(screen, 10));
+    let focused = vec![propose, review, review, review];
+    let focused_screen = vec![screen; 10];
 
-    let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
-    let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
+    let q = |limit| {
+        papers_before_wrap_up(
+            limit,
+            frame,
+            &quick,
+            &quick_screen,
+            abstract_paper,
+            (r0, growth, share),
+            5,
+        )
+    };
+    let f = |paper, growth| {
+        papers_before_wrap_up(
+            4000,
+            frame,
+            &focused,
+            &focused_screen,
+            paper,
+            (r0, growth, share),
+            10,
+        )
+    };
     // Ruling R-FA2 guard: the live smoke test (28 Oct, default effort) saw
     // propose use 560 and review 997 output tokens (thinking included).
     // Even at those charges, Quick at ₹15 still reads 2 papers.
     let sonnet = |io| ctx.budget.cost_of("claude-sonnet-5-5", &us(io)).unwrap();
     let live_propose = (propose.0, sonnet((900, 560)));
     let live_review = (review.0, sonnet((1_500, 997)));
-    let quick_live = vec![live_propose, live_review, screen, screen];
-    let mut focused_live = vec![live_propose, live_review, live_review, live_review];
-    focused_live.extend(std::iter::repeat_n(screen, 10));
-    let ql =
-        |limit| papers_before_wrap_up(limit, frame, &quick_live, abstract_paper, (r0, growth), 5);
-    let fl = |paper| papers_before_wrap_up(4000, frame, &focused_live, paper, (r0, growth), 10);
+    let quick_live = vec![live_propose, live_review];
+    let focused_live = vec![live_propose, live_review, live_review, live_review];
+    let ql = |limit| {
+        papers_before_wrap_up(
+            limit,
+            frame,
+            &quick_live,
+            &quick_screen,
+            abstract_paper,
+            (r0, growth, share),
+            5,
+        )
+    };
+    let fl = |paper, growth| {
+        papers_before_wrap_up(
+            4000,
+            frame,
+            &focused_live,
+            &focused_screen,
+            paper,
+            (r0, growth, share),
+            10,
+        )
+    };
     assert_eq!(
         ql(1500),
         Some(2),
         "Quick at ₹15, live search output: 2 abstracts"
     );
     assert_eq!(
-        fl(full_paper),
-        Some(5),
+        fl(full_paper, ft_typical),
+        Some(4),
         "Focused, live search output, full text"
     );
     assert_eq!(
-        fl(abstract_paper),
+        fl(abstract_paper, growth),
         Some(10),
         "Focused, live search output, abstracts"
     );
@@ -5640,21 +6090,65 @@ async fn production_prices_capacity() {
     // abstracts (was 4 before Fix A). R-FA2 doubled the search holds
     // (max_tokens 2,000): the counts are unchanged.
     assert_eq!(q(1500), Some(3), "Quick at ₹15: 3 of 5 abstracts");
-    assert_eq!(f(full_paper), Some(6), "Focused, all full text");
-    assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
+    assert_eq!(f(full_paper, ft_typical), Some(5), "Focused, all full text");
+    assert_eq!(
+        f(abstract_paper, growth),
+        Some(10),
+        "Focused, all abstracts"
+    );
+    // Fix round 1 (R-FB3, M-3). The doubled in-flight holds change no count:
+    // with the abstract growth the full-text runs still read 6 (5 with live
+    // search output), as before. The full-text growth is what lowers them:
+    // 125 paise per paper typical (6 quotes of 300 characters), 384
+    // pessimistic (6 of 1,000).
+    assert_eq!((ft_typical, ft_max), (125, 384));
+    assert_eq!(f(full_paper, growth), Some(6));
+    assert_eq!(fl(full_paper, growth), Some(5));
+    // R-FB4: each paper in flight keeps its largest possible growth free
+    // (443 paise at production prices). No count above changes: with the
+    // doubled in-flight holds (R-FB3) the papers in flight already had that
+    // room at these hold sizes; the share makes it a guarantee.
+    assert_eq!(share, 443);
+    // Pessimistic growth: 3 papers. With live search output Write would
+    // still be refused (partial, never over the limit), but that is the
+    // single-call gap, as before Fix B: the last paper goes out alone (the
+    // others have settled), so its own growth is not reserved; the same run
+    // one paper at a time gives the same result (report, R-FB4).
+    let sim = |search: &[(i64, i64)]| {
+        simulate(
+            4000,
+            frame,
+            search,
+            &focused_screen,
+            full_paper,
+            (r0, ft_max, share),
+            10,
+        )
+    };
+    assert_eq!(sim(&focused), Some((3, true)));
+    assert_eq!(sim(&focused_live), Some((3, false)));
     // The smallest Quick limit (5-paise steps) that reads 2 papers.
     let min_quick = (500..5000)
         .step_by(5)
         .find(|l| q(*l).unwrap_or(0) >= 2)
         .unwrap();
     // 1265 before the Check prompt asked for the verdict first (28 Oct);
-    // 1270 before the schemas were held (Fix A, 28 Oct).
+    // 1270 before the schemas were held (Fix A, 28 Oct); 1300 with Fix B's
+    // first outcome rule, 1295 again with the shorter wording (M-5).
     assert_eq!(
         min_quick, 1295,
-        "recorded in the Task 13 report, updated by Fix A"
+        "recorded in the Task 13 report, updated by Fixes A and B"
     );
-    // (565, 8) before the Check prompt change; (571, 8) before Fix A.
-    assert_eq!((r0, growth), (587, 8));
+    // (565, 8) before the Check prompt change; (571, 8) before Fix A;
+    // (587, 8) before the Write outcome rule (Fix B); (591, 8) with its
+    // first wording.
+    assert_eq!((r0, growth), (590, 8));
+    // Fix B (28 Oct): the simulation now runs 4 screening batches and 3
+    // papers at once, with in-flight holds counted and a refused hold
+    // retried after the next call settles. Every figure above is unchanged
+    // (money decides how much is read; concurrency only decides how fast),
+    // and after every simulated run Write and Check still fit (R-13c,
+    // asserted in `papers_before_wrap_up`).
 }
 
 #[tokio::test]
@@ -5731,19 +6225,40 @@ async fn every_paper_read_is_not_stopped_early_even_past_seventy_percent() {
 async fn write_refused_for_budget_is_partial_not_failed() {
     // The first extraction costs far more than its hold (~3,960 of 4,000
     // paise), so even the reserve cannot save Write's hold: the run ends
-    // partial with a Note, never failed/over_budget.
+    // partial with a Note, never failed/over_budget. Six records are
+    // included; three papers go out at once (Fix B), the two beside the
+    // expensive one give nothing, and the rest are not launched.
     let Some(pool) = pool().await else { return };
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
-    let llm = Arc::new(gathering_script().reply_json(meta_extraction(), usage(100, 90_000)));
+    let gate = BudgetGate::default();
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .reply_json(screen_reply_including(6), u())
+            .reply_json(screen_reply_including(6), u())
+            // ref-2 is title-only (never sent).
+            .until("from ref-3.", spent_at_least(&gate, 3_000))
+            .until("from ref-4.", spent_at_least(&gate, 3_000))
+            .when("from ref-1.")
+            .reply_json(meta_extraction(), usage(100, 90_000))
+            .when("from ref-3.")
+            .reply_json(extraction(json!([])), u())
+            .when("from ref-4.")
+            .reply_json(extraction(json!([])), u()),
+    );
     let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    gate.set(ctx.budget.clone()).ok().unwrap();
     let outcome = run_pipeline(&ctx).await;
     assert!(
         matches!(outcome, PipelineOutcome::Partial(_)),
         "{outcome:?}"
     );
     let a = answer_of(&outcome);
-    assert_eq!(llm.remaining(), 0, "no Write call was made");
-    // Extract also stopped before the second paper (past 70%).
+    assert_eq!(llm.remaining(), 0);
+    assert_eq!(llm.requests().len(), 8, "no Write call was made");
+    // Extract also stopped before the fourth paper (past 70%).
     assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
     assert!(a.trail.write_refused);
     assert!(a.bottom_line.is_empty() && a.insufficient && !a.no_verified_claims);
@@ -5784,27 +6299,51 @@ async fn no_claims_drafted_says_no_evidence_not_unverified() {
 
 #[tokio::test]
 async fn screen_stop_counts_records_as_not_assessed() {
-    // M-4: the first screening batch passes 70%, so the rest are not
-    // assessed: counted apart, never among the exclusion reasons.
+    // M-4, under Fix B: both screening batches may go out at once. The
+    // limit is set so the first batch's hold fits beside the finish reserve
+    // and the second's does not fit beside it (in-flight holds count); the
+    // first batch then costs exactly its hold, so the second still does not
+    // fit once it has settled: the second batch is never sent, and its
+    // records are not assessed: counted apart, never among the exclusion
+    // reasons.
     let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    // A dry run at a generous limit measures the holds and charges.
+    let dry = Arc::new(gathering_script());
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &dry, &server, 4000).await;
+    let r0 = incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[]);
+    let _ = run_pipeline(&ctx).await;
+    let h = holds_of(&dry, &ctx.budget);
+    let c = charge_rows(&pool, uid).await;
+    let before_screen: i64 = c[..3].iter().sum();
+    let limit = before_screen + r0 + h[3] + h[4] - 1;
+    assert!(before_screen + r0 + h[1].max(h[2]) <= limit, "search fits");
+    let first = &dry.requests()[3];
+    let first_batch_at_its_hold = estimate_usage(request_prompt_bytes(first), first.max_tokens);
+
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
     let llm = Arc::new(
         ScriptedLlm::new()
             .reply_json(agent_json("frame_pico.json"), u())
             .reply_json(agent_json("search_initial.json"), u())
             .reply_json(agent_json("search_accept.json"), u())
-            .reply_json(screen_reply(), usage(100, 70_000)),
+            .reply_json(screen_reply(), first_batch_at_its_hold),
     );
-    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, limit).await;
     let outcome = run_pipeline(&ctx).await;
     assert!(
         matches!(outcome, PipelineOutcome::Partial(_)),
         "{outcome:?}"
     );
+    assert_eq!(llm.requests().len(), 4, "the second batch was never sent");
+    assert!(
+        charge_rows(&pool, uid).await.iter().sum::<i64>() <= limit,
+        "no overspend"
+    );
     let a = answer_of(&outcome);
     let t = &a.trail;
     assert_eq!(t.stopped_early.as_deref(), Some("cost limit"));
-    assert!(t.not_assessed > 0 && t.not_assessed < t.screened, "{t:?}");
+    assert_eq!((t.screened, t.not_assessed), (15, 5), "{t:?}");
     assert!(
         t.excluded_top
             .iter()
@@ -5814,7 +6353,7 @@ async fn screen_stop_counts_records_as_not_assessed() {
     let text = render_text(&a);
     assert!(
         text.contains(&format!(
-            "Screened {} of {}, included {}, excluded {}; {} not assessed (search stopped early)",
+            "Screened {} of {}, included {}, excluded {}; {} not assessed\n",
             t.screened - t.not_assessed,
             t.screened,
             t.included,
@@ -6517,4 +7056,442 @@ fn step_schemas_are_strict_compatible() {
     ] {
         assert!(problems.iter().any(|p| p == want), "{want}: {problems:?}");
     }
+}
+
+// ---------- answer polish (Fix B part 2) ----------
+
+#[tokio::test]
+async fn not_assessed_records_are_never_excluded() {
+    // Item 9: a record with no verdict, a failed batch and records left by
+    // a stop are "not assessed": counted apart from the excluded, in the
+    // step line and in the answer, never among the exclusion reasons.
+    let Some(pool) = pool().await else { return };
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let papers: Vec<Paper> = (1..=6)
+        .map(|i| {
+            paper(
+                &format!("{}", 900 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    // p-1 included, p-2..p-4 excluded, p-5 and p-6 have no verdict.
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!({"verdicts": [
+            {"id": "p-1", "include": true, "code": "relevant", "reason": "ok"},
+            {"id": "p-2", "include": false, "code": "population", "reason": "r"},
+            {"id": "p-3", "include": false, "code": "population", "reason": "r"},
+            {"id": "p-4", "include": false, "code": "design", "reason": "r"},
+        ]}),
+        u(),
+    ));
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    assert_eq!((s.not_assessed, s.stopped), (2, 0));
+    assert_eq!(s.excluded(), 3);
+    assert!(
+        s.excluded_counts
+            .iter()
+            .all(|(r, _)| !r.starts_with("not assessed")),
+        "{:?}",
+        s.excluded_counts
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter().any(|x| x
+            == "Screened 4 of 6: included 1, excluded 3; 2 not assessed (top reasons: wrong population (2); wrong study design (1))"),
+        "{l:?}"
+    );
+
+    // In a run: the second batch's reply has a verdict for p-11 only, so
+    // p-12..p-15 are not assessed. Not a stop: no "stopped early".
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .when("these ids: p-1,")
+            .reply_json(screen_reply(), u())
+            .when("these ids: p-11,")
+            .reply_json(
+                json!({"verdicts": [{"id": "p-11", "include": false, "code": "population", "reason": "r"}]}),
+                u(),
+            )
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("supported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    let a = answer_of(&outcome);
+    let t = &a.trail;
+    assert_eq!(
+        (t.screened, t.included, t.not_assessed),
+        (15, 2, 4),
+        "{t:?}"
+    );
+    assert_eq!(t.stopped_early, None);
+    assert!(
+        t.excluded_top
+            .iter()
+            .all(|(r, _)| !r.starts_with("not assessed")),
+        "{t:?}"
+    );
+    let text = render_text(&a);
+    assert!(
+        text.contains("Screened 11 of 15, included 2, excluded 9; 4 not assessed\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Top exclusion reasons: wrong population (9)\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn stored_answers_from_before_the_split_render_not_assessed_apart() {
+    // Item 9, backward compatibility: answers stored before Fix B have no
+    // `not_assessed` (or count only the stopped records there) and may list
+    // "not assessed" among the exclusion reasons.
+    let old = json!({
+        "pubmed_count": 1, "epmc_count": 2, "screened": 15, "included": 2,
+        "excluded_top": [["wrong population", 7], ["not assessed", 3]],
+        "refinements": [], "stopped_early": null, "unavailable": []
+    });
+    let t: Trail = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 12 of 15, included 2, excluded 10; 3 not assessed"
+    );
+    assert_eq!(
+        incisive_app::agent::answer::exclusions_text(&t).as_deref(),
+        Some("Top exclusion reasons: wrong population (7)")
+    );
+    let old = json!({
+        "pubmed_count": 1, "epmc_count": 2, "screened": 15, "included": 2,
+        "not_assessed": 5,
+        "excluded_top": [["wrong population", 6], ["not assessed", 2]],
+        "refinements": [], "stopped_early": "cost limit", "unavailable": []
+    });
+    let t: Trail = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 8 of 15, included 2, excluded 6; 7 not assessed"
+    );
+    // Nothing not assessed: the short form.
+    let mut t = t;
+    t.not_assessed = 0;
+    t.excluded_top = vec![("wrong population".into(), 13)];
+    assert_eq!(
+        incisive_app::agent::answer::screened_text(&t),
+        "Screened 15, included 2, excluded 13"
+    );
+}
+
+#[tokio::test]
+async fn references_list_only_refs_cited_by_surviving_claims() {
+    // Item 10: both papers are verified, but the surviving claims cite only
+    // the meta-analysis: the RCT is not listed (nor in key studies), and
+    // the Check line still reports the refs verified of those drafted.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("unsupported"), u())
+            .reply_json(verdict("unsupported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let a = answer_of(&run_pipeline(&ctx).await);
+    assert_eq!(a.bottom_line.len(), 1);
+    assert_eq!(a.bottom_line[0].refs, [1]);
+    let refs: Vec<(u8, Option<&str>)> = a
+        .references
+        .iter()
+        .map(|r| (r.ref_id, r.pmid.as_deref()))
+        .collect();
+    assert_eq!(refs, [(1, Some("41871586"))]);
+    assert_eq!(a.key_studies.len(), 1);
+    assert_eq!(a.key_studies[0].ref_id, 1);
+    assert_eq!((a.check.refs_verified, a.check.refs_total), (2, 2));
+    assert!(render_text(&a).contains("2/2 references verified."));
+}
+
+#[tokio::test]
+async fn references_cited_only_by_removed_claims_go_and_the_rest_renumber() {
+    // Item 10: the surviving claim cites the RCT (ref 2 of the draft); it
+    // becomes reference 1.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(three_claims(), u())
+            .reply_json(verdict("unsupported"), u())
+            .reply_json(verdict("supported"), u())
+            .reply_json(verdict("unsupported"), u()),
+    );
+    let (ctx, _uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let a = answer_of(&run_pipeline(&ctx).await);
+    assert_eq!(a.bottom_line.len(), 1);
+    assert_eq!(a.bottom_line[0].refs, [1]);
+    let refs: Vec<(u8, Option<&str>)> = a
+        .references
+        .iter()
+        .map(|r| (r.ref_id, r.pmid.as_deref()))
+        .collect();
+    assert_eq!(refs, [(1, Some("40042831"))]);
+    assert_eq!(a.key_studies.len(), 1);
+    assert_eq!(a.key_studies[0].n, Some(1136));
+    let text = render_text(&a);
+    assert!(
+        text.contains("In one RCT the leak rate was 5.8% with ICG vs 7.9% without [1]"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn write_prompt_keeps_claims_to_the_pico_outcomes() {
+    // Item 11 (prompt only): claims address the PICO outcomes; none on an
+    // outcome outside it; no invented finding; at most one claim on which
+    // asked outcomes the evidence does not cover.
+    let Some(pool) = pool().await else { return };
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_json(
+        json!({"claims": [{"text": "c", "refs": [1], "confidence": "limited"}], "insufficient": false}),
+        u(),
+    ));
+    write(&ctx, &agent_llm(&llm), &pico(), &two_papers())
+        .await
+        .unwrap();
+    let sys = llm.requests()[0].system.clone().unwrap();
+    assert!(
+        sys.contains(incisive_app::agent::write::OUTCOME_RULE),
+        "{sys}"
+    );
+    for phrase in [
+        "Claims address only the PICO outcomes; together they cover as many of them as the findings allow; at most one claim may name asked outcomes with no evidence among the findings",
+        "Operative time or cost count as PICO outcomes only when the PICO lists them",
+        "Never invent a finding",
+    ] {
+        assert!(sys.contains(phrase), "missing {phrase:?}: {sys}");
+    }
+    assert!(!sys.contains("Write 3 to 6 short claims"), "{sys}");
+}
+
+// ---------- Fix B round 1: rate limits, cancel in flight, panics ----------
+
+#[tokio::test]
+async fn screen_rate_limit_is_requeued_then_read_and_never_charged() {
+    let Some(pool) = pool().await else { return };
+    let papers: Vec<Paper> = (1..=3)
+        .map(|i| {
+            paper(
+                &format!("{}", 7100 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    let rate_limited = || ClaudeError::RateLimited {
+        retry_after: Some(Duration::from_millis(20)),
+    };
+
+    // One 429 (after the client's own attempts): put back, then read.
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .fail(rate_limited())
+            .reply_json(include_all(1..=3), u()),
+    );
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers.clone())
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 2);
+    assert_eq!(
+        (s.included.len(), s.failed_batches, s.not_assessed),
+        (3, 0, 0)
+    );
+    assert_eq!(
+        charge_rows(&pool, uid).await.len(),
+        1,
+        "the 429 was not charged"
+    );
+    assert_eq!(ctx.budget.held(), 0);
+
+    // Still rate limited after two re-queues: the batch fails, not assessed.
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .fail(rate_limited())
+            .fail(ClaudeError::Overloaded)
+            .fail(rate_limited()),
+    );
+    // (Overloaded has no retry-after: the default 5 s wait applies.)
+    let s = screen(&ctx, &agent_llm(&llm), &pico(), papers)
+        .await
+        .unwrap();
+    assert_eq!(llm.requests().len(), 3, "1 + 2 re-queues");
+    assert_eq!((s.failed_batches, s.not_assessed), (1, 3));
+    assert!(
+        charge_rows(&pool, uid).await.is_empty(),
+        "no charge for 429/529"
+    );
+    assert_eq!((ctx.budget.spent(), ctx.budget.held()), (0, 0));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Screening failed for 3 records (1 batches); they were not assessed"),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn rate_limits_outside_screen_and_extract_stay_llm_errors() {
+    // Only Screen and Extract re-queue; every other call still reports Llm.
+    let Some(pool) = pool().await else { return };
+    let (_uid, _run, budget) = setup(&pool, 4000).await;
+    let llm = Arc::new(ScriptedLlm::new().fail(ClaudeError::RateLimited { retry_after: None }));
+    let r = call(&llm, &budget, &pool, &CancelFlag::default())
+        .text("s", "u", 100)
+        .await;
+    assert_eq!(r, Err(StepError::Llm));
+}
+
+#[tokio::test]
+async fn cancel_while_batches_are_in_flight_launches_nothing_more_and_charges_them() {
+    // Fix B review M-6: cancel is set while 4 batches are in flight. No
+    // batch is launched after it; the 4 in flight still finish and charge.
+    let Some(pool) = pool().await else { return };
+    let papers: Vec<Paper> = (1..=60)
+        .map(|i| {
+            paper(
+                &format!("{}", 7200 + i),
+                &format!("Study {i}"),
+                Some("abs"),
+                2020,
+                &[],
+            )
+        })
+        .collect();
+    let (ctx, uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let probe = Arc::new(Probe::new(usage(1_000, 1_400), Duration::from_millis(150)));
+    probe.budget.set(ctx.budget.clone()).ok().unwrap();
+    let llm = AgentLlm {
+        client: probe.clone(),
+        models: agent_llm(&Arc::new(ScriptedLlm::new())).models,
+    };
+    let cancel = ctx.cancel.clone();
+    let p2 = probe.clone();
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering::SeqCst;
+        while p2.in_flight.load(SeqCst) < 4 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        cancel.cancel();
+    });
+    let r = screen(&ctx, &llm, &pico(), papers).await;
+    assert_eq!(r.unwrap_err(), StepError::Cancelled);
+    use std::sync::atomic::Ordering::SeqCst;
+    for _ in 0..100 {
+        if charge_rows(&pool, uid).await.len() == 4 && ctx.budget.held() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        probe.calls.load(SeqCst),
+        4,
+        "nothing launched after the cancel"
+    );
+    assert_eq!(
+        charge_rows(&pool, uid).await.len(),
+        4,
+        "in-flight calls charged"
+    );
+    assert_eq!(ctx.budget.held(), 0);
+}
+
+#[tokio::test]
+async fn panicking_task_nobody_waits_for_still_counts_its_estimate() {
+    // Fix B review M-2: a call whose waiter was dropped (a sibling's fatal
+    // error or a cancel ended the step) panics: its estimate is still
+    // counted as unbooked, once.
+    let Some(pool) = pool().await else { return };
+    let (_uid, _run, budget) = setup(&pool, 4000).await;
+    let call = LlmCall::new(
+        Arc::new(PanickingLlm),
+        budget.clone(),
+        pool.clone(),
+        CancelFlag::default(),
+        MODEL,
+        "test",
+    );
+    let started = call.start("system", "user", None, 500).unwrap();
+    let estimate = budget.held();
+    assert!(estimate > 0);
+    drop(started);
+    for _ in 0..100 {
+        if budget.spent() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(budget.spent(), estimate, "counted once");
+    assert_eq!(budget.held(), 0);
+}
+
+#[tokio::test]
+async fn extract_keeps_a_reserve_share_per_paper_in_flight() {
+    // Ruling R-FB4, wiring: while two papers are in flight, each keeps its
+    // largest possible growth free; all of it is back once they are read.
+    let Some(pool) = pool().await else { return };
+    let abs = icg_abstract();
+    let (ctx, _uid) = run_ctx(&pool, settings(1), 10_000).await;
+    let gate = BudgetGate::default();
+    gate.set(ctx.budget.clone()).ok().unwrap();
+    let llm_for_share = agent_llm(&Arc::new(ScriptedLlm::new()));
+    let share = incisive_app::agent::extract::max_growth(&llm_for_share, &ctx.budget, &pico());
+    assert!(share > 0);
+    let g = gate.clone();
+    let seen = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let seen2 = seen.clone();
+    let both_shares: incisive_app::agent::llm::Gate = Arc::new(move || {
+        let r = g.get().map_or(0, |b| b.in_flight_reserve());
+        seen2.fetch_max(r, std::sync::atomic::Ordering::SeqCst);
+        r >= 2 * share
+    });
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .until("from ref-1.", both_shares)
+            .when("from ref-1.")
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .when("from ref-2.")
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u()),
+    );
+    let out = extract(
+        &ctx,
+        &agent_llm(&llm),
+        &pico(),
+        vec![abstract_paper("151", &abs), abstract_paper("152", &abs)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.papers.len(), 2);
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2 * share);
+    assert_eq!(ctx.budget.in_flight_reserve(), 0);
 }
