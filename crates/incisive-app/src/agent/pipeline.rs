@@ -7,13 +7,22 @@
 //! stops as `Failed("interrupted")`; the worker sorts out why).
 //!
 //! **Graceful finish.** Before each gathering step (Search, Screen,
-//! Retrieve, Extract) the wrap-up point is checked (70% of the cost limit
-//! spent, or 3 minutes). Once it is reached, the remaining gathering steps
-//! are skipped (one Note line) and the run goes straight to Write and Check
+//! Retrieve, Extract) the wrap-up point is checked: 70% of the cost limit
+//! spent, 3 minutes elapsed, or no headroom above the **finish reserve**
+//! (Ruling R-13c). Once it is reached, the remaining gathering steps are
+//! skipped (one Note line) and the run goes straight to Write and Check
 //! with what it has; the trail says "search stopped early (cost limit / time
-//! limit)". A step that stops itself at the wrap-up point (Screen between
-//! batches, Extract between papers) marks the same. `OverBudget` from a
-//! gathering step wraps up the same way ("cost limit").
+//! limit)". A step that stops itself (Screen between batches, Extract between
+//! papers, each reporting how much it left unread) marks the same.
+//! `OverBudget` from a gathering step wraps up the same way ("cost limit").
+//!
+//! The finish reserve is what Write and Check (at `MAX_CLAIMS`) would hold
+//! for the findings so far ([`super::finish_reserve`]); it is set once the
+//! question is framed and raised by Extract after each paper. Every
+//! gathering call's hold must leave it free (`try_hold_gathering`), so the
+//! gathering money is never spent at the cost of the write-up. If Write is
+//! still refused, the run ends `partial` with a Note and no claims, never
+//! `failed`.
 //!
 //! **Failures** (Ruling, Task 13 carry-over 2), as the run's `error_kind`:
 //! * `Unrecorded` (money not booked): "unrecorded", at once.
@@ -22,7 +31,7 @@
 //! * `Llm` / `Parse` in Frame, Search or Write: "llm" / "parse". (Search
 //!   fails this way only when no valid query could be made at all: there is
 //!   nothing to answer from, and "no evidence found" would be untrue.)
-//! * `OverBudget` in Frame or Write: "over_budget".
+//! * `OverBudget` in Frame: "over_budget". (In Write: `partial`, above.)
 //! * Check handles its own per-claim failures.
 //!
 //! **Answer.** References and key studies are the papers whose refs Check
@@ -31,10 +40,10 @@
 //! when Write said so (fewer than two papers, or the model's judgement) and
 //! recomputed after Check: fewer than two distinct verified refs across the
 //! surviving claims is insufficient (Ruling R-12e). If Check removed every
-//! claim, or Write produced none from extracted evidence, `no_verified_claims`
-//! is set and the bottom line reads "No claims could be verified against the
-//! sources." (Review Focus 2). Nothing extracted at all gives "No relevant
-//! evidence found."
+//! drafted claim, `no_verified_claims` is set and the bottom line reads "No
+//! claims could be verified against the sources." (Review Focus 2). With no
+//! claim drafted, the bottom line is "No relevant evidence found." after a
+//! complete run, or says the search stopped early when it did.
 //!
 //! The outcome is `Partial` when a step degraded: a database was
 //! unavailable, the search stopped early, or no claim survived Check;
@@ -211,17 +220,22 @@ async fn gather(ctx: &RunContext, pico: &Pico) -> Result<Gathered, Stop> {
         return Ok(g);
     };
     g.trail.included = u32::try_from(screened.included.len()).unwrap_or(u32::MAX);
+    // Records left unscreened at the wrap-up point were not assessed, not
+    // excluded: counted apart.
+    g.trail.not_assessed = screened
+        .excluded_counts
+        .iter()
+        .filter(|(r, _)| r == REASON_STOPPED)
+        .map(|(_, n)| *n)
+        .sum();
     g.trail.excluded_top = screened
         .excluded_counts
         .iter()
+        .filter(|(r, _)| r != REASON_STOPPED)
         .take(EXCLUDED_TOP)
         .cloned()
         .collect();
-    if screened
-        .excluded_counts
-        .iter()
-        .any(|(r, _)| r == REASON_STOPPED)
-    {
+    if g.trail.not_assessed > 0 {
         // Screen stopped between batches at the wrap-up point.
         let reason = Gathered::stopped_by_step(ctx);
         g.stop(ctx, reason).await;
@@ -249,18 +263,16 @@ async fn gather(ctx: &RunContext, pico: &Pico) -> Result<Gathered, Stop> {
     if !g.may_gather(ctx).await {
         return Ok(g);
     }
-    let used_n = used.len();
-    let Some(extracted) = gathering(extract(ctx, &ctx.llm, pico, used).await)? else {
+    let Some(extraction) = gathering(extract(ctx, &ctx.llm, pico, used).await)? else {
         g.stop(ctx, "cost limit").await;
         return Ok(g);
     };
-    if extracted.len() < used_n
-        && let Some(reason) = ctx.budget.wrap_up_reason(Instant::now())
-    {
-        // Extract stops between papers at the wrap-up point.
+    if extraction.stopped > 0 {
+        // Extract left papers unread (wrap-up point or budget).
+        let reason = Gathered::stopped_by_step(ctx);
         g.stop(ctx, reason).await;
     }
-    g.extracted = extracted;
+    g.extracted = extraction.papers;
     Ok(g)
 }
 
@@ -279,17 +291,34 @@ async fn run(ctx: &RunContext) -> Result<(Answer, bool), Stop> {
     // 1. Frame.
     gate(ctx).await?;
     let pico = frame(ctx, &ctx.llm, &ctx.question).await.map_err(failure)?;
+    // From here on, gathering leaves Write and Check their share (R-13c).
+    ctx.budget
+        .set_finish_reserve(super::finish_reserve(&ctx.llm, &ctx.budget, &pico, &[]));
 
     // 2–5. Gathering.
-    let g = gather(ctx, &pico).await?;
+    let mut g = gather(ctx, &pico).await?;
 
-    // 6. Write: always, with what was found.
+    // 6. Write: always, with what was found. Refused for budget despite the
+    // reserve: the run ends partial with what was gathered, never failed.
     gate(ctx).await?;
-    let draft = bound_draft(
-        write(ctx, &ctx.llm, &pico, &g.extracted)
-            .await
-            .map_err(failure)?,
-    );
+    let draft = match write(ctx, &ctx.llm, &pico, &g.extracted).await {
+        Ok(d) => bound_draft(d),
+        Err(StepError::OverBudget) => {
+            tracing::info!(run_id = %ctx.run_id, "write refused: over budget; answer without claims");
+            add_line(
+                ctx,
+                StepKind::Note,
+                "Not enough of the cost limit was left to write the answer",
+            )
+            .await;
+            g.stopped = Some("cost limit");
+            Draft {
+                bottom_line: vec![],
+                insufficient: true,
+            }
+        }
+        Err(e) => return Err(failure(e)),
+    };
     let drafted = draft.bottom_line.len();
     let draft_insufficient = draft.insufficient;
 
@@ -458,7 +487,9 @@ fn assemble(
         .collect();
     let insufficient =
         draft_says_insufficient || extracted.len() < MIN_PAPERS || distinct.len() < MIN_PAPERS;
-    let no_verified_claims = !extracted.is_empty() && bottom_line.is_empty();
+    // Claims were drafted and Check kept none. With none drafted there was
+    // nothing to verify: the insufficient / no-evidence wording applies.
+    let no_verified_claims = drafted > 0 && bottom_line.is_empty();
 
     trail.stopped_early = stopped.map(str::to_string);
     let degraded = !trail.unavailable.is_empty() || stopped.is_some() || no_verified_claims;

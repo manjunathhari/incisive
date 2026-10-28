@@ -115,6 +115,30 @@ impl Literature {
     }
 }
 
+/// Paise to keep free for the finishing steps given what has been extracted:
+/// Write's hold plus [`write::MAX_CLAIMS`] Check holds, each from the real
+/// prompt builders and the same estimator the holds use (Ruling R-13c).
+/// Gathering calls may not hold into it ([`RunBudget::try_hold_gathering`]).
+///
+/// It is computed for the findings extracted so far, so reading one more
+/// paper can raise it by that paper's findings (a few hundred input tokens
+/// across the calls). Holds reserve each call's full `max_tokens`, so the
+/// real charges usually leave that much slack; if they do not, Write is
+/// refused and the run ends `partial` (see `pipeline`). A JSON retry
+/// (one per call at most) is not reserved for. An unpriced model counts 0:
+/// its call fails anyway.
+pub fn finish_reserve(
+    llm: &AgentLlm,
+    budget: &RunBudget,
+    pico: &frame::Pico,
+    extracted: &[extract::Extracted],
+) -> i64 {
+    let write = write::hold_for(llm, budget, pico, extracted).unwrap_or(0);
+    let check = check::hold_per_claim_for(llm, budget, extracted).unwrap_or(0);
+    let claims = i64::try_from(write::MAX_CLAIMS).unwrap_or(i64::MAX);
+    write.saturating_add(check.saturating_mul(claims))
+}
+
 /// Longest step line stored.
 pub const MAX_STEP_LINE: usize = 160;
 

@@ -172,6 +172,23 @@ fn sources(extracted: &[Extracted]) -> String {
     out
 }
 
+/// The hold Write would take for `extracted` (its real prompt, same
+/// estimator), for the finish reserve. Ruling R-13c.
+pub fn hold_for(
+    llm: &AgentLlm,
+    budget: &crate::runs::budget::RunBudget,
+    pico: &Pico,
+    extracted: &[Extracted],
+) -> Option<i64> {
+    super::llm::hold_estimate(
+        budget,
+        &llm.models.write,
+        SYSTEM,
+        &prompt(pico, extracted),
+        MAX_TOKENS,
+    )
+}
+
 fn prompt(pico: &Pico, extracted: &[Extracted]) -> String {
     let pico = neutralise_pico_tags(&serde_json::to_string_pretty(pico).unwrap_or_default());
     let ids = extracted

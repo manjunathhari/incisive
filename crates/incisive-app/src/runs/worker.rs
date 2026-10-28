@@ -235,6 +235,12 @@ enum End {
 
 /// A panic outside the pipeline (or before its own boundary): fail the run,
 /// release its reservation and audit, as far as the database allows.
+///
+/// The whole reservation is released (`keep = 0`): the run's budget is out
+/// of reach here, so what in-flight Claude calls still hold is unknown. Their
+/// late charges then book with no headroom left for them, a small cap
+/// overshoot bounded by those calls' holds. This needs a panic outside
+/// `catch_unwind` while calls are in flight (a double fault): rare, accepted.
 async fn after_panic(pool: &PgPool, run_id: Uuid) {
     let user_id = match store::load_question(pool, run_id).await {
         Ok(Some((user_id, ..))) => Some(user_id),

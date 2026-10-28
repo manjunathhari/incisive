@@ -594,13 +594,28 @@ fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, Extracte
 
 // ---------- the step ----------
 
+/// What Extract produced.
+#[derive(Debug)]
+pub struct Extraction {
+    /// Papers with at least one verified finding, numbered `ref_id` 1..K.
+    pub papers: Vec<Extracted>,
+    /// Papers that would have been sent but were not read because the run
+    /// reached its wrap-up point or its budget. Non-zero means the step
+    /// stopped early.
+    pub stopped: usize,
+}
+
 /// Extract findings from `papers` (see the module docs).
+///
+/// After each paper kept, the run's finish reserve is raised to what Write
+/// and Check need for the findings so far ([`super::finish_reserve`]), so
+/// the next paper's hold must leave it free.
 pub async fn extract(
     ctx: &RunContext,
     llm: &AgentLlm,
     pico: &Pico,
     papers: Vec<UsedPaper>,
-) -> Result<Vec<Extracted>, StepError> {
+) -> Result<Extraction, StepError> {
     let run_id = ctx.run_id;
     let call = llm.call(ctx, &llm.models.extract, "extract");
 
@@ -673,6 +688,8 @@ pub async fn extract(
             comparison: f.comparison,
             findings,
         });
+        ctx.budget
+            .set_finish_reserve(super::finish_reserve(&ctx.llm, &ctx.budget, pico, &out));
     }
     tracing::info!(
         %run_id, step = "extract", papers = out.len(), dropped_findings,
@@ -713,5 +730,8 @@ pub async fn extract(
             add_line(ctx, StepKind::Note, &line).await;
         }
     }
-    Ok(out)
+    Ok(Extraction {
+        papers: out,
+        stopped,
+    })
 }

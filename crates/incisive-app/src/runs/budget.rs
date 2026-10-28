@@ -69,6 +69,10 @@ struct State {
     calls: HashMap<Uuid, CallState>,
     /// Set by the worker once the run has ended ([`RunBudget::finish`]).
     finished: bool,
+    /// Paise kept free for the finishing steps (Write, and Check at
+    /// `MAX_CLAIMS`): gathering calls may not hold into it
+    /// ([`RunBudget::try_hold_gathering`]). Ruling R-13c.
+    finish_reserve: i64,
 }
 
 /// An in-flight reservation of part of the run's limit, taken before a Claude
@@ -104,6 +108,9 @@ pub struct RunBudget {
     prices: Prices,
     usd_inr: f64,
     state: Mutex<State>,
+    /// Added to the run's age (tests only, [`RunBudget::aged_for_test`]), so
+    /// time-limit tests do not depend on the host's monotonic clock.
+    age_offset: Duration,
 }
 
 impl RunBudget {
@@ -123,7 +130,20 @@ impl RunBudget {
             prices,
             usd_inr,
             state: Mutex::new(State::default()),
+            age_offset: Duration::ZERO,
         }
+    }
+
+    /// Tests only: the run behaves as if it started `by` earlier.
+    #[cfg(feature = "test-util")]
+    pub fn aged_for_test(mut self, by: Duration) -> RunBudget {
+        self.age_offset = by;
+        self
+    }
+
+    /// Time since the run started.
+    fn age(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.started) + self.age_offset
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -137,11 +157,26 @@ impl RunBudget {
     /// The hold owns a share of the budget, so it can move into a task that
     /// outlives the caller.
     pub fn try_hold(self: &Arc<Self>, estimate_paise: i64) -> Option<Hold> {
+        self.hold_leaving(estimate_paise, false)
+    }
+
+    /// [`RunBudget::try_hold`] for a gathering call (Frame through Extract):
+    /// it must also leave the finish reserve free, so the evidence gathered
+    /// can always be written up and checked. Ruling R-13c.
+    pub fn try_hold_gathering(self: &Arc<Self>, estimate_paise: i64) -> Option<Hold> {
+        self.hold_leaving(estimate_paise, true)
+    }
+
+    fn hold_leaving(self: &Arc<Self>, estimate_paise: i64, reserve: bool) -> Option<Hold> {
         if estimate_paise < 0 {
             return None;
         }
         let mut st = self.state();
-        let total = i128::from(st.spent) + i128::from(st.held) + i128::from(estimate_paise);
+        let kept = if reserve { st.finish_reserve } else { 0 };
+        let total = i128::from(st.spent)
+            + i128::from(st.held)
+            + i128::from(estimate_paise)
+            + i128::from(kept);
         if total > i128::from(self.limit_paise) {
             return None;
         }
@@ -313,15 +348,36 @@ impl RunBudget {
 
     /// Time since the run started.
     pub fn elapsed(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.started)
+        self.age(now)
     }
 
-    /// Why the run should wrap up, if it should: "cost limit" (70% of the
-    /// limit spent) is reported before "time limit" (3 minutes elapsed).
+    /// Set the finish reserve (see [`RunBudget::try_hold_gathering`]). The
+    /// pipeline sets it once the question is framed; Extract raises it as
+    /// findings accumulate.
+    pub fn set_finish_reserve(&self, paise: i64) {
+        self.state().finish_reserve = paise.max(0);
+    }
+
+    pub fn finish_reserve(&self) -> i64 {
+        self.state().finish_reserve
+    }
+
+    /// Why the run should wrap up, if it should. "cost limit": 70% of the
+    /// limit spent, or no headroom left above the finish reserve
+    /// (`spent + held + finish_reserve >= limit`; each gathering call also
+    /// needs its own estimate on top, [`RunBudget::try_hold_gathering`]).
+    /// "time limit": 3 minutes elapsed. Cost is reported first.
     pub fn wrap_up_reason(&self, now: Instant) -> Option<&'static str> {
-        if i128::from(self.spent()) * 100 >= i128::from(self.limit_paise) * WRAP_UP_PERCENT {
+        let (spent, held, reserve) = {
+            let st = self.state();
+            (st.spent, st.held, st.finish_reserve)
+        };
+        let limit = i128::from(self.limit_paise);
+        if i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
+            || (reserve > 0 && i128::from(spent) + i128::from(held) + i128::from(reserve) >= limit)
+        {
             Some("cost limit")
-        } else if now.saturating_duration_since(self.started) >= WRAP_UP_AFTER {
+        } else if self.age(now) >= WRAP_UP_AFTER {
             Some("time limit")
         } else {
             None
@@ -337,15 +393,14 @@ impl RunBudget {
         self.limit_paise
     }
 
-    /// True once spend reaches 70% of the limit or 3 minutes have elapsed.
-    /// Counts real spend only, not in-flight holds.
+    /// True when [`RunBudget::wrap_up_reason`] gives a reason.
     pub fn should_wrap_up(&self, now: Instant) -> bool {
         self.wrap_up_reason(now).is_some()
     }
 
     /// True once 6 minutes have elapsed.
     pub fn past_hard_stop(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started) >= HARD_STOP_AFTER
+        self.age(now) >= HARD_STOP_AFTER
     }
 
     /// Read-only check against `spent` and current holds. It is **not** a

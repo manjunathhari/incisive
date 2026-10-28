@@ -345,6 +345,34 @@ pub fn wrap_source(id: &str, text: &str) -> String {
 
 // ---------- estimates and parsing ----------
 
+/// The steps that finish a run (Write, Check). Their calls may use the finish
+/// reserve; every other step's calls must leave it free.
+pub const FINISHING_STEPS: [&str; 2] = ["write", "check"];
+
+/// Bytes of the prompt a call sends: the system prompt with [`SOURCE_RULE`]
+/// appended (as [`LlmCall::text`] sends it) and the user message.
+fn prompt_bytes(system: &str, user: &str) -> usize {
+    system.len() + "\n\n".len() + SOURCE_RULE.len() + user.len()
+}
+
+/// The hold a call of `model` with these prompts and `max_tokens` would take,
+/// in paise: the same estimate [`LlmCall::text`] holds. `None` for an
+/// unpriced model (that call would fail anyway).
+pub fn hold_estimate(
+    budget: &RunBudget,
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Option<i64> {
+    budget
+        .cost_of(
+            model,
+            &estimate_usage(prompt_bytes(system, user), max_tokens),
+        )
+        .ok()
+}
+
 /// Estimated usage for a call: input ≈ ceil(prompt bytes / 3) + 50, output =
 /// `max_tokens` (the most it can cost). This is an estimate, not a bound on
 /// the input side: token-dense text (for example some non-Latin scripts or
@@ -465,8 +493,7 @@ impl LlmCall {
             }],
             tools: vec![],
         };
-        let prompt_bytes = req.system.as_ref().map_or(0, String::len) + user.len();
-        let estimate_usage = estimate_usage(prompt_bytes, max_tokens);
+        let estimate_usage = estimate_usage(prompt_bytes(system, user), max_tokens);
         let estimate = self
             .budget
             .cost_of(&self.model, &estimate_usage)
@@ -474,7 +501,13 @@ impl LlmCall {
                 tracing::error!(%run_id, step = self.step, model = %self.model, "no price for agent model");
                 StepError::Llm
             })?;
-        let Some(hold) = self.budget.try_hold(estimate) else {
+        // Gathering calls leave the finish reserve free (Ruling R-13c).
+        let hold = if FINISHING_STEPS.contains(&self.step) {
+            self.budget.try_hold(estimate)
+        } else {
+            self.budget.try_hold_gathering(estimate)
+        };
+        let Some(hold) = hold else {
             tracing::info!(%run_id, step = self.step, model = %self.model, estimate, "call refused: over budget");
             return Err(StepError::OverBudget);
         };
@@ -515,6 +548,12 @@ struct Attempt {
 impl Attempt {
     /// Make the call, then, if the run has ended meanwhile, release what is
     /// left of its reservation (Ruling R-8d: the worker kept it for us).
+    ///
+    /// If the call panics, this release is skipped (as it is when the task
+    /// is aborted): the kept share then stays reserved until recovery's
+    /// periodic sweep releases it, at least `LATE_CHARGE_GRACE_MIN` (10)
+    /// minutes after the run finished. Bounded by the call's hold, and
+    /// recovered; not a leak.
     async fn run(self, hold: Hold) -> Result<String, StepError> {
         let (budget, pool) = (self.call.budget.clone(), self.call.pool.clone());
         let r = self.call_and_settle(hold).await;

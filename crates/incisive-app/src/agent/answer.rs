@@ -21,6 +21,9 @@ pub const NO_VERIFIED_CLAIMS: &str = "No claims could be verified against the so
 /// Bottom line when nothing relevant was found (empty search, nothing included
 /// or nothing extracted).
 pub const NO_EVIDENCE: &str = "No relevant evidence found.";
+/// Bottom line when the search stopped early (cost or time limit) and no
+/// claim was written: not "no evidence", since the search was cut short.
+pub const STOPPED_NO_ANSWER: &str = "No answer could be written: the search stopped early, before enough evidence was read and checked.";
 /// Shown above the bottom line when the evidence is too thin for a conclusion.
 pub const INSUFFICIENT: &str = "Insufficient evidence \u{2014} no conclusion is drawn.";
 /// Marks a partly supported claim.
@@ -107,6 +110,10 @@ pub struct Trail {
     /// Records screened (after merging).
     pub screened: u32,
     pub included: u32,
+    /// Records left unscreened when the search stopped early: neither
+    /// included nor excluded.
+    #[serde(default)]
+    pub not_assessed: u32,
     /// The most common exclusion reasons with their counts.
     pub excluded_top: Vec<(String, u32)>,
     pub refinements: Vec<Refinement>,
@@ -143,6 +150,8 @@ pub fn empty_bottom_line(a: &Answer) -> Option<&'static str> {
         None
     } else if a.no_verified_claims {
         Some(NO_VERIFIED_CLAIMS)
+    } else if a.trail.stopped_early.is_some() {
+        Some(STOPPED_NO_ANSWER)
     } else {
         Some(NO_EVIDENCE)
     }
@@ -200,14 +209,23 @@ pub fn check_text(c: &CheckSummary) -> String {
     )
 }
 
-/// "Screened 15, included 2, excluded 13".
+/// "Screened 15, included 2, excluded 13", or with records the search
+/// stopped before: "Screened 10 of 15, included 2, excluded 8; 5 not
+/// assessed (search stopped early)".
 pub fn screened_text(t: &Trail) -> String {
-    format!(
-        "Screened {}, included {}, excluded {}",
-        t.screened,
-        t.included,
-        t.screened.saturating_sub(t.included)
-    )
+    let assessed = t.screened.saturating_sub(t.not_assessed);
+    let excluded = assessed.saturating_sub(t.included);
+    if t.not_assessed == 0 {
+        format!(
+            "Screened {}, included {}, excluded {excluded}",
+            t.screened, t.included
+        )
+    } else {
+        format!(
+            "Screened {assessed} of {}, included {}, excluded {excluded}; {} not assessed (search stopped early)",
+            t.screened, t.included, t.not_assessed
+        )
+    }
 }
 
 /// "Top exclusion reasons: wrong population (3); …", or `None`.

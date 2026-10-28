@@ -65,7 +65,7 @@ use serde_json::Value;
 use super::extract::Extracted;
 use super::llm::{StepError, wrap_source};
 use super::screen::EvidenceLevel;
-use super::write::{Claim, Draft, cap_confidence};
+use super::write::{Claim, Confidence, Draft, cap_confidence};
 use super::{AgentLlm, Literature, RunContext, add_line};
 use crate::lit::Paper;
 use crate::lit::europepmc::strip_markup;
@@ -144,6 +144,29 @@ const SYSTEM_TAIL: &str = "Reply with a JSON array only, in this form: \
 
 fn system() -> String {
     format!("{SYSTEM} {MEASURE_RULE} {SCOPE_RULE} {CLAIM_RULE} {SYSTEM_TAIL}")
+}
+
+/// The most one claim's Check call could hold for `extracted`: a claim of
+/// [`MAX_CLAIM`](super::write::MAX_CLAIM) characters citing every paper, with
+/// the real prompt and estimator. For the finish reserve (Ruling R-13c).
+pub fn hold_per_claim_for(
+    llm: &AgentLlm,
+    budget: &crate::runs::budget::RunBudget,
+    extracted: &[Extracted],
+) -> Option<i64> {
+    let widest = Claim {
+        text: "x".repeat(super::write::MAX_CLAIM),
+        refs: extracted.iter().map(|e| e.ref_id).collect(),
+        confidence: Confidence::Limited,
+    };
+    let by_ref: HashMap<u8, &Extracted> = extracted.iter().map(|e| (e.ref_id, e)).collect();
+    super::llm::hold_estimate(
+        budget,
+        &llm.models.check,
+        &system(),
+        &claim_prompt(&widest, &by_ref),
+        MAX_TOKENS,
+    )
 }
 
 /// One claim with the quotes of its (verified) refs.

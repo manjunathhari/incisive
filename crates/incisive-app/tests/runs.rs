@@ -2485,6 +2485,7 @@ fn answer_json() -> serde_json::Value {
             epmc_count: 789,
             screened: 15,
             included: 2,
+            not_assessed: 0,
             excluded_top: vec![("wrong population".into(), 7)],
             refinements: vec![],
             stopped_early: None,

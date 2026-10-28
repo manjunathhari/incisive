@@ -2622,7 +2622,8 @@ async fn finding_with_non_verbatim_quote_is_dropped() {
         vec![abstract_paper("71", &abs)],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     assert_eq!(out.len(), 1);
     let e = &out[0];
     assert_eq!(e.ref_id, 1);
@@ -2687,7 +2688,8 @@ async fn whitespace_differences_still_match() {
         vec![abstract_paper("72", &abs)],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     // The stored quote is the source's own text, thin spaces included.
     assert_eq!(
         quotes(&out[0]),
@@ -2895,7 +2897,8 @@ async fn short_quote_is_dropped() {
         vec![abstract_paper("73", &abs)],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     assert_eq!(quotes(&out[0]), vec![ICG_VERBATIM.to_string()]);
     assert!(lines(&steps_of(&ctx, uid).await).contains(
         &"Extracted findings from 1 papers (1 findings dropped: quote not found)".to_string()
@@ -2928,7 +2931,8 @@ async fn paper_with_no_surviving_findings_is_dropped() {
     ];
     let out = extract(&ctx, &agent_llm(&llm), &pico(), papers)
         .await
-        .unwrap();
+        .unwrap()
+        .papers;
     assert_eq!(llm.requests().len(), 3);
     // The prompt id follows the input order.
     assert!(request_text(&llm, 2).contains("ref-3"));
@@ -2981,7 +2985,8 @@ async fn stops_between_papers_on_wrap_up() {
     );
     let out = extract(&ctx, &agent_llm(&llm), &pico(), papers())
         .await
-        .unwrap();
+        .unwrap()
+        .papers;
     assert_eq!(llm.requests().len(), 1);
     assert_eq!(out.len(), 1);
     let steps = steps_of(&ctx, uid).await;
@@ -3040,7 +3045,8 @@ async fn source_kind_carried_through() {
     );
     let out = extract(&ctx, &agent_llm(&llm), &pico(), papers)
         .await
-        .unwrap();
+        .unwrap()
+        .papers;
     // The title-only paper is never sent to the model.
     assert_eq!(llm.requests().len(), 2);
     assert!(!request_text(&llm, 1).contains("Paper 102"));
@@ -3114,7 +3120,8 @@ async fn quote_across_a_section_boundary_is_dropped() {
         vec![used("111", PaperText::FullText(ft))],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     let t = request_text(&llm, 0);
     assert!(t.contains("[methods]"));
     assert_eq!(quotes(&out[0]), vec![within.to_string()]);
@@ -3144,7 +3151,8 @@ async fn quote_with_neutralised_source_tag_matches() {
         vec![abstract_paper("121", abs)],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     let t = request_text(&llm, 0);
     // The wrapper is intact: one opening and one closing tag.
     assert_eq!(t.matches("</source>").count(), 1);
@@ -3190,7 +3198,8 @@ async fn failed_paper_dropped_findings_capped_and_over_budget_keeps_progress() {
     ];
     let out = extract(&ctx, &agent_llm(&llm), &pico(), papers)
         .await
-        .unwrap();
+        .unwrap()
+        .papers;
     assert_eq!(llm.requests().len(), 5);
     // 133: one good of the first six (the good 7th and 8th are ignored);
     // 134: none of the first six, so it is dropped.
@@ -3233,7 +3242,8 @@ async fn failed_paper_dropped_findings_capped_and_over_budget_keeps_progress() {
         ],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     assert_eq!(llm.requests().len(), 1);
     assert_eq!(out.len(), 1);
     let l = lines(&steps_of(&ctx, uid).await);
@@ -3276,7 +3286,8 @@ async fn result_numbers_not_in_the_quote_drop_the_finding() {
         vec![abstract_paper("151", &abs)],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     assert_eq!(
         out[0]
             .findings
@@ -3330,7 +3341,8 @@ async fn text_sent_is_capped_with_discussion_dropped_first() {
         vec![used("161", PaperText::FullText(ft))],
     )
     .await
-    .unwrap();
+    .unwrap()
+    .papers;
     let req = &llm.requests()[0];
     let user = match &req.messages[0].content[0] {
         claude_client::ContentBlock::Text { text } => text.clone(),
@@ -4394,7 +4406,7 @@ async fn confidence_capped_by_evidence_level() {
 
 use incisive_app::agent::answer::{
     Answer, AnswerClaim, CheckSummary, DECISION_SUPPORT, KeyStudy, NO_EVIDENCE, NO_VERIFIED_CLAIMS,
-    PARTIAL_MARK, Reference, Trail, render_text, rerun_href,
+    PARTIAL_MARK, Reference, STOPPED_NO_ANSWER, Trail, render_text, rerun_href,
 };
 use incisive_app::agent::{PipelineOutcome, run_pipeline};
 use incisive_app::runs::RunStatus;
@@ -4660,10 +4672,12 @@ async fn wrap_up_skips_to_write_and_check_and_marks_stopped_early() {
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
     let llm = Arc::new(ScriptedLlm::new().reply_json(agent_json("frame_pico.json"), u()));
     let (mut ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
-    let Some(past) = Instant::now().checked_sub(Duration::from_secs(200)) else {
-        return;
-    };
-    ctx.budget = Arc::new(RunBudget::new(ctx.run_id, uid, 4000, past, prices(), 88.0));
+    // Aged by an offset, not a backdated Instant: independent of how long
+    // the host has been up.
+    ctx.budget = Arc::new(
+        RunBudget::new(ctx.run_id, uid, 4000, Instant::now(), prices(), 88.0)
+            .aged_for_test(Duration::from_secs(200)),
+    );
     let outcome = run_pipeline(&ctx).await;
     assert!(
         matches!(outcome, PipelineOutcome::Partial(_)),
@@ -4724,10 +4738,12 @@ async fn hard_stop_marks_failed() {
     let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
     let llm = full_script(&["supported", "supported", "supported"]);
     let (mut ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
-    let Some(past) = Instant::now().checked_sub(Duration::from_secs(361)) else {
-        return;
-    };
-    ctx.budget = Arc::new(RunBudget::new(ctx.run_id, uid, 4000, past, prices(), 88.0));
+    // Aged by an offset, not a backdated Instant: independent of how long
+    // the host has been up.
+    ctx.budget = Arc::new(
+        RunBudget::new(ctx.run_id, uid, 4000, Instant::now(), prices(), 88.0)
+            .aged_for_test(Duration::from_secs(361)),
+    );
     assert_eq!(
         run_pipeline(&ctx).await,
         PipelineOutcome::Failed("hard_stop")
@@ -4953,6 +4969,7 @@ fn sample_answer() -> Answer {
             epmc_count: 789,
             screened: 15,
             included: 3,
+            not_assessed: 0,
             excluded_top: vec![("wrong population".into(), 7)],
             refinements: vec![],
             stopped_early: Some("time limit".into()),
@@ -5175,4 +5192,407 @@ async fn step_errors_map_to_error_kinds() {
     );
     let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
     assert_eq!(run_pipeline(&ctx).await, PipelineOutcome::Failed("llm"));
+}
+
+// ---------- production prices (Ruling R-13c) ----------
+
+/// The production rates: Sonnet $3/$15 and Haiku $1/$5 per million tokens.
+fn prod_prices() -> Prices {
+    Prices::from_json(
+        r#"{"claude-sonnet-5-5": {"input": 3.0, "output": 15.0},
+            "claude-haiku-5-5": {"input": 1.0, "output": 5.0}}"#,
+    )
+    .unwrap()
+}
+
+/// A run at production prices and default models (Haiku screens, Sonnet
+/// does the rest), with the run `running`.
+async fn prod_ctx(
+    pool: &PgPool,
+    mode: RunMode,
+    limit: i64,
+    llm: &Arc<ScriptedLlm>,
+    server: &MockServer,
+) -> (RunContext, i64) {
+    let (mut ctx, uid) = pipeline_ctx(pool, mode, llm, server, limit).await;
+    ctx.llm = Arc::new(AgentLlm {
+        client: llm.clone(),
+        models: AgentModels::default(),
+    });
+    ctx.budget = Arc::new(RunBudget::new(
+        ctx.run_id,
+        uid,
+        limit,
+        Instant::now(),
+        prod_prices(),
+        88.0,
+    ));
+    (ctx, uid)
+}
+
+/// The hold each recorded request took (same estimator as `LlmCall`).
+fn holds_of(llm: &ScriptedLlm, budget: &RunBudget) -> Vec<i64> {
+    llm.requests()
+        .iter()
+        .map(|r| {
+            let user: usize = r
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .map(|c| match c {
+                    claude_client::ContentBlock::Text { text } => text.len(),
+                    _ => 0,
+                })
+                .sum();
+            let bytes = r.system.as_ref().map_or(0, String::len) + user;
+            budget
+                .cost_of(&r.model, &estimate_usage(bytes, r.max_tokens))
+                .unwrap()
+        })
+        .collect()
+}
+
+/// Realistic token counts per call (from typical Claude replies to these
+/// prompts): (input, output).
+const FRAME_U: (u32, u32) = (700, 250);
+const PROPOSE_U: (u32, u32) = (900, 150);
+const REVIEW_U: (u32, u32) = (1_500, 80);
+const SCREEN_U: (u32, u32) = (4_500, 600);
+const EXTRACT_ABSTRACT_U: (u32, u32) = (1_200, 500);
+const EXTRACT_FULL_U: (u32, u32) = (9_000, 700);
+const WRITE_U: (u32, u32) = (2_500, 500);
+const CHECK_U: (u32, u32) = (1_200, 25);
+
+fn us((i, o): (u32, u32)) -> Usage {
+    usage(i, o)
+}
+
+fn prod_script(extract_u: (u32, u32)) -> Arc<ScriptedLlm> {
+    let mut llm = ScriptedLlm::new()
+        .reply_json(agent_json("frame_pico.json"), us(FRAME_U))
+        .reply_json(agent_json("search_initial.json"), us(PROPOSE_U))
+        .reply_json(agent_json("search_accept.json"), us(REVIEW_U))
+        .reply_json(screen_reply(), us(SCREEN_U))
+        .reply_json(screen_reply(), us(SCREEN_U))
+        .reply_json(meta_extraction(), us(extract_u))
+        .reply_json(extraction(json!([finding(ICG_VERBATIM)])), us(extract_u))
+        .reply_json(three_claims(), us(WRITE_U));
+    for _ in 0..3 {
+        llm = llm.reply_json(verdict("supported"), us(CHECK_U));
+    }
+    Arc::new(llm)
+}
+
+#[tokio::test]
+async fn production_prices_quick_cannot_hold_the_finish_reserve() {
+    // Quick's limit (500 paise) is below the finish reserve itself (Write +
+    // 6 Checks ≈ 565 paise at Sonnet rates): the run wraps up right after
+    // Frame, ends partial with "stopped early", and never fails at Write.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = prod_script(EXTRACT_ABSTRACT_U);
+    let (ctx, uid) = prod_ctx(&pool, RunMode::Quick, 500, &llm, &server).await;
+    let reserve = incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[]);
+    assert!((500..700).contains(&reserve), "{reserve}");
+
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(llm.requests().len(), 1, "only Frame");
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    let text = render_text(&a);
+    assert!(text.contains(STOPPED_NO_ANSWER), "{text}");
+    assert!(!text.contains(NO_EVIDENCE));
+    assert!(a.cost_paise <= 500);
+    assert_eq!(
+        a.cost_paise,
+        charge_rows(&pool, uid).await.iter().sum::<i64>()
+    );
+}
+
+#[tokio::test]
+async fn production_prices_focused_reaches_check_within_the_reserve() {
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = prod_script(EXTRACT_FULL_U);
+    let (ctx, uid) = prod_ctx(&pool, RunMode::Focused, 4000, &llm, &server).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    assert_eq!((a.bottom_line.len(), a.references.len()), (3, 2));
+    let charges = charge_rows(&pool, uid).await;
+    assert_eq!(a.cost_paise, charges.iter().sum::<i64>());
+    assert!(a.cost_paise < 4000);
+    // The finishing holds (Write, then one per claim) fit in the reserve
+    // that gathering left free.
+    let holds = holds_of(&llm, &ctx.budget);
+    let finishing: i64 = holds[holds.len() - 4..].iter().sum();
+    assert!(finishing <= ctx.budget.finish_reserve(), "{holds:?}");
+}
+
+/// Papers Extract reads before wrap-up, applying the real budget rules
+/// (`try_hold`, `try_hold_gathering`, `should_wrap_up`) to the given
+/// `(hold, real charge)` calls: Frame, then the gathering calls with the
+/// finish reserve in force, then up to `max` extractions (the reserve
+/// grows by `growth` per paper read). `None`: gathering itself wrapped up.
+fn papers_before_wrap_up(
+    limit: i64,
+    frame: (i64, i64),
+    gathering: &[(i64, i64)],
+    extract: (i64, i64),
+    reserve: (i64, i64),
+    max: usize,
+) -> Option<usize> {
+    let now = Instant::now();
+    let b = Arc::new(RunBudget::new(
+        Uuid::new_v4(),
+        0,
+        limit,
+        now,
+        prod_prices(),
+        88.0,
+    ));
+    drop(b.try_hold(frame.0)?);
+    b.record_spent_for_test(frame.1);
+    b.set_finish_reserve(reserve.0);
+    for &(hold, real) in gathering {
+        if b.should_wrap_up(now) {
+            return None;
+        }
+        drop(b.try_hold_gathering(hold)?);
+        b.record_spent_for_test(b.spent() + real);
+    }
+    if b.should_wrap_up(now) {
+        return Some(0);
+    }
+    let mut read = 0;
+    while read < max {
+        if read > 0 && b.should_wrap_up(now) {
+            break;
+        }
+        let Some(h) = b.try_hold_gathering(extract.0) else {
+            break;
+        };
+        drop(h);
+        b.record_spent_for_test(b.spent() + extract.1);
+        read += 1;
+        b.set_finish_reserve(reserve.0 + reserve.1 * i64::try_from(read).unwrap());
+    }
+    Some(read)
+}
+
+#[tokio::test]
+async fn production_prices_capacity() {
+    // Measured holds and charges of a real Focused run at production prices
+    // (abstract-sized papers), then the budget rules applied at full depth.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = prod_script(EXTRACT_ABSTRACT_U);
+    let (ctx, uid) = prod_ctx(&pool, RunMode::Focused, 4000, &llm, &server).await;
+    let r0 = incisive_app::agent::finish_reserve(&ctx.llm, &ctx.budget, &pico(), &[]);
+    assert!(matches!(run_pipeline(&ctx).await, PipelineOutcome::Done(_)));
+    let h = holds_of(&llm, &ctx.budget);
+    let c = charge_rows(&pool, uid).await;
+    let growth = (ctx.budget.finish_reserve() - r0) / 2;
+    let (frame, propose, review, screen) = ((h[0], c[0]), (h[1], c[1]), (h[2], c[2]), (h[3], c[3]));
+    let abstract_paper = (h[5], c[5]);
+    // A full text sent at the 25,000-character cap, on top of the measured
+    // abstract prompt (conservative), at the realistic full-text usage.
+    let req = &llm.requests()[5];
+    let bytes = req.system.as_ref().map_or(0, String::len) + 25_000 + 2_000;
+    let full_hold = ctx
+        .budget
+        .cost_of(&req.model, &estimate_usage(bytes, req.max_tokens))
+        .unwrap();
+    let full_real = ctx.budget.cost_of(&req.model, &us(EXTRACT_FULL_U)).unwrap();
+    let full_paper = (full_hold, full_real);
+
+    // Quick: one refinement, 20 records (2 screening batches), 5 abstracts.
+    let quick: Vec<_> = vec![propose, review, screen, screen];
+    // Focused: three refinements, 100 records (10 batches), 10 papers.
+    let mut focused = vec![propose, review, review, review];
+    focused.extend(std::iter::repeat_n(screen, 10));
+
+    let q = |limit| papers_before_wrap_up(limit, frame, &quick, abstract_paper, (r0, growth), 5);
+    let f = |paper| papers_before_wrap_up(4000, frame, &focused, paper, (r0, growth), 10);
+    assert_eq!(q(500), None, "Quick at 500 cannot even search");
+    assert_eq!(f(full_paper), Some(6), "Focused, all full text");
+    assert_eq!(f(abstract_paper), Some(10), "Focused, all abstracts");
+    // The smallest Quick limit (5-paise steps) that reads 2 papers.
+    let min_quick = (500..5000)
+        .step_by(5)
+        .find(|l| q(*l).unwrap_or(0) >= 2)
+        .unwrap();
+    assert_eq!(min_quick, 1265, "recorded in the Task 13 report");
+    assert_eq!((r0, growth), (565, 8));
+}
+
+#[tokio::test]
+async fn extract_budget_stop_below_wrap_up_point_is_partial_not_no_evidence() {
+    // I-1. At 1,000 paise, gathering spends ~280 (under 70%) and leaves room
+    // above the finish reserve, so no wrap-up trigger fires before Extract;
+    // but the first paper's hold does not fit beside the reserve. Extract
+    // reads nothing and says so: partial, "cost limit", never "no evidence".
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = prod_script(EXTRACT_ABSTRACT_U);
+    let (ctx, uid) = prod_ctx(&pool, RunMode::Focused, 1000, &llm, &server).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(
+        llm.requests().len(),
+        5,
+        "frame, 2 search, 2 screen; no extract"
+    );
+    assert!(a.cost_paise * 100 < 1000 * 70, "{}", a.cost_paise);
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    let text = render_text(&a);
+    assert!(text.contains(STOPPED_NO_ANSWER), "{text}");
+    assert!(!text.contains(NO_EVIDENCE));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Extraction stopped early; 2 papers not read"),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn every_paper_read_is_not_stopped_early_even_past_seventy_percent() {
+    // The reverse of I-1: both papers are read (the second gives no
+    // matchable finding) and the last call crosses 70%. Nothing was left
+    // unread, so the run is not marked as stopped early.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(
+                extraction(json!([finding("a sentence that appears in no abstract at all")])),
+                usage(100, 70_000),
+            )
+            .reply_json(
+                json!({"claims": [{"text": "ICG angiography reduced anastomotic leak", "refs": [1], "confidence": "moderate"}], "insufficient": true}),
+                u(),
+            )
+            .reply_json(verdict("supported"), u()),
+    );
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0);
+    assert!(ctx.budget.should_wrap_up(Instant::now()), "past 70%");
+    assert_eq!(a.trail.stopped_early, None);
+    assert_eq!(a.bottom_line.len(), 1);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(l.iter().all(|x| !x.contains("stopped early")), "{l:?}");
+    assert!(
+        l.iter().any(|x| x.starts_with("1 papers gave no finding")),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn write_refused_for_budget_is_partial_not_failed() {
+    // The first extraction costs far more than its hold (~3,960 of 4,000
+    // paise), so even the reserve cannot save Write's hold: the run ends
+    // partial with a Note, never failed/over_budget.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(gathering_script().reply_json(meta_extraction(), usage(100, 90_000)));
+    let (ctx, uid) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    assert_eq!(llm.remaining(), 0, "no Write call was made");
+    assert_eq!(a.trail.stopped_early.as_deref(), Some("cost limit"));
+    assert!(a.bottom_line.is_empty() && a.insufficient && !a.no_verified_claims);
+    assert!(render_text(&a).contains(STOPPED_NO_ANSWER));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x == "Not enough of the cost limit was left to write the answer"),
+        "{l:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_claims_drafted_says_no_evidence_not_unverified() {
+    // M-3: Write drafted nothing from two papers; nothing was checked, so
+    // the bottom line is the insufficient / no-evidence wording.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        gathering_script()
+            .reply_json(meta_extraction(), u())
+            .reply_json(extraction(json!([finding(ICG_VERBATIM)])), u())
+            .reply_json(json!({"claims": [], "insufficient": true}), u()),
+    );
+    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(matches!(outcome, PipelineOutcome::Done(_)), "{outcome:?}");
+    let a = answer_of(&outcome);
+    assert!(a.insufficient && !a.no_verified_claims);
+    assert_eq!(a.check.checked, 0);
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!("Bottom line\n{NO_EVIDENCE}\n")),
+        "{text}"
+    );
+    assert!(!text.contains(NO_VERIFIED_CLAIMS));
+}
+
+#[tokio::test]
+async fn screen_stop_counts_records_as_not_assessed() {
+    // M-4: the first screening batch passes 70%, so the rest are not
+    // assessed: counted apart, never among the exclusion reasons.
+    let Some(pool) = pool().await else { return };
+    let server = icg_server(lit_fixture("pubmed_esummary_icg.json")).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(agent_json("frame_pico.json"), u())
+            .reply_json(agent_json("search_initial.json"), u())
+            .reply_json(agent_json("search_accept.json"), u())
+            .reply_json(screen_reply(), usage(100, 70_000)),
+    );
+    let (ctx, _) = pipeline_ctx(&pool, RunMode::Focused, &llm, &server, 4000).await;
+    let outcome = run_pipeline(&ctx).await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Partial(_)),
+        "{outcome:?}"
+    );
+    let a = answer_of(&outcome);
+    let t = &a.trail;
+    assert_eq!(t.stopped_early.as_deref(), Some("cost limit"));
+    assert!(t.not_assessed > 0 && t.not_assessed < t.screened, "{t:?}");
+    assert!(
+        t.excluded_top
+            .iter()
+            .all(|(r, _)| r != incisive_app::agent::screen::REASON_STOPPED),
+        "{t:?}"
+    );
+    let text = render_text(&a);
+    assert!(
+        text.contains(&format!(
+            "Screened {} of {}, included {}, excluded {}; {} not assessed (search stopped early)",
+            t.screened - t.not_assessed,
+            t.screened,
+            t.included,
+            t.screened - t.not_assessed - t.included,
+            t.not_assessed
+        )),
+        "{text}"
+    );
 }
