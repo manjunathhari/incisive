@@ -5,8 +5,13 @@
 //!   is sent as `wrap_source("ref-N", text)`, N being its position in the
 //!   input, and the PICO inside `<pico>…</pico>` as data. The text is the
 //!   title (context only), then each section under a `[name]` label: for full
-//!   text abstract, methods, results and discussion (already capped at 60,000
-//!   characters by Europe PMC's `full_text`), otherwise `[abstract]`.
+//!   text abstract, methods, results and discussion, otherwise `[abstract]`.
+//! * **Text cap** (Ruling R-11b): at most [`MAX_TEXT`] (25,000) characters of
+//!   section text per paper. Room goes to the abstract first, then results,
+//!   then methods, then discussion (so discussion is dropped first, then
+//!   methods are cut). A cut section ends at its last whitespace, never inside
+//!   a word or number. The cut happens before matching is set up, so quotes
+//!   are checked against exactly what was sent.
 //! * A title-only paper is never sent: a title cannot support a finding. It is
 //!   skipped and counted in a Note line.
 //! * The reply is strict JSON, read field by field (it is untrusted):
@@ -14,16 +19,30 @@
 //!   "findings":[{"outcome","result","quote"}]}`. Only the first
 //!   [`MAX_FINDINGS`] (6) findings are considered; the rest are ignored.
 //! * **The verbatim rule** ([`find_verbatim`]). A finding is kept only when its
-//!   quote, after [`normalise`] (whitespace runs to one space, trimmed, ‘’ to
-//!   ', “” to ", hyphen/dash/minus characters to -), is a substring of one
-//!   section exactly as it was sent (that is, after `neutralise_source_tags`),
-//!   normalised the same way. Case and digits must match; the normalised quote
-//!   must be [`MIN_QUOTE`] (20) to [`MAX_QUOTE`] (1,000) characters. A quote
-//!   may not span two sections (or include a section label or the title).
-//!   The stored quote is the matching span of the sent section text itself,
-//!   not the model's copy, so later steps show and check real source text.
-//!   Every other finding is dropped and counted; a paper left with no finding
-//!   is dropped too.
+//!   quote, after [`normalise`], occurs in one section exactly as it was sent
+//!   (that is, after `neutralise_source_tags`), normalised the same way, at an
+//!   occurrence that is properly bounded:
+//!   - it **starts at a clause start** (Ruling R-11d): the section start, a
+//!     new paragraph (a blank line in the source), or after `.`, `;`, `:`,
+//!     `(` or `[` (optionally followed by a space). A suffix of a clause ("…
+//!     did not | reduce the rate") can never pass as the clause;
+//!   - the character just before it is not a letter or digit, nor one of
+//!     `- . + ± $ <` (so no sign, decimal point or digit is cut off);
+//!   - the character just after it is not a letter or digit, not `%`, and not
+//!     `.` or `,` followed by a digit (so "12%" never reads as "1").
+//!
+//!   Every occurrence is tried. Case and digits must match; the normalised
+//!   quote must be [`MIN_QUOTE`] (20) to [`MAX_QUOTE`] (1,000) characters. A
+//!   quote may not span two sections (or include a section label or the
+//!   title). The stored quote is the matching span of the sent section text
+//!   itself, not the model's copy, so later steps show and check real source
+//!   text.
+//! * **The result must come from the quote** (Ruling R-11c,
+//!   [`finding_consistent`]): every number in `result` must be a number of
+//!   the quote; a `result` with no digits needs a quote with a digit or one of
+//!   the outcome's words (4+ letters).
+//! * A finding failing either rule is dropped and counted ("quote not found");
+//!   a paper left with no finding is dropped too.
 //! * `ref_id` is 1..K over the papers that survive, in input order.
 //! * A paper whose call fails (`Llm`, or `Parse` after the wrapper's retry) is
 //!   dropped with a Note. `OverBudget` stops extraction and returns what was
@@ -34,8 +53,11 @@
 //! Privacy: nothing here logs quotes, text, the PICO or the question; only the
 //! run id, counts and fixed kinds. Step lines hold counts only.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
 use std::time::Instant;
 
+use regex::Regex;
 use serde_json::Value;
 
 use super::frame::Pico;
@@ -54,6 +76,8 @@ pub const MIN_QUOTE: usize = 20;
 /// Longest normalised quote accepted, in characters: a "quote" of a whole
 /// section supports nothing in particular.
 pub const MAX_QUOTE: usize = 1_000;
+/// Characters of section text sent per paper (Ruling R-11b).
+pub const MAX_TEXT: usize = 25_000;
 /// Characters of the title shown to the model.
 const MAX_TITLE: usize = 500;
 /// Characters kept of `design`.
@@ -117,75 +141,148 @@ pub struct Extracted {
     pub findings: Vec<Finding>,
 }
 
-// ---------- the verbatim rule ----------
+// ---------- normalisation ----------
 
-/// The normalised form of one character, or `None` for whitespace.
-fn fold(c: char) -> Option<char> {
-    if c.is_whitespace() {
-        return None;
-    }
-    Some(match c {
-        '\u{2018}' | '\u{2019}' => '\'',
-        '\u{201c}' | '\u{201d}' => '"',
-        // Hyphen, non-breaking hyphen, figure dash, en dash, em dash,
-        // horizontal bar, minus sign.
-        '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
-        c => c,
-    })
+enum Fold {
+    /// Dropped: soft hyphen and zero-width characters.
+    Skip,
+    Space,
+    Char(char),
 }
 
-/// `s` normalised, with the source byte span of every output byte.
-fn normalise_mapped(s: &str) -> (String, Vec<(usize, usize)>) {
-    let mut out = String::with_capacity(s.len());
+fn fold(c: char) -> Fold {
+    match c {
+        '\u{ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' => Fold::Skip,
+        c if c.is_whitespace() => Fold::Space,
+        '\u{2018}' | '\u{2019}' => Fold::Char('\''),
+        '\u{201c}' | '\u{201d}' => Fold::Char('"'),
+        // Hyphen, non-breaking hyphen, figure dash, en dash, em dash,
+        // horizontal bar, minus sign.
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => Fold::Char('-'),
+        c => Fold::Char(c),
+    }
+}
+
+/// A normalised text with the source byte span of every output byte and the
+/// output positions of spaces that stand for a paragraph break.
+struct Mapped {
+    text: String,
+    map: Vec<(usize, usize)>,
+    paragraphs: HashSet<usize>,
+}
+
+fn normalise_mapped(s: &str) -> Mapped {
+    let mut text = String::with_capacity(s.len());
     let mut map = Vec::with_capacity(s.len());
-    let mut gap: Option<(usize, usize)> = None;
+    let mut paragraphs = HashSet::new();
+    // (start, end, newlines) of the pending whitespace run.
+    let mut gap: Option<(usize, usize, usize)> = None;
     for (i, c) in s.char_indices() {
         let end = i + c.len_utf8();
-        let Some(m) = fold(c) else {
-            gap = Some(gap.map_or((i, end), |(start, _)| (start, end)));
-            continue;
-        };
-        if let Some(g) = gap.take() {
-            // Leading whitespace is dropped; trailing never gets flushed.
-            if !out.is_empty() {
-                out.push(' ');
-                map.push(g);
+        match fold(c) {
+            Fold::Skip => {}
+            Fold::Space => {
+                let nl = usize::from(c == '\n');
+                gap = Some(gap.map_or((i, end, nl), |(start, _, n)| (start, end, n + nl)));
+            }
+            Fold::Char(m) => {
+                if let Some((start, gend, newlines)) = gap.take() {
+                    // Leading whitespace is dropped; trailing never gets flushed.
+                    if !text.is_empty() {
+                        if newlines >= 2 {
+                            paragraphs.insert(text.len());
+                        }
+                        text.push(' ');
+                        map.push((start, gend));
+                    }
+                }
+                text.push(m);
+                map.extend(std::iter::repeat_n((i, end), m.len_utf8()));
             }
         }
-        out.push(m);
-        map.extend(std::iter::repeat_n((i, end), m.len_utf8()));
     }
-    (out, map)
+    Mapped {
+        text,
+        map,
+        paragraphs,
+    }
 }
 
 /// The form both sides are compared in: every run of Unicode whitespace
-/// becomes one space, the ends are trimmed, ‘’ become `'`, “” become `"`, and
-/// hyphen, dash and minus characters (U+2010 to U+2015, U+2212) become `-`.
-/// Case is kept.
+/// becomes one space, the ends are trimmed, soft hyphens and zero-width
+/// characters (U+00AD, U+200B to U+200D, U+2060, U+FEFF) are removed, ‘’
+/// become `'`, “” become `"`, and hyphen, dash and minus characters (U+2010 to
+/// U+2015, U+2212) become `-`. Case is kept.
 pub fn normalise(s: &str) -> String {
-    normalise_mapped(s).0
+    normalise_mapped(s).text
 }
+
+// ---------- the verbatim rule ----------
+
+/// Characters that may not sit right before a quote: they would be cut off
+/// from the number or sign the quote starts with.
+const BAD_BEFORE: &[char] = &['-', '.', '+', '\u{b1}', '$', '<'];
+/// Characters a quote may start right after (the clause starts).
+const CLAUSE_OPENERS: &[char] = &['.', ';', ':', '(', '['];
 
 /// A source section prepared for matching.
 struct Section {
     /// The section exactly as sent (neutralised).
     sent: String,
-    norm: String,
-    map: Vec<(usize, usize)>,
+    norm: Mapped,
 }
 
 impl Section {
     fn new(sent: String) -> Section {
-        let (norm, map) = normalise_mapped(&sent);
-        Section { sent, norm, map }
+        let norm = normalise_mapped(&sent);
+        Section { sent, norm }
     }
 
-    /// The span of `sent` matching the normalised quote `q` (non-empty).
+    fn starts_clause(&self, at: usize) -> bool {
+        let before = &self.norm.text[..at];
+        let Some(last) = before.chars().next_back() else {
+            return true;
+        };
+        if last == ' ' && self.norm.paragraphs.contains(&(at - 1)) {
+            return true;
+        }
+        before
+            .trim_end_matches(' ')
+            .chars()
+            .next_back()
+            .is_none_or(|c| CLAUSE_OPENERS.contains(&c))
+    }
+
+    fn bounded_before(&self, at: usize) -> bool {
+        self.norm.text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && !BAD_BEFORE.contains(&c))
+    }
+
+    fn bounded_after(&self, end: usize) -> bool {
+        let mut rest = self.norm.text[end..].chars();
+        match rest.next() {
+            None => true,
+            Some(c) if c.is_alphanumeric() || c == '%' => false,
+            Some('.' | ',') => !rest.next().is_some_and(|d| d.is_ascii_digit()),
+            Some(_) => true,
+        }
+    }
+
+    /// The span of `sent` at the first properly bounded occurrence of the
+    /// normalised quote `q` (non-empty, trimmed).
     fn find(&self, q: &str) -> Option<&str> {
-        let at = self.norm.find(q)?;
-        let start = self.map[at].0;
-        let end = self.map[at + q.len() - 1].1;
-        Some(&self.sent[start..end])
+        self.norm.text.match_indices(q).find_map(|(at, _)| {
+            let end = at + q.len();
+            (self.starts_clause(at) && self.bounded_before(at) && self.bounded_after(end)).then(
+                || {
+                    let start = self.norm.map[at].0;
+                    let stop = self.norm.map[end - 1].1;
+                    &self.sent[start..stop]
+                },
+            )
+        })
     }
 }
 
@@ -195,17 +292,80 @@ fn quote_key(quote: &str) -> Option<String> {
     (MIN_QUOTE..=MAX_QUOTE).contains(&len).then_some(q)
 }
 
-/// The span of `section` that `quote` reproduces under [`normalise`], or
-/// `None` when it does not, or when the normalised quote is shorter than
-/// [`MIN_QUOTE`] or longer than [`MAX_QUOTE`] characters. `section` must be
-/// the text exactly as it was shown to the model. The span returned is the
-/// section's own text (its whitespace, quotes and dashes), starting and ending
-/// on a non-space character.
+/// The span of `section` that `quote` reproduces under [`normalise`] at a
+/// properly bounded occurrence (see the module docs), or `None`. `None` too
+/// when the normalised quote is shorter than [`MIN_QUOTE`] or longer than
+/// [`MAX_QUOTE`] characters. `section` must be the text exactly as it was
+/// shown to the model. The span returned is the section's own text (its
+/// whitespace, quotes and dashes), starting and ending on a non-space
+/// character.
 pub fn find_verbatim<'a>(section: &'a str, quote: &str) -> Option<&'a str> {
     let q = quote_key(quote)?;
-    let (norm, map) = normalise_mapped(section);
-    let at = norm.find(&q)?;
-    Some(&section[map[at].0..map[at + q.len() - 1].1])
+    let s = Section::new(section.to_string());
+    let hit = s.find(&q)?;
+    // Same text, so the same offsets in `section`.
+    let start = hit.as_ptr() as usize - s.sent.as_ptr() as usize;
+    Some(&section[start..start + hit.len()])
+}
+
+// ---------- the result must come from the quote ----------
+
+static NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-?\d+(?:[.,]\d+)?%?").expect("number pattern is valid"));
+static THOUSANDS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^-?\d{1,3},\d{3}%?$").expect("thousands pattern is valid"));
+
+/// The number tokens of `s` (normalised first). A `-` right after a digit or
+/// `%` is a range dash, not a sign; a comma before exactly three final digits
+/// is a thousands separator.
+fn numbers(s: &str) -> Vec<String> {
+    let s = normalise(s);
+    NUMBER
+        .find_iter(&s)
+        .map(|m| {
+            let mut t = m.as_str();
+            if t.starts_with('-')
+                && s[..m.start()]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_digit() || c == '%')
+            {
+                t = &t[1..];
+            }
+            if THOUSANDS.is_match(t) {
+                t.replace(',', "")
+            } else {
+                t.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Lower-cased words of 4+ letters.
+fn content_words(s: &str) -> HashSet<String> {
+    s.split(|c: char| !c.is_alphabetic())
+        .filter(|w| w.chars().count() >= 4)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Ruling R-11c: every number in `result` is a number of `quote` (a result
+/// number without `%` may match the quote's number with `%`). A `result`
+/// with no digits needs a `quote` with a digit or one of `outcome`'s content
+/// words (4+ letters, any case).
+pub fn finding_consistent(outcome: &str, result: &str, quote: &str) -> bool {
+    let wanted = numbers(result);
+    if wanted.is_empty() && !result.chars().any(|c| c.is_ascii_digit()) {
+        if quote.chars().any(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        let q = content_words(quote);
+        return content_words(outcome).iter().any(|w| q.contains(w));
+    }
+    let have: HashSet<String> = numbers(quote).into_iter().collect();
+    wanted
+        .iter()
+        .all(|t| have.contains(t) || (!t.ends_with('%') && have.contains(&format!("{t}%"))))
 }
 
 // ---------- prompt ----------
@@ -217,9 +377,10 @@ Report the study design, the number of participants analysed (n, an integer, or 
 the population, the intervention, the comparison (null if none), and up to 6 key findings relevant to the PICO, most relevant first. \
 For each finding give the outcome, the result, and a quote. \
 The result must include the numbers and effect sizes the paper reports (rates, counts, odds or risk ratios, \
-confidence intervals, p values) whenever they are present. \
-The quote must be copied exactly, character for character, from the text of a single section: \
-one contiguous passage of at least one full clause that states the result. \
+confidence intervals, p values) whenever they are present, and every number in the result must appear in its quote. \
+The quote must be copied exactly, character for character, from the text of a single section. \
+Quote whole sentences or whole clauses, starting at the clause start (never part-way through a clause, a word or a number), \
+including every number the result gives. \
 Do not paraphrase, shorten, correct or reword it; do not use an ellipsis or join separate passages; \
 do not include the section label or the title; do not add quotation marks around it. \
 A finding without such a quote will be discarded. If the paper reports nothing relevant, give an empty findings list. \
@@ -238,6 +399,48 @@ fn label(name: &str) -> String {
     if l.is_empty() { "section".into() } else { l }
 }
 
+/// Order in which sections get room under [`MAX_TEXT`].
+fn priority(label: &str) -> u8 {
+    match label {
+        "abstract" => 0,
+        "results" => 1,
+        "methods" => 2,
+        "discussion" => 3,
+        _ => 4,
+    }
+}
+
+/// `text` cut to at most `max` characters, at its last whitespace (empty when
+/// a cut is needed and there is none).
+fn cut(text: &str, max: usize) -> &str {
+    match text.char_indices().nth(max) {
+        None => text,
+        Some((at, c)) if c.is_whitespace() => text[..at].trim_end(),
+        Some((at, _)) => text[..at]
+            .rfind(char::is_whitespace)
+            .map_or("", |ws| text[..ws].trim_end()),
+    }
+}
+
+/// The sections cut to [`MAX_TEXT`] characters in all (see the module docs),
+/// in their original order.
+fn cap_sections(sections: Vec<(String, &str)>) -> Vec<(String, &str)> {
+    let mut order: Vec<usize> = (0..sections.len()).collect();
+    order.sort_by_key(|&i| priority(&sections[i].0));
+    let mut room = MAX_TEXT;
+    let mut kept: Vec<Option<&str>> = vec![None; sections.len()];
+    for i in order {
+        let t = cut(sections[i].1, room);
+        room -= t.chars().count();
+        kept[i] = Some(t);
+    }
+    sections
+        .into_iter()
+        .zip(kept)
+        .map(|((name, _), t)| (name, t.unwrap_or_default()))
+        .collect()
+}
+
 /// The text sent for `u` (already neutralised, so `wrap_source` leaves it as
 /// is) and its quotable sections, or `None` when there is no text to quote.
 fn prepare(u: &UsedPaper) -> Option<(String, Vec<Section>)> {
@@ -245,9 +448,9 @@ fn prepare(u: &UsedPaper) -> Option<(String, Vec<Section>)> {
         PaperText::FullText(ft) => ft
             .sections
             .iter()
-            .map(|(n, t)| (label(n), t.as_str()))
+            .map(|(n, t)| (label(n), t.trim()))
             .collect(),
-        PaperText::AbstractOnly(a) => vec![("abstract".into(), a.as_str())],
+        PaperText::AbstractOnly(a) => vec![("abstract".into(), a.trim())],
         PaperText::TitleOnly => return None,
     };
     let title = neutralise_source_tags(&clip(&u.paper.title, MAX_TITLE));
@@ -256,8 +459,8 @@ fn prepare(u: &UsedPaper) -> Option<(String, Vec<Section>)> {
         SourceKind::of(&u.text).as_str()
     );
     let mut quotable = Vec::new();
-    for (name, text) in sections {
-        let sent = neutralise_source_tags(text.trim());
+    for (name, text) in cap_sections(sections) {
+        let sent = neutralise_source_tags(text);
         if sent.is_empty() {
             continue;
         }
@@ -317,7 +520,15 @@ fn reply_object(v: Value) -> Option<Value> {
     }
 }
 
-/// The paper's extraction with only verified findings, and how many of the
+struct ExtractedFields {
+    design: String,
+    n: Option<u32>,
+    population: String,
+    intervention: String,
+    comparison: Option<String>,
+}
+
+/// The reply's fields with only verified findings, and how many of the
 /// considered findings were dropped.
 fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, ExtractedFields) {
     let mut kept = Vec::new();
@@ -328,15 +539,18 @@ fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, Extracte
         .map(Vec::as_slice)
         .unwrap_or_default();
     for f in findings.iter().take(MAX_FINDINGS) {
+        let outcome = text_field(f, "outcome", MAX_FIELD);
+        let result = text_field(f, "result", MAX_RESULT);
         let quote = f
             .get("quote")
             .and_then(Value::as_str)
             .and_then(quote_key)
-            .and_then(|q| sections.iter().find_map(|s| s.find(&q)));
+            .and_then(|q| sections.iter().find_map(|s| s.find(&q)))
+            .filter(|q| finding_consistent(&outcome, &result, q));
         match quote {
             Some(q) => kept.push(Finding {
-                outcome: text_field(f, "outcome", MAX_FIELD),
-                result: text_field(f, "result", MAX_RESULT),
+                outcome,
+                result,
                 quote: q.to_string(),
             }),
             None => dropped += 1,
@@ -352,14 +566,6 @@ fn verify(reply: &Value, sections: &[Section]) -> (Vec<Finding>, usize, Extracte
     (kept, dropped, fields)
 }
 
-struct ExtractedFields {
-    design: String,
-    n: Option<u32>,
-    population: String,
-    intervention: String,
-    comparison: Option<String>,
-}
-
 // ---------- the step ----------
 
 /// Extract findings from `papers` (see the module docs).
@@ -371,7 +577,10 @@ pub async fn extract(
 ) -> Result<Vec<Extracted>, StepError> {
     let run_id = ctx.run_id;
     let call = llm.call(ctx, &llm.models.extract, "extract");
-    let total = papers.len();
+
+    let prepared: Vec<_> = papers.iter().map(prepare).collect();
+    // Papers from `i` on that would have been sent (title-only ones never are).
+    let unread = |i: usize| prepared[i..].iter().filter(|p| p.is_some()).count();
 
     let mut out: Vec<Extracted> = Vec::new();
     let mut dropped_findings = 0usize;
@@ -381,23 +590,24 @@ pub async fn extract(
     let mut stopped = 0usize;
     let mut calls = 0usize;
 
-    for (i, u) in papers.into_iter().enumerate() {
+    for (i, (u, prep)) in papers.into_iter().zip(prepared.iter()).enumerate() {
         if ctx.cancel.is_cancelled() {
             return Err(StepError::Cancelled);
         }
-        let Some((body, sections)) = prepare(&u) else {
+        let Some((body, sections)) = prep else {
             title_only += 1;
             continue;
         };
         if calls > 0 && ctx.budget.should_wrap_up(Instant::now()) {
             tracing::info!(%run_id, step = "extract", read = calls, "wrap-up reached; extraction stopped");
-            stopped = total - i;
+            stopped = unread(i);
+            title_only += prepared[i..].iter().filter(|p| p.is_none()).count();
             break;
         }
         let id = format!("ref-{}", i + 1);
         calls += 1;
         let reply: Value = match call
-            .json(SYSTEM, &prompt(pico, &id, &body), MAX_TOKENS)
+            .json(SYSTEM, &prompt(pico, &id, body), MAX_TOKENS)
             .await
         {
             Ok(v) => v,
@@ -408,7 +618,8 @@ pub async fn extract(
             }
             Err(StepError::OverBudget) => {
                 tracing::info!(%run_id, step = "extract", read = calls - 1, "over budget; extraction stopped");
-                stopped = total - i;
+                stopped = unread(i);
+                title_only += prepared[i..].iter().filter(|p| p.is_none()).count();
                 break;
             }
             Err(e) => return Err(e),
@@ -418,7 +629,7 @@ pub async fn extract(
             failed += 1;
             continue;
         };
-        let (findings, dropped, f) = verify(&reply, &sections);
+        let (findings, dropped, f) = verify(&reply, sections);
         dropped_findings += dropped;
         if findings.is_empty() {
             empty += 1;
