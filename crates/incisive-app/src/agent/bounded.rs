@@ -72,6 +72,28 @@ pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(20);
 /// The wait when the server gave no `retry-after`.
 pub const DEFAULT_RATE_LIMIT_WAIT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+thread_local! {
+    /// Passes through the step loop (tests: no busy-waiting).
+    static WAKES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Longest single sleep while an item waits, so a cancel is seen within it.
+const CANCEL_POLL: Duration = Duration::from_millis(250);
+
+/// Sleep until `at`, waking early (within [`CANCEL_POLL`]) once `cancel` is
+/// set (Fix B re-review N-2). The cancel flag has no notifier, so it is
+/// polled in slices.
+async fn sleep_or_cancel(at: Instant, cancel: &CancelFlag) {
+    loop {
+        let left = at.saturating_duration_since(Instant::now());
+        if left.is_zero() || cancel.is_cancelled() {
+            return;
+        }
+        tokio::time::sleep(left.min(CANCEL_POLL)).await;
+    }
+}
+
 /// Run the items `0..items` with at most `max_in_flight` in flight (see the
 /// module docs).
 ///
@@ -118,8 +140,14 @@ where
     let mut launching = true;
     let mut rate_limited = 0u32;
 
+    // A hold was refused beside the calls in flight: nothing is tried again
+    // until one of them settles (Fix B re-review N-1: no busy retries).
+    let mut blocked = false;
+
     loop {
-        while launching && in_flight.len() < cap {
+        #[cfg(test)]
+        WAKES.with(|w| w.set(w.get() + 1));
+        while launching && !blocked && in_flight.len() < cap {
             let now = Instant::now();
             // A re-queued item that is due goes first, then the next new one.
             let due = waiting
@@ -163,12 +191,13 @@ where
                 Some(Err(StepError::OverBudget)) if !in_flight.is_empty() => {
                     // The hold does not fit beside the calls in flight; their
                     // real charges are usually below their holds, so try
-                    // this item again once one has settled.
+                    // this item again once one has settled (not before).
                     if due.is_some() {
                         waiting.push((now, i));
                     } else {
                         next = i;
                     }
+                    blocked = true;
                     break;
                 }
                 Some(Err(StepError::OverBudget)) => {
@@ -186,29 +215,37 @@ where
             }
         }
 
-        // Wait for a call to finish, or for a re-queued item to be due.
-        let next_due = if launching {
+        // Wait for a call to finish, or for a re-queued item to be due; a
+        // due time counts only when the item could launch then (a free slot
+        // and no refused hold waiting for a settle), so nothing spins.
+        let next_due = if launching && !blocked && in_flight.len() < cap {
             waiting.iter().map(|(at, _)| *at).min()
         } else {
             None
         };
+        if next_due.is_some() && cancel.is_cancelled() {
+            // Woken by a cancel while an item waits (N-2): stop as a launch
+            // would; the calls in flight still charge from their own tasks.
+            return Err(StepError::Cancelled);
+        }
         let finished = match (in_flight.is_empty(), next_due) {
             (true, None) => break,
             (true, Some(at)) => {
-                tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
+                sleep_or_cancel(at, cancel).await;
                 continue;
             }
             (false, None) => in_flight.next().await,
             (false, Some(at)) => {
                 tokio::select! {
                     r = in_flight.next() => r,
-                    () = tokio::time::sleep(at.saturating_duration_since(Instant::now())) => continue,
+                    () = sleep_or_cancel(at, cancel) => continue,
                 }
             }
         };
         let Some((i, r)) = finished else {
             break;
         };
+        blocked = false;
         match r {
             Err(StepError::OverBudget) => {
                 tracing::info!(%run_id, step, "over budget; no further calls launched");
@@ -674,5 +711,142 @@ mod tests {
         drop((h, s));
         assert_eq!((b.held(), b.in_flight_reserve()), (0, 0));
         assert!(!b.should_wrap_up(Instant::now()));
+    }
+
+    /// Item `i` takes `ms[i]` and costs `charges[i]`; `rl`'s first call is
+    /// rate limited (retry-after `ra`); each launch takes a hold of
+    /// `holds[i]`. Returns the outcomes, launch attempts per item (refused
+    /// holds included) and passes through the step loop.
+    async fn requeue_case(
+        b: &Arc<RunBudget>,
+        k: usize,
+        ms: &[u64],
+        holds: &[i64],
+        charges: &[i64],
+        rl: usize,
+        ra: Duration,
+    ) -> (Vec<Outcome<usize>>, Vec<usize>, usize) {
+        let attempts = Mutex::new(vec![0usize; ms.len()]);
+        let calls = Mutex::new(vec![0usize; ms.len()]);
+        WAKES.with(|w| w.set(0));
+        let out = run(
+            b,
+            &CancelFlag::default(),
+            "test",
+            k,
+            ms.len(),
+            |i| {
+                attempts.lock().unwrap()[i] += 1;
+                let Some(h) = b.try_hold_gathering(holds[i]) else {
+                    return Some(Err(StepError::OverBudget));
+                };
+                let a = {
+                    let mut c = calls.lock().unwrap();
+                    c[i] += 1;
+                    c[i]
+                };
+                let (b, d, cost) = (b.clone(), ms[i], charges[i]);
+                Some(Ok(async move {
+                    let limited = i == rl && a == 1;
+                    if !limited {
+                        tokio::time::sleep(Duration::from_millis(d)).await;
+                    }
+                    drop(h);
+                    if limited {
+                        Err(StepError::RateLimited(Some(ra)))
+                    } else {
+                        b.record_spent_for_test(b.spent() + cost);
+                        Ok(i)
+                    }
+                }))
+            },
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let wakes = WAKES.with(std::cell::Cell::get);
+        (out, attempts.into_inner().unwrap(), wakes)
+    }
+
+    #[tokio::test]
+    async fn requeued_item_with_no_free_slot_does_not_spin() {
+        // N-1 case A: three go out; item 2 is rate limited at once, so the
+        // concurrency drops to 1 while items 0 and 1 run for 300 ms. Item 2
+        // is due after 10 ms but has no slot: the loop sleeps until a call
+        // settles instead of waking again and again.
+        let b = budget(1_000_000);
+        let (out, attempts, wakes) = requeue_case(
+            &b,
+            3,
+            &[300, 300, 10],
+            &[10, 10, 10],
+            &[1, 1, 1],
+            2,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            out.iter().all(|o| matches!(o, Outcome::Done(Ok(_)))),
+            "{out:?}"
+        );
+        assert_eq!(attempts, vec![1, 1, 2]);
+        assert!(wakes <= 8, "{wakes} passes through the loop");
+    }
+
+    #[tokio::test]
+    async fn requeued_item_whose_hold_is_refused_waits_for_a_settle() {
+        // N-1 case B: limit 2,000. Item 0 (hold 400) runs 300 ms; item 1
+        // (hold 400) is rate limited at once (due after 10 ms); item 2 (hold
+        // 50) settles after 10 ms and costs 500. Item 1 is then due with a
+        // free slot, but beside item 0 it needs 500 + 2 × 800 > 2,000: its
+        // hold is refused, and it is tried again only once item 0 has
+        // settled (then alone it fits): 3 attempts, not hundreds.
+        let b = budget(2_000);
+        let (out, attempts, wakes) = requeue_case(
+            &b,
+            4,
+            &[300, 10, 10],
+            &[400, 400, 50],
+            &[1, 1, 500],
+            1,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            out.iter().all(|o| matches!(o, Outcome::Done(Ok(_)))),
+            "{out:?}"
+        );
+        assert_eq!(attempts, vec![1, 3, 1], "429, refused once, then read");
+        assert!(wakes <= 8, "{wakes} passes through the loop");
+    }
+
+    #[tokio::test]
+    async fn cancel_wakes_a_requeue_sleep() {
+        // N-2: the only item waits 10 s after a rate limit; a cancel 50 ms
+        // in ends the step within the poll interval.
+        let b = budget(1_000_000);
+        let cancel = CancelFlag::default();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            c2.cancel();
+        });
+        let t0 = Instant::now();
+        let r: Result<Vec<Outcome<()>>, StepError> = run(
+            &b,
+            &cancel,
+            "test",
+            4,
+            1,
+            |_| {
+                Some(Ok(async {
+                    Err(StepError::RateLimited(Some(Duration::from_secs(10))))
+                }))
+            },
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), StepError::Cancelled);
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
     }
 }
