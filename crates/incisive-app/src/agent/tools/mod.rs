@@ -18,6 +18,8 @@
 //! whole with `wrap_source` before the model sees it: every tool result,
 //! paper text or not, is data.
 
+pub mod lit;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

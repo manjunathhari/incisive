@@ -12,3 +12,10 @@ Real responses recorded on 2026-10-28 with curl.
 
 Unpaywall was queried with the owner's email for the recording only; the saved
 responses do not contain it.
+
+- `pubmed_elink_neighbor_score.json`: **constructed, not recorded** (Phase 3
+  T2: no live fetch). It follows the documented E-utilities elink JSON shape
+  for `dbfrom=pubmed&cmd=neighbor_score&linkname=pubmed_pubmed&retmode=json`
+  (`linksets[].linksetdbs[].links[]` of `{"id","score"}`, the source id listed
+  first), using the ICG fixture ids so `pubmed_esummary_icg.json` serves the
+  titles.
