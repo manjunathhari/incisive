@@ -3262,3 +3262,227 @@ async fn ssr_run_page_header_is_the_full_question() {
     assert!(html[h2..end].contains(&escaped), "{}", &html[h2..end]);
     assert!(!html.contains("<i>ICG</i>"));
 }
+
+// ---------- Phase 3 T6: the AnswerV3 page ----------
+
+fn answer_v3_json(retracted: bool) -> serde_json::Value {
+    use incisive_app::agent::answer_v3::*;
+    let a = AnswerV3 {
+        version: ANSWER_VERSION,
+        question: "Robotic <i>vs</i> lap hernia?".into(),
+        mode: RunMode::Quick,
+        created_at: chrono::Utc::now(),
+        answer: Some(WrittenAnswer {
+            bottom_line: BottomLine {
+                text: "No benefit <script>alert(1)</script> [41060645; 39979619].".into(),
+                certainty: Certainty::Low,
+                certainty_reason: "Small trials <b>only</b> [39979619]".into(),
+            },
+            outcomes: vec![Outcome {
+                outcome: "Chronic pain".into(),
+                rct_evidence: "Two RCTs".into(),
+                effect_text: "RR 0.53 (0.20 to 1.39) [41060645]".into(),
+                numbers: vec![Number {
+                    label: "RR".into(),
+                    value: 0.53,
+                    unit: None,
+                    arm: None,
+                    ci_low: Some(0.2),
+                    ci_high: Some(1.39),
+                    p: None,
+                    pmid: "41060645".into(),
+                }],
+                certainty: Certainty::VeryLow,
+                why: "wide CI".into(),
+                pmids: vec!["41060645".into()],
+            }],
+            studies: vec![Study {
+                pmid: "39979619".into(),
+                label: "Self-fixated <img src=x onerror=alert(2)> (2025)".into(),
+                design: "RCT".into(),
+                n: Some(120),
+                setting: "Single centre".into(),
+                comparison: "self-fixating vs tacked".into(),
+                key_results: "no difference [39979619]".into(),
+                appraisal: "short follow-up".into(),
+            }],
+            conflicts: vec![Conflict {
+                text: "One trial differs [39979619]".into(),
+                pmids: vec!["39979619".into()],
+            }],
+            applicability: Applicability {
+                case_mix: "Primary hernias".into(),
+                india_cost_context: "Indian costs are not known.".into(),
+                training: "A low-risk index case.".into(),
+            },
+            would_change: vec!["A multicentre blinded RCT".into()],
+        }),
+        empty_reason: None,
+        references: vec![
+            ReferenceV3 {
+                n: 1,
+                pmid: "41060645".into(),
+                title: "Biological vs Synthetic Mesh".into(),
+                journal: Some("JAMA Surg".into()),
+                year: Some(2025),
+                doi: Some("10.1001/jamasurg.2025.4071".into()),
+                retracted: false,
+            },
+            ReferenceV3 {
+                n: 2,
+                pmid: "39979619".into(),
+                title: "Self-fixated meshes".into(),
+                journal: Some("Surg Endosc".into()),
+                year: Some(2025),
+                doi: None,
+                retracted,
+            },
+        ],
+        searches: vec![SearchEntry {
+            query: "hernia[tiab] AND <mesh>".into(),
+            source: "PubMed".into(),
+            hits: 327,
+        }],
+        integrity: IntegrityV3 {
+            dropped_unseen: 1,
+            ..IntegrityV3::default()
+        },
+        stopped_early: None,
+        cost_paise: 2345,
+        elapsed_s: 125,
+    };
+    serde_json::to_value(a).unwrap()
+}
+
+/// The page without its `<script>` blocks (which carry the hydration data,
+/// including the raw stored answer): what is drawn.
+fn markup_of(html: &str) -> String {
+    let mut markup = String::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<script") {
+        markup.push_str(&rest[..i]);
+        rest = rest[i..]
+            .find("</script>")
+            .map_or("", |j| &rest[i + j + "</script>".len()..]);
+    }
+    markup.push_str(rest);
+    markup
+}
+
+async fn v3_page(pool: &PgPool, body: serde_json::Value) -> (StatusCode, String) {
+    let st = app_state(pool.clone());
+    let uid = new_user(pool).await;
+    let email = email_of(pool, uid).await;
+    let run = create_run(pool, uid, "Robotic vs lap hernia?", RunMode::Quick, 6000)
+        .await
+        .unwrap()
+        .unwrap();
+    set_status(pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert!(save_answer(pool, run, &body).await.unwrap());
+    set_status(pool, run, RunStatus::Done, None).await.unwrap();
+    send(
+        router(st),
+        api("GET", &format!("/runs/{run}"), email.as_str()),
+    )
+    .await
+}
+
+/// T6: a stored AnswerV3 renders in the spec order, model text escaped,
+/// `[PMID]` markers as numbered reference links, tables in a horizontal
+/// scroller, a retraction warning and the collapsed search trail.
+#[tokio::test]
+async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let (s, html) = v3_page(&pool, answer_v3_json(true)).await;
+    assert_eq!(s, StatusCode::OK);
+    // Escaped, never markup.
+    assert!(
+        html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{html}"
+    );
+    assert!(!html.contains("<script>alert(1)"));
+    assert!(!html.contains("<img src=x"));
+    assert!(!html.contains("<b>only</b>"));
+    assert!(
+        html.contains("&lt;i&gt;vs&lt;/i&gt;"),
+        "the question header is escaped"
+    );
+    assert!(html.contains("hernia[tiab] AND &lt;mesh&gt;"));
+    // Citations: numbered links to the references, no raw PMID markers.
+    assert!(html.contains(r##"href="#ref-1""##));
+    assert!(html.contains(r##"href="#ref-2""##));
+    assert!(html.contains(r#"id="ref-1""#) && html.contains(r#"id="ref-2""#));
+    // The markup (scripts, which carry the hydration data, removed) has no
+    // raw markers.
+    let markup = markup_of(&html);
+    assert!(!markup.contains("[41060645"), "raw markers are replaced");
+    assert!(markup.contains(
+        r##"No benefit &lt;script&gt;alert(1)&lt;/script&gt; <span class="cite">[<a href="#ref-1" rel="external">1</a>, <a href="#ref-2" rel="external">2</a>"##
+    ));
+    assert!(html.contains("https://pubmed.ncbi.nlm.nih.gov/41060645/"));
+    assert!(html.contains("https://doi.org/10.1001/jamasurg.2025.4071"));
+    // Retraction warning on the retracted reference only.
+    assert_eq!(html.matches("RETRACTED").count(), 1);
+    // Sections in order.
+    let mut at = 0;
+    for h in [
+        "Bottom line",
+        "Certainty: Low",
+        "Outcome by outcome",
+        "The trials",
+        "Conflicting evidence",
+        "Applicability",
+        "India and cost",
+        "What would change this answer",
+        "References",
+        "<details",
+        "Search trail (1 searches)",
+        "Cost and time",
+        "₹23.45",
+    ] {
+        let i = html[at..]
+            .find(h)
+            .unwrap_or_else(|| panic!("{h} missing or out of order"));
+        at += i + h.len();
+    }
+    // Tables scroll sideways on a phone.
+    assert_eq!(
+        html.matches(r#"<div class="scroll"><table class="wide">"#)
+            .count(),
+        2
+    );
+    // The trail notes what the checks dropped.
+    assert!(html.contains("not returned by this run"));
+    // The Phase 2 sections are not used for a v3 answer.
+    assert!(!html.contains("How I read your question"));
+}
+
+/// T6: a v3 answer with nothing written shows its reason; a Phase 2 answer
+/// still renders with its own view.
+#[tokio::test]
+async fn ssr_empty_v3_answer_and_phase2_answers_still_render() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    body["answer"] = serde_json::Value::Null;
+    body["empty_reason"] = json!("No relevant evidence found.");
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let html = markup_of(&html);
+    assert!(html.contains("No relevant evidence found."));
+    assert!(html.contains(r#"id="ref-1""#), "references still listed");
+    assert!(!html.contains("Outcome by outcome"));
+    assert!(!html.contains("RETRACTED"));
+    assert!(!html.contains("can't be shown"));
+
+    let (s, html) = v3_page(&pool, answer_json()).await;
+    assert_eq!(s, StatusCode::OK);
+    let html = markup_of(&html);
+    assert!(html.contains("How I read your question"), "Phase 2 view");
+    assert!(!html.contains("Outcome by outcome"));
+}
