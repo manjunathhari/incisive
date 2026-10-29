@@ -92,6 +92,7 @@ jobs:
           tags: incisive-app:ci
           cache-from: type=gha,scope=incisive
           cache-to: type=gha,mode=max,scope=incisive
+          provenance: false
       - name: smoke test image
         shell: bash
         run: |

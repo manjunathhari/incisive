@@ -156,6 +156,9 @@ jobs:
           push: true
           tags: ${{ env.IMAGE }}
           cache-from: type=gha,scope=incisive
+          # Push a plain image, as `docker push` did: no attestation index.
+          provenance: false
+          sbom: false
       - name: Deploy to Cloud Run
         env:
           PROJECT_ID: ${{ vars.PROJECT_ID }}

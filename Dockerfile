@@ -26,7 +26,10 @@ RUN cargo chef cook --release --no-default-features --features ssr \
       --no-default-features --features hydrate \
       -p incisive-app --lib --recipe-path recipe.json
 COPY . .
-RUN cargo leptos build --release
+# The cooked stubs must never be mistaken for the real sources: mark every
+# crate source as newer than the cooked output before the real build.
+RUN find crates -name '*.rs' -exec touch {} + \
+ && cargo leptos build --release
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
