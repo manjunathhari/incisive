@@ -79,15 +79,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # The cache is shared with the Deploy workflow (same scope), so a deploy
+      # after a green CI reuses these layers. `load: true` puts the image in the
+      # local daemon for the smoke test. On failure the action itself raises an
+      # error annotation carrying buildx's error output.
       - name: docker build
-        shell: bash
-        run: |
-          set -o pipefail
-          if ! docker build --progress=plain -t incisive-app:ci . 2>&1 | tee build.log; then
-            msg=$(tail -n 80 build.log | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
-            echo "::error title=docker build::${msg}"
-            exit 1
-          fi
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: incisive-app:ci
+          cache-from: type=gha,scope=incisive
+          cache-to: type=gha,mode=max,scope=incisive
+          provenance: false
       - name: smoke test image
         shell: bash
         run: |

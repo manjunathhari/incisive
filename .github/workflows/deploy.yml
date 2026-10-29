@@ -144,8 +144,21 @@ jobs:
           service_account: ${{ vars.DEPLOY_SA }}
       - uses: google-github-actions/setup-gcloud@v2
       - run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
-      - run: docker build -t "$IMAGE" .
-      - run: docker push "$IMAGE"
+      # `gcloud auth configure-docker` writes ~/.docker/config.json. The
+      # docker-container buildx driver (setup-buildx-action default) reads that
+      # file on the client side when it pushes, so registry auth keeps working;
+      # push happens in the build step and replaces the separate `docker push`.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=incisive
+          # Push a plain image, as `docker push` did: no attestation index.
+          provenance: false
+          sbom: false
       - name: Deploy to Cloud Run
         env:
           PROJECT_ID: ${{ vars.PROJECT_ID }}

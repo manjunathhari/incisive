@@ -117,6 +117,15 @@ A push to `main` runs CI; when it succeeds, the Deploy workflow builds, pushes
    `gcloud run services describe incisive-app --region=asia-south1` must show
    `ANTHROPIC_API_KEY` and `DATABASE_URL` as Secret Manager references (`secretKeyRef`), not values.
 
+### Build caching
+
+CI and Deploy share one Docker layer cache (GitHub Actions cache, scope `incisive`),
+and the Dockerfile compiles dependencies in their own layer (cargo-chef), so a build
+with unchanged dependencies takes a few minutes. No extra credentials are involved.
+If a build ever looks stale, delete the cache in GitHub: Actions, Caches (left
+sidebar), and remove the entries named `incisive`; the next build is a full, slow one.
+GitHub keeps 10 GB of caches per repository and evicts the least recently used.
+
 ## 8. Google sign-in (Identity-Aware Proxy)
 
 Only listed Google accounts can open the app; everyone else is refused by Google
