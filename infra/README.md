@@ -303,6 +303,25 @@ fields you want to change. Money is in paise (100 paise = 1 rupee). The defaults
 {"quick": {"limit_paise": 2000}, "focused": {"screen_n": 80}}
 ```
 
+**Phase 3 (evidence team) fields.** These sit in the same `quick` / `focused`
+objects; `focused` holds Phase 3's **Full** mode. The Phase 2 pipeline that runs
+today ignores them; they take effect when Phase 3 Stage 2 switches the run over.
+The global, daily and monthly caps apply as before.
+
+| Field | Quick | Focused (Full) | Meaning |
+|---|---|---|---|
+| `agent_limit_paise` | 6000 (₹60) | 20000 (₹200) | Phase 3 cost limit |
+| `agent_time_limit_s` | 240 | 480 | Phase 3 time limit in seconds |
+| `researcher_turns` | 8 | 15 | researcher tool-use turns at most (1 to 50) |
+| `skeptic_turns` | 0 | 8 | skeptic tool-use turns at most (0 = no skeptic; up to 50) |
+| `researcher_max_tokens` | 4000 | 4000 | output tokens per researcher turn (1 to 64000) |
+| `skeptic_max_tokens` | 4000 | 4000 | output tokens per skeptic turn |
+| `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
+| `writer_max_tokens` | 8000 | 8000 | output tokens of the writer's call |
+
+Each call's full `max_tokens` is held against the cost limit before it is made,
+so raising these makes each turn harder to fit, not more expensive in itself.
+
 The question box shows each cost limit next to Quick and Focused, read from these
 settings, so the figures there change when you change `RUN_LIMITS`.
 
