@@ -1069,7 +1069,9 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         gate_model: config.gate_model.clone(),
         dev_mode: false,
         runs: config.runs,
-        quick_engine: config.quick_engine,
+        // The runner scores Phase 2 answers until T12 (gold-set runner v3),
+        // so Quick runs here use the classic pipeline whatever QUICK_ENGINE says.
+        quick_engine: incisive_app::runs::QuickEngine::Classic,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,

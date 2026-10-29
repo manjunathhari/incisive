@@ -23,10 +23,12 @@ pub mod researcher;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
+pub mod team;
 #[cfg(feature = "test-util")]
 pub mod testing;
 pub mod tools;
 pub mod write;
+pub mod writer_v3;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -47,6 +49,17 @@ use crate::server::AppState;
 use llm::{AgentModels, LlmCall, LlmClient};
 
 pub use pipeline::run_pipeline;
+
+/// The pipeline the worker runs for `ctx`: the Phase 3 evidence team for
+/// Quick runs when `QUICK_ENGINE` is `team` (the default), the Phase 2
+/// pipeline otherwise (Focused, or `classic`).
+pub fn run_engine(ctx: &RunContext) -> PipelineFuture<'_> {
+    if ctx.state.quick_engine.uses_team(ctx.mode) {
+        Box::pin(team::run_team(ctx))
+    } else {
+        Box::pin(run_pipeline(ctx))
+    }
+}
 
 /// Everything one run's pipeline needs. Built by the worker.
 pub struct RunContext {

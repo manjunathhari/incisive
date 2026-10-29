@@ -395,4 +395,12 @@ pub struct RunView {
     pub summary: RunSummary,
     pub steps: Vec<StepLine>,
     pub answer: Option<serde_json::Value>,
+    /// `run_answers.answer_version`: 2 for a Phase 2 `Answer`, 3 for a
+    /// Phase 3 `AnswerV3` (2 when there is no answer).
+    #[serde(default = "phase2_version")]
+    pub answer_version: i16,
+}
+
+fn phase2_version() -> i16 {
+    2
 }

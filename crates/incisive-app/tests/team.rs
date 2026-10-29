@@ -191,6 +191,10 @@ async fn quick_ctx(
     settings: DepthSettings,
 ) -> (RunContext, i64) {
     let (uid, run, user) = new_run(pool, limit).await;
+    // As the worker does: the pipeline's heartbeat needs a running run.
+    incisive_app::runs::store::set_status(pool, run, incisive_app::runs::RunStatus::Running, None)
+        .await
+        .unwrap();
     let budget = Arc::new(
         RunBudget::new(run, uid, limit, Instant::now(), prices(), 88.0)
             .with_time_limit(settings.agent_time_limit_s),
@@ -468,4 +472,682 @@ async fn a_selection_seen_only_in_a_withheld_result_is_dropped() {
     assert!(r.selected.is_empty());
     assert_eq!(r.dropped_unseen, 1);
     assert!(r.searches.is_empty());
+}
+
+// ---------- T5: writer, AnswerV3, the team pipeline ----------
+
+use incisive_app::agent::answer::NO_EVIDENCE;
+use incisive_app::agent::answer_v3::{ANSWER_VERSION, AnswerV3};
+use incisive_app::agent::team::run_team;
+use incisive_app::agent::writer_v3::STUDIES_HEADING;
+use incisive_app::agent::{PipelineFuture, PipelineOutcome};
+use incisive_app::ask::{AskOutcome, me_view, start_run};
+use incisive_app::runs::RunStatus;
+use incisive_app::runs::store::save_answer;
+
+const FINAL_KEY: &str = "Research transcript";
+const UNKNOWN_CITE: &str = "99999999";
+
+/// The writer's reply: cites the two seen studies, an unknown PMID in text,
+/// a number from the unseen study and a trial row for a made-up PMID.
+fn writer_json() -> Value {
+    json!({
+        "bottom_line": {
+            "text": format!("Mesh type made no difference to chronic pain [{SEEN_A}; {UNKNOWN_CITE}]. <script>alert(1)</script>"),
+            "certainty": "Low",
+            "certainty_reason": format!("Two small trials [{SEEN_B}]")
+        },
+        "outcomes": [{
+            "outcome": "Chronic pain",
+            "rct_evidence": "Two RCTs",
+            "effect_text": format!("No difference [{SEEN_A}]"),
+            "numbers": [
+                {"label": "VAS", "value": 1.2, "unit": null, "arm": "biological", "ci_low": null, "ci_high": null, "p": "0.4", "pmid": SEEN_A},
+                {"label": "VAS", "value": 9.9, "unit": null, "arm": null, "ci_low": 1.0, "ci_high": 2.0, "p": null, "pmid": UNSEEN}
+            ],
+            "certainty": "Low",
+            "why": "small",
+            "pmids": [SEEN_A, UNKNOWN_CITE]
+        }],
+        "studies": [
+            {"pmid": SEEN_A, "label": "Biological vs synthetic (2025)", "design": "RCT", "n": 100, "setting": "multicentre", "comparison": "biological vs synthetic", "key_results": format!("no difference [{SEEN_A}]"), "appraisal": "short follow-up"},
+            {"pmid": "77777777", "label": "Invented", "design": "RCT", "n": null, "setting": "", "comparison": "", "key_results": "", "appraisal": ""}
+        ],
+        "conflicts": [{"text": format!("Self-fixating mesh differs [{SEEN_B}]"), "pmids": [SEEN_B]}],
+        "applicability": {"case_mix": "primary hernias", "india_cost_context": "Indian mesh costs are not known.", "training": "No particular bearing."},
+        "would_change": ["A larger multicentre RCT"]
+    })
+}
+
+/// A full scripted Quick run: research (two tool turns and an end of turn),
+/// the study list (keyed on the transcript) and the writer (keyed on its
+/// study heading).
+fn team_script() -> ScriptedLlm {
+    research_script(ScriptedLlm::new())
+        .when(FINAL_KEY)
+        .reply_json(
+            study_list(&[(SEEN_A, "RCT"), (UNSEEN, "RCT"), (SEEN_B, "SR_MA")]),
+            u(),
+        )
+        .when(STUDIES_HEADING)
+        .reply_json(writer_json(), usage(3000, 2500))
+}
+
+fn team_state(pool: &PgPool, lit: Arc<Literature>, llm: Arc<AgentLlm>) -> AppState {
+    let mut st = app_state(pool.clone(), lit);
+    st.llm = Some(llm);
+    st
+}
+
+/// Poll (up to 20 s) until the run is no longer active.
+async fn wait_done(pool: &PgPool, uid: i64, run: Uuid) -> incisive_app::runs::RunView {
+    for _ in 0..2000 {
+        let v = get_run_for_user(pool, uid, run).await.unwrap().unwrap();
+        if !v.summary.status.is_active() {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} did not finish");
+}
+
+async fn wait_idle(st: &AppState, run: Uuid) {
+    for _ in 0..2000 {
+        if !st.worker.is_running(run) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} still running");
+}
+
+async fn run_limit(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT limit_paise FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn charges(pool: &PgPool, uid: i64) -> Vec<i64> {
+    sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend WHERE user_id = $1 AND kind = 'charge' ORDER BY id",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn new_user(pool: &PgPool) -> (i64, incisive_app::identity::User) {
+    let email = format!("team-{}@example.com", Uuid::new_v4());
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise) \
+         VALUES ($1, 'T', 'surgeon', 100000) RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let user = incisive_app::identity::find_user(pool, &email)
+        .await
+        .unwrap()
+        .unwrap();
+    (uid, user)
+}
+
+fn request_user_text(r: &MessagesRequest) -> String {
+    r.messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// End to end through `start_run` and the worker: researcher turns →
+/// study list (an unseen PMID dropped) → writer (an unknown citation
+/// removed, a number and a trial row of unknown studies dropped) → stored
+/// AnswerV3 (version 3) → the run view the page reads.
+#[tokio::test]
+async fn quick_team_run_end_to_end_through_the_worker() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(team_script());
+    let st = team_state(&pool, literature(&server), agent_llm(llm.clone(), MODEL));
+    let (uid, user) = new_user(&pool).await;
+
+    let out = start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Quick, None)
+        .await
+        .unwrap();
+    let AskOutcome::RunStarted { run_id, .. } = out else {
+        panic!("{out:?}")
+    };
+    // The team's cost limit is reserved: ₹60.
+    assert_eq!(run_limit(&pool, run_id).await, 6000);
+    let v = wait_done(&pool, uid, run_id).await;
+    wait_idle(&st, run_id).await;
+    assert_eq!(v.summary.status, RunStatus::Done, "{:?}", v.steps);
+    assert_eq!(v.answer_version, ANSWER_VERSION);
+    let a: AnswerV3 = serde_json::from_value(v.answer.clone().unwrap()).unwrap();
+    assert_eq!(a.version, 3);
+    assert_eq!(a.question, QUESTION);
+    assert_eq!(a.mode, RunMode::Quick);
+
+    // References: code-built from the fetched records, selection order.
+    let refs: Vec<(u16, &str)> = a
+        .references
+        .iter()
+        .map(|r| (r.n, r.pmid.as_str()))
+        .collect();
+    assert_eq!(refs, [(1, SEEN_A), (2, SEEN_B)]);
+    assert!(
+        a.references[0]
+            .title
+            .starts_with("Biological vs Synthetic Mesh")
+    );
+    assert!(a.references.iter().all(|r| !r.retracted));
+    // Integrity: the unseen study, the unknown citations, the number and
+    // the invented row.
+    assert_eq!(a.integrity.dropped_unseen, 1);
+    assert_eq!(a.integrity.removed_citations, 2);
+    assert_eq!(a.integrity.dropped_numbers, 1);
+    assert_eq!(a.integrity.dropped_studies, 1);
+    let w = a.answer.as_ref().unwrap();
+    assert!(!w.bottom_line.text.contains(UNKNOWN_CITE));
+    assert!(w.bottom_line.text.contains(&format!("[{SEEN_A}]")));
+    assert_eq!(w.outcomes[0].numbers.len(), 1);
+    assert_eq!(w.outcomes[0].pmids, [SEEN_A]);
+    assert_eq!(w.studies.len(), 1);
+    // Trail: recorded by code.
+    assert_eq!(a.searches.len(), 1);
+    assert_eq!(a.searches[0].hits, 327);
+    assert_eq!(a.stopped_early, None);
+    // Cost: every call charged, and the answer's cost is the run's.
+    let rows = charges(&pool, uid).await;
+    assert_eq!(rows.len(), 5, "three turns, the study list, the writer");
+    assert_eq!(a.cost_paise, rows.iter().sum::<i64>());
+    assert_eq!(v.summary.cost_paise, a.cost_paise);
+
+    // Progress lines.
+    let l = lines(&v.steps);
+    for want in [
+        "Researcher: searching PubMed and Europe PMC",
+        "Researcher: 1 search so far (turn 1 of 8)",
+        "Researcher: selected 2 studies (1 RCT, 1 meta-analysis)",
+        "Writer: writing the answer from 2 studies (2 with an abstract)",
+        "Citation check: removed 2 unknown citations, dropped 1 number and 1 trial row",
+        "Answer ready",
+    ] {
+        assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
+    }
+
+    // The writer's request: one structured call, writer settings, the
+    // abstracts wrapped by PMID, the researcher's notes and search log.
+    let reqs = llm.requests();
+    let writer: Vec<&MessagesRequest> = reqs
+        .iter()
+        .filter(|r| request_user_text(r).contains(STUDIES_HEADING))
+        .collect();
+    assert_eq!(writer.len(), 1);
+    let wr = writer[0];
+    assert_eq!(wr.max_tokens, DepthSettings::QUICK.writer_max_tokens);
+    assert!(wr.tools.is_empty());
+    let oc = wr.output_config.as_ref().unwrap();
+    assert!(oc.format.is_some());
+    assert_eq!(
+        oc.effort, None,
+        "the writer runs at the model's default effort"
+    );
+    let sys = wr.system.as_deref().unwrap();
+    assert!(sys.contains("Bengaluru") && sys.contains("Indian cost context"));
+    let text = request_user_text(wr);
+    assert!(text.contains(&format!("<source id=\"pmid-{SEEN_A}\">")));
+    assert!(text.contains(&format!("<source id=\"pmid-{SEEN_B}\">")));
+    assert!(!text.contains(&format!("pmid-{UNSEEN}")));
+    assert!(
+        text.contains(&format!("key study {SEEN_A}")),
+        "the researcher's why"
+    );
+    assert!(text.contains("self-fixating mesh, different result"));
+    assert!(text.contains("(327 hits)"));
+    assert!(text.contains("Abstract:"));
+}
+
+/// The rollback switch: `classic` keeps Quick on the Phase 2 pipeline, its
+/// ₹15 limit and its time limit; `team` uses the Phase 3 ones. The Ask page
+/// shows the engine's limit.
+#[tokio::test]
+async fn the_engine_switch_picks_the_pipeline_and_the_limits() {
+    let Some(pool) = pool().await else { return };
+    fn hard_stop(ctx: &RunContext) -> PipelineFuture<'_> {
+        Box::pin(async move {
+            PipelineOutcome::Done(json!({"hard_stop_s": ctx.budget.hard_stop().as_secs()}))
+        })
+    }
+    for (engine, limit, hard_stop_s) in [
+        (QuickEngine::Team, 6000, 240 + 60),
+        (QuickEngine::Classic, 1500, 300 + 60),
+    ] {
+        let mut st = app_state(
+            pool.clone(),
+            incisive_app::agent::testing::offline_literature(),
+        );
+        st.quick_engine = engine;
+        st.worker = WorkerHandle::with_pipeline(hard_stop);
+        st.llm = Some(incisive_app::agent::testing::idle_llm(MODEL));
+        let (uid, user) = new_user(&pool).await;
+        assert_eq!(me_view(&st, &user).await.unwrap().quick_limit_paise, limit);
+        let AskOutcome::RunStarted { run_id, .. } =
+            start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Quick, None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(run_limit(&pool, run_id).await, limit, "{engine:?}");
+        let v = wait_done(&pool, uid, run_id).await;
+        wait_idle(&st, run_id).await;
+        assert_eq!(
+            v.answer,
+            Some(json!({"hard_stop_s": hard_stop_s})),
+            "{engine:?}"
+        );
+        // Focused is unchanged by the switch.
+        assert_eq!(me_view(&st, &user).await.unwrap().focused_limit_paise, 4000);
+    }
+
+    // The default pipeline dispatches on the engine: classic runs Frame.
+    let llm = Arc::new(ScriptedLlm::new());
+    let mut st = team_state(
+        &pool,
+        incisive_app::agent::testing::offline_literature(),
+        agent_llm(llm.clone(), MODEL),
+    );
+    st.quick_engine = QuickEngine::Classic;
+    let (uid, user) = new_user(&pool).await;
+    let AskOutcome::RunStarted { run_id, .. } =
+        start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Quick, None)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    let v = wait_done(&pool, uid, run_id).await;
+    wait_idle(&st, run_id).await;
+    assert_eq!(v.summary.status, RunStatus::Failed);
+    let reqs = llm.requests();
+    assert!(
+        reqs[0]
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("You frame clinical questions"),
+        "classic Quick starts with Frame"
+    );
+}
+
+/// Nothing valid selected after a complete search: done, "No relevant
+/// evidence found.", and no writer call.
+#[tokio::test]
+async fn no_valid_selection_is_no_relevant_evidence_without_a_writer_call() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new()).reply_json(study_list(&[(UNSEEN, "RCT")]), u()),
+    );
+    let (ctx, _uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_none());
+    assert_eq!(a.empty_reason.as_deref(), Some(NO_EVIDENCE));
+    assert_eq!(a.integrity.dropped_unseen, 1);
+    assert!(a.references.is_empty());
+    assert_eq!(llm.requests().len(), 4, "no writer call");
+}
+
+/// Cancel during research: the turn in flight is charged, nothing after it
+/// runs, and the writer is never called.
+#[tokio::test]
+async fn cancel_mid_research_stops_before_the_writer() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let cancel = CancelFlag::default();
+    let c2 = cancel.clone();
+    // The first turn cancels the run while it is in flight.
+    let llm = Arc::new(team_script().until(
+        "<question>",
+        Arc::new(move || {
+            c2.cancel();
+            true
+        }),
+    ));
+    let (mut ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    ctx.cancel = cancel;
+    // The run's calls must see this flag: rebuild nothing else.
+    assert_eq!(run_team(&ctx).await, PipelineOutcome::Failed("cancelled"));
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 1, "only the first turn was sent");
+    assert!(
+        !reqs
+            .iter()
+            .any(|r| request_user_text(r).contains(STUDIES_HEADING))
+    );
+    // Its charge is booked.
+    for _ in 0..200 {
+        if charges(&pool, uid).await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(charges(&pool, uid).await.len(), 1);
+}
+
+/// Past the hard stop during research: the run fails `hard_stop` before any
+/// tool runs or the writer is called.
+#[tokio::test]
+async fn hard_stop_mid_research_fails_the_run() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(team_script().delay(Duration::from_millis(1200)));
+    let settings = DepthSettings::QUICK;
+    let (uid, run, user) = new_run(&pool, 6000).await;
+    incisive_app::runs::store::set_status(&pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    let lit = literature(&server);
+    // One second before the hard stop: the first turn (1.2 s) crosses it.
+    let hard = Duration::from_secs(u64::from(settings.agent_time_limit_s) + 60);
+    let budget = Arc::new(
+        RunBudget::new(run, uid, 6000, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s)
+            .aged_for_test(hard - Duration::from_secs(1)),
+    );
+    let ctx = RunContext {
+        state: app_state(pool.clone(), lit.clone()),
+        llm: agent_llm(llm.clone(), MODEL),
+        lit,
+        run_id: run,
+        user,
+        question: QUESTION.to_string(),
+        mode: RunMode::Quick,
+        settings,
+        budget,
+        cancel: CancelFlag::default(),
+    };
+    assert_eq!(run_team(&ctx).await, PipelineOutcome::Failed("hard_stop"));
+    assert_eq!(llm.requests().len(), 1);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() != ESEARCH),
+        "no tool ran after the hard stop"
+    );
+}
+
+/// Old answers keep loading as version 2; a v3 body is stored as version 3;
+/// delete and retention remove both.
+#[tokio::test]
+async fn answer_versions_are_stored_and_deleted_with_the_run() {
+    let Some(pool) = pool().await else { return };
+    let (uid, v2_run, _) = new_run(&pool, 100).await;
+    incisive_app::runs::store::set_status(&pool, v2_run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert!(
+        save_answer(&pool, v2_run, &json!({"question": "q", "bottom_line": []}))
+            .await
+            .unwrap()
+    );
+    let v = get_run_for_user(&pool, uid, v2_run).await.unwrap().unwrap();
+    assert_eq!(v.answer_version, 2);
+    // The same run's answer replaced by a v3 body.
+    assert!(
+        save_answer(&pool, v2_run, &json!({"version": 3, "question": "q"}))
+            .await
+            .unwrap()
+    );
+    let v = get_run_for_user(&pool, uid, v2_run).await.unwrap().unwrap();
+    assert_eq!(v.answer_version, 3);
+    // Delete cascades.
+    assert!(
+        incisive_app::runs::store::delete_run(&pool, uid, v2_run)
+            .await
+            .unwrap()
+    );
+    let left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM incisive.run_answers WHERE run_id = $1")
+            .bind(v2_run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
+    // A run with no answer reads as version 2.
+    let (uid2, run2, _) = new_run(&pool, 100).await;
+    let v = get_run_for_user(&pool, uid2, run2).await.unwrap().unwrap();
+    assert_eq!((v.answer, v.answer_version), (None, 2));
+}
+
+// ---------- money: the writer is always reached; ₹60 measured ----------
+
+const OPUS: &str = "claude-opus-5-5";
+
+/// Opus-sized usage for a scripted run: each a fraction of what its call
+/// holds, as real calls are (input estimated at bytes / 3; output held at
+/// `max_tokens`).
+fn opus_script(turns: usize) -> ScriptedLlm {
+    let mut llm = ScriptedLlm::new();
+    for i in 0..turns {
+        llm = llm.reply_blocks(
+            vec![
+                ContentBlock::Text {
+                    text: "Searching from another angle.".into(),
+                },
+                tool_call(
+                    &format!("s{i}"),
+                    "search_pubmed",
+                    json!({"query": format!("mesh[tiab] AND hernia[tiab] AND {i}[dp]"), "max_results": 20}),
+                ),
+                tool_call(
+                    &format!("a{i}"),
+                    "get_abstracts",
+                    json!({"pmids": [SEEN_A, SEEN_B, "35777031", "9657784", "23355162"]}),
+                ),
+            ],
+            Some(StopReason::ToolUse),
+            usage(1500, 1500),
+        );
+    }
+    for _ in 0..3 {
+        llm = llm.when(FINAL_KEY).reply_json(
+            study_list(&[(SEEN_A, "RCT"), (SEEN_B, "SR_MA")]),
+            usage(2000, 800),
+        );
+    }
+    for _ in 0..3 {
+        llm = llm
+            .when(STUDIES_HEADING)
+            .reply_json(writer_json(), usage(2500, 4000));
+    }
+    llm
+}
+
+async fn opus_ctx(
+    pool: &PgPool,
+    server: &MockServer,
+    llm: &Arc<ScriptedLlm>,
+    limit: i64,
+) -> (RunContext, i64) {
+    quick_ctx(
+        pool,
+        literature(server),
+        agent_llm(llm.clone(), OPUS),
+        limit,
+        DepthSettings::QUICK,
+    )
+    .await
+}
+
+fn writer_calls(llm: &ScriptedLlm) -> usize {
+    llm.requests()
+        .iter()
+        .filter(|r| request_user_text(r).contains(STUDIES_HEADING))
+        .count()
+}
+
+/// Real Opus prices (USD 4 / 20 per Mtok, ₹88 per USD). For every cost
+/// limit from far too small to ample: either no call is made at all
+/// (`over_budget`: not even the first turn fits beside the writer's reserve
+/// and the researcher's final call), or the researcher ran and the writer
+/// was reached; spending never passes the limit. Prints the smallest
+/// limit that reaches the writer (the measured minimal Quick run).
+#[tokio::test]
+async fn the_writer_is_always_reached_under_a_tight_budget() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let mut min_viable = None;
+    for limit in (1000..=7000).step_by(250) {
+        let llm = Arc::new(opus_script(8));
+        let (ctx, uid) = opus_ctx(&pool, &server, &llm, limit).await;
+        let out = run_team(&ctx).await;
+        let sent = llm.requests().len();
+        // Let late charges land.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let spent: i64 = charges(&pool, uid).await.iter().sum();
+        assert!(spent <= limit, "limit {limit}: spent {spent}");
+        assert_eq!(ctx.budget.held(), 0, "limit {limit}");
+        if sent == 0 {
+            assert_eq!(out, PipelineOutcome::Failed("over_budget"), "limit {limit}");
+            assert!(
+                min_viable.is_none(),
+                "limit {limit}: refused after a smaller limit ran"
+            );
+            continue;
+        }
+        assert_eq!(
+            writer_calls(&llm),
+            1,
+            "limit {limit}: research ran ({sent} calls) but the writer was not reached: {out:?}"
+        );
+        assert!(
+            matches!(out, PipelineOutcome::Done(_) | PipelineOutcome::Partial(_)),
+            "limit {limit}: {out:?}"
+        );
+        min_viable.get_or_insert(limit);
+    }
+    let mut hi = min_viable.expect("some limit up to ₹70 reaches the writer");
+    // Narrow it to the paisa (the property is monotone in the limit).
+    let mut lo = hi - 250;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        let llm = Arc::new(opus_script(8));
+        let (ctx, _uid) = opus_ctx(&pool, &server, &llm, mid).await;
+        let _ = run_team(&ctx).await;
+        if writer_calls(&llm) == 1 {
+            hi = mid;
+        } else {
+            assert!(
+                llm.requests().is_empty(),
+                "limit {mid}: research ran without the writer"
+            );
+            lo = mid;
+        }
+    }
+    let min_viable = hi;
+    // Its parts: the writer's reserve and the first turn's hold, at the
+    // same prices; the rest is the researcher's kept final-call share.
+    let llm = Arc::new(opus_script(1));
+    let (ctx, _uid) = opus_ctx(&pool, &server, &llm, min_viable).await;
+    let reserve = incisive_app::agent::writer_v3::reserve_for(
+        &ctx.llm,
+        &ctx.budget,
+        QUESTION,
+        DepthSettings::QUICK.writer_max_tokens,
+    )
+    .unwrap();
+    let call = ctx.llm.call(&ctx, OPUS, "researcher");
+    let tools = incisive_app::agent::tools::lit::LitTools::new(
+        ctx.lit.clone(),
+        pool.clone(),
+        ctx.run_id,
+        QUESTION,
+    )
+    .registry_of(&incisive_app::agent::researcher::QUICK_TOOLS)
+    .defs();
+    let first = vec![claude_client::Message {
+        role: claude_client::Role::User,
+        content: vec![ContentBlock::Text {
+            text: incisive_app::agent::researcher::task(QUESTION),
+        }],
+    }];
+    let turn1 = call
+        .turn_estimate(
+            &incisive_app::agent::researcher::system_prompt(8),
+            &first,
+            &tools,
+            None,
+            DepthSettings::QUICK.researcher_max_tokens,
+        )
+        .unwrap();
+    eprintln!(
+        "MEASURED: smallest Quick limit that reaches the writer at Opus prices (USD_INR 88): {min_viable} paise \
+         = writer reserve {reserve} + researcher turn-1 hold {turn1} + researcher final-call share {}",
+        min_viable - reserve - turn1
+    );
+    assert!(
+        min_viable <= DepthSettings::QUICK.agent_limit_paise,
+        "₹60 cannot fit a minimal Quick run: needs {min_viable} paise"
+    );
+}
+
+/// The ₹60 default at real prices: what is reserved, how far research gets
+/// and what a run costs, printed for the stage report.
+#[tokio::test]
+async fn quick_at_sixty_rupees_at_real_prices() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(opus_script(8));
+    let limit = DepthSettings::QUICK.agent_limit_paise;
+    let (ctx, uid) = opus_ctx(&pool, &server, &llm, limit).await;
+    let out = run_team(&ctx).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let rows = charges(&pool, uid).await;
+    let reqs = llm.requests();
+    let turns = reqs.iter().filter(|r| !r.tools.is_empty()).count();
+    let writer_reserve = ctx.budget.finish_reserve();
+    eprintln!(
+        "MEASURED at ₹60: writer reserve {writer_reserve} paise; researcher turns {turns}; calls {}; charges {rows:?} = {} paise; outcome {}",
+        reqs.len(),
+        rows.iter().sum::<i64>(),
+        match &out {
+            PipelineOutcome::Done(_) => "done",
+            PipelineOutcome::Partial(_) => "partial",
+            PipelineOutcome::Failed(k) => k,
+        }
+    );
+    assert_eq!(writer_calls(&llm), 1);
+    assert!(rows.iter().sum::<i64>() <= limit);
+    assert!(turns >= 1);
 }

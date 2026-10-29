@@ -479,3 +479,10 @@ default or set; the Deploy workflow checks the defaults too.
 | `writer` | writes the structured answer | `claude-opus-5-5` |
 | `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
 | `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |
+
+**Rolling back.** Prefer `QUICK_ENGINE=classic` to rolling back the image: it needs
+no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an
+`answer_version` column on `run_answers`); an older image refuses a database that
+has it and its readiness stays down, as described for Phase 2 in section 11. Phase 3
+answers are stored with `answer_version = 3` and are shown by the Phase 3 answer
+view; Phase 2 answers keep `answer_version = 2` and their own view.

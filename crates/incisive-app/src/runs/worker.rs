@@ -49,7 +49,7 @@ use crate::spend;
 pub type PipelineFn = for<'a> fn(&'a RunContext) -> PipelineFuture<'a>;
 
 fn default_pipeline(ctx: &RunContext) -> PipelineFuture<'_> {
-    Box::pin(agent::run_pipeline(ctx))
+    agent::run_engine(ctx)
 }
 
 /// Refresh a live run's heartbeat at least this often (recovery treats 90 s
@@ -342,8 +342,10 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
                 state.prices.clone(),
                 state.usd_inr,
             )
-            // Wrap-up and hard stop from the mode's `time_limit_s` (RUN_LIMITS).
-            .with_time_limit(state.runs.for_mode(mode).time_limit_s),
+            // Wrap-up and hard stop from the mode's time limit (RUN_LIMITS):
+            // `agent_time_limit_s` when the evidence team answers the run
+            // (QUICK_ENGINE), `time_limit_s` otherwise.
+            .with_time_limit(state.runs.limits(mode, state.quick_engine).1),
         ),
         cancel,
     };
