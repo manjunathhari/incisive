@@ -6623,7 +6623,9 @@ fn assert_structured(req: &claude_client::MessagesRequest, schema: &OutputSchema
     assert!(req.tools.is_empty(), "no tools");
     assert_eq!(req.tool_choice, None, "no tool_choice");
     let format = &req.output_config.as_ref().expect("output_config").format;
-    let OutputFormat::JsonSchema { schema: sent } = format;
+    let Some(OutputFormat::JsonSchema { schema: sent }) = format else {
+        panic!("output_config.format")
+    };
     assert_eq!(sent, schema.schema());
     let body = serde_json::to_value(req).unwrap();
     assert_eq!(body["output_config"]["format"]["type"], "json_schema");

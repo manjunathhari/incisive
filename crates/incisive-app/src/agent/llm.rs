@@ -39,7 +39,7 @@ use async_trait::async_trait;
 pub use claude_client::Effort;
 use claude_client::{
     ClaudeError, Client, ContentBlock, Message, MessagesRequest, MessagesResponse, OutputConfig,
-    OutputFormat, Role, StopReason, Usage,
+    OutputFormat, Role, StopReason, ToolDef, Usage,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -48,7 +48,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::gate::{error_kind, maybe_billed};
-use crate::runs::budget::{BudgetError, Hold, RunBudget};
+use crate::runs::budget::{BudgetError, Hold, InFlightReserve, RunBudget};
 use crate::runs::worker::CancelFlag;
 
 /// Appended to every system prompt built through [`LlmCall`].
@@ -164,6 +164,11 @@ pub enum StepError {
     /// money sense: every Claude call so far was charged normally, so the
     /// worker simply finishes the run and releases the remainder.
     Lit,
+    /// The run passed its hard stop between two turns of an agent loop
+    /// (Phase 3); no further call was made. The pipeline ends the run
+    /// `failed` with `hard_stop`, as its own gate does. Not fatal in the
+    /// money sense: every call made was charged.
+    HardStop,
 }
 
 impl StepError {
@@ -177,6 +182,7 @@ impl StepError {
             StepError::Unrecorded => "unrecorded",
             StepError::RateLimited(_) => "rate_limited",
             StepError::Lit => "lit",
+            StepError::HardStop => "hard_stop",
         }
     }
 
@@ -520,17 +526,48 @@ fn build_request(
         tools: vec![],
         tool_choice: None,
         output_config: schema.map(|s| OutputConfig {
-            format: OutputFormat::JsonSchema {
+            format: Some(OutputFormat::JsonSchema {
                 schema: s.schema.clone(),
-            },
+            }),
             effort: s.effort,
         }),
     }
 }
 
+/// The request one tool-use turn sends (Phase 3, `agent_loop`):
+/// [`SOURCE_RULE`] appended to the system prompt, the whole conversation so
+/// far, the tools, **no** `tool_choice` (auto, the API default: Opus and
+/// Sonnet 5.5 reject a forced choice, Ruling R-FA1) and `output_config` with
+/// the effort only (no format; a turn's structured answer comes from a
+/// separate final call). Without an effort, no `output_config` at all.
+pub(crate) fn turn_request(
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[ToolDef],
+    effort: Option<Effort>,
+    max_tokens: u32,
+) -> MessagesRequest {
+    MessagesRequest {
+        model: model.to_string(),
+        max_tokens,
+        system: Some(format!("{system}\n\n{SOURCE_RULE}")),
+        messages: messages.to_vec(),
+        tools: tools.to_vec(),
+        tool_choice: None,
+        output_config: effort.map(|e| OutputConfig {
+            format: None,
+            effort: Some(e),
+        }),
+    }
+}
+
 /// Bytes of the prompt `req` sends, for the hold estimate: the system prompt,
-/// the text of every message and, when present, the tools, `tool_choice` and
-/// `output_config` as serialised JSON (a schema is sent with every call).
+/// the text of every message, every other block of every message (tool use,
+/// tool results, thinking) as serialised JSON, so a multi-turn conversation
+/// is counted whole on every turn (Phase 3), and, when present, the tools,
+/// `tool_choice` and `output_config` as serialised JSON (a schema is sent
+/// with every call). A single-text-message request counts as before.
 pub fn request_prompt_bytes(req: &MessagesRequest) -> usize {
     fn json_len<T: serde::Serialize>(v: &T) -> usize {
         serde_json::to_string(v).map_or(0, |t| t.len())
@@ -542,7 +579,7 @@ pub fn request_prompt_bytes(req: &MessagesRequest) -> usize {
         .flat_map(|m| &m.content)
         .map(|c| match c {
             ContentBlock::Text { text } => text.len(),
-            _ => 0,
+            other => json_len(other),
         })
         .sum();
     let tools = if req.tools.is_empty() {
@@ -681,6 +718,11 @@ pub struct Reply {
     pub stop_reason: Option<StopReason>,
     /// Output tokens billed (thinking included), for diagnostics.
     pub output_tokens: u32,
+    /// Input tokens billed, for diagnostics (the agent loop's turn log).
+    pub input_tokens: u32,
+    /// Every content block as received (tool use, thinking, …). The agent
+    /// loop sends the assistant turn back from these; never logged.
+    pub content: Vec<ContentBlock>,
 }
 
 impl Reply {
@@ -689,6 +731,8 @@ impl Reply {
             text: response_text(resp),
             stop_reason: resp.stop_reason,
             output_tokens: resp.usage.output_tokens,
+            input_tokens: resp.usage.input_tokens,
+            content: resp.content.clone(),
         }
     }
 
@@ -866,7 +910,36 @@ impl LlmCall {
         schema: &'a OutputSchema,
         max_tokens: u32,
     ) -> Result<impl Future<Output = Result<T, StepError>> + 'a, StepError> {
-        let first = self.start(system, user, Some(schema), max_tokens)?;
+        self.start_structured_from(system, user, schema, max_tokens, None)
+    }
+
+    /// [`LlmCall::structured`] whose first call is held from `share`, the
+    /// estimate kept free for it ([`RunBudget::try_hold_releasing`]): the
+    /// agent loop's final call. The retry, if any, is an ordinary hold.
+    pub(crate) async fn structured_from_share<T: DeserializeOwned>(
+        &self,
+        system: &str,
+        user: &str,
+        schema: &OutputSchema,
+        max_tokens: u32,
+        share: InFlightReserve,
+    ) -> Result<T, StepError> {
+        self.start_structured_from(system, user, schema, max_tokens, Some(share))?
+            .await
+    }
+
+    fn start_structured_from<'a, T: DeserializeOwned + 'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+        schema: &'a OutputSchema,
+        max_tokens: u32,
+        share: Option<InFlightReserve>,
+    ) -> Result<impl Future<Output = Result<T, StepError>> + 'a, StepError> {
+        let first = self.start_request(
+            build_request(&self.model, system, user, Some(schema), max_tokens),
+            share,
+        )?;
         Ok(async move {
             let reply = first.wait().await?;
             match read_structured(&reply) {
@@ -931,11 +1004,80 @@ impl LlmCall {
         schema: Option<&OutputSchema>,
         max_tokens: u32,
     ) -> Result<Started, StepError> {
+        self.start_request(
+            build_request(&self.model, system, user, schema, max_tokens),
+            None,
+        )
+    }
+
+    /// Start one tool-use turn of a conversation ([`turn_request`]): the
+    /// same cancel check, hold, spawned call and charge as every call
+    /// ([`LlmCall::start`]); the hold counts the whole conversation and the
+    /// tools. The reply's content blocks (tool use) are in [`Reply::content`].
+    pub(crate) fn start_turn(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDef],
+        effort: Option<Effort>,
+        max_tokens: u32,
+    ) -> Result<Started, StepError> {
+        self.start_request(
+            turn_request(&self.model, system, messages, tools, effort, max_tokens),
+            None,
+        )
+    }
+
+    /// The hold [`LlmCall::start_turn`] would take now, in paise (`None`:
+    /// unpriced model).
+    pub fn turn_estimate(
+        &self,
+        system: &str,
+        messages: &[Message],
+        tools: &[ToolDef],
+        effort: Option<Effort>,
+        max_tokens: u32,
+    ) -> Option<i64> {
+        let req = turn_request(&self.model, system, messages, tools, effort, max_tokens);
+        self.budget
+            .cost_of(
+                &self.model,
+                &estimate_usage(request_prompt_bytes(&req), max_tokens),
+            )
+            .ok()
+    }
+
+    pub(crate) fn budget(&self) -> &Arc<RunBudget> {
+        &self.budget
+    }
+
+    pub(crate) fn cancel_flag(&self) -> &CancelFlag {
+        &self.cancel
+    }
+
+    pub(crate) fn step(&self) -> &'static str {
+        self.step
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The one launch path every call takes (single calls, structured calls,
+    /// tool turns): cancel check, estimate from the request as sent, hold
+    /// (gathering calls leave the finish reserve free, R-13c; with `share`,
+    /// the hold is taken from that kept share, atomically), then the spawned
+    /// call and charge.
+    fn start_request(
+        &self,
+        req: MessagesRequest,
+        share: Option<InFlightReserve>,
+    ) -> Result<Started, StepError> {
         let run_id = self.budget.run_id();
         if self.cancel.is_cancelled() {
             return Err(StepError::Cancelled);
         }
-        let req = build_request(&self.model, system, user, schema, max_tokens);
+        let max_tokens = req.max_tokens;
         let estimate_usage = estimate_usage(request_prompt_bytes(&req), max_tokens);
         let estimate = self
             .budget
@@ -945,10 +1087,11 @@ impl LlmCall {
                 StepError::Llm
             })?;
         // Gathering calls leave the finish reserve free (Ruling R-13c).
-        let hold = if FINISHING_STEPS.contains(&self.step) {
-            self.budget.try_hold(estimate)
-        } else {
-            self.budget.try_hold_gathering(estimate)
+        let finishing = FINISHING_STEPS.contains(&self.step);
+        let hold = match share {
+            Some(share) => self.budget.try_hold_releasing(estimate, share, !finishing),
+            None if finishing => self.budget.try_hold(estimate),
+            None => self.budget.try_hold_gathering(estimate),
         };
         let Some(hold) = hold else {
             tracing::info!(%run_id, step = self.step, model = %self.model, estimate, "call refused: over budget");

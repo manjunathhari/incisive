@@ -19,13 +19,28 @@ pub struct MessagesRequest {
 }
 
 /// The Messages API `output_config`.
+///
+/// A structured call sets `format`; a tool-use turn sets only `effort`
+/// (Phase 3: tools and a format are never combined in one request).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct OutputConfig {
-    pub format: OutputFormat,
+    /// Structured outputs. Unset: omitted (free text or tool use).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<OutputFormat>,
     /// How much the model thinks (thinking counts toward `max_tokens`).
     /// Unset: omitted (the model's default).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+}
+
+impl OutputConfig {
+    /// `{"format": {"type": "json_schema", "schema": …}}`, default effort.
+    pub fn format(schema: serde_json::Value) -> OutputConfig {
+        OutputConfig {
+            format: Some(OutputFormat::JsonSchema { schema }),
+            effort: None,
+        }
+    }
 }
 
 /// `output_config.effort`.
@@ -87,6 +102,20 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// The model's thinking. Sent back unchanged (with its signature) in the
+    /// assistant turn of a tool-use conversation; never logged or shown.
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    /// Encrypted thinking. Sent back unchanged, like [`ContentBlock::Thinking`].
+    RedactedThinking {
+        data: String,
+    },
+    /// Any other block type. Never sent back: serialising it would produce a
+    /// block the API rejects, so callers drop it from echoed turns.
     #[serde(other)]
     Unknown,
 }
