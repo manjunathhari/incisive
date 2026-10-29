@@ -12,12 +12,14 @@
 
 pub mod agent_loop;
 pub mod answer;
+pub mod answer_v3;
 mod bounded;
 pub mod check;
 pub mod extract;
 pub mod frame;
 pub mod llm;
 mod pipeline;
+pub mod researcher;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
