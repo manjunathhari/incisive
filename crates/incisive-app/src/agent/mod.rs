@@ -228,6 +228,9 @@ pub enum PipelineOutcome {
     Done(Value),
     /// An answer, but a step degraded.
     Partial(Value),
+    /// An answer, degraded for this reason, stored as the run's
+    /// `error_kind` (Phase 3: `writer_truncated`, `writer_time`, …).
+    PartialKind(Value, &'static str),
     /// No answer; a fixed error kind (stored as the run's `error_kind`).
     Failed(&'static str),
 }

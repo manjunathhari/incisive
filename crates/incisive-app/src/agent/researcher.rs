@@ -50,8 +50,10 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::agent_loop::{
-    AgentLog, AgentSpec, LoopStop, ResultCaps, TurnLog, TurnObserver, run_agent_observed,
+    AgentSpec, LoopStop, ResultCaps, TurnLog, TurnObserver, run_agent_observed,
 };
 use super::answer_v3::SearchEntry;
 use super::llm::{Effort, OutputSchema, StepError};
@@ -423,17 +425,36 @@ pub struct Research {
     /// Recorded by code as the tools ran.
     pub searches: Vec<SearchEntry>,
     pub dropped_unseen: usize,
-    pub log: AgentLog,
+    /// Why the tool turns stopped.
+    pub stop: LoopStop,
+    /// Tool-use rounds (model turns) completed.
+    pub rounds: usize,
+    /// Research ran, but its final study-list call could not be made or
+    /// read (review finding 1): nothing is selected, and the run ends
+    /// `partial`, not `failed`.
+    pub final_failed: bool,
 }
 
 impl Research {
     /// Why research stopped early, if it did: "cost limit" / "time limit",
     /// or "cost limit" for a refused or failed turn.
     pub fn stopped_early(&self) -> Option<&'static str> {
-        match self.log.stop {
+        match self.stop {
             LoopStop::WrapUp(r) => Some(r),
             LoopStop::OverBudget => Some("cost limit"),
             LoopStop::TurnFailed => Some("a failed model call"),
+            _ => None,
+        }
+    }
+
+    /// Owner ruling R-S2b: where research was stopped by a limit (money or
+    /// time: "the Quick limit"; the turn cap: "the round cap"), for the
+    /// trail line. `None` when the model ended its own search, or a turn
+    /// failed.
+    pub fn stopped_at(&self) -> Option<&'static str> {
+        match self.stop {
+            LoopStop::WrapUp(_) | LoopStop::OverBudget => Some("the Quick limit"),
+            LoopStop::TurnCap => Some("the round cap"),
             _ => None,
         }
     }
@@ -444,11 +465,13 @@ struct Progress<'a> {
     ctx: &'a RunContext,
     rec: Arc<SearchRecorder>,
     turns: u8,
+    done: AtomicUsize,
 }
 
 #[async_trait]
 impl TurnObserver for Progress<'_> {
     async fn turn_done(&self, turn: &TurnLog) {
+        self.done.fetch_add(1, Ordering::SeqCst);
         let n = self.rec.count();
         let noun = if n == 1 { "search" } else { "searches" };
         add_line(
@@ -504,8 +527,37 @@ pub async fn research(
         ctx,
         rec: rec.clone(),
         turns: settings.researcher_turns,
+        done: AtomicUsize::new(0),
     };
-    let run = run_agent_observed::<StudyList>(&call, &tools, &spec, Some(&progress)).await?;
+    let run = match run_agent_observed::<StudyList>(&call, &tools, &spec, Some(&progress)).await {
+        Ok(r) => r,
+        // After at least one completed turn, these can only come from the
+        // final study-list call (a failed later turn goes to the final
+        // call): unreadable twice, its retry refused, or the model call
+        // failed. The research is lost, not the run.
+        Err(e @ (StepError::Parse | StepError::OverBudget | StepError::Llm))
+            if progress.done.load(Ordering::SeqCst) > 0 =>
+        {
+            let rounds = progress.done.load(Ordering::SeqCst);
+            tracing::warn!(run_id = %ctx.run_id, error_kind = e.kind(), rounds, "researcher's final call failed");
+            add_line(
+                ctx,
+                StepKind::Note,
+                "Researcher: the study list could not be completed",
+            )
+            .await;
+            return Ok(Research {
+                selected: Vec::new(),
+                contradictions: Vec::new(),
+                searches: rec.searches(),
+                dropped_unseen: 0,
+                stop: LoopStop::Other,
+                rounds,
+                final_failed: true,
+            });
+        }
+        Err(e) => return Err(e),
+    };
 
     let seen = seen_pmids(&run.results);
     let reported = run.output.selected.len();
@@ -563,7 +615,9 @@ pub async fn research(
         contradictions: v.contradictions,
         searches: rec.searches(),
         dropped_unseen: v.dropped_unseen,
-        log: run.log,
+        stop: run.log.stop,
+        rounds: run.log.turns.len(),
+        final_failed: false,
     })
 }
 

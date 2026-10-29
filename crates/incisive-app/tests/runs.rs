@@ -3101,6 +3101,13 @@ fn deploy_workflow_wires_phase2_settings() {
     }
 }
 
+/// The deploy check's QUICK_ENGINE lines (from the trim to the `esac`).
+fn quick_engine_check(check: &str) -> String {
+    let start = check.find("qe=").expect("QUICK_ENGINE trim");
+    let end = start + check[start..].find("esac").expect("esac") + "esac".len();
+    check[start..end].to_string()
+}
+
 /// Stage 2 §0: the Phase 3 roles and the Quick engine switch reach the
 /// deploy. The price pre-check covers every role's **default** model (not
 /// only keys set in AGENT_MODELS), from the app's own defaults.
@@ -3127,6 +3134,27 @@ fn deploy_workflow_wires_phase3_settings() {
         check.contains(r#"""|team|classic) ;;"#),
         "QUICK_ENGINE must be checked against team|classic"
     );
+    // Review finding 9: only leading and trailing blanks are stripped (as
+    // the app trims), so "tea m" is refused, not read as "team".
+    assert!(
+        !check.contains("${QUICK_ENGINE//[[:space:]]/}"),
+        "inner spaces must not be removed"
+    );
+    for (value, ok) in [
+        ("team", true),
+        ("  classic ", true),
+        ("", true),
+        ("tea m", false),
+        ("Team", false),
+    ] {
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}\nexit 0", quick_engine_check(check)))
+            .env("QUICK_ENGINE", value)
+            .status()
+            .expect("bash");
+        assert_eq!(status.success(), ok, "QUICK_ENGINE={value:?}");
+    }
     let run = &scripts
         .iter()
         .find(|(n, _)| n == "Deploy to Cloud Run")

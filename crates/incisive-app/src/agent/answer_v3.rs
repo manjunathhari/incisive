@@ -226,35 +226,50 @@ pub enum Segment {
     Cite(Vec<String>),
 }
 
-/// `text` cut into plain runs and citation runs, in order.
-pub fn split_citations(text: &str) -> Vec<Segment> {
-    let mut out = Vec::new();
+/// Shortest id that counts as a PMID on its own in a bracket.
+pub const MIN_PMID_DIGITS: usize = 5;
+
+/// `text` cut into plain runs and citation runs, in order. A bracket of
+/// numbers is a citation only if one of its ids is `known` (a selected
+/// study) or every id has at least [`MIN_PMID_DIGITS`] digits; otherwise
+/// (e.g. "LOS 2 [1, 3] days") it stays text.
+pub fn split_citations(text: &str, known: impl Fn(&str) -> bool) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    let mut plain = String::new();
     let mut last = 0;
     for m in CITE.find_iter(text) {
-        if m.start() > last {
-            out.push(Segment::Text(text[last..m.start()].to_string()));
-        }
-        let ids = DIGITS
+        let ids: Vec<String> = DIGITS
             .find_iter(m.as_str())
             .map(|d| d.as_str().to_string())
             .collect();
-        out.push(Segment::Cite(ids));
+        let citation =
+            ids.iter().any(|i| known(i)) || ids.iter().all(|i| i.len() >= MIN_PMID_DIGITS);
+        plain.push_str(&text[last..m.start()]);
+        if citation {
+            if !plain.is_empty() {
+                out.push(Segment::Text(std::mem::take(&mut plain)));
+            }
+            out.push(Segment::Cite(ids));
+        } else {
+            plain.push_str(m.as_str());
+        }
         last = m.end();
     }
-    if last < text.len() {
-        out.push(Segment::Text(text[last..].to_string()));
+    plain.push_str(&text[last..]);
+    if !plain.is_empty() {
+        out.push(Segment::Text(plain));
     }
     out
 }
 
-/// `text` with every citation marker rewritten to keep only PMIDs for which
+/// `text` with every citation marker ([`split_citations`]) rewritten to keep only PMIDs for which
 /// `known` is true (de-duplicated, in order, as `[a; b]`); a marker left
 /// empty is removed with the blank before it. Returns the text and how many
 /// PMID citations were removed.
 pub fn clean_citations(text: &str, known: impl Fn(&str) -> bool) -> (String, u32) {
     let mut removed = 0u32;
     let mut out = String::with_capacity(text.len());
-    for seg in split_citations(text) {
+    for seg in split_citations(text, &known) {
         match seg {
             Segment::Text(t) => out.push_str(&t),
             Segment::Cite(ids) => {
@@ -284,31 +299,58 @@ pub fn clean_citations(text: &str, known: impl Fn(&str) -> bool) -> (String, u32
 mod tests {
     use super::*;
 
+    const A: &str = "41060645";
+    const B: &str = "39979619";
+
+    fn known(p: &str) -> bool {
+        p == A || p == B
+    }
+
     #[test]
     fn splits_markers_of_every_shape() {
-        let s = split_citations("Pain was similar [123; 456]. Cost [PMID: 789], [1,2] end");
+        let s = split_citations(
+            &format!("Pain was similar [{A}; {B}]. Cost [PMID: {A}], [{A},{B}] end"),
+            known,
+        );
         assert_eq!(
             s,
             vec![
                 Segment::Text("Pain was similar ".into()),
-                Segment::Cite(vec!["123".into(), "456".into()]),
+                Segment::Cite(vec![A.into(), B.into()]),
                 Segment::Text(". Cost ".into()),
-                Segment::Cite(vec!["789".into()]),
+                Segment::Cite(vec![A.into()]),
                 Segment::Text(", ".into()),
-                Segment::Cite(vec!["1".into(), "2".into()]),
+                Segment::Cite(vec![A.into(), B.into()]),
                 Segment::Text(" end".into()),
             ]
         );
         // Brackets that are not citations stay text.
-        let s = split_citations("95% CI [0.2 to 1.39] and [n=12] and [a]");
+        let s = split_citations("95% CI [0.2 to 1.39] and [n=12] and [a]", known);
         assert!(s.iter().all(|x| matches!(x, Segment::Text(_))), "{s:?}");
+    }
+
+    /// Review finding 5: short numbers in brackets are not citations unless
+    /// one of them is a selected study.
+    #[test]
+    fn short_bracketed_numbers_stay_text() {
+        let t = "LOS 2 [1, 3] days";
+        let (c, n) = clean_citations(t, known);
+        assert_eq!((c.as_str(), n), (t, 0));
+        assert_eq!(split_citations(t, known), vec![Segment::Text(t.into())]);
+        // An unknown long id is a citation (and removed); a short one beside
+        // a selected study is too.
+        let (c, n) = clean_citations(&format!("x [99999999] y [{A}; 12]"), known);
+        assert_eq!(c, format!("x y [{A}]"));
+        assert_eq!(n, 2);
     }
 
     #[test]
     fn clean_keeps_known_and_removes_unknown() {
-        let known = |p: &str| p == "111" || p == "222";
-        let (t, n) = clean_citations("A [111; 999]. B [999]. C [222; 222; 111].", known);
-        assert_eq!(t, "A [111]. B. C [222; 111].");
+        let (t, n) = clean_citations(
+            &format!("A [{A}; 99999999]. B [88888888]. C [{B}; {B}; {A}]."),
+            known,
+        );
+        assert_eq!(t, format!("A [{A}]. B. C [{B}; {A}]."));
         assert_eq!(n, 2);
         let (t, n) = clean_citations("No markers here.", known);
         assert_eq!((t.as_str(), n), ("No markers here.", 0));

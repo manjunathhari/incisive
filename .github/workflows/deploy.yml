@@ -77,7 +77,7 @@ jobs:
             case "$v" in
               AGENT_MODELS) allowed="frame search screen extract write check researcher writer extractor skeptic"; fields="" ;;
               RUN_LIMITS) allowed="quick focused"
-                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens" ;;
+                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens writer_time_allowance_s" ;;
             esac
             if ! msg=$(printf '%s' "${!v}" | python3 -c '
           import json, sys
@@ -134,7 +134,10 @@ jobs:
           fi
           # Optional Quick engine: unset (team), team or classic (the Phase 2
           # pipeline, the rollback switch). The app refuses anything else.
-          case "${QUICK_ENGINE//[[:space:]]/}" in
+          # Only leading and trailing blanks are stripped, as the app trims.
+          qe="${QUICK_ENGINE#"${QUICK_ENGINE%%[![:space:]]*}"}"
+          qe="${qe%"${qe##*[![:space:]]}"}"
+          case "$qe" in
             ""|team|classic) ;;
             *) echo "::error::vars.QUICK_ENGINE must be team or classic (see infra/README.md section 12)"; exit 1 ;;
           esac

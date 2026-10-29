@@ -320,14 +320,15 @@ The global, daily and monthly caps apply as before.
 
 | Field | Quick | Focused (Full) | Meaning |
 |---|---|---|---|
-| `agent_limit_paise` | 6000 (₹60) | 20000 (₹200) | Phase 3 cost limit |
-| `agent_time_limit_s` | 240 | 480 | Phase 3 time limit in seconds |
+| `agent_limit_paise` | 10000 (₹100) | 20000 (₹200) | Phase 3 cost limit |
+| `agent_time_limit_s` | 360 | 480 | Phase 3 time limit in seconds (hard stop at it plus 60 s) |
 | `researcher_turns` | 8 | 15 | researcher tool-use turns at most (1 to 50) |
 | `skeptic_turns` | 0 | 8 | skeptic tool-use turns at most (0 = no skeptic; up to 50) |
 | `researcher_max_tokens` | 4000 | 4000 | output tokens per researcher turn (1 to 64000) |
 | `skeptic_max_tokens` | 4000 | 4000 | output tokens per skeptic turn |
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
-| `writer_max_tokens` | 8000 | 8000 | output tokens of the writer's call |
+| `writer_max_tokens` | 16000 | 16000 | output tokens of the writer's call (its cost is reserved before research starts) |
+| `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
 
 Each call's full `max_tokens` is held against the cost limit before it is made,
 so raising these makes each turn harder to fit, not more expensive in itself.
@@ -465,9 +466,11 @@ value, and so does the app at startup. A question is reserved and run by the sam
 instance right after it is sent, so it always runs on the engine it was reserved
 for; runs that are in flight during a deploy are interrupted as before.
 
-Under `team`, a Quick run reserves `agent_limit_paise` (default ₹60) and runs under
-`agent_time_limit_s` (default 240 s) from `RUN_LIMITS` (section 11), and the
-question box shows that limit next to Quick. Under `classic` it reserves
+Under `team`, a Quick run reserves `agent_limit_paise` (default ₹100, owner ruling of
+29 Oct 2026) and runs under `agent_time_limit_s` (default 360 s, hard stop at 420 s)
+from `RUN_LIMITS` (section 11); research wraps up `writer_time_allowance_s` (150 s)
+before the time limit so the writer has time, and the writer is not started with less
+than 60 s left. The question box shows the limit next to Quick. Under `classic` it reserves
 `limit_paise` (₹15) and uses `time_limit_s`, as before.
 
 **New `AGENT_MODELS` keys.** Each must be priced in `MODEL_PRICES` (section 10),

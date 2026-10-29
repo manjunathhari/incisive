@@ -563,14 +563,17 @@ mod tests {
                 limit_paise: 1500,
                 time_limit_s: 300,
                 // Phase 3 (T3): additive; the Phase 2 pipeline ignores them.
-                agent_limit_paise: 6000,
-                agent_time_limit_s: 240,
+                // Owner ruling R-S2a: ₹100; review: 6 minutes, writer 16k
+                // tokens and 150 s kept for it.
+                agent_limit_paise: 10000,
+                agent_time_limit_s: 360,
                 researcher_turns: 8,
                 skeptic_turns: 0,
                 researcher_max_tokens: 4000,
                 skeptic_max_tokens: 4000,
                 extractor_max_tokens: 4000,
-                writer_max_tokens: 8000,
+                writer_max_tokens: 16000,
+                writer_time_allowance_s: 150,
             }
         );
         assert_eq!(
@@ -589,7 +592,8 @@ mod tests {
                 researcher_max_tokens: 4000,
                 skeptic_max_tokens: 4000,
                 extractor_max_tokens: 4000,
-                writer_max_tokens: 8000,
+                writer_max_tokens: 16000,
+                writer_time_allowance_s: 150,
             }
         );
 
@@ -622,7 +626,7 @@ mod tests {
         assert_eq!(c.runs.focused.limit_paise, 4500);
         assert_eq!(c.runs.focused.skeptic_turns, 8);
         assert_eq!(c.runs.quick.writer_max_tokens, 6000);
-        assert_eq!(c.runs.quick.agent_limit_paise, 6000);
+        assert_eq!(c.runs.quick.agent_limit_paise, 10000);
 
         for bad in [
             "not json",
@@ -648,6 +652,9 @@ mod tests {
             r#"{"quick": {"extractor_max_tokens": 0}}"#,
             r#"{"quick": {"skeptic_max_tokens": 100000}}"#,
             r#"{"quick": {"skeptic_turn": 2}}"#,
+            // The writer's time must leave research some time.
+            r#"{"quick": {"writer_time_allowance_s": 360}}"#,
+            r#"{"focused": {"writer_time_allowance_s": 900}}"#,
         ] {
             let mut pairs = full();
             pairs.push(("RUN_LIMITS", bad));

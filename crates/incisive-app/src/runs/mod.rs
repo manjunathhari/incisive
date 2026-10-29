@@ -102,8 +102,13 @@ pub struct DepthSettings {
     pub skeptic_max_tokens: u32,
     /// `max_tokens` per extractor + appraiser call.
     pub extractor_max_tokens: u32,
-    /// `max_tokens` of the writer's call.
+    /// `max_tokens` of the writer's call (16,000; its finish reserve is
+    /// sized on it).
     pub writer_max_tokens: u32,
+    /// Seconds of the Phase 3 time limit kept for the writer: research
+    /// wraps up at `agent_time_limit_s - writer_time_allowance_s`. Must be
+    /// below `agent_time_limit_s`.
+    pub writer_time_allowance_s: u32,
 }
 
 /// Most tool-use turns a role may be given (`RUN_LIMITS`).
@@ -115,7 +120,10 @@ pub const MAX_ROLE_TOKENS: u32 = 64_000;
 /// it (thinking counts toward it), so these are kept modest: at Opus-class
 /// prices a 4,000-token turn holds about ₹9 of output before input.
 const AGENT_MAX_TOKENS: u32 = 4_000;
-const WRITER_MAX_TOKENS: u32 = 8_000;
+/// Review fix: 8,000 could truncate a full answer (thinking counts too).
+const WRITER_MAX_TOKENS: u32 = 16_000;
+/// Seconds kept for the writer at the end of a Phase 3 run.
+const WRITER_TIME_ALLOWANCE_S: u32 = 150;
 
 impl DepthSettings {
     pub const QUICK: DepthSettings = DepthSettings {
@@ -127,14 +135,17 @@ impl DepthSettings {
         // finish reserve for Write and Check (Ruling R-13c).
         limit_paise: 1500,
         time_limit_s: 300,
-        agent_limit_paise: 6000,
-        agent_time_limit_s: 240,
+        // ₹100 (owner ruling R-S2a, 29 Oct 2026; was ₹60) and 6 minutes
+        // (review: time for the writer).
+        agent_limit_paise: 10000,
+        agent_time_limit_s: 360,
         researcher_turns: 8,
         skeptic_turns: 0,
         researcher_max_tokens: AGENT_MAX_TOKENS,
         skeptic_max_tokens: AGENT_MAX_TOKENS,
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
+        writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
     };
     pub const FOCUSED: DepthSettings = DepthSettings {
         refinements: 3,
@@ -151,6 +162,7 @@ impl DepthSettings {
         skeptic_max_tokens: AGENT_MAX_TOKENS,
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
+        writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
     };
 
     fn validate(&self) -> Result<(), String> {
@@ -171,6 +183,9 @@ impl DepthSettings {
         }
         if self.agent_time_limit_s == 0 {
             return Err("agent_time_limit_s must be positive".into());
+        }
+        if self.writer_time_allowance_s >= self.agent_time_limit_s {
+            return Err("writer_time_allowance_s must be below agent_time_limit_s".into());
         }
         if !(1..=MAX_AGENT_TURNS).contains(&self.researcher_turns) {
             return Err(format!("researcher_turns must be 1 to {MAX_AGENT_TURNS}"));
@@ -227,6 +242,17 @@ impl RunsConfig {
         } else {
             (s.limit_paise, s.time_limit_s)
         }
+    }
+
+    /// When research wraps up, in seconds from the start, for a team run:
+    /// the time limit less the writer's allowance. `None` for a Phase 2 run
+    /// (its wrap-up stays at 60% of the time limit).
+    pub fn team_wrap_up_s(&self, mode: RunMode, engine: QuickEngine) -> Option<u32> {
+        let s = self.for_mode(mode);
+        engine.uses_team(mode).then(|| {
+            s.agent_time_limit_s
+                .saturating_sub(s.writer_time_allowance_s)
+        })
     }
 
     /// Parse `RUN_LIMITS`: `{"quick": {...}, "focused": {...}}`, either key

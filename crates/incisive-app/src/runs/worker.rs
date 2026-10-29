@@ -324,6 +324,23 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
     };
 
     let _ticker = start_ticker(pool.clone(), run_id, cancel.clone());
+    let mut budget = RunBudget::new(
+        run_id,
+        user_id,
+        limit_paise,
+        Instant::now(),
+        state.prices.clone(),
+        state.usd_inr,
+    )
+    // Wrap-up and hard stop from the mode's time limit (RUN_LIMITS):
+    // `agent_time_limit_s` when the evidence team answers the run
+    // (QUICK_ENGINE), `time_limit_s` otherwise.
+    .with_time_limit(state.runs.limits(mode, state.quick_engine).1);
+    // A team run keeps the writer's allowance at the end: research wraps up
+    // at the time limit less it.
+    if let Some(s) = state.runs.team_wrap_up_s(mode, state.quick_engine) {
+        budget = budget.with_wrap_up_after(Duration::from_secs(u64::from(s)));
+    }
     let ctx = RunContext {
         state: state.clone(),
         llm,
@@ -333,20 +350,7 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
         question,
         mode,
         settings: state.runs.for_mode(mode),
-        budget: Arc::new(
-            RunBudget::new(
-                run_id,
-                user_id,
-                limit_paise,
-                Instant::now(),
-                state.prices.clone(),
-                state.usd_inr,
-            )
-            // Wrap-up and hard stop from the mode's time limit (RUN_LIMITS):
-            // `agent_time_limit_s` when the evidence team answers the run
-            // (QUICK_ENGINE), `time_limit_s` otherwise.
-            .with_time_limit(state.runs.limits(mode, state.quick_engine).1),
-        ),
+        budget: Arc::new(budget),
         cancel,
     };
     let guarded = AssertUnwindSafe(async { pipeline(&ctx).await }).catch_unwind();
@@ -394,6 +398,17 @@ async fn decide(pool: &PgPool, ctx: &RunContext, outcome: PipelineOutcome) -> En
     let (status, body) = match outcome {
         PipelineOutcome::Done(body) => (RunStatus::Done, body),
         PipelineOutcome::Partial(body) => (RunStatus::Partial, body),
+        PipelineOutcome::PartialKind(body, kind) => {
+            return match store::save_answer(pool, run_id, &body).await {
+                Ok(true) => End::Status(RunStatus::Partial, Some(kind)),
+                Ok(false) | Err(_) if gone(pool, run_id).await => End::Deleted,
+                Ok(false) => End::AlreadyFinished,
+                Err(_) => {
+                    tracing::error!(%run_id, "run answer could not be stored");
+                    End::Status(RunStatus::Failed, Some("store"))
+                }
+            };
+        }
         PipelineOutcome::Failed(kind) => {
             return if gone(pool, run_id).await {
                 End::Deleted

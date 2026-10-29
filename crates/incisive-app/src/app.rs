@@ -906,7 +906,7 @@ fn answer_view(a: Answer) -> impl IntoView {
 /// references (`#ref-N`). Text stays plain (escaped); a PMID with no
 /// reference (none should be left after the citation check) is not shown.
 fn cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
-    split_citations(text)
+    split_citations(text, |p| refs.contains_key(p))
         .into_iter()
         .map(|seg| match seg {
             Segment::Text(t) => t.into_any(),
