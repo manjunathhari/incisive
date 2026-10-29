@@ -272,9 +272,9 @@ impl PubMed {
 }
 
 /// Neighbour ids from an elink JSON reply (see [`PubMed::related`]). Links
-/// are objects `{"id", "score"}` (`neighbor_score`) or plain id strings
-/// (`neighbor`); both are read, in the order given (NCBI sorts by score).
-/// Only digit ids are kept.
+/// are objects `{"id", "score"}` (`neighbor_score`) or plain ids
+/// (`neighbor`); an id may be a JSON string or a number. All are read, in
+/// the order given (NCBI sorts by score). Only digit ids are kept.
 pub fn parse_elink(
     body: &serde_json::Value,
     pmid: &str,
@@ -302,16 +302,24 @@ pub fn parse_elink(
     let Some(links) = db.and_then(|d| d.get("links")).and_then(|l| l.as_array()) else {
         return Ok(Vec::new());
     };
+    // An id as a JSON string or a whole number.
+    fn id_of(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.trim().to_string()),
+            serde_json::Value::Number(n) => n.as_u64().map(|n| n.to_string()),
+            _ => None,
+        }
+    }
     let mut out: Vec<String> = Vec::new();
     for link in links {
         let id = match link {
-            serde_json::Value::String(s) => Some(s.as_str()),
-            serde_json::Value::Object(o) => o.get("id").and_then(|v| v.as_str()),
-            _ => None,
+            serde_json::Value::Object(o) => o.get("id").and_then(id_of),
+            other => id_of(other),
         };
-        let Some(id) = id.map(str::trim) else {
+        let Some(id) = id else {
             continue;
         };
+        let id = id.as_str();
         if id.is_empty()
             || !id.bytes().all(|b| b.is_ascii_digit())
             || id == pmid

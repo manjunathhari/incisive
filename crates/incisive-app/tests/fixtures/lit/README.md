@@ -19,3 +19,6 @@ responses do not contain it.
   (`linksets[].linksetdbs[].links[]` of `{"id","score"}`, the source id listed
   first), using the ICG fixture ids so `pubmed_esummary_icg.json` serves the
   titles.
+- `pubmed_elink_numeric_ids.json`: **constructed**. The same link set with ids
+  as JSON numbers (and mixed with strings and objects), to keep the parser
+  tolerant of either encoding.

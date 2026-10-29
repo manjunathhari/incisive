@@ -451,6 +451,12 @@ fn elink_neighbours_parse_both_link_shapes() {
         {"dbto": "pubmed", "linkname": "pubmed_pubmed", "links": ["1", "22", "x9", "22", "333"]}
     ]}]});
     assert_eq!(parse_elink(&plain, "1", 30).unwrap(), ["22", "333"]);
+    // Ids may come as JSON numbers too (review fix 5).
+    let numeric: Value = serde_json::from_str(&fixture("pubmed_elink_numeric_ids.json")).unwrap();
+    assert_eq!(
+        parse_elink(&numeric, "40042831", 30).unwrap(),
+        ["41871586", "40690925", "33820705", "38577071"]
+    );
     let none = json!({"linksets": [{"dbfrom": "pubmed", "ids": ["1"]}]});
     assert!(parse_elink(&none, "1", 30).unwrap().is_empty());
     assert!(parse_elink(&json!({"ERROR": "Invalid uid"}), "1", 30).is_err());

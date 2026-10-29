@@ -1,0 +1,22 @@
+{
+  "header": {"type": "elink", "version": "0.3"},
+  "linksets": [
+    {
+      "dbfrom": "pubmed",
+      "ids": [40042831],
+      "linksetdbs": [
+        {
+          "dbto": "pubmed",
+          "linkname": "pubmed_pubmed",
+          "links": [
+            {"id": 40042831, "score": 999999999},
+            {"id": 41871586, "score": 48211407},
+            "40690925",
+            33820705,
+            {"id": "38577071", "score": "35500210"}
+          ]
+        }
+      ]
+    }
+  ]
+}
