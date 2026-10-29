@@ -1328,6 +1328,7 @@ async fn a_truncated_writer_retries_only_when_the_budget_allows() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let spent: i64 = charges(&pool, uid).await.iter().sum();
         assert!(spent <= limit, "limit {limit}: spent {spent}");
+        assert_eq!(ctx.budget.held(), 0, "limit {limit}: nothing left held");
         assert!(
             matches!(out, PipelineOutcome::PartialKind(_, "writer_truncated")),
             "limit {limit}: {out:?}"
@@ -1355,6 +1356,39 @@ async fn a_truncated_researcher_final_call_ends_partial() {
         truncated(research_script(ScriptedLlm::new()), FINAL_KEY),
         FINAL_KEY,
     ));
+    let (ctx, _uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(
+            out,
+            PipelineOutcome::PartialKind(_, "researcher_incomplete")
+        ),
+        "{out:?}"
+    );
+    let a = body_of(&out);
+    assert_eq!(a.empty_reason.as_deref(), Some(STOPPED_NO_ANSWER));
+    assert_eq!(a.searches.len(), 1, "the trail is kept");
+    assert!(writer_requests(&llm).is_empty());
+}
+
+/// Minor review 2: a rate-limited (or failed) final study-list call after
+/// research ends partial with the trail, not failed.
+#[tokio::test]
+async fn a_rate_limited_researcher_final_call_ends_partial() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new())
+            .when(FINAL_KEY)
+            .fail(claude_client::ClaudeError::RateLimited { retry_after: None }),
+    );
     let (ctx, _uid) = quick_ctx(
         &pool,
         literature(&server),

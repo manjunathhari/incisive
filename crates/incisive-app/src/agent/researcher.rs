@@ -535,9 +535,12 @@ pub async fn research(
         // final study-list call (a failed later turn goes to the final
         // call): unreadable twice, its retry refused, or the model call
         // failed. The research is lost, not the run.
-        Err(e @ (StepError::Parse | StepError::OverBudget | StepError::Llm))
-            if progress.done.load(Ordering::SeqCst) > 0 =>
-        {
+        Err(
+            e @ (StepError::Parse
+            | StepError::OverBudget
+            | StepError::Llm
+            | StepError::RateLimited(_)),
+        ) if progress.done.load(Ordering::SeqCst) > 0 => {
             let rounds = progress.done.load(Ordering::SeqCst);
             tracing::warn!(run_id = %ctx.run_id, error_kind = e.kind(), rounds, "researcher's final call failed");
             add_line(

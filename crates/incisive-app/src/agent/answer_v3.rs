@@ -231,7 +231,7 @@ pub const MIN_PMID_DIGITS: usize = 5;
 
 /// `text` cut into plain runs and citation runs, in order. A bracket of
 /// numbers is a citation only if one of its ids is `known` (a selected
-/// study) or every id has at least [`MIN_PMID_DIGITS`] digits; otherwise
+/// study) or any id has at least [`MIN_PMID_DIGITS`] digits; otherwise
 /// (e.g. "LOS 2 [1, 3] days") it stays text.
 pub fn split_citations(text: &str, known: impl Fn(&str) -> bool) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::new();
@@ -243,7 +243,7 @@ pub fn split_citations(text: &str, known: impl Fn(&str) -> bool) -> Vec<Segment>
             .map(|d| d.as_str().to_string())
             .collect();
         let citation =
-            ids.iter().any(|i| known(i)) || ids.iter().all(|i| i.len() >= MIN_PMID_DIGITS);
+            ids.iter().any(|i| known(i)) || ids.iter().any(|i| i.len() >= MIN_PMID_DIGITS);
         plain.push_str(&text[last..m.start()]);
         if citation {
             if !plain.is_empty() {
@@ -272,6 +272,26 @@ pub fn clean_citations(text: &str, known: impl Fn(&str) -> bool) -> (String, u32
     for seg in split_citations(text, &known) {
         match seg {
             Segment::Text(t) => out.push_str(&t),
+            Segment::Cite(ids) if !ids.iter().any(|i| known(i)) => {
+                // No selected study in it: unknown PMIDs (5+ digits) are
+                // removed and counted; short numbers stay as text.
+                let mut short: Vec<String> = Vec::new();
+                for id in ids {
+                    if id.len() >= MIN_PMID_DIGITS {
+                        removed += 1;
+                    } else {
+                        short.push(id);
+                    }
+                }
+                if short.is_empty() {
+                    let trimmed = out.trim_end_matches([' ', '\t']).len();
+                    out.truncate(trimmed);
+                } else {
+                    out.push('[');
+                    out.push_str(&short.join("; "));
+                    out.push(']');
+                }
+            }
             Segment::Cite(ids) => {
                 let mut keep: Vec<String> = Vec::new();
                 for id in ids {
@@ -342,6 +362,25 @@ mod tests {
         let (c, n) = clean_citations(&format!("x [99999999] y [{A}; 12]"), known);
         assert_eq!(c, format!("x y [{A}]"));
         assert_eq!(n, 2);
+    }
+
+    /// Minor review 1: an unknown long PMID beside short numbers is still a
+    /// citation candidate: the PMID is removed and counted, the short
+    /// numbers stay as text.
+    #[test]
+    fn unknown_long_ids_beside_short_numbers_are_removed() {
+        assert_eq!(
+            split_citations("x [12; 99999999] y", known),
+            vec![
+                Segment::Text("x ".into()),
+                Segment::Cite(vec!["12".into(), "99999999".into()]),
+                Segment::Text(" y".into()),
+            ]
+        );
+        let (c, n) = clean_citations("x [12; 99999999] y", known);
+        assert_eq!((c.as_str(), n), ("x [12] y", 1));
+        let (c, n) = clean_citations("x [1, 3; 88888888; 99999999] y", known);
+        assert_eq!((c.as_str(), n), ("x [1; 3] y", 2));
     }
 
     #[test]
