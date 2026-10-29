@@ -35,6 +35,8 @@ fn identity_state() -> incisive_app::server::AppState {
         gate_model: "unused".into(),
         dev_mode: false,
         runs: incisive_app::runs::RunsConfig::default(),
+        // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
+        quick_engine: incisive_app::runs::QuickEngine::Classic,
         worker: incisive_app::runs::worker::WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

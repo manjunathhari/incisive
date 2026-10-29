@@ -19,9 +19,9 @@ use crate::config::AppEnv;
 use crate::gate::Classifier;
 use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
-use crate::runs::RunsConfig;
 use crate::runs::api as runs_api;
 use crate::runs::worker::WorkerHandle;
+use crate::runs::{QuickEngine, RunsConfig};
 use crate::spend::{CapsConfig, Prices};
 
 /// Everything a request needs. Also provided as Leptos context to server functions.
@@ -38,6 +38,8 @@ pub struct AppState {
     pub dev_mode: bool,
     /// Per-depth run limits (`RUN_LIMITS`).
     pub runs: RunsConfig,
+    /// Which engine answers Quick runs (`QUICK_ENGINE`; default `team`).
+    pub quick_engine: QuickEngine,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev

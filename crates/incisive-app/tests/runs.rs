@@ -959,6 +959,8 @@ fn app_state(pool: PgPool) -> AppState {
         gate_model: "m-test".into(),
         dev_mode: true,
         runs: RunsConfig::default(),
+        // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
+        quick_engine: incisive_app::runs::QuickEngine::Classic,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
@@ -3097,6 +3099,50 @@ fn deploy_workflow_wires_phase2_settings() {
     ] {
         assert!(deploy.contains(v), "deploy.yml misses `{v}`");
     }
+}
+
+/// Stage 2 §0: the Phase 3 roles and the Quick engine switch reach the
+/// deploy. The price pre-check covers every role's **default** model (not
+/// only keys set in AGENT_MODELS), from the app's own defaults.
+#[test]
+fn deploy_workflow_wires_phase3_settings() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    // Every role and its default model appear in the pre-check's defaults.
+    for (role, model) in incisive_app::agent::llm::AgentModels::default().entries() {
+        let pair = format!(r#""{role}": "{model}""#);
+        assert!(
+            check.contains(&pair),
+            "price pre-check misses default {pair}"
+        );
+    }
+    // QUICK_ENGINE: optional, team or classic, checked before the build.
+    assert!(check.contains("QUICK_ENGINE"), "check misses QUICK_ENGINE");
+    assert!(
+        check.contains(r#"""|team|classic) ;;"#),
+        "QUICK_ENGINE must be checked against team|classic"
+    );
+    let run = &scripts
+        .iter()
+        .find(|(n, _)| n == "Deploy to Cloud Run")
+        .expect("deploy step")
+        .1;
+    assert!(
+        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE"]"#),
+        "QUICK_ENGINE must be an optional env var"
+    );
+    assert_eq!(
+        deploy
+            .matches("QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}")
+            .count(),
+        2,
+        "QUICK_ENGINE must reach both the check and the deploy step"
+    );
 }
 
 /// Reports the hard stop the worker gave the run's budget.

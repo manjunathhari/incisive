@@ -30,6 +30,41 @@ pub enum RunMode {
     Focused,
 }
 
+/// Which engine answers Quick questions (`QUICK_ENGINE`, Phase 3 Stage 2):
+/// the evidence team (researcher → writer, the default) or the Phase 2
+/// pipeline (`classic`, the owner's rollback switch). Focused always runs
+/// the Phase 2 pipeline until Stage 3.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickEngine {
+    #[default]
+    Team,
+    Classic,
+}
+
+impl QuickEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuickEngine::Team => "team",
+            QuickEngine::Classic => "classic",
+        }
+    }
+
+    /// Exactly `team` or `classic` (lower case).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "team" => Some(QuickEngine::Team),
+            "classic" => Some(QuickEngine::Classic),
+            _ => None,
+        }
+    }
+
+    /// Whether a run of `mode` is answered by the evidence team.
+    pub fn uses_team(self, mode: RunMode) -> bool {
+        mode == RunMode::Quick && self == QuickEngine::Team
+    }
+}
+
 /// The limits one depth runs under (owner-editable through `RUN_LIMITS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -178,6 +213,19 @@ impl RunsConfig {
         match mode {
             RunMode::Quick => self.quick,
             RunMode::Focused => self.focused,
+        }
+    }
+
+    /// The cost limit (paise, reserved in full when the run starts) and the
+    /// time limit (seconds) of a run of `mode` under `engine`: the Phase 3
+    /// limits (`agent_limit_paise`, `agent_time_limit_s`) when the evidence
+    /// team answers it, the Phase 2 ones otherwise.
+    pub fn limits(&self, mode: RunMode, engine: QuickEngine) -> (i64, u32) {
+        let s = self.for_mode(mode);
+        if engine.uses_team(mode) {
+            (s.agent_limit_paise, s.agent_time_limit_s)
+        } else {
+            (s.limit_paise, s.time_limit_s)
         }
     }
 

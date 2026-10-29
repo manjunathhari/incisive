@@ -61,8 +61,13 @@ pub const SCHEMA_NUDGE: &str = "\n\nReply with JSON matching the given schema on
 
 const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_SCREEN_MODEL: &str = "claude-haiku-5-5";
+/// Phase 3: the researcher and the writer (spec §3).
+const DEFAULT_OPUS_MODEL: &str = "claude-opus-5-5";
 
-/// Model per agent step (`AGENT_MODELS`).
+/// Model per agent step (`AGENT_MODELS`): the Phase 2 steps (`frame` …
+/// `check`) and the Phase 3 roles (`researcher`, `writer`, `extractor`,
+/// `skeptic`). Every model named here, default or set, must be priced in
+/// prod (`config.rs`; the deploy pre-check mirrors the defaults).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentModels {
@@ -78,6 +83,18 @@ pub struct AgentModels {
     pub write: String,
     #[serde(default = "default_model")]
     pub check: String,
+    /// Phase 3 researcher (tool loop). Default Opus 5.5.
+    #[serde(default = "default_opus_model")]
+    pub researcher: String,
+    /// Phase 3 writer (one structured call). Default Opus 5.5.
+    #[serde(default = "default_opus_model")]
+    pub writer: String,
+    /// Phase 3 extractor + appraiser (Stage 3). Default Sonnet 5.5.
+    #[serde(default = "default_model")]
+    pub extractor: String,
+    /// Phase 3 skeptic (Stage 3). Default Sonnet 5.5.
+    #[serde(default = "default_model")]
+    pub skeptic: String,
 }
 
 fn default_model() -> String {
@@ -86,6 +103,10 @@ fn default_model() -> String {
 
 fn default_screen_model() -> String {
     DEFAULT_SCREEN_MODEL.to_string()
+}
+
+fn default_opus_model() -> String {
+    DEFAULT_OPUS_MODEL.to_string()
 }
 
 impl Default for AgentModels {
@@ -97,6 +118,10 @@ impl Default for AgentModels {
             extract: default_model(),
             write: default_model(),
             check: default_model(),
+            researcher: default_opus_model(),
+            writer: default_opus_model(),
+            extractor: default_model(),
+            skeptic: default_model(),
         }
     }
 }
@@ -107,7 +132,7 @@ impl AgentModels {
     pub fn from_json(json: &str) -> Result<AgentModels, String> {
         let m: AgentModels = serde_json::from_str(json).map_err(|e| {
             format!(
-                "expected a JSON object with optional keys frame, search, screen, extract, write, check, each a model id (line {}, column {})",
+                "expected a JSON object with optional keys frame, search, screen, extract, write, check, researcher, writer, extractor, skeptic, each a model id (line {}, column {})",
                 e.line(),
                 e.column()
             )
@@ -122,8 +147,9 @@ impl AgentModels {
         Ok(m)
     }
 
-    /// Every (step, model) pair, for validation.
-    pub fn entries(&self) -> [(&'static str, &str); 6] {
+    /// Every (step or role, model) pair, for validation (the startup price
+    /// check covers each of them).
+    pub fn entries(&self) -> [(&'static str, &str); 10] {
         [
             ("frame", &self.frame),
             ("search", &self.search),
@@ -131,6 +157,10 @@ impl AgentModels {
             ("extract", &self.extract),
             ("write", &self.write),
             ("check", &self.check),
+            ("researcher", &self.researcher),
+            ("writer", &self.writer),
+            ("extractor", &self.extractor),
+            ("skeptic", &self.skeptic),
         ]
     }
 }

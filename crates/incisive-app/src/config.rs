@@ -4,7 +4,7 @@ use secrecy::SecretString;
 use std::fmt;
 
 use crate::agent::llm::AgentModels;
-use crate::runs::RunsConfig;
+use crate::runs::{QuickEngine, RunsConfig};
 use crate::spend::Prices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,17 +42,26 @@ pub struct Config {
     pub unpaywall_email: String,
     /// Model per agent step (`AGENT_MODELS`, optional JSON; missing keys take defaults).
     pub agent_models: AgentModels,
+    /// Engine for Quick runs (`QUICK_ENGINE`: `team`, the default, or
+    /// `classic`, the Phase 2 pipeline). The owner's rollback switch.
+    pub quick_engine: QuickEngine,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
     pub ncbi_api_key: Option<SecretString>,
 }
 
-/// DEV ONLY. Placeholder prices (USD per million tokens), not real rates. Prod must
-/// set `MODEL_PRICES` explicitly.
+/// DEV ONLY. The official prices (USD per million tokens, platform.claude.com,
+/// 29 Oct 2026) of every default model. Prod must set `MODEL_PRICES`
+/// explicitly (the GitHub variable).
+///
+/// Haiku 5.5 costs more for prompts above 100k tokens; the rate here is the
+/// one up to 100k. Incisive never sends Haiku a prompt that large (the gate
+/// and Screen batches are a few thousand tokens), so this rate applies.
 const DEV_MODEL_PRICES: &str = r#"{
-  "claude-haiku-5-5": {"input": 1.0, "output": 5.0},
-  "claude-sonnet-5-5": {"input": 3.0, "output": 15.0}
+  "claude-haiku-5-5": {"input": 0.10, "output": 0.50},
+  "claude-sonnet-5-5": {"input": 2.0, "output": 10.0},
+  "claude-opus-5-5": {"input": 4.0, "output": 20.0}
 }"#;
 /// DEV ONLY. `.invalid` can never resolve, so a dev run cannot pose as a real contact.
 const DEV_UNPAYWALL_EMAIL: &str = "dev@example.invalid";
@@ -181,6 +190,14 @@ impl Config {
             }
         }
 
+        let quick_engine = match lookup("QUICK_ENGINE") {
+            None => QuickEngine::default(),
+            Some(v) => QuickEngine::parse(&v).ok_or_else(|| ConfigError::Invalid {
+                var: "QUICK_ENGINE",
+                reason: "expected `team` or `classic`".to_string(),
+            })?,
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -254,6 +271,7 @@ impl Config {
             runs,
             unpaywall_email,
             agent_models,
+            quick_engine,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -274,7 +292,7 @@ mod tests {
 
     const DB: &str = "postgres://user:hunter2pw@host/db";
     /// Prices for the default gate model and the `CLAUDE_MODEL` used by `full()`.
-    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-test": {"input": 3, "output": 15}}"#;
+    const PROD_PRICES: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-opus-5-5": {"input": 4, "output": 20}, "claude-test": {"input": 3, "output": 15}}"#;
 
     fn full() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -680,6 +698,78 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("UNPAYWALL_EMAIL"));
+    }
+
+    /// Stage 2 §0: the official prices (platform.claude.com, 29 Oct 2026),
+    /// USD per million tokens, for every default model.
+    #[test]
+    fn dev_prices_are_the_official_rates() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        for (model, input, output) in [
+            ("claude-opus-5-5", 4.0, 20.0),
+            ("claude-sonnet-5-5", 2.0, 10.0),
+            ("claude-haiku-5-5", 0.10, 0.50),
+        ] {
+            let p = c
+                .model_prices
+                .get(model)
+                .unwrap_or_else(|| panic!("{model}"));
+            assert_eq!(p.input_usd_per_mtok, input, "{model} input");
+            assert_eq!(p.output_usd_per_mtok, output, "{model} output");
+        }
+        // Every default agent model is priced in dev too.
+        for (role, model) in c.agent_models.entries() {
+            assert!(c.model_prices.get(model).is_some(), "{role} `{model}`");
+        }
+    }
+
+    /// Stage 2 §0: `QUICK_ENGINE` is `team` (default) or `classic`; anything
+    /// else is refused at startup, naming the variable.
+    #[test]
+    fn quick_engine_switch() {
+        use crate::runs::QuickEngine;
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.quick_engine, QuickEngine::Team);
+        for (v, want) in [
+            ("team", QuickEngine::Team),
+            ("classic", QuickEngine::Classic),
+            (" classic ", QuickEngine::Classic),
+            ("   ", QuickEngine::Team),
+        ] {
+            let mut pairs = full();
+            pairs.push(("QUICK_ENGINE", v));
+            assert_eq!(
+                Config::from_lookup(lookup(&pairs)).unwrap().quick_engine,
+                want,
+                "{v:?}"
+            );
+        }
+        for bad in ["Team", "CLASSIC", "phase2", "team,classic", "1"] {
+            let mut pairs = full();
+            pairs.push(("QUICK_ENGINE", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "QUICK_ENGINE",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("team") && msg.contains("classic"), "{msg}");
+            assert!(!msg.contains(bad), "the value is not echoed: {msg}");
+        }
+        // Prod too.
+        let mut prod = prod_with(PROD_PRICES);
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
+        prod.push(("QUICK_ENGINE", "classic"));
+        assert_eq!(
+            Config::from_lookup(lookup(&prod)).unwrap().quick_engine,
+            QuickEngine::Classic
+        );
     }
 
     #[test]

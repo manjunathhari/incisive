@@ -433,7 +433,7 @@ fn prod(prices: &'static str) -> Vec<(&'static str, &'static str)> {
     v
 }
 
-const ALL_PRICED: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-test": {"input": 3, "output": 15}, "claude-x": {"input": 3, "output": 15}}"#;
+const ALL_PRICED: &str = r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-opus-5-5": {"input": 4, "output": 20}, "claude-test": {"input": 3, "output": 15}, "claude-x": {"input": 3, "output": 15}}"#;
 
 #[test]
 fn agent_models_default_and_prod_price_check() {
@@ -444,7 +444,27 @@ fn agent_models_default_and_prod_price_check() {
     for s in [&m.frame, &m.search, &m.extract, &m.write, &m.check] {
         assert_eq!(s, "claude-sonnet-5-5");
     }
+    // Phase 3 roles (Stage 2 §0).
+    assert_eq!(m.researcher, "claude-opus-5-5");
+    assert_eq!(m.writer, "claude-opus-5-5");
+    assert_eq!(m.extractor, "claude-sonnet-5-5");
+    assert_eq!(m.skeptic, "claude-sonnet-5-5");
     assert_eq!(*m, AgentModels::default());
+    let roles: Vec<&str> = m.entries().iter().map(|(s, _)| *s).collect();
+    for r in ["researcher", "writer", "extractor", "skeptic"] {
+        assert!(roles.contains(&r), "entries() misses {r}");
+    }
+
+    // The new roles override like the old keys.
+    let mut p = base();
+    p.push((
+        "AGENT_MODELS",
+        r#"{"researcher":"claude-x","skeptic":"claude-y"}"#,
+    ));
+    let m = Config::from_lookup(lookup(p)).unwrap().agent_models;
+    assert_eq!(m.researcher, "claude-x");
+    assert_eq!(m.skeptic, "claude-y");
+    assert_eq!(m.writer, "claude-opus-5-5");
 
     // Partial override: missing keys keep defaults.
     let mut p = base();
@@ -460,6 +480,8 @@ fn agent_models_default_and_prod_price_check() {
         r#"{"frame": 3}"#,
         r#"{"bogus":"m"}"#,
         r#"{"frame":""}"#,
+        r#"{"writer":"has space"}"#,
+        r#"{"Researcher":"m"}"#,
     ] {
         let mut p = base();
         p.push(("AGENT_MODELS", bad));
@@ -483,6 +505,23 @@ fn agent_models_default_and_prod_price_check() {
         "{err}"
     );
     assert!(err.contains("claude-sonnet-5-5"), "{err}");
+
+    // Prod: the default Opus roles must be priced too (researcher, writer).
+    let err = Config::from_lookup(lookup(prod(
+        r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15}, "claude-test": {"input": 3, "output": 15}}"#,
+    )))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("claude-opus-5-5"), "{err}");
+    assert!(err.contains("researcher"), "{err}");
+    // A new role's unpriced override is named.
+    let mut p = prod(ALL_PRICED);
+    p.push(("AGENT_MODELS", r#"{"skeptic":"claude-unpriced"}"#));
+    let err = Config::from_lookup(lookup(p)).unwrap_err().to_string();
+    assert!(
+        err.contains("claude-unpriced") && err.contains("skeptic"),
+        "{err}"
+    );
 
     // Prod: an unpriced override is caught too; dev allows it.
     let mut p = prod(ALL_PRICED);
@@ -900,6 +939,8 @@ fn app_state(pool: PgPool) -> AppState {
         gate_model: MODEL.into(),
         dev_mode: true,
         runs: RunsConfig::default(),
+        // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
+        quick_engine: incisive_app::runs::QuickEngine::Classic,
         worker: WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),
@@ -943,7 +984,11 @@ fn agent_llm(llm: &Arc<ScriptedLlm>) -> AgentLlm {
             screen: m.clone(),
             extract: m.clone(),
             write: m.clone(),
-            check: m,
+            check: m.clone(),
+            researcher: m.clone(),
+            writer: m.clone(),
+            extractor: m.clone(),
+            skeptic: m,
         },
     }
 }

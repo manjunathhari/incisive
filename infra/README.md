@@ -204,16 +204,25 @@ To confirm the exact string, open Google Cloud console → Security → Identity
 Proxy, find `incisive-app`, click the three-dot menu → **Get JWT audience code**, and
 copy the value.
 
-**`MODEL_PRICES`.** One JSON object, keyed by model id. Take the numbers from
-Anthropic's pricing page (https://www.anthropic.com/pricing); do not guess them.
-Every model the app calls (`GATE_MODEL` and `CLAUDE_MODEL`) needs an entry:
+**`MODEL_PRICES`.** One JSON object, keyed by model id, in USD per million
+tokens. Take the numbers from Anthropic's pricing page; do not guess them. Every
+model the app calls needs an entry: `GATE_MODEL`, `CLAUDE_MODEL` and every agent
+step and role in `AGENT_MODELS`, including the defaults (sections 11 and 12), so
+Opus 5.5 must be priced for the Phase 3 researcher and writer. The official prices
+on platform.claude.com as of 29 Oct 2026:
 
 ```json
 {
-  "claude-haiku-5-5":  {"input": <input USD per million tokens>, "output": <output USD per million tokens>},
-  "claude-sonnet-5-5": {"input": <input USD per million tokens>, "output": <output USD per million tokens>}
+  "claude-haiku-5-5":  {"input": 0.10, "output": 0.50},
+  "claude-sonnet-5-5": {"input": 2,    "output": 10},
+  "claude-opus-5-5":   {"input": 4,    "output": 20}
 }
 ```
+
+Haiku 5.5 costs more for prompts above 100k tokens; the figure above is the rate
+up to 100k. Incisive never sends Haiku a prompt that large (the gate and the
+screening batches are a few thousand tokens), so that is the rate to use. If the
+pricing page changes, update this variable; the app reads it at startup.
 
 The deploy passes this through an env-vars file, so the commas and quotes in the JSON
 are safe. Paste it as a single value in the GitHub variable.
@@ -272,13 +281,14 @@ names below (a typo such as `limt_paise` is caught here), or if `HAS_NCBI_KEY` o
 | Variable | Required? | What it is | Default |
 |---|---|---|---|
 | `UNPAYWALL_EMAIL` | yes | Contact address sent to Unpaywall (which requires one) and to NCBI | none; the app will not start in prod without it |
-| `AGENT_MODELS` | no | Model per agent step (JSON) | `screen` = `claude-haiku-5-5`; `frame`, `search`, `extract`, `write`, `check` = `claude-sonnet-5-5` |
+| `AGENT_MODELS` | no | Model per agent step (JSON); the Phase 3 roles are in section 12 | `screen` = `claude-haiku-5-5`; `frame`, `search`, `extract`, `write`, `check` = `claude-sonnet-5-5` |
 | `RUN_LIMITS` | no | Limits for Quick and Focused (JSON) | see the table below |
 | `HAS_NCBI_KEY` | no | `true` once the `ncbi-api-key` secret exists (see below) | `false` |
 | `CPU_ALWAYS` | no | `true` keeps the CPU on between requests (see below) | `false` |
 
 **`AGENT_MODELS`.** Any of the keys `frame`, `search`, `screen`, `extract`, `write`,
-`check`; keys you leave out keep their default. Every model named here must also
+`check`, and the Phase 3 roles `researcher`, `writer`, `extractor`, `skeptic`
+(section 12); keys you leave out keep their default. Every model named here must also
 have an entry in `MODEL_PRICES` (section 10), or the app refuses to start. The
 Deploy workflow checks this before building, using the defaults above for any key
 you leave out, so a missing price fails the deploy early.
@@ -435,3 +445,37 @@ serving, but:
 
   Charges already made stand. After rolling forward, recovery marks those runs
   `interrupted` within a minute.
+
+## 12. Phase 3 settings: evidence team (Quick)
+
+Phase 3 Stage 2 answers **Quick** questions with the evidence team: a researcher
+(Opus 5.5, searching PubMed and Europe PMC in several turns, abstracts only) and a
+writer (Opus 5.5, one structured answer). **Focused** questions still use the
+Phase 2 pipeline until Stage 3. One new optional repository variable and four new
+`AGENT_MODELS` keys:
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `QUICK_ENGINE` | no | `team` (the evidence team) or `classic` (the Phase 2 Quick pipeline) | `team` |
+
+**`QUICK_ENGINE`** is the rollback switch: set it to `classic` and deploy to send
+Quick questions back to the Phase 2 pipeline, with no code change; set it to
+`team` (or delete the variable) to return. The Deploy workflow refuses any other
+value, and so does the app at startup. A question is reserved and run by the same
+instance right after it is sent, so it always runs on the engine it was reserved
+for; runs that are in flight during a deploy are interrupted as before.
+
+Under `team`, a Quick run reserves `agent_limit_paise` (default ₹60) and runs under
+`agent_time_limit_s` (default 240 s) from `RUN_LIMITS` (section 11), and the
+question box shows that limit next to Quick. Under `classic` it reserves
+`limit_paise` (₹15) and uses `time_limit_s`, as before.
+
+**New `AGENT_MODELS` keys.** Each must be priced in `MODEL_PRICES` (section 10),
+default or set; the Deploy workflow checks the defaults too.
+
+| Key | Role | Default |
+|---|---|---|
+| `researcher` | finds and selects the studies (tool loop) | `claude-opus-5-5` |
+| `writer` | writes the structured answer | `claude-opus-5-5` |
+| `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
+| `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |

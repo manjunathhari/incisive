@@ -1069,6 +1069,7 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         gate_model: config.gate_model.clone(),
         dev_mode: false,
         runs: config.runs,
+        quick_engine: config.quick_engine,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,
