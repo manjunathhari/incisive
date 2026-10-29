@@ -100,6 +100,13 @@ pub struct InFlightReserve {
     amount: i64,
 }
 
+impl InFlightReserve {
+    /// Paise this share keeps free.
+    pub fn amount(&self) -> i64 {
+        self.amount
+    }
+}
+
 impl Drop for InFlightReserve {
     fn drop(&mut self) {
         self.budget.state().in_flight_reserve -= self.amount;
@@ -225,11 +232,42 @@ impl RunBudget {
         self.hold_leaving(estimate_paise, true)
     }
 
+    /// [`RunBudget::try_hold_gathering`] (or, with `gathering == false`,
+    /// [`RunBudget::try_hold`]) for the call `share` was kept for: the share
+    /// is released and the hold taken under one lock, so no concurrent call
+    /// can take the headroom in between (Phase 3: the agent loop keeps its
+    /// final structured call's estimate free while it runs tool turns, then
+    /// makes that call from it). The share is gone either way; refused, the
+    /// caller makes no call.
+    pub fn try_hold_releasing(
+        self: &Arc<Self>,
+        estimate_paise: i64,
+        share: InFlightReserve,
+        gathering: bool,
+    ) -> Option<Hold> {
+        let mut share = share;
+        let amount = std::mem::take(&mut share.amount);
+        // Dropped with nothing left (its own lock is taken and freed here).
+        drop(share);
+        let mut st = self.state();
+        st.in_flight_reserve -= amount;
+        self.hold_locked(&mut st, estimate_paise, gathering)
+    }
+
     fn hold_leaving(self: &Arc<Self>, estimate_paise: i64, reserve: bool) -> Option<Hold> {
+        let mut st = self.state();
+        self.hold_locked(&mut st, estimate_paise, reserve)
+    }
+
+    fn hold_locked(
+        self: &Arc<Self>,
+        st: &mut MutexGuard<'_, State>,
+        estimate_paise: i64,
+        reserve: bool,
+    ) -> Option<Hold> {
         if estimate_paise < 0 {
             return None;
         }
-        let mut st = self.state();
         let kept = if reserve {
             st.finish_reserve + st.in_flight_reserve
         } else {
@@ -247,7 +285,6 @@ impl RunBudget {
             return None;
         }
         st.held += estimate_paise;
-        drop(st);
         Some(Hold {
             budget: Arc::clone(self),
             amount: estimate_paise,

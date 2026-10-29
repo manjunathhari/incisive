@@ -46,7 +46,41 @@ pub struct DepthSettings {
     pub limit_paise: i64,
     /// Time limit in seconds (graceful finish works against it).
     pub time_limit_s: u32,
+
+    // ----- Phase 3 evidence team (T3) -----
+    //
+    // Additive: the Phase 2 pipeline reads none of these, and keeps
+    // `limit_paise` / `time_limit_s` above until Stage 2 switches the run
+    // over. `focused` carries Phase 3's **Full** mode (spec §5); `quick`
+    // its Quick mode. The global, daily and monthly caps are unchanged.
+    /// Phase 3 cost limit in paise (Quick ₹60, Full ₹200).
+    pub agent_limit_paise: i64,
+    /// Phase 3 time limit in seconds (Quick 4 min, Full 8 min).
+    pub agent_time_limit_s: u32,
+    /// Researcher tool-use turns at most (Quick 8, Full 15).
+    pub researcher_turns: u8,
+    /// Skeptic tool-use turns at most (Full 8; 0: no skeptic, Quick).
+    pub skeptic_turns: u8,
+    /// `max_tokens` per researcher turn (and its final call).
+    pub researcher_max_tokens: u32,
+    /// `max_tokens` per skeptic turn (and its final call).
+    pub skeptic_max_tokens: u32,
+    /// `max_tokens` per extractor + appraiser call.
+    pub extractor_max_tokens: u32,
+    /// `max_tokens` of the writer's call.
+    pub writer_max_tokens: u32,
 }
+
+/// Most tool-use turns a role may be given (`RUN_LIMITS`).
+pub const MAX_AGENT_TURNS: u8 = 50;
+/// Largest `max_tokens` a role may be given (`RUN_LIMITS`).
+pub const MAX_ROLE_TOKENS: u32 = 64_000;
+
+/// Phase 3 per-call `max_tokens` defaults. A turn's hold reserves all of
+/// it (thinking counts toward it), so these are kept modest: at Opus-class
+/// prices a 4,000-token turn holds about ₹9 of output before input.
+const AGENT_MAX_TOKENS: u32 = 4_000;
+const WRITER_MAX_TOKENS: u32 = 8_000;
 
 impl DepthSettings {
     pub const QUICK: DepthSettings = DepthSettings {
@@ -58,6 +92,14 @@ impl DepthSettings {
         // finish reserve for Write and Check (Ruling R-13c).
         limit_paise: 1500,
         time_limit_s: 300,
+        agent_limit_paise: 6000,
+        agent_time_limit_s: 240,
+        researcher_turns: 8,
+        skeptic_turns: 0,
+        researcher_max_tokens: AGENT_MAX_TOKENS,
+        skeptic_max_tokens: AGENT_MAX_TOKENS,
+        extractor_max_tokens: AGENT_MAX_TOKENS,
+        writer_max_tokens: WRITER_MAX_TOKENS,
     };
     pub const FOCUSED: DepthSettings = DepthSettings {
         refinements: 3,
@@ -66,6 +108,14 @@ impl DepthSettings {
         full_text: true,
         limit_paise: 4000,
         time_limit_s: 300,
+        agent_limit_paise: 20000,
+        agent_time_limit_s: 480,
+        researcher_turns: 15,
+        skeptic_turns: 8,
+        researcher_max_tokens: AGENT_MAX_TOKENS,
+        skeptic_max_tokens: AGENT_MAX_TOKENS,
+        extractor_max_tokens: AGENT_MAX_TOKENS,
+        writer_max_tokens: WRITER_MAX_TOKENS,
     };
 
     fn validate(&self) -> Result<(), String> {
@@ -80,6 +130,28 @@ impl DepthSettings {
         }
         if self.use_n == 0 {
             return Err("use_n must be positive".into());
+        }
+        if self.agent_limit_paise <= 0 {
+            return Err("agent_limit_paise must be a positive number of paise".into());
+        }
+        if self.agent_time_limit_s == 0 {
+            return Err("agent_time_limit_s must be positive".into());
+        }
+        if !(1..=MAX_AGENT_TURNS).contains(&self.researcher_turns) {
+            return Err(format!("researcher_turns must be 1 to {MAX_AGENT_TURNS}"));
+        }
+        if self.skeptic_turns > MAX_AGENT_TURNS {
+            return Err(format!("skeptic_turns must be 0 to {MAX_AGENT_TURNS}"));
+        }
+        for (name, v) in [
+            ("researcher_max_tokens", self.researcher_max_tokens),
+            ("skeptic_max_tokens", self.skeptic_max_tokens),
+            ("extractor_max_tokens", self.extractor_max_tokens),
+            ("writer_max_tokens", self.writer_max_tokens),
+        ] {
+            if !(1..=MAX_ROLE_TOKENS).contains(&v) {
+                return Err(format!("{name} must be 1 to {MAX_ROLE_TOKENS}"));
+            }
         }
         Ok(())
     }

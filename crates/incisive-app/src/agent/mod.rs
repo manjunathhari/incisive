@@ -10,6 +10,7 @@
 //! The orchestration itself lives in [`pipeline`]; the stored body is an
 //! [`answer::Answer`].
 
+pub mod agent_loop;
 pub mod answer;
 mod bounded;
 pub mod check;
@@ -22,6 +23,7 @@ pub mod screen;
 pub mod search;
 #[cfg(feature = "test-util")]
 pub mod testing;
+pub mod tools;
 pub mod write;
 
 use std::future::Future;

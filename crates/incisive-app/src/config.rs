@@ -544,6 +544,15 @@ mod tests {
                 full_text: false,
                 limit_paise: 1500,
                 time_limit_s: 300,
+                // Phase 3 (T3): additive; the Phase 2 pipeline ignores them.
+                agent_limit_paise: 6000,
+                agent_time_limit_s: 240,
+                researcher_turns: 8,
+                skeptic_turns: 0,
+                researcher_max_tokens: 4000,
+                skeptic_max_tokens: 4000,
+                extractor_max_tokens: 4000,
+                writer_max_tokens: 8000,
             }
         );
         assert_eq!(
@@ -555,6 +564,14 @@ mod tests {
                 full_text: true,
                 limit_paise: 4000,
                 time_limit_s: 300,
+                agent_limit_paise: 20000,
+                agent_time_limit_s: 480,
+                researcher_turns: 15,
+                skeptic_turns: 8,
+                researcher_max_tokens: 4000,
+                skeptic_max_tokens: 4000,
+                extractor_max_tokens: 4000,
+                writer_max_tokens: 8000,
             }
         );
 
@@ -575,6 +592,20 @@ mod tests {
             6000
         );
 
+        // Phase 3 fields override the same way, beside Phase 2 ones.
+        let mut pairs = full();
+        pairs.push((
+            "RUN_LIMITS",
+            r#"{"focused": {"researcher_turns": 12, "agent_limit_paise": 25000, "limit_paise": 4500}, "quick": {"writer_max_tokens": 6000}}"#,
+        ));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.runs.focused.researcher_turns, 12);
+        assert_eq!(c.runs.focused.agent_limit_paise, 25000);
+        assert_eq!(c.runs.focused.limit_paise, 4500);
+        assert_eq!(c.runs.focused.skeptic_turns, 8);
+        assert_eq!(c.runs.quick.writer_max_tokens, 6000);
+        assert_eq!(c.runs.quick.agent_limit_paise, 6000);
+
         for bad in [
             "not json",
             "[]",
@@ -589,6 +620,16 @@ mod tests {
             r#"{"focused": {"refinements": 300}}"#,
             r#"{"focused": {"full_text": "yes"}}"#,
             r#"{"focused": {"limit_rupees": 40}}"#,
+            r#"{"focused": {"agent_limit_paise": 0}}"#,
+            r#"{"quick": {"agent_time_limit_s": 0}}"#,
+            r#"{"quick": {"researcher_turns": 0}}"#,
+            r#"{"focused": {"researcher_turns": 51}}"#,
+            r#"{"focused": {"skeptic_turns": 51}}"#,
+            r#"{"focused": {"researcher_max_tokens": 0}}"#,
+            r#"{"focused": {"writer_max_tokens": 64001}}"#,
+            r#"{"quick": {"extractor_max_tokens": 0}}"#,
+            r#"{"quick": {"skeptic_max_tokens": 100000}}"#,
+            r#"{"quick": {"skeptic_turn": 2}}"#,
         ] {
             let mut pairs = full();
             pairs.push(("RUN_LIMITS", bad));

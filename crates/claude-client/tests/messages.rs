@@ -109,6 +109,7 @@ async fn unknown_block_type_is_tolerated() {
         json!({
             "id": "msg_3",
             "content": [
+                {"type": "web_search_tool_result", "content": []},
                 {"type": "thinking", "thinking": "..."},
                 {"type": "text", "text": "ok"}
             ],
@@ -123,6 +124,12 @@ async fn unknown_block_type_is_tolerated() {
         resp.content,
         vec![
             ContentBlock::Unknown,
+            // Thinking is a known block now (Phase 3); a missing signature
+            // reads as empty rather than failing the reply.
+            ContentBlock::Thinking {
+                thinking: "...".into(),
+                signature: String::new()
+            },
             ContentBlock::Text { text: "ok".into() }
         ]
     );
@@ -355,9 +362,9 @@ fn output_config_is_omitted_when_unset_and_serialises_json_schema() {
     );
     let mut req = request();
     req.output_config = Some(OutputConfig {
-        format: OutputFormat::JsonSchema {
+        format: Some(OutputFormat::JsonSchema {
             schema: json!({"type": "object", "additionalProperties": false}),
-        },
+        }),
         effort: None,
     });
     let body = serde_json::to_value(&req).unwrap();
@@ -393,9 +400,9 @@ async fn refusal_stop_reason_is_parsed_and_unknown_is_other() {
 fn output_config_effort_serialises_beside_format_and_is_omitted_when_unset() {
     let mut req = request();
     req.output_config = Some(OutputConfig {
-        format: OutputFormat::JsonSchema {
+        format: Some(OutputFormat::JsonSchema {
             schema: json!({"type": "object"}),
-        },
+        }),
         effort: Some(Effort::Low),
     });
     let body = serde_json::to_value(&req).unwrap();
@@ -420,5 +427,76 @@ fn output_config_effort_serialises_beside_format_and_is_omitted_when_unset() {
             .unwrap()
             .contains_key("effort"),
         "{body}"
+    );
+}
+
+// ---------- Phase 3 T1: multi-turn tool use ----------
+
+/// A tool turn: `tools`, no `tool_choice` (auto, the API default) and
+/// `output_config` with effort only (no format).
+#[test]
+fn tool_turn_sends_tools_without_tool_choice_and_effort_only_output_config() {
+    let mut req = request();
+    req.tools = vec![ToolDef {
+        name: "get_abstracts".into(),
+        description: "d".into(),
+        input_schema: json!({"type": "object", "additionalProperties": false}),
+    }];
+    req.output_config = Some(OutputConfig {
+        format: None,
+        effort: Some(Effort::High),
+    });
+    let body = serde_json::to_value(&req).unwrap();
+    let o = body.as_object().unwrap();
+    assert!(!o.contains_key("tool_choice"), "{body}");
+    assert_eq!(body["output_config"], json!({"effort": "high"}));
+    assert_eq!(body["tools"][0]["name"], "get_abstracts");
+    // A structured call still sends its format.
+    req.output_config = Some(OutputConfig::format(json!({"type": "object"})));
+    let body = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        body["output_config"],
+        json!({"format": {"type": "json_schema", "schema": {"type": "object"}}})
+    );
+}
+
+/// The assistant turn is sent back as received: thinking blocks keep their
+/// signature (the API requires them beside `tool_use` on the next turn),
+/// redacted thinking keeps its data, and tool results carry `is_error`.
+#[test]
+fn thinking_tool_use_and_tool_result_round_trip() {
+    let resp: claude_client::MessagesResponse = serde_json::from_value(json!({
+        "id": "msg_1",
+        "content": [
+            {"type": "thinking", "thinking": "let me search", "signature": "sig=="},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "text", "text": "Searching."},
+            {"type": "tool_use", "id": "toolu_1", "name": "search_pubmed", "input": {"query": "x", "max_results": 5}},
+            {"type": "server_tool_use", "id": "srv_1"}
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 20}
+    }))
+    .unwrap();
+    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert!(matches!(&resp.content[4], ContentBlock::Unknown));
+    let back = serde_json::to_value(&resp.content[..4]).unwrap();
+    assert_eq!(
+        back,
+        json!([
+            {"type": "thinking", "thinking": "let me search", "signature": "sig=="},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "text", "text": "Searching."},
+            {"type": "tool_use", "id": "toolu_1", "name": "search_pubmed", "input": {"query": "x", "max_results": 5}}
+        ])
+    );
+    let result = ContentBlock::ToolResult {
+        tool_use_id: "toolu_1".into(),
+        content: "bad input".into(),
+        is_error: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&result).unwrap(),
+        json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": "bad input", "is_error": true})
     );
 }

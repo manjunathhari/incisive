@@ -249,6 +249,92 @@ impl PubMed {
     }
 }
 
+impl PubMed {
+    /// PubMed's related articles for `pmid` (elink `cmd=neighbor_score`,
+    /// link `pubmed_pubmed`, on the allowlisted eutils host, paced like every
+    /// eutils call), best first, without `pmid` itself, at most `max`. A
+    /// record with no neighbours gives an empty list; an unknown id or an
+    /// error reply is [`LitError::Parse`].
+    pub async fn related(&self, pmid: &str, max: usize) -> Result<Vec<String>, LitError> {
+        let url = self.url(
+            "elink.fcgi",
+            &[
+                ("dbfrom", "pubmed"),
+                ("id", pmid),
+                ("cmd", "neighbor_score"),
+                ("linkname", "pubmed_pubmed"),
+                ("retmode", "json"),
+            ],
+        );
+        let body: serde_json::Value = self.client.get_json(&url).await?;
+        parse_elink(&body, pmid, max)
+    }
+}
+
+/// Neighbour ids from an elink JSON reply (see [`PubMed::related`]). Links
+/// are objects `{"id", "score"}` (`neighbor_score`) or plain ids
+/// (`neighbor`); an id may be a JSON string or a number. All are read, in
+/// the order given (NCBI sorts by score). Only digit ids are kept.
+pub fn parse_elink(
+    body: &serde_json::Value,
+    pmid: &str,
+    max: usize,
+) -> Result<Vec<String>, LitError> {
+    if body.get("ERROR").is_some() {
+        return Err(LitError::Parse);
+    }
+    let set = body
+        .get("linksets")
+        .and_then(|l| l.as_array())
+        .and_then(|a| a.first())
+        .ok_or(LitError::Parse)?;
+    if set.get("ERROR").is_some() {
+        return Err(LitError::Parse);
+    }
+    let dbs: &[serde_json::Value] = set
+        .get("linksetdbs")
+        .and_then(|d| d.as_array())
+        .map_or(&[], Vec::as_slice);
+    let db = dbs
+        .iter()
+        .find(|d| d.get("linkname").and_then(|n| n.as_str()) == Some("pubmed_pubmed"))
+        .or_else(|| dbs.first());
+    let Some(links) = db.and_then(|d| d.get("links")).and_then(|l| l.as_array()) else {
+        return Ok(Vec::new());
+    };
+    // An id as a JSON string or a whole number.
+    fn id_of(v: &serde_json::Value) -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.trim().to_string()),
+            serde_json::Value::Number(n) => n.as_u64().map(|n| n.to_string()),
+            _ => None,
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for link in links {
+        let id = match link {
+            serde_json::Value::Object(o) => o.get("id").and_then(id_of),
+            other => id_of(other),
+        };
+        let Some(id) = id else {
+            continue;
+        };
+        let id = id.as_str();
+        if id.is_empty()
+            || !id.bytes().all(|b| b.is_ascii_digit())
+            || id == pmid
+            || out.iter().any(|o| o == id)
+        {
+            continue;
+        }
+        out.push(id.to_string());
+        if out.len() >= max {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // esearch / esummary
 // ---------------------------------------------------------------------------
