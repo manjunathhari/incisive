@@ -24,7 +24,7 @@ RUN cargo chef cook --release --no-default-features --features ssr \
       -p incisive-app --bin incisive-app --recipe-path recipe.json \
  && cargo chef cook --profile wasm-release --target wasm32-unknown-unknown \
       --no-default-features --features hydrate \
-      -p incisive-app --lib --recipe-path recipe.json
+      -p incisive-app --recipe-path recipe.json
 COPY . .
 # The cooked stubs must never be mistaken for the real sources: mark every
 # crate source as newer than the cooked output before the real build.
