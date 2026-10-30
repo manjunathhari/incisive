@@ -33,6 +33,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 

@@ -569,6 +569,7 @@ async fn abstracts_reach_the_model_wrapped_as_source() {
     let u = Usage {
         input_tokens: 100,
         output_tokens: 10,
+        ..Usage::default()
     };
     let llm = Arc::new(
         ScriptedLlm::new()

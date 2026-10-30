@@ -561,6 +561,7 @@ fn build_request(
             }),
             effort: s.effort,
         }),
+        cache_breakpoints: vec![],
     }
 }
 
@@ -589,7 +590,29 @@ pub(crate) fn turn_request(
             format: None,
             effort: Some(e),
         }),
+        cache_breakpoints: turn_breakpoints(messages),
     }
+}
+
+/// Prompt caching (§X) for a tool-use turn: the last message (the newest
+/// tool results, or the task on the first turn) is marked, so this turn
+/// writes the conversation so far to the cache; and the previous user
+/// message (where the last turn wrote it) is marked too, so this turn reads
+/// that prefix from the cache however many blocks the last turn added (the
+/// API looks back only about 20 blocks from a mark). Two marks of the four
+/// allowed. Never a thinking block: marks go on user messages only, whose
+/// last block is a text or tool result.
+fn turn_breakpoints(messages: &[Message]) -> Vec<usize> {
+    let mut marks = Vec::new();
+    if let Some(last) = messages.len().checked_sub(1)
+        && messages[last].role == Role::User
+    {
+        if let Some(prev) = (0..last).rev().find(|&i| messages[i].role == Role::User) {
+            marks.push(prev);
+        }
+        marks.push(last);
+    }
+    marks
 }
 
 /// Bytes of the prompt `req` sends, for the hold estimate: the system prompt,
@@ -619,7 +642,47 @@ pub fn request_prompt_bytes(req: &MessagesRequest) -> usize {
     };
     let choice = req.tool_choice.as_ref().map_or(0, json_len);
     let output = req.output_config.as_ref().map_or(0, json_len);
-    system + text + tools + choice + output
+    // `,"cache_control":{"type":"ephemeral"}` per mark (§X).
+    let marks = req.cache_breakpoints.len() * CACHE_MARK_BYTES;
+    system + text + tools + choice + output + marks
+}
+
+/// Bytes one `cache_control` mark adds to a block (rounded up).
+const CACHE_MARK_BYTES: usize = 40;
+
+/// The hold for `usage` (its input estimated) on `model`: with prompt
+/// caching (`cached`: the request carries cache marks), the input is held
+/// at the highest of the input, cache-write and cache-read prices (with the
+/// default multipliers, the cache-write price: a mark may write the whole
+/// prefix, and a cache hit is never assumed, §X). Output is held at `max_tokens` as always. Charges then use
+/// the real split (`spend::cost_paise`), which is never more: the charge
+/// for any split of the same input tokens into plain, written and read is
+/// at most this.
+pub fn hold_cost(
+    budget: &RunBudget,
+    model: &str,
+    usage: &Usage,
+    cached: bool,
+) -> Result<i64, crate::spend::SpendError> {
+    let plain = budget.cost_of(model, usage)?;
+    if !cached {
+        return Ok(plain);
+    }
+    let written = Usage {
+        input_tokens: 0,
+        cache_creation_input_tokens: usage.input_tokens,
+        ..*usage
+    };
+    // A read price above the input price (a `MODEL_PRICES` override) is the
+    // worst case then; the defaults (0.1 ×) never make it so.
+    let read = Usage {
+        input_tokens: 0,
+        cache_read_input_tokens: usage.input_tokens,
+        ..*usage
+    };
+    Ok(plain
+        .max(budget.cost_of(model, &written)?)
+        .max(budget.cost_of(model, &read)?))
 }
 
 /// The hold a call of `model` with these prompts, this schema (the structured
@@ -669,6 +732,7 @@ pub fn estimate_usage(prompt_bytes: usize, max_tokens: u32) -> Usage {
     Usage {
         input_tokens: u32::try_from(input).unwrap_or(u32::MAX),
         output_tokens: max_tokens,
+        ..Usage::default()
     }
 }
 
@@ -1069,12 +1133,14 @@ impl LlmCall {
         max_tokens: u32,
     ) -> Option<i64> {
         let req = turn_request(&self.model, system, messages, tools, effort, max_tokens);
-        self.budget
-            .cost_of(
-                &self.model,
-                &estimate_usage(request_prompt_bytes(&req), max_tokens),
-            )
-            .ok()
+        let cached = !req.cache_breakpoints.is_empty();
+        hold_cost(
+            &self.budget,
+            &self.model,
+            &estimate_usage(request_prompt_bytes(&req), max_tokens),
+            cached,
+        )
+        .ok()
     }
 
     pub(crate) fn budget(&self) -> &Arc<RunBudget> {
@@ -1109,9 +1175,8 @@ impl LlmCall {
         }
         let max_tokens = req.max_tokens;
         let estimate_usage = estimate_usage(request_prompt_bytes(&req), max_tokens);
-        let estimate = self
-            .budget
-            .cost_of(&self.model, &estimate_usage)
+        let cached = !req.cache_breakpoints.is_empty();
+        let estimate = hold_cost(&self.budget, &self.model, &estimate_usage, cached)
             .map_err(|_| {
                 tracing::error!(%run_id, step = self.step, model = %self.model, "no price for agent model");
                 StepError::Llm
@@ -1246,6 +1311,8 @@ impl Attempt {
                     %run_id, step = c.step, model = %c.model,
                     input_tokens = resp.usage.input_tokens,
                     output_tokens = resp.usage.output_tokens,
+                    cache_creation_input_tokens = resp.usage.cache_creation_input_tokens,
+                    cache_read_input_tokens = resp.usage.cache_read_input_tokens,
                     "claude call done"
                 );
                 self.settle(hold, &resp.usage).await?;

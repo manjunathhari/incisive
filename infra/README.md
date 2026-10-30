@@ -269,6 +269,15 @@ VALUES ('colleague@example.com', 'Dr Colleague', 'surgeon', 30000, 300000);
 Without the `incisive.users` row they can sign in through IAP but the app refuses them.
 To suspend someone, `UPDATE incisive.users SET active = false WHERE email = '...';`.
 
+
+**Prompt caching (Phase 3 Stage 3).** The evidence team's tool turns use Anthropic
+prompt caching. Each model's entry may also set `cache_write` and `cache_read`
+(USD per million tokens); when they are absent the app uses 1.25 × and 0.1 × the
+`input` price, the published rates (Opus 5.5: 5 and 0.40; Sonnet 5.5: 2.50 and 0.20).
+Existing `MODEL_PRICES` values keep working unchanged. Holds never assume a cache
+hit; charges use the real cache counts, which the spend ledger records (migration
+0011, two nullable columns).
+
 ## 11. Phase 2 settings: evidence agent, NCBI key, CPU always on
 
 Phase 2 adds five repository variables (same place as section 6) and one optional

@@ -72,6 +72,7 @@ impl Fixed {
                 usage: Some(Usage {
                     input_tokens: 812,
                     output_tokens: 37,
+                    ..Usage::default()
                 }),
                 model: Some(GATE_MODEL.to_string()),
             }),
@@ -104,6 +105,8 @@ fn prices() -> Prices {
         ModelPrice {
             input_usd_per_mtok: 1.0,
             output_usd_per_mtok: 5.0,
+            cache_write_usd_per_mtok: 1.25,
+            cache_read_usd_per_mtok: 0.1,
         },
     );
     Prices::new(m)
@@ -454,6 +457,7 @@ fn bad_response(model: &str, input_tokens: u32, output_tokens: u32) -> GateError
         usage: Usage {
             input_tokens,
             output_tokens,
+            ..Usage::default()
         },
     }
 }

@@ -848,6 +848,63 @@ mod tests {
         );
     }
 
+    /// The CI container smoke's exact prod environment (`.github/workflows/
+    /// ci.yml`) parses: every default role priced, the engines defaulted.
+    /// Stage 2's merge was once blocked by a CI env missing a price.
+    #[test]
+    fn the_ci_smoke_env_parses_in_prod() {
+        let env = [
+            ("APP_ENV", "prod"),
+            ("ANTHROPIC_API_KEY", "sk-ant-FAKE-smoke-test-not-a-real-key"),
+            ("CLAUDE_MODEL", "claude-sonnet-5-5"),
+            ("GATE_MODEL", "claude-haiku-5-5"),
+            ("OWNER_EMAIL", "owner@example.com"),
+            ("UNPAYWALL_EMAIL", "ci@example.invalid"),
+            (
+                "MODEL_PRICES",
+                r#"{"claude-haiku-5-5":{"input":0.1,"output":0.5},"claude-sonnet-5-5":{"input":2,"output":10},"claude-opus-5-5":{"input":4,"output":20}}"#,
+            ),
+            ("USD_INR", "88"),
+            ("GLOBAL_MONTHLY_CAP_INR", "10000"),
+            (
+                "IAP_AUDIENCE",
+                "/projects/0/locations/asia-south1/services/test",
+            ),
+            ("DATABASE_URL", "postgres://u:p@127.0.0.1:1/x"),
+        ];
+        let ci = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/workflows/ci.yml"
+        ))
+        .unwrap();
+        for (k, v) in &env {
+            if *k != "DATABASE_URL" {
+                assert!(
+                    ci.contains(v),
+                    "ci.yml no longer sets {k} as this test does"
+                );
+            }
+        }
+        let c = Config::from_lookup(lookup(&env)).unwrap();
+        assert_eq!(c.full_engine, crate::runs::Engine::Team);
+        // §X: the cache rates default from the input price.
+        let opus = c.model_prices.get("claude-opus-5-5").unwrap();
+        assert_eq!(opus.cache_write_usd_per_mtok, 5.0);
+        // Per-model overrides parse in prod too.
+        let mut prod = prod_with(
+            r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.3}, "claude-opus-5-5": {"input": 4, "output": 20}, "claude-test": {"input": 3, "output": 15}}"#,
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(
+            c.model_prices
+                .get("claude-sonnet-5-5")
+                .unwrap()
+                .cache_read_usd_per_mtok,
+            0.3
+        );
+    }
+
     #[test]
     fn debug_redacts_secrets() {
         let c = Config::from_lookup(lookup(&full())).unwrap();

@@ -67,10 +67,33 @@ const ALERT_PERCENT: i128 = 80;
 
 // ---------- prices and cost ----------
 
+/// Default prompt-caching multipliers on the input price (Anthropic's
+/// published rates for 5-minute cache writes and for cache reads, §X).
+pub const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+pub const CACHE_READ_MULTIPLIER: f64 = 0.1;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPrice {
     pub input_usd_per_mtok: f64,
     pub output_usd_per_mtok: f64,
+    /// Prompt-cache writes (`cache_creation_input_tokens`): 1.25 × input
+    /// unless `MODEL_PRICES` sets `cache_write` for the model.
+    pub cache_write_usd_per_mtok: f64,
+    /// Prompt-cache reads (`cache_read_input_tokens`): 0.1 × input unless
+    /// `MODEL_PRICES` sets `cache_read` for the model.
+    pub cache_read_usd_per_mtok: f64,
+}
+
+impl ModelPrice {
+    /// Input and output prices with the default cache multipliers.
+    pub fn new(input_usd_per_mtok: f64, output_usd_per_mtok: f64) -> ModelPrice {
+        ModelPrice {
+            input_usd_per_mtok,
+            output_usd_per_mtok,
+            cache_write_usd_per_mtok: input_usd_per_mtok * CACHE_WRITE_MULTIPLIER,
+            cache_read_usd_per_mtok: input_usd_per_mtok * CACHE_READ_MULTIPLIER,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -92,6 +115,12 @@ impl std::error::Error for PricesError {}
 struct RawPrice {
     input: f64,
     output: f64,
+    /// Optional: USD per million cache-write tokens (default 1.25 × input).
+    #[serde(default)]
+    cache_write: Option<f64>,
+    /// Optional: USD per million cache-read tokens (default 0.1 × input).
+    #[serde(default)]
+    cache_read: Option<f64>,
 }
 
 impl Prices {
@@ -100,7 +129,9 @@ impl Prices {
     }
 
     /// Parse the `MODEL_PRICES` JSON: `{"<model id>": {"input": <usd>, "output": <usd>}}`,
-    /// USD per million tokens. Errors name the variable and never echo the input.
+    /// USD per million tokens, with optional `cache_write` and `cache_read`
+    /// per model (prompt caching; defaults 1.25 × and 0.1 × input). Errors
+    /// name the variable and never echo the input.
     pub fn from_json(json: &str) -> Result<Prices, PricesError> {
         let raw: HashMap<String, RawPrice> = serde_json::from_str(json).map_err(|e| {
             PricesError(format!(
@@ -115,18 +146,23 @@ impl Prices {
         let mut map = HashMap::new();
         for (model, p) in raw {
             let ok = |v: f64| v.is_finite() && v >= 0.0;
-            if !ok(p.input) || !ok(p.output) {
+            if !ok(p.input)
+                || !ok(p.output)
+                || p.cache_write.is_some_and(|v| !ok(v))
+                || p.cache_read.is_some_and(|v| !ok(v))
+            {
                 return Err(PricesError(format!(
                     "prices for `{model}` must be finite and not negative"
                 )));
             }
-            map.insert(
-                model,
-                ModelPrice {
-                    input_usd_per_mtok: p.input,
-                    output_usd_per_mtok: p.output,
-                },
-            );
+            let mut price = ModelPrice::new(p.input, p.output);
+            if let Some(w) = p.cache_write {
+                price.cache_write_usd_per_mtok = w;
+            }
+            if let Some(r) = p.cache_read {
+                price.cache_read_usd_per_mtok = r;
+            }
+            map.insert(model, price);
         }
         Ok(Prices(map))
     }
@@ -155,7 +191,9 @@ impl fmt::Display for SpendError {
 
 impl std::error::Error for SpendError {}
 
-/// Cost of one call in paise, rounded **up** to the next paisa.
+/// Cost of one call in paise, rounded **up** to the next paisa: input
+/// tokens at the input price, cache writes at the cache-write price, cache
+/// reads at the cache-read price and output at the output price (§X).
 ///
 /// The float product is first rounded to 6 decimal places of a paisa so binary
 /// noise (e.g. 100.00000000000001) cannot add a phantom paisa to exact amounts.
@@ -172,6 +210,8 @@ pub fn cost_paise(
         return Err(SpendError::InvalidRate);
     }
     let usd = (f64::from(usage.input_tokens) * price.input_usd_per_mtok
+        + f64::from(usage.cache_creation_input_tokens) * price.cache_write_usd_per_mtok
+        + f64::from(usage.cache_read_input_tokens) * price.cache_read_usd_per_mtok
         + f64::from(usage.output_tokens) * price.output_usd_per_mtok)
         / 1_000_000.0;
     let paise = usd * usd_inr * 100.0;
@@ -471,8 +511,9 @@ pub async fn charge_call(
 
     let inserted = sqlx::query(
         "INSERT INTO incisive.spend \
-         (user_id, kind, purpose, model, input_tokens, output_tokens, paise, request_id) \
-         VALUES ($1, 'charge', $2, $3, $4, $5, $6, $7) \
+         (user_id, kind, purpose, model, input_tokens, output_tokens, paise, request_id, \
+          cache_creation_input_tokens, cache_read_input_tokens) \
+         VALUES ($1, 'charge', $2, $3, $4, $5, $6, $7, $8, $9) \
          ON CONFLICT (request_id) WHERE kind = 'charge' DO NOTHING",
     )
     .bind(user_id)
@@ -482,6 +523,8 @@ pub async fn charge_call(
     .bind(tokens(usage.output_tokens))
     .bind(paise)
     .bind(call_id)
+    .bind(tokens(usage.cache_creation_input_tokens))
+    .bind(tokens(usage.cache_read_input_tokens))
     .execute(&mut *tx)
     .await?
     .rows_affected()

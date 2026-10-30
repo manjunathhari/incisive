@@ -209,6 +209,7 @@ fn gate_and_charged_details_have_required_fields() {
         usage: Some(Usage {
             input_tokens: 900,
             output_tokens: 40,
+            ..Usage::default()
         }),
         model: Some("m-gate".into()),
     };
@@ -238,6 +239,7 @@ fn gate_and_charged_details_have_required_fields() {
         Some(&Usage {
             input_tokens: 1,
             output_tokens: 2,
+            ..Usage::default()
         }),
         16,
     );

@@ -25,6 +25,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -632,4 +633,133 @@ async fn charge_call_without_reservation_and_release_are_safe() {
     .await
     .unwrap();
     assert_eq!((paise, purpose), (7, format!("run:{run}")));
+}
+
+// ---------- §X: prompt caching ----------
+
+/// Charges price each part of the usage at its own rate: input at the
+/// input price, cache writes at 1.25 ×, cache reads at 0.1 × (the default
+/// multipliers), output at the output price.
+#[test]
+fn cache_charge_arithmetic() {
+    // Opus at USD 4 / 20 per Mtok, ₹88: 1M tokens of each part.
+    let p = Prices::from_json(r#"{"o": {"input": 4.0, "output": 20.0}}"#).unwrap();
+    let price = p.get("o").unwrap();
+    assert_eq!(price.cache_write_usd_per_mtok, 5.0);
+    assert!((price.cache_read_usd_per_mtok - 0.4).abs() < 1e-12);
+    let m = 1_000_000;
+    let part = |i, w, r, o| Usage {
+        input_tokens: i,
+        output_tokens: o,
+        cache_creation_input_tokens: w,
+        cache_read_input_tokens: r,
+    };
+    assert_eq!(
+        cost_paise(&p, 88.0, "o", &part(m, 0, 0, 0)).unwrap(),
+        35_200
+    );
+    assert_eq!(
+        cost_paise(&p, 88.0, "o", &part(0, m, 0, 0)).unwrap(),
+        44_000
+    );
+    assert_eq!(cost_paise(&p, 88.0, "o", &part(0, 0, m, 0)).unwrap(), 3_520);
+    assert_eq!(
+        cost_paise(&p, 88.0, "o", &part(0, 0, 0, m)).unwrap(),
+        176_000
+    );
+    // A typical cached turn: 2k new input, 40k read, 4k written, 1.5k out.
+    // (2,000 × 4 + 4,000 × 5 + 40,000 × 0.4 + 1,500 × 20) / 1M USD = 0.074
+    // → ₹6.512 → 652 paise, rounded up.
+    assert_eq!(
+        cost_paise(&p, 88.0, "o", &part(2_000, 4_000, 40_000, 1_500)).unwrap(),
+        652
+    );
+    // Without cache fields, as before.
+    assert_eq!(
+        cost_paise(&p, 88.0, "o", &part(2_000, 0, 0, 1_500)),
+        cost_paise(&p, 88.0, "o", &usage(2_000, 1_500))
+    );
+}
+
+/// `MODEL_PRICES` keeps parsing as before; `cache_write` and `cache_read`
+/// are optional per model and override the multipliers; bad values fail
+/// without echoing the input.
+#[test]
+fn cache_prices_parse_backward_compatibly() {
+    let p = Prices::from_json(
+        r#"{"a": {"input": 2, "output": 10}, "b": {"input": 2, "output": 10, "cache_write": 3.0, "cache_read": 0.3}}"#,
+    )
+    .unwrap();
+    let a = p.get("a").unwrap();
+    assert_eq!(
+        (a.cache_write_usd_per_mtok, a.cache_read_usd_per_mtok),
+        (2.5, 0.2)
+    );
+    let b = p.get("b").unwrap();
+    assert_eq!(
+        (b.cache_write_usd_per_mtok, b.cache_read_usd_per_mtok),
+        (3.0, 0.3)
+    );
+    for bad in [
+        r#"{"a": {"input": 2, "output": 10, "cache_write": -1}}"#,
+        r#"{"a": {"input": 2, "output": 10, "cache_read": "x"}}"#,
+        r#"{"a": {"input": 2, "output": 10, "cache_hit": 1}}"#,
+    ] {
+        let e = Prices::from_json(bad).unwrap_err().to_string();
+        assert!(e.contains("MODEL_PRICES"), "{e}");
+        assert!(!e.contains("cache_hit"), "{e}");
+    }
+}
+
+/// A cached call's hold (input held at the higher of the input and the
+/// cache-write price) is never below its charge, for every split of the
+/// same input tokens into plain, written and read, at the default rates and
+/// at overrides (including a write price below the input price).
+#[test]
+fn a_cached_hold_is_never_below_the_charge_for_any_mix() {
+    use incisive_app::agent::llm::hold_cost;
+    use incisive_app::runs::budget::RunBudget;
+    for json in [
+        r#"{"m": {"input": 4.0, "output": 20.0}}"#,
+        r#"{"m": {"input": 2.0, "output": 10.0, "cache_write": 1.0, "cache_read": 3.0}}"#,
+        r#"{"m": {"input": 0.1, "output": 0.5, "cache_write": 0.9, "cache_read": 0.0}}"#,
+    ] {
+        let p = Prices::from_json(json).unwrap();
+        let b = RunBudget::new(
+            Uuid::new_v4(),
+            0,
+            1_000_000,
+            std::time::Instant::now(),
+            p.clone(),
+            88.0,
+        );
+        for total in [0u32, 1, 37, 1_000, 41_234, 200_000] {
+            let held = hold_cost(&b, "m", &usage(total, 4_000), true).unwrap();
+            let step = (total / 7).max(1);
+            let mut w = 0;
+            while w <= total {
+                let mut r = 0;
+                while r <= total - w {
+                    let real = Usage {
+                        input_tokens: total - w - r,
+                        output_tokens: 4_000,
+                        cache_creation_input_tokens: w,
+                        cache_read_input_tokens: r,
+                    };
+                    let charge = cost_paise(&p, 88.0, "m", &real).unwrap();
+                    assert!(
+                        held >= charge,
+                        "{json} total {total} w {w} r {r}: hold {held} < charge {charge}"
+                    );
+                    r += step;
+                }
+                w += step;
+            }
+        }
+        // Without marks: the plain input price, as before.
+        assert_eq!(
+            hold_cost(&b, "m", &usage(1_000, 10), false).unwrap(),
+            cost_paise(&p, 88.0, "m", &usage(1_000, 10)).unwrap()
+        );
+    }
 }

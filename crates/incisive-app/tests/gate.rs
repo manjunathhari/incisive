@@ -282,6 +282,7 @@ fn bad_response(input_tokens: u32, output_tokens: u32) -> GateError {
         usage: Usage {
             input_tokens,
             output_tokens,
+            ..Usage::default()
         },
     }
 }

@@ -21,6 +21,7 @@ fn request() -> MessagesRequest {
         tools: vec![],
         tool_choice: None,
         output_config: None,
+        cache_breakpoints: vec![],
     }
 }
 
@@ -498,5 +499,90 @@ fn thinking_tool_use_and_tool_result_round_trip() {
     assert_eq!(
         serde_json::to_value(&result).unwrap(),
         json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": "bad input", "is_error": true})
+    );
+}
+
+/// §X: a request with cache breakpoints sends `cache_control: ephemeral` on
+/// the last block of each marked message, and nowhere else; usage reads the
+/// cache fields (absent or null: 0).
+#[tokio::test]
+async fn cache_breakpoints_are_sent_and_cache_usage_is_read() {
+    let mut req = request();
+    req.messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "task".into(),
+            }],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "x".into(),
+                input: json!({}),
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "a".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t2".into(),
+                    content: "b".into(),
+                    is_error: false,
+                },
+            ],
+        },
+    ];
+    req.cache_breakpoints = vec![0, 2];
+    let body = req.body();
+    let eph = json!({"type": "ephemeral"});
+    assert_eq!(body["messages"][0]["content"][0]["cache_control"], eph);
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(
+        body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert_eq!(body["messages"][2]["content"][1]["cache_control"], eph);
+    assert!(body.get("cache_breakpoints").is_none());
+    // No breakpoints: exactly the derived serialisation.
+    assert_eq!(request().body(), serde_json::to_value(request()).unwrap());
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_partial_json(
+            json!({"messages": [{"content": [{"cache_control": {"type": "ephemeral"}}]}]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_c",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2,
+                      "cache_creation_input_tokens": 1200, "cache_read_input_tokens": null}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut one = request();
+    one.cache_breakpoints = vec![0];
+    let resp = client(&server).create_message(&one).await.unwrap();
+    assert_eq!(resp.usage.cache_creation_input_tokens, 1200);
+    assert_eq!(resp.usage.cache_read_input_tokens, 0);
+    let u: claude_client::Usage =
+        serde_json::from_value(json!({"input_tokens": 1, "output_tokens": 2})).unwrap();
+    assert_eq!(
+        (u.cache_creation_input_tokens, u.cache_read_input_tokens),
+        (0, 0)
     );
 }

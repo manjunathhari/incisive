@@ -629,6 +629,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -2396,6 +2397,7 @@ async fn finish_keeps_headroom_for_calls_in_flight() {
             Usage {
                 input_tokens: 100,
                 output_tokens: 20,
+                ..Usage::default()
             },
         ),
         gate: gate.clone(),

@@ -70,6 +70,7 @@ fn u() -> Usage {
     Usage {
         input_tokens: 100,
         output_tokens: 20,
+        ..Usage::default()
     }
 }
 

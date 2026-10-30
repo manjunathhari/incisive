@@ -164,6 +164,7 @@ mod server {
         Usage {
             input_tokens: gate::GATE_PROMPT_TOKENS.saturating_add(question_tokens),
             output_tokens: gate::GATE_MAX_TOKENS,
+            ..Usage::default()
         }
     }
     const ACTIVITY_DEFAULT: i64 = 50;

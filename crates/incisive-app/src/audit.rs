@@ -255,12 +255,20 @@ pub fn accepted_detail(question: &str) -> Value {
 }
 
 pub fn charged_detail(model: Option<&str>, usage: Option<&Usage>, paise: i64) -> Value {
-    json!({
+    let mut v = json!({
         "model": model,
         "input_tokens": usage.map(|u| u.input_tokens),
         "output_tokens": usage.map(|u| u.output_tokens),
         "paise": paise,
-    })
+    });
+    // Prompt caching (§X): the cache counts only when there are any, so a
+    // charge without caching is audited exactly as before.
+    if let Some(u) = usage.filter(|u| u.cache_creation_input_tokens + u.cache_read_input_tokens > 0)
+    {
+        v["cache_creation_input_tokens"] = json!(u.cache_creation_input_tokens);
+        v["cache_read_input_tokens"] = json!(u.cache_read_input_tokens);
+    }
+    v
 }
 
 /// The run id and its depth. Never the question.

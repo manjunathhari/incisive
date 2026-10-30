@@ -369,7 +369,7 @@ Do 4 to 8 searches, then end your turn with a short summary. You will then be as
     )
 }
 
-const FINAL_SYSTEM: &str = "You are the SKEPTIC on an evidence team. Report your review as JSON matching the schema. \
+pub const FINAL_SYSTEM: &str = "You are the SKEPTIC on an evidence team. Report your review as JSON matching the schema. \
 Use only PMIDs that appear in YOUR tool results in the transcript; never add one from memory. \
 contradicting: evidence against the emerging conclusion, each with its PMID, the claim, an exact quote from that PMID's \
 title or abstract as returned, and why it is weaker or stronger than the randomised evidence (design, bias, population). \
@@ -379,7 +379,7 @@ overlaps: groups of PMIDs (selected or found) that are not independent evidence 
 population), with a note. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
 must state, each one sentence or two. searches: each search you ran.";
 
-const FINAL_INSTRUCTION: &str = "Submit your review now, as JSON matching the schema.";
+pub const FINAL_INSTRUCTION: &str = "Submit your review now, as JSON matching the schema.";
 
 /// The [`SkepticReport`] JSON Schema (strict-compatible).
 pub fn report_schema() -> Value {

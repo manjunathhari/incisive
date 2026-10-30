@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tools: vec![],
         tool_choice: None,
         output_config: None,
+        cache_breakpoints: vec![],
     };
     let resp = client.create_message(&req).await?;
     for block in &resp.content {

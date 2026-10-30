@@ -57,6 +57,7 @@ impl Fake {
             usage: Some(Usage {
                 input_tokens: 500,
                 output_tokens: 20,
+                ..Usage::default()
             }),
             model: Some(model.to_string()),
         })))
@@ -77,6 +78,8 @@ fn state(pool: PgPool, gate: Arc<dyn Classifier>, gate_model: &str) -> AppState 
         ModelPrice {
             input_usd_per_mtok: 1.0,
             output_usd_per_mtok: 5.0,
+            cache_write_usd_per_mtok: 1.25,
+            cache_read_usd_per_mtok: 0.1,
         },
     );
     AppState {
@@ -193,6 +196,7 @@ async fn question_text_never_reaches_tracing() {
                     usage: claude_client::Usage {
                         input_tokens: 10,
                         output_tokens: 150,
+                        ..Usage::default()
                     },
                 }))),
                 PRICED,
