@@ -80,7 +80,9 @@ pub const WRITER_UNREADABLE: &str =
 /// Bottom line when too little time was left to write.
 pub const WRITER_NO_TIME: &str = "Not enough of the time limit was left to write the answer. The studies found are listed below; please ask again.";
 /// The writer is not started with less time than this before the hard stop.
-pub const WRITER_MIN_TIME: Duration = Duration::from_secs(60);
+// 120 s: the live smoke (30 Oct) had the Opus writer take 44 s for 3 studies
+// (4,768 output tokens); 10 studies is roughly double.
+pub const WRITER_MIN_TIME: Duration = Duration::from_secs(120);
 
 type Stop = &'static str;
 

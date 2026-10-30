@@ -1411,7 +1411,7 @@ async fn a_rate_limited_researcher_final_call_ends_partial() {
     assert!(writer_requests(&llm).is_empty());
 }
 
-/// Finding 2: with less than a minute left before the hard stop, the writer
+/// Finding 2: with less than WRITER_MIN_TIME left before the hard stop, the writer
 /// is not started; the run ends partial with the references.
 #[tokio::test]
 async fn too_little_time_left_skips_the_writer() {
