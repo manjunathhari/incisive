@@ -784,7 +784,7 @@ fn missed_input(pmid: &str, p: &Paper, why: String) -> StudyInput {
 }
 
 /// Per selected study, what the extractor did (for the page).
-fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
+pub fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
     studies
         .iter()
         .map(|s| match x.rows.iter().find(|r| r.pmid == s.pmid) {
@@ -907,7 +907,7 @@ pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<Notab
 }
 
 /// The skeptic's review as the page shows it.
-fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
+pub fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
     SkepticV3 {
         verdict: r.verdict.as_str().to_string(),
         must_mention: r.must_mention.clone(),

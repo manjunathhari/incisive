@@ -1,0 +1,62 @@
+{
+  "searches": [
+    "robotic inguinal hernia repair recurrent OR bilateral OR obese laparoscopic comparison (385k hits, noisy; no new RCT)",
+    "robotic inguinal hernia learning curve (65 hits)",
+    "(HerniaSurge OR European Hernia Society OR guideline) AND robotic AND inguinal hernia, 2023+ (17 hits; no robotic-vs-lap guideline recommendation found)",
+    "robotic versus laparoscopic inguinal hernia randomized, 2026+, by date (26 hits; all RCTs already in studies.json, no new RCT)",
+    "robotic inguinal hernia cost-effectiveness OR return to work OR chronic pain laparoscopic, 2024+ (1802 hits, noisy; nothing new relevant)",
+    "European Hernia Society recommendations robotic abdominal wall surgery consensus, 2023+ (4 hits; none is a robotic guideline)",
+    "robotic inguinal hernia bilateral OR recurrent OR obesity laparoscopic outcomes cohort, 2025+ by date (noisy; nothing relevant in top 10)"
+  ],
+  "contradicting": [
+    {
+      "pmid": "42747553",
+      "claim": "Learning curve: operative time in rTAPP falls significantly after about 32 cases. Pooled early-versus-late operative time gap is 17 min. Trial operative-time penalties may therefore reflect early learning curve, not steady-state.",
+      "quote": "Among studies using operative-time-based CUSUM analyses, a median threshold of 32 cases was associated with improved operative efficiency in rTAPP, as reflected by reduced operative time.",
+      "strength_vs_rcts": "Weaker for patient outcomes. Cohort-based SR/MA (13 uncontrolled series, 1,770 pts, I2 86%) with no laparoscopic comparator, and it measures operative time only. It does explain why RCT operative times conflict (DIRECT and ROLAIS faster, RIVAL and VOLTAIRE slower), so the conclusion that robotic is longer should be stated as setting- and experience-dependent."
+    },
+    {
+      "pmid": "42198825",
+      "claim": "A high-volume robotic surgeon past the learning curve reports a median incision-to-closure time of 38 min, same-day discharge, low pain and no recurrences. Suggests operative time and recovery can match or beat laparoscopy at the steady state.",
+      "quote": "The overall operative duration from incision to closure was a median of 38 min, while total theatre time (wheels in to wheels out) was a median of 68 min.",
+      "strength_vs_rcts": "Much weaker. Single-surgeon, single-centre, uncontrolled prospective cohort, n=89, 28-day follow-up, no laparoscopic comparator, telephone-reported pain. Illustrates what an expert can achieve. It cannot show superiority."
+    },
+    {
+      "pmid": "40842882",
+      "claim": "Uncontrolled UK learning-curve series supports the safety of a structured EHS training pathway. Median rTAPP time was 56 min unilateral and 101 min bilateral. Complications were 3.3% and there were 2 recurrences at 6 months.",
+      "quote": "The median operative time was 56 min for unilateral and 101 min for bilateral repair. Four (3.3%) rTAPP patients experienced complications, with two recurrences at the 6-month follow-up.",
+      "strength_vs_rcts": "Weaker. Case series, n=97 rTAPP, 6-month follow-up, no comparator. It supports safe adoption only. It is also the nearest thing to a society pathway for robotic hernia surgery, and it is a training pathway, not a recommendation of robotic over laparoscopic repair."
+    },
+    {
+      "pmid": "42272915",
+      "claim": "A technique report asserts a theoretical robotic advantage in complex hernias. It is opinion and a single case, with no outcome data.",
+      "quote": "While complex inguinal hernia repairs have traditionally been relative contraindication for laparoscopic repair due to technical difficulties, the robotic approach may help overcome these challenges.",
+      "strength_vs_rcts": "Negligible. Single case report (J Vis Surg), no comparator. Useful only to show that the complex, bilateral and recurrent hernia claim is untested in randomised data."
+    },
+    {
+      "pmid": "41938185",
+      "claim": "Narrative review states the evidence for MIS in bilateral and recurrent hernias is limited. This supports the gap in the evidence base rather than refuting the conclusion.",
+      "quote": "This has been attributed to training challenges, steep learning curve, and limited evidence of benefit for bilateral and recurrent hernias.",
+      "strength_vs_rcts": "Weak. Narrative review of Africa-specific context, not a comparative study. Confirms that no RCT evidence exists for the complex-hernia subgroup."
+    },
+    {
+      "pmid": "42658055",
+      "claim": "A 2026 narrative review is consistent with the researcher's conclusion.",
+      "quote": "Robotic-assisted repair may offer ergonomic and educational advantages, but evidence of superior patient outcomes is limited, while operative times and costs are generally higher than with conventional laparoscopy.",
+      "strength_vs_rcts": "Weak, non-systematic narrative review. Agrees with the conclusion but adds no independent evidence."
+    }
+  ],
+  "missed_rcts": [],
+  "guidelines": [],
+  "verdict": "holds with caveats",
+  "must_mention": [
+    "Operative time is NOT consistently longer with robotic repair. The RCTs conflict: DIRECT (40632168) and ROLAIS (40277023) found robotic faster, while RIVAL, ROGER and VOLTAIRE found it longer. The MA pooled difference is non-significant with I2 about 98% (42927985). The learning curve (about 32 cases, 17 min, 42747553) and surgeon experience probably drive this. Say 'variable, often longer', not 'longer'.",
+    "Not every RCT found 'no benefit'. ROLAIS (40277023, n=139) reported fewer complications, less inflammation and more same-day discharge with robotic repair, but it is open-label and single-centre. VOLTAIRE (40450465) found more patients back to normal activity at 14 d (39% vs 5%), but it is small (n=59), a secondary outcome and unblinded. The honest summary is 'no consistent patient benefit across trials, with two trials showing early signals'.",
+    "Cost is the most robust finding against robotic repair (RIVAL $3258 vs $1421, and several observational and model studies). The cost data come mostly from observational or modelled studies plus one RCT. Costs depend on the platform and the institution and are not RCT-grade. The 2026 RCT MA reported no significant cost difference on low or very-low certainty evidence (42625069), so state that the cost direction is consistent but the certainty is low.",
+    "Long-term outcomes (chronic pain, recurrence, quality of life) are essentially unproven. The only RCT long-term data are RIVAL at 1-2 years with about 25% loss to follow-up (35578051). Absence of evidence of benefit does not equal evidence of no benefit. Recurrence differences in observational meta-analyses (42541618, RR 0.32) are low certainty and confounded.",
+    "Complex, recurrent, bilateral, obese and inguinoscrotal hernias: no RCT has addressed these subgroups. The conclusion applies to mostly primary, unilateral hernias in selected, experienced-surgeon settings. Robotic advantages there are plausible but untested (prospective SCAR study is only a protocol, 42040509).",
+    "Evidence base is low or very-low certainty and heterogeneous: small trials, mostly rTAPP vs lTAPP (only ROGER used lTEP as comparator), mostly high-income expert centres, an Indian RCT (42527734) null, and an open-console platform in VOLTAIRE. Findings may not generalise to other platforms (Hugo, Dexter, Versius) or to trainee surgeons.",
+    "Surgeon-side benefits are the most consistent robotic signal (ergonomics in VOLTAIRE and a 2026 ergonomics MA 42842114, lower NASA-TLX workload in ROGER) but they are not patient outcomes. Surgeon-side benefits should be reported separately from the patient-outcome verdict.",
+    "No HerniaSurge or EHS guideline statement on robotic versus laparoscopic inguinal repair was found in PubMed. Do not claim a guideline position. The only society item is an EHS training pathway (40842882), which is not a recommendation to prefer either approach."
+  ]
+}

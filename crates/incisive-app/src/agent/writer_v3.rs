@@ -1158,8 +1158,10 @@ fn row_allowed(r: &EvidenceRow, out: &mut Vec<f64>) {
 /// verified quote or a verified structured number of an evidence row (and
 /// its source-checked text); the skeptic's verified quotes; the abstracts
 /// the writer was given (Quick: every study; Full: studies without a row
-/// and the skeptic's missed trials); and each given study's title and
-/// year (its record, shown to the writer). `full` is `None` in Quick.
+/// and the skeptic's missed trials); each given study's title and year
+/// (its record, shown to the writer); and, as identifiers, the PMIDs of
+/// the given studies and those the skeptic names (its entries', and the
+/// unmarked 5- to 9-digit numbers of its text). `full` is `None` in Quick.
 pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> Vec<f64> {
     let mut out: Vec<f64> = Vec::new();
     let record = |s: &StudyInput, out: &mut Vec<f64>, with_abstract: bool| {
@@ -1181,9 +1183,13 @@ pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> 
             row_allowed(r, &mut out);
         }
     }
+    // PMIDs are identifiers, not findings: those of the given studies.
+    let id = |p: &str| p.trim().parse::<f64>().ok();
+    out.extend(studies.iter().filter_map(|s| id(&s.pmid)));
     if let Some(f) = full {
         for s in f.missed {
             record(s, &mut out, true);
+            out.extend(id(&s.pmid));
         }
         if let Some(r) = f.skeptic {
             for c in &r.contradicting {
@@ -1191,6 +1197,54 @@ pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> 
             }
             for g in &r.guidelines {
                 out.extend(quote_values(&g.statement_quote));
+            }
+            // The PMIDs the skeptic names: its entries' (all seen or
+            // selected, by its validation) and the 5- to 9-digit numbers in
+            // its text that its check did not mark (the same seen-or-
+            // selected rule). Other numbers of its caveats are not sources.
+            let named = r
+                .contradicting
+                .iter()
+                .map(|c| &c.pmid)
+                .chain(r.guidelines.iter().map(|g| &g.pmid))
+                .chain(r.missed_rcts.iter().map(|m| &m.pmid))
+                .chain(r.overlaps.iter().flat_map(|o| &o.pmids))
+                .chain(r.ma_notes.iter().map(|m| &m.pmid));
+            out.extend(named.filter_map(|p| id(p)));
+            let mut texts: Vec<(String, &str)> = r
+                .must_mention
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (format!("must_mention.{i}"), m.as_str()))
+                .collect();
+            for (i, c) in r.contradicting.iter().enumerate() {
+                texts.push((format!("contradicting.{i}.text"), &c.claim));
+                texts.push((format!("contradicting.{i}.strength"), &c.strength_vs_rcts));
+            }
+            for (i, o) in r.overlaps.iter().enumerate() {
+                texts.push((format!("overlaps.{i}.note"), &o.note));
+            }
+            for (i, m) in r.missed_rcts.iter().enumerate() {
+                texts.push((format!("missed_rcts.{i}.text"), &m.why));
+            }
+            for (i, m) in r.ma_notes.iter().enumerate() {
+                texts.push((format!("ma_notes.{i}.text"), &m.note));
+            }
+            for (field, t) in texts {
+                let marked: Vec<(usize, usize)> = r
+                    .spans
+                    .iter()
+                    .filter(|s| s.field == field)
+                    .map(|s| (s.start as usize, (s.start + s.len) as usize))
+                    .collect();
+                for (a, b, _) in written_numbers(t) {
+                    let w = &t[a..b];
+                    let pmid_like =
+                        (5..=9).contains(&w.len()) && w.bytes().all(|c| c.is_ascii_digit());
+                    if pmid_like && !marked.iter().any(|(x, y)| a < *y && *x < b) {
+                        out.extend(id(w));
+                    }
+                }
             }
         }
     }
@@ -2245,6 +2299,18 @@ mod tests {
         for x in [7.7, 3.3, 8.8, 2019.0, 55.5] {
             assert!(!has(&allowed, x), "{x} must not be allowed");
         }
+        // PMIDs as identifiers: the studies', the skeptic's entries' and an
+        // unmarked one in its text; a marked one is not.
+        assert!(has(&allowed, 11111111.0) && has(&allowed, 33333333.0));
+        let mut r2 = review();
+        r2.must_mention = vec!["See 55555555 and 66666666.".into()];
+        r2.spans = vec![Span::new("must_mention.0", 17, 25)];
+        let full2 = FullInput {
+            skeptic: Some(&r2),
+            ..full
+        };
+        let allowed2 = allowed_numbers(&studies, Some(&full2));
+        assert!(has(&allowed2, 55555555.0) && !has(&allowed2, 66666666.0));
         let quick = allowed_numbers(&studies, None);
         assert!(has(&quick, 55.5) && has(&quick, 66.6) && !has(&quick, 2.1));
     }

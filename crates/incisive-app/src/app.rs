@@ -1650,6 +1650,14 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
     }
 }
 
+/// A stored Phase 3 answer as the run page draws it (server only; for
+/// tests and the Stage 4 replay).
+#[cfg(feature = "ssr")]
+pub fn render_answer_v3(a: AnswerV3) -> String {
+    use leptos::tachys::view::RenderHtml;
+    Owner::new().with(|| answer_v3_view(a).to_html())
+}
+
 /// The id of the hidden textarea holding the plain-text answer.
 const COPY_AREA: &str = "answer-plain-text";
 
