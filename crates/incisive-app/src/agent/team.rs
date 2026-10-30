@@ -94,7 +94,7 @@ use chrono::Utc;
 use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
 use super::answer_v3::{
     ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, ReferenceV3, SkepticItem, SkepticOverlap,
-    SkepticV3,
+    SkepticV3, UnverifiedOutcomeV3,
 };
 use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
@@ -400,6 +400,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             });
         }
         answer.evidence = evidence_summary(&studies, &reviewed.extraction);
+        integrity.numbers_unverified = reviewed.extraction.numbers_unverified();
+        integrity.outcomes_unverified = reviewed.extraction.outcomes_unverified();
+        answer.integrity = integrity;
         answer.skeptic = reviewed.review.as_ref().map(skeptic_summary);
         answer.notes = reviewed.notes.clone();
     }
@@ -435,18 +438,19 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         ),
     )
     .await;
+    let full_input = FullInput {
+        rows: &reviewed.extraction.rows,
+        skeptic: reviewed.review.as_ref(),
+        skeptic_note: reviewed.skeptic_note,
+        missed: &reviewed.missed,
+    };
     let (system, user) = if full {
         (
             writer_v3::SYSTEM_FULL,
             writer_user_full(
                 &ctx.question,
                 &studies,
-                &FullInput {
-                    rows: &reviewed.extraction.rows,
-                    skeptic: reviewed.review.as_ref(),
-                    skeptic_note: reviewed.skeptic_note,
-                    missed: &reviewed.missed,
-                },
+                &full_input,
                 &research.contradictions,
                 &research.searches,
             ),
@@ -471,6 +475,14 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     match writer_v3::write_with(ctx, &ctx.llm, system, &user).await {
         Ok(mut written) => {
             check_citations(&mut written, &selected, &mut integrity);
+            // Stage 4 item 5: mark (never change) the numbers not traced to
+            // what the writer was given.
+            let allowed = writer_v3::allowed_numbers(&studies, full.then_some(&full_input));
+            let (untraced, checked) =
+                writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p));
+            integrity.numbers_checked = checked;
+            integrity.numbers_untraced = count(untraced.len());
+            answer.untraced = untraced;
             answer.integrity = integrity;
             answer.answer = Some(written);
             let line = if integrity.removed_citations == 0
@@ -492,6 +504,19 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
                         "trial row",
                         "trial rows"
                     )
+                )
+            };
+            add_line(ctx, StepKind::Check, &line).await;
+            let line = if integrity.numbers_untraced == 0 {
+                format!(
+                    "Number check: all {} traced to a verified quote, structured number or abstract",
+                    plural(integrity.numbers_checked as usize, "number", "numbers")
+                )
+            } else {
+                format!(
+                    "Number check: {} of {} not traced to a verified quote, structured number or abstract (marked \"not traced\"; nothing removed)",
+                    integrity.numbers_untraced,
+                    plural(integrity.numbers_checked as usize, "number", "numbers")
                 )
             };
             add_line(ctx, StepKind::Check, &line).await;
@@ -766,13 +791,26 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
                 pmid: s.pmid.clone(),
                 text: r.text.as_str().to_string(),
                 verified_quotes: r.outcomes_verified,
-                numbers_dropped: r.numbers_dropped,
+                numbers_dropped: 0,
                 unverified_outcomes: r.unverified_outcomes.clone(),
-                numbers_unverified: 0,
-                unverified_details: Vec::new(),
+                numbers_unverified: r.numbers_unverified,
+                unverified_details: r
+                    .outcomes
+                    .iter()
+                    .filter(|o| !o.verified)
+                    .map(|o| UnverifiedOutcomeV3 {
+                        outcome: o.outcome.clone(),
+                        effect_text: o.effect_text.clone(),
+                    })
+                    .collect(),
                 funding: r.funding.clone(),
                 funding_checked: true,
-                spans: Vec::new(),
+                spans: r
+                    .spans
+                    .iter()
+                    .filter(|s| s.field == "funding")
+                    .cloned()
+                    .collect(),
             },
             None => EvidenceV3 {
                 pmid: s.pmid.clone(),
@@ -839,6 +877,7 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
                 quote: None,
             })
             .collect(),
-        spans: Vec::new(),
+        // The paths are the page's (the review's spans use them).
+        spans: r.spans.clone(),
     }
 }

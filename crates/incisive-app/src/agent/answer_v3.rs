@@ -526,6 +526,85 @@ pub fn split_citations(text: &str, known: impl Fn(&str) -> bool) -> Vec<Segment>
     out
 }
 
+/// The byte ranges of the citation markers in `text` (as
+/// [`split_citations`] decides them): numbers inside them are PMIDs, not
+/// findings.
+pub fn citation_ranges(text: &str, known: impl Fn(&str) -> bool) -> Vec<(usize, usize)> {
+    CITE.find_iter(text)
+        .filter(|m| {
+            let ids: Vec<&str> = DIGITS.find_iter(m.as_str()).map(|d| d.as_str()).collect();
+            ids.iter().any(|i| known(i)) || ids.iter().any(|i| i.len() >= MIN_PMID_DIGITS)
+        })
+        .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+/// Every text field of the writer's answer with its span path (Stage 4
+/// item 5), in page order. Structured numbers are not text; see
+/// `writer_v3::trace_numbers`.
+pub fn text_fields(a: &WrittenAnswer) -> Vec<(String, &str)> {
+    let mut v: Vec<(String, &str)> = Vec::new();
+    if let Some(g) = &a.at_a_glance {
+        v.push(("at_a_glance.verdict".into(), &g.verdict));
+        for (i, k) in g.key_numbers.iter().enumerate() {
+            v.push((format!("at_a_glance.key_numbers.{i}.label"), &k.label));
+            v.push((
+                format!("at_a_glance.key_numbers.{i}.value_text"),
+                &k.value_text,
+            ));
+        }
+        v.push(("at_a_glance.main_caveat".into(), &g.main_caveat));
+    }
+    v.push(("bottom_line.text".into(), &a.bottom_line.text));
+    v.push((
+        "bottom_line.certainty_reason".into(),
+        &a.bottom_line.certainty_reason,
+    ));
+    if let Some(c) = &a.clinical_practice {
+        v.push(("clinical_practice.default_choice".into(), &c.default_choice));
+        v.push((
+            "clinical_practice.who_may_benefit".into(),
+            &c.who_may_benefit,
+        ));
+        v.push(("clinical_practice.counselling".into(), &c.counselling));
+        v.push(("clinical_practice.cost_per_case".into(), &c.cost_per_case));
+    }
+    for (i, o) in a.outcomes.iter().enumerate() {
+        v.push((format!("outcomes.{i}.outcome"), &o.outcome));
+        v.push((format!("outcomes.{i}.rct_evidence"), &o.rct_evidence));
+        v.push((format!("outcomes.{i}.effect_text"), &o.effect_text));
+        v.push((format!("outcomes.{i}.why"), &o.why));
+    }
+    for (i, s) in a.studies.iter().enumerate() {
+        v.push((format!("studies.{i}.label"), &s.label));
+        v.push((format!("studies.{i}.design"), &s.design));
+        v.push((format!("studies.{i}.setting"), &s.setting));
+        v.push((format!("studies.{i}.comparison"), &s.comparison));
+        v.push((format!("studies.{i}.key_results"), &s.key_results));
+        v.push((format!("studies.{i}.appraisal"), &s.appraisal));
+    }
+    for (i, c) in a.conflicts.iter().enumerate() {
+        v.push((format!("conflicts.{i}.text"), &c.text));
+    }
+    for (i, g) in a.guidelines.iter().enumerate() {
+        v.push((format!("guidelines.{i}.body"), &g.body));
+        v.push((format!("guidelines.{i}.statement"), &g.statement));
+    }
+    v.push(("applicability.case_mix".into(), &a.applicability.case_mix));
+    v.push((
+        "applicability.india_cost_context".into(),
+        &a.applicability.india_cost_context,
+    ));
+    v.push(("applicability.training".into(), &a.applicability.training));
+    for (i, w) in a.would_change.iter().enumerate() {
+        v.push((format!("would_change.{i}"), w));
+    }
+    for (i, n) in a.notable_findings.iter().enumerate() {
+        v.push((format!("notable_findings.{i}.text"), &n.text));
+    }
+    v
+}
+
 /// `text` with every citation marker ([`split_citations`]) rewritten to keep only PMIDs for which
 /// `known` is true (de-duplicated, in order, as `[a; b]`); a marker left
 /// empty is removed with the blank before it. Returns the text and how many
@@ -657,6 +736,47 @@ mod tests {
         assert_eq!(n, 2);
         let (t, n) = clean_citations("No markers here.", known);
         assert_eq!((t.as_str(), n), ("No markers here.", 0));
+    }
+
+    /// Stage 4: marked runs never change the text; spans that do not fit
+    /// the text (stored data) are ignored.
+    #[test]
+    fn marked_runs_split_text_and_ignore_bad_spans() {
+        let t = "Pain 2.1 vs 2.4 é 7%";
+        let spans = vec![
+            Span::new("f", 5, 8),
+            Span::new("f", 6, 9),
+            Span::new("g", 0, 4),
+            Span::new("f", 17, 18),
+            Span::new("f", 19, 99),
+            Span::new("f", 20, 22),
+        ];
+        let runs = marked_runs(t, "f", &spans);
+        let joined: String = runs.iter().map(|(x, _)| x.as_str()).collect();
+        assert_eq!(joined, t);
+        let marked: Vec<&str> = runs
+            .iter()
+            .filter(|(_, m)| *m)
+            .map(|(x, _)| x.as_str())
+            .collect();
+        assert_eq!(
+            marked,
+            ["2.1"],
+            "overlap, off-boundary and out-of-range spans ignored"
+        );
+        assert_eq!(marked_runs("", "f", &spans), vec![(String::new(), false)]);
+        assert!(whole_marked("n", &[Span::new("n", 0, 0)]));
+        assert!(!whole_marked("n", &[Span::new("n", 0, 1)]));
+    }
+
+    #[test]
+    fn citation_ranges_follow_the_citation_rule() {
+        let t = format!("LOS 2 [1, 3] days [{A}; 12] and [99999999].");
+        let r: Vec<&str> = citation_ranges(&t, known)
+            .into_iter()
+            .map(|(a, b)| &t[a..b])
+            .collect();
+        assert_eq!(r, [format!("[{A}; 12]").as_str(), "[99999999]"]);
     }
 
     #[test]

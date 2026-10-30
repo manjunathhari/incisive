@@ -3410,7 +3410,8 @@ fn markup_of(html: &str) -> String {
             .map_or("", |j| &rest[i + j + "</script>".len()..]);
     }
     markup.push_str(rest);
-    markup
+    // Leptos's hydration markers between adjacent text and views.
+    markup.replace("<!>", "")
 }
 
 async fn v3_page(pool: &PgPool, body: serde_json::Value) -> (StatusCode, String) {
@@ -3785,4 +3786,141 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
     let g = m.find("Guidelines and consensus statements").unwrap();
     assert!(m.find("Conflicting evidence").unwrap() < g);
     assert!(g < m.find(">Applicability<").unwrap());
+}
+
+/// Stage 4 items 5 and 7: untraced numbers carry a "not traced" mark,
+/// skeptic and funding numbers a "not verified" mark, unverified outcomes
+/// are listed with their values and a label; the text is unchanged, there is
+/// no `[?]`, and model text stays escaped.
+#[tokio::test]
+async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.bottom_line.text = "Pain fell by 37% <b>x</b> [41060645].".into();
+    // "37%" is bytes 13..16 of the bottom line; trial n is marked whole.
+    a.untraced = vec![
+        Span::new("bottom_line.text", 13, 16),
+        Span::new("studies.0.n", 0, 0),
+    ];
+    a.integrity.numbers_checked = 12;
+    a.integrity.numbers_untraced = 2;
+    a.integrity.outcomes_unverified = 1;
+    a.integrity.numbers_unverified = 2;
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec!["Recurrence was 7% in 2019.".into()],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![],
+        overlaps: vec![],
+        ma_notes: vec![],
+        spans: vec![Span::new("must_mention.0", 15, 17)],
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "abstract only".into(),
+        verified_quotes: 2,
+        numbers_dropped: 0,
+        unverified_outcomes: vec!["Recurrence".into()],
+        numbers_unverified: 2,
+        unverified_details: vec![UnverifiedOutcomeV3 {
+            outcome: "Recurrence <i>".into(),
+            effect_text: "1 vs 1 at 2 years".into(),
+        }],
+        funding: Some("Grant 4471".into()),
+        funding_checked: true,
+        spans: vec![Span::new("funding", 6, 10)],
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(!m.contains("[?]"));
+    // The bottom line keeps its text; the mark follows "37%".
+    assert!(m.contains("Pain fell by 37%<sup title="), "{m}");
+    assert!(m.contains(r#"class="flag">not traced</sup>"#));
+    assert!(m.contains(">not traced</sup> &lt;b&gt;x&lt;/b&gt;"), "{m}");
+    assert!(m.contains("n = 120<sup title="), "{m}");
+    // The skeptic's caveat: "7%" marked not verified, text intact.
+    assert!(m.contains("Recurrence was 7%<sup title="), "{m}");
+    assert!(m.contains(">not verified</sup> in 2019."));
+    // Funding: the grant number marked.
+    assert!(m.contains("Funding: Grant 4471<sup title="), "{m}");
+    // The unverified outcome is listed with its values and a label.
+    assert!(m.contains("Recurrence &lt;i&gt;: 1 vs 1 at 2 years"));
+    assert!(
+        m.contains("not verified against the paper&#x27;s wording")
+            || m.contains("not verified against the paper's wording")
+    );
+    assert!(m.contains("2 numbers not verified"));
+    // The trail says what was marked; nothing removed.
+    assert!(m.contains("Number check: 2 of 12 numbers in the answer not traced"));
+    // Stage 4 item 6: the evidence label (answer_v3_json's outcome).
+    assert!(
+        m.contains(r#"<span class="etype">RCT meta-analysis</span>"#),
+        "{m}"
+    );
+    assert!(m.contains("1 outcomes and 2 numbers could not be matched"));
+}
+
+/// Stage 4: a v3 answer stored before Stage 4 (none of the new fields)
+/// loads with defaults and renders unchanged.
+#[tokio::test]
+async fn ssr_v3_answers_stored_before_stage4_still_render() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    let o = body.as_object_mut().unwrap();
+    for k in ["untraced", "notable_code"] {
+        assert!(o.remove(k).is_some(), "{k}");
+    }
+    for k in [
+        "numbers_checked",
+        "numbers_untraced",
+        "numbers_unverified",
+        "outcomes_unverified",
+    ] {
+        o["integrity"].as_object_mut().unwrap().remove(k).unwrap();
+    }
+    let w = o["answer"].as_object_mut().unwrap();
+    for k in [
+        "at_a_glance",
+        "clinical_practice",
+        "guidelines",
+        "notable_findings",
+    ] {
+        assert!(w.remove(k).is_some(), "{k}");
+    }
+    for oc in w["outcomes"].as_array_mut().unwrap() {
+        oc.as_object_mut().unwrap().remove("evidence_type").unwrap();
+    }
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    let wa = a.answer.as_ref().unwrap();
+    assert!(wa.at_a_glance.is_none() && wa.clinical_practice.is_none());
+    assert!(wa.guidelines.is_empty() && wa.notable_findings.is_empty());
+    assert_eq!(
+        wa.outcomes[0].evidence_type,
+        incisive_app::agent::answer_v3::EvidenceType::Mixed
+    );
+    assert!(a.untraced.is_empty() && a.notable_code.is_empty());
+    // A Stage 3 skeptic and evidence entry without the Stage 4 fields.
+    body["skeptic"] = json!({"verdict": "holds", "must_mention": ["a"], "contradicting": [],
+        "missed_rcts": [], "guidelines": [], "overlaps": []});
+    body["evidence"] = json!([{"pmid": "39979619", "text": "full text", "verified_quotes": 1,
+        "numbers_dropped": 2, "unverified_outcomes": ["Pain"]}]);
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    assert!(a.skeptic.as_ref().unwrap().ma_notes.is_empty());
+    assert!(!a.evidence[0].funding_checked);
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("The trials"));
+    assert!(!m.contains("not traced"));
+    assert!(!m.contains("Funding:"), "old rows never looked for funding");
+    assert!(!m.contains("Guidelines and consensus"));
 }

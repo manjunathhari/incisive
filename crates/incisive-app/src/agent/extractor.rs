@@ -29,24 +29,30 @@
 //! * every structured number (`value`, `ci_low`, `ci_high`, and each number
 //!   in `p`) must be a number of **its own** quote ([`number_in_quote`],
 //!   on the Phase 2 number tokens: `−`/`-`, decimals, `0·52`, `.004`,
-//!   percentages). A number that is not is dropped and counted.
+//!   percentages, and numbers written as words in the source, "Sixty").
+//!   A number that is not is **kept, flagged** `verified: false` and
+//!   counted (Stage 4 item 7: flag, never delete).
 //! * **Correction pass.** Outcomes whose quote was not found are sent back
 //!   in one batched correction request per study, asking for exact quotes.
 //!   A corrected quote is verified the same way (and the numbers against
-//!   it). An outcome that fails again is **dropped from the evidence**, with
-//!   its numbers; only its name is kept on the row (`unverified_outcomes`),
-//!   so the writer and the page can say it was reported but could not be
-//!   checked. Why dropped rather than kept as text: its `effect_text` was
-//!   written by the model beside a quote that does not exist in the paper,
-//!   so it may carry exactly the unverified numbers this step exists to
-//!   keep from the writer; the name alone states what was dropped.
-//!   A correction refused for budget, rate limited or failed is not an
-//!   error: the failed outcomes are dropped as above.
-//! * counts per row: `outcomes_verified`, `numbers_dropped`, `corrections`
-//!   (requests made: 0 or 1), `unverified_outcomes`.
+//!   it). An outcome that fails again is **kept, flagged** (`verified:
+//!   false`, its numbers all unverified, the model's own values and quote),
+//!   named in `unverified_outcomes` and counted. The writer is given it
+//!   labelled "NOT VERIFIED against the paper's wording" and the page shows
+//!   it with a "not verified" label. A correction refused for budget, rate
+//!   limited or failed is not an error: the failed outcomes are flagged as
+//!   above.
+//! * numbers written in the row's text that its quote (outcome text) or the
+//!   sent source (the row's own fields) does not have are recorded as
+//!   spans (`spans`); the text is never rewritten (no `[?]`). n is kept
+//!   aside, labelled, when the source does not have that integer.
+//! * counts per row: `outcomes_verified`, `numbers_unverified`,
+//!   `texts_flagged`, `corrections` (requests made: 0 or 1),
+//!   `unverified_outcomes`.
 //!
 //! **Progress line** (one per settled study): "Extractor: 6/10 studies (42
-//! verified outcomes, 3 numbers dropped)".
+//! verified outcomes, 1 not verified, 3 numbers not verified; all kept,
+//! labelled)".
 //!
 //! Privacy: nothing here logs quotes, text or the question; only the run
 //! id, counts and fixed kinds.
@@ -56,6 +62,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::answer_v3::Span;
 use super::bounded::{self, Outcome};
 use super::extract::{Section, cut, label, numbers, priority, quote_key};
 use super::llm::{Effort, OutputSchema, StepError, neutralise_source_tags, wrap_source};
@@ -77,6 +84,8 @@ pub const MAX_FIELD: usize = 300;
 pub const MAX_TEXT: usize = 400;
 /// Characters kept of a number's label, unit, arm or p.
 pub const MAX_LABEL: usize = 80;
+/// Characters kept of an unverified outcome's quote (as the model gave it).
+pub const MAX_QUOTE: usize = 1_000;
 /// Characters of a study's title shown to the model.
 const MAX_TITLE: usize = 500;
 
@@ -113,6 +122,10 @@ pub enum Centres {
     Unclear,
 }
 
+fn yes() -> bool {
+    true
+}
+
 /// One structured number (model output, then verified).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowNumber {
@@ -123,6 +136,10 @@ pub struct RowNumber {
     pub ci_low: Option<f64>,
     pub ci_high: Option<f64>,
     pub p: Option<String>,
+    /// Set by code (not in the model's schema; default true): false when
+    /// the number is not in its quote (Stage 4 item 7: kept, flagged).
+    #[serde(default = "yes")]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -175,17 +192,25 @@ pub struct ReportedRow {
     pub funding: Option<String>,
 }
 
-/// An outcome whose quote was found in the source.
+/// An extracted outcome. Verified: its quote was found in the source (the
+/// stored quote is the source's own span). Not verified (Stage 4 item 7):
+/// its quote was not found even after the correction; it is kept with the
+/// model's own values, labelled, never used as verified evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VerifiedOutcome {
     pub outcome: String,
     pub effect_text: String,
-    /// Only numbers found in `quote`.
+    /// Each flagged `verified: false` unless found in `quote` (a number of
+    /// an unverified outcome is never verified).
     pub numbers: Vec<RowNumber>,
-    /// The source's own text at the match.
+    /// Verified: the source's own text at the match. Not verified: the
+    /// quote the model gave (not found in the paper).
     pub quote: String,
-    /// Where the quote was found.
+    /// Verified: where the quote was found. Not verified: where the model
+    /// said it was.
     pub source: QuoteSource,
+    #[serde(default = "yes")]
+    pub verified: bool,
 }
 
 /// A verified evidence row.
@@ -214,15 +239,28 @@ pub struct EvidenceRow {
     /// text, or `None` when it does not state them.
     #[serde(default)]
     pub funding: Option<String>,
-    /// Names of outcomes reported but not verifiable (quote not found
-    /// twice): dropped from the evidence, numbers included.
+    /// Names of outcomes whose quote was not found twice (they stay in
+    /// `outcomes`, `verified: false`).
     pub unverified_outcomes: Vec<String>,
     pub outcomes_verified: u32,
-    pub numbers_dropped: u32,
-    /// Numbers in the row's text (outcome names, effect texts, its own
-    /// fields) not found in the quote or the source, replaced by `[?]`.
+    /// Structured numbers (and n) kept but not verified (Stage 4: flagged,
+    /// not dropped).
+    pub numbers_unverified: u32,
+    /// Numbers written in the row's text (outcome names, effect texts, its
+    /// own fields) not found in the quote or the source: marked by
+    /// `spans`, the text unchanged.
     #[serde(default)]
-    pub texts_cleaned: u32,
+    pub texts_flagged: u32,
+    /// Stage 4 item 7: where those numbers are (`design`,
+    /// `outcomes.2.effect_text`, `appraisal.bias`, `funding`, …).
+    #[serde(default)]
+    pub spans: Vec<Span>,
+    /// n as the model gave it when the source does not have that integer
+    /// (kept, labelled not verified).
+    #[serde(default)]
+    pub n_randomised_unverified: Option<i64>,
+    #[serde(default)]
+    pub n_analysed_unverified: Option<i64>,
     /// Correction requests made for this study (0 or 1).
     pub corrections: u32,
 }
@@ -339,12 +377,108 @@ pub fn source_text(paper: &Paper, full: Option<&FullText>) -> Option<SourceText>
 
 /// The numeric values of `quote`'s number tokens (the Phase 2 tokens:
 /// folded dashes and middle dots, range dashes, thousands separators,
-/// leading-dot decimals; a trailing `%` dropped).
+/// leading-dot decimals; a trailing `%` dropped), plus the numbers it
+/// writes as words ([`word_values`]: "Sixty patients" is 60).
 pub(crate) fn quote_values(quote: &str) -> Vec<f64> {
-    numbers(quote)
+    let mut v: Vec<f64> = numbers(quote)
         .iter()
         .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok())
-        .collect()
+        .collect();
+    v.extend(word_values(quote));
+    v
+}
+
+const UNIT_WORDS: [&str; 20] = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+];
+const TENS_WORDS: [&str; 8] = [
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+];
+
+fn unit_word(w: &str) -> Option<u32> {
+    UNIT_WORDS.iter().position(|u| *u == w).map(|i| i as u32)
+}
+
+fn tens_word(w: &str) -> Option<u32> {
+    TENS_WORDS
+        .iter()
+        .position(|t| *t == w)
+        .map(|i| 20 + 10 * i as u32)
+}
+
+/// 0–99 starting at `words[i]` ("sixty", "sixty-two" or "sixty two",
+/// "seven"), and the index after it.
+fn below_hundred(words: &[String], i: usize) -> Option<(u32, usize)> {
+    let w = words.get(i)?;
+    if let Some(u) = unit_word(w) {
+        return Some((u, i + 1));
+    }
+    let t = tens_word(w)?;
+    match words.get(i + 1).and_then(|w| unit_word(w)) {
+        Some(u) if (1..=9).contains(&u) => Some((t + u, i + 2)),
+        _ => Some((t, i + 1)),
+    }
+}
+
+/// Numbers written as words in `text` (Stage 4 item 10): "zero" to
+/// "ninety-nine", compounds with a hyphen or a space ("Sixty-two"),
+/// "hundred" (100) and "N hundred [and] M" (e.g. "one hundred and five").
+/// Case does not matter. Used only to widen what a source is allowed to
+/// support (its quotes and its text), never to read the model's text.
+pub(crate) fn word_values(text: &str) -> Vec<f64> {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if words[i] == "hundred" {
+            out.push(100.0);
+            i += 1;
+            continue;
+        }
+        let Some((mut v, mut j)) = below_hundred(&words, i) else {
+            i += 1;
+            continue;
+        };
+        if v > 0 && v < 10 && words.get(j).is_some_and(|w| w == "hundred") {
+            v *= 100;
+            j += 1;
+            let k = if words.get(j).is_some_and(|w| w == "and") {
+                j + 1
+            } else {
+                j
+            };
+            if let Some((rest, after)) = below_hundred(&words, k) {
+                v += rest;
+                j = after;
+            }
+        }
+        out.push(f64::from(v));
+        i = j;
+    }
+    out
 }
 
 fn same(a: f64, b: f64) -> bool {
@@ -386,37 +520,45 @@ fn signed_start(text: &str, start: usize) -> usize {
     }
 }
 
-/// `text` with every number that is not among `allowed` replaced by `[?]`,
-/// and how many were replaced (Stage 3 review 1: no number reaches the
-/// writer from a row unless the source has it). Ranges and hyphenated
-/// names keep their dash ([`signed_start`]): "CI 0.48-1.13" checks 0.48 and
-/// 1.13; a genuine minus ("of −2.3") checks -2.3.
-pub fn strip_unverified(text: &str, allowed: &[f64]) -> (String, u32) {
-    let mut n = 0u32;
-    let mut out = String::with_capacity(text.len());
+/// Each number written in `text` (in digits) as its byte range, sign
+/// included ([`signed_start`]), with its values.
+pub(crate) fn written_numbers(text: &str) -> Vec<(usize, usize, Vec<f64>)> {
+    let mut out = Vec::new();
     let mut last = 0;
     for m in WRITTEN_NUMBER.find_iter(text) {
         let start = signed_start(text, m.start()).max(last);
         let written = &text[start..m.end()];
-        let ok = quote_values(written)
+        let values: Vec<f64> = numbers(written)
             .iter()
-            .all(|v| allowed.iter().any(|a| same(*a, *v)));
-        out.push_str(&text[last..start]);
-        if ok {
-            out.push_str(written);
-        } else {
-            n += 1;
-            out.push_str("[?]");
-        }
+            .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok())
+            .collect();
+        out.push((start, m.end(), values));
         last = m.end();
     }
-    out.push_str(&text[last..]);
-    (out, n)
+    out
+}
+
+/// Whether every one of `values` is among `allowed`.
+pub(crate) fn all_allowed(values: &[f64], allowed: &[f64]) -> bool {
+    values.iter().all(|v| allowed.iter().any(|a| same(*a, *v)))
+}
+
+/// The byte ranges of the numbers written in `text` that are not among
+/// `allowed` (Stage 4 item 7: the text is never changed; these are marked
+/// "not verified"). Ranges and hyphenated names keep their dash
+/// ([`signed_start`]): "CI 0.48-1.13" checks 0.48 and 1.13; a genuine minus
+/// ("of −2.3") checks -2.3. Replaces Stage 3's `[?]` replacement.
+pub fn unverified_spans(text: &str, allowed: &[f64]) -> Vec<(usize, usize)> {
+    written_numbers(text)
+        .into_iter()
+        .filter(|(_, _, v)| !all_allowed(v, allowed))
+        .map(|(a, b, _)| (a, b))
+        .collect()
 }
 
 /// Whether every number written in `text` is a number of `quote`.
 fn numbers_in(text: &str, quote: &str) -> bool {
-    strip_unverified(text, &quote_values(quote)).1 == 0
+    unverified_spans(text, &quote_values(quote)).is_empty()
 }
 
 /// Whether `n` (its value, CI bounds and every number in its `p`) is all
@@ -452,7 +594,7 @@ fn clip_opt(s: &Option<String>, max: usize) -> Option<String> {
     s.as_deref().map(|v| clip(v, max)).filter(|v| !v.is_empty())
 }
 
-fn clean_number(n: &RowNumber) -> RowNumber {
+fn clean_number(n: &RowNumber, verified: bool) -> RowNumber {
     RowNumber {
         label: clip(&n.label, MAX_LABEL),
         value: n.value,
@@ -461,74 +603,96 @@ fn clean_number(n: &RowNumber) -> RowNumber {
         ci_low: n.ci_low,
         ci_high: n.ci_high,
         p: clip_opt(&n.p, MAX_LABEL),
+        verified,
     }
 }
 
-/// `o` verified against `src` with `quote`: `None` when the quote is not
-/// found; otherwise the outcome with the numbers found in the quote, and
-/// how many were dropped.
-/// `o` verified against `src` with `quote`: `None` when the quote is not
-/// found; otherwise the outcome with only the numbers found in the quote
-/// (a number whose label, unit or arm carries a number the quote does not
-/// have is dropped too), its name and `effect_text` with any number not in
-/// the quote replaced by `[?]`, the numbers dropped and the text numbers
-/// replaced.
+/// `text` clipped to `max`, with the numbers not among `allowed` recorded
+/// as spans on `field` (the text is unchanged).
+fn flagged(text: &str, max: usize, allowed: &[f64], field: &str, spans: &mut Vec<Span>) -> String {
+    let t = clip(text, max);
+    for (a, b) in unverified_spans(&t, allowed) {
+        spans.push(Span::new(field, a, b));
+    }
+    t
+}
+
+/// Outcome `i` verified against `src` with `quote`: `None` when the quote
+/// is not found; otherwise the outcome with each number flagged `verified`
+/// only when it is in the quote (a number whose label, unit or arm carries
+/// a number the quote does not have is flagged too), and the numbers in its
+/// name and `effect_text` that the quote lacks recorded as spans. Returns
+/// it and how many numbers were flagged. Nothing is removed (Stage 4).
 fn verify_outcome(
     src: &SourceText,
     o: &ReportedOutcome,
     quote: &str,
-) -> Option<(VerifiedOutcome, u32, u32)> {
+    i: usize,
+    spans: &mut Vec<Span>,
+) -> Option<(VerifiedOutcome, u32)> {
     let (span, source) = locate(src, quote)?;
     let allowed = quote_values(span);
-    let mut dropped = 0u32;
-    let mut kept = Vec::new();
+    let mut unverified = 0u32;
+    let mut numbers = Vec::new();
     for n in o.numbers.iter().take(MAX_NUMBERS) {
         let words_ok = [Some(&n.label), n.unit.as_ref(), n.arm.as_ref()]
             .into_iter()
             .flatten()
             .all(|t| numbers_in(t, span));
-        if words_ok && number_in_quote(n, span) {
-            kept.push(clean_number(n));
-        } else {
-            dropped += 1;
+        let ok = words_ok && number_in_quote(n, span);
+        if !ok {
+            unverified += 1;
         }
+        numbers.push(clean_number(n, ok));
     }
-    let (outcome, a) = strip_unverified(&clip(&o.outcome, MAX_FIELD), &allowed);
-    let (effect_text, b) = strip_unverified(&clip(&o.effect_text, MAX_TEXT), &allowed);
+    let outcome = flagged(
+        &o.outcome,
+        MAX_FIELD,
+        &allowed,
+        &format!("outcomes.{i}.outcome"),
+        spans,
+    );
+    let effect_text = flagged(
+        &o.effect_text,
+        MAX_TEXT,
+        &allowed,
+        &format!("outcomes.{i}.effect_text"),
+        spans,
+    );
     Some((
         VerifiedOutcome {
             outcome,
             effect_text,
-            numbers: kept,
+            numbers,
             quote: span.to_string(),
             source,
+            verified: true,
         },
-        dropped,
-        a + b,
+        unverified,
     ))
 }
 
-/// The first pass over a reply: verified outcomes, numbers dropped, and
-/// the indexes (into the reply's first [`MAX_OUTCOMES`]) whose quote failed.
+/// The first pass over a reply: outcomes verified so far (by index into
+/// the reply's first [`MAX_OUTCOMES`]), numbers flagged, text spans, and
+/// the indexes whose quote failed.
 struct FirstPass {
     verified: Vec<(usize, VerifiedOutcome)>,
-    numbers_dropped: u32,
-    texts_cleaned: u32,
+    numbers_unverified: u32,
+    spans: Vec<Span>,
     failed: Vec<usize>,
 }
 
 fn first_pass(src: &SourceText, row: &ReportedRow) -> FirstPass {
     let mut p = FirstPass {
         verified: Vec::new(),
-        numbers_dropped: 0,
-        texts_cleaned: 0,
+        numbers_unverified: 0,
+        spans: Vec::new(),
         failed: Vec::new(),
     };
     for (i, o) in row.outcomes.iter().take(MAX_OUTCOMES).enumerate() {
-        match verify_outcome(src, o, &o.quote) {
-            Some((v, d, t)) => {
-                p.numbers_dropped += d;
-                p.texts_cleaned += t;
+        match verify_outcome(src, o, &o.quote, i, &mut p.spans) {
+            Some((v, d)) => {
+                p.numbers_unverified += d;
                 p.verified.push((i, v));
             }
             None => p.failed.push(i),
@@ -551,8 +715,11 @@ pub struct Corrections {
 
 /// Apply `corrections` to the failed outcomes of `row`: each failed outcome
 /// whose corrected quote is found becomes verified (its numbers checked
-/// against the new quote); the rest are dropped, their numbers counted as
-/// dropped. Returns the row.
+/// against the new quote); the rest are **kept, flagged** (`verified:
+/// false`, every number unverified, the model's own values and quote) and
+/// named in `unverified_outcomes` (Stage 4 item 7: flag, never delete).
+/// The row's own fields keep their text; numbers the sent source does not
+/// have are recorded as spans. Returns the row.
 fn finish_row(
     pmid: &str,
     src: &SourceText,
@@ -570,32 +737,44 @@ fn finish_row(
                     .iter()
                     .find(|c| usize::try_from(c.index).ok() == Some(i))
             })
-            .and_then(|c| verify_outcome(src, o, &c.quote));
+            .and_then(|c| verify_outcome(src, o, &c.quote, i, &mut pass.spans));
         match fixed {
-            Some((v, d, t)) => {
-                pass.numbers_dropped += d;
-                pass.texts_cleaned += t;
+            Some((v, d)) => {
+                pass.numbers_unverified += d;
                 pass.verified.push((i, v));
             }
             None => {
-                pass.numbers_dropped +=
-                    u32::try_from(o.numbers.len().min(MAX_NUMBERS)).unwrap_or(u32::MAX);
+                let numbers: Vec<RowNumber> = o
+                    .numbers
+                    .iter()
+                    .take(MAX_NUMBERS)
+                    .map(|n| clean_number(n, false))
+                    .collect();
+                pass.numbers_unverified += u32::try_from(numbers.len()).unwrap_or(u32::MAX);
                 unverified.push(clip(&o.outcome, MAX_FIELD));
+                pass.verified.push((
+                    i,
+                    VerifiedOutcome {
+                        outcome: clip(&o.outcome, MAX_FIELD),
+                        effect_text: clip(&o.effect_text, MAX_TEXT),
+                        numbers,
+                        quote: clip(&o.quote, MAX_QUOTE),
+                        source: o.source,
+                        verified: false,
+                    },
+                ));
             }
         }
     }
     pass.verified.sort_by_key(|(i, _)| *i);
     let outcomes: Vec<VerifiedOutcome> = pass.verified.into_iter().map(|(_, v)| v).collect();
-    // The row's own fields: a number the sent source does not have is
-    // replaced by `[?]` (counted); n only when the source has that integer;
-    // a registration only when it appears in the source.
-    let mut cleaned = pass.texts_cleaned;
-    let mut field = |s: &str, max: usize| {
-        let (t, k) = strip_unverified(&clip(s, max), &src.values);
-        cleaned += k;
-        t
-    };
-    let f = |field: &mut dyn FnMut(&str, usize) -> String, s: &str| field(s, MAX_FIELD);
+    // The row's own fields: numbers the sent source does not have are
+    // marked (spans); n is verified only when the source has that integer
+    // (otherwise kept aside, labelled); a registration only when it appears
+    // in the source.
+    let mut spans = pass.spans;
+    let mut field =
+        |s: &str, max: usize, name: &str| flagged(s, max, &src.values, name, &mut spans);
     let a = &row.appraisal;
     let ind = &row.independence;
     let in_source = |n: Option<i64>| {
@@ -608,49 +787,64 @@ fn finish_row(
     });
     let n_randomised = in_source(row.n_randomised);
     let n_analysed = in_source(row.n_analysed);
-    let dropped_n = u32::from(row.n_randomised.is_some_and(|v| v > 0) && n_randomised.is_none())
-        + u32::from(row.n_analysed.is_some_and(|v| v > 0) && n_analysed.is_none());
-    EvidenceRow {
+    let aside = |given: Option<i64>, kept: Option<i64>| given.filter(|v| *v > 0 && kept.is_none());
+    let n_randomised_unverified = aside(row.n_randomised, n_randomised);
+    let n_analysed_unverified = aside(row.n_analysed, n_analysed);
+    let flagged_n =
+        u32::from(n_randomised_unverified.is_some()) + u32::from(n_analysed_unverified.is_some());
+    let funding = row
+        .funding
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| field(t, MAX_TEXT, "funding"));
+    let mut e = EvidenceRow {
         pmid: pmid.to_string(),
         text: src.kind,
-        design: f(&mut field, &row.design),
+        design: field(&row.design, MAX_FIELD, "design"),
         n_randomised,
         n_analysed,
-        setting: f(&mut field, &row.setting),
+        setting: field(&row.setting, MAX_FIELD, "setting"),
         centres: row.centres,
-        country: f(&mut field, &row.country),
-        population: f(&mut field, &row.population),
-        intervention: f(&mut field, &row.intervention),
-        comparator: f(&mut field, &row.comparator),
-        follow_up: f(&mut field, &row.follow_up),
-        blinding: f(&mut field, &row.blinding),
-        primary_endpoint: f(&mut field, &row.primary_endpoint),
+        country: field(&row.country, MAX_FIELD, "country"),
+        population: field(&row.population, MAX_FIELD, "population"),
+        intervention: field(&row.intervention, MAX_FIELD, "intervention"),
+        comparator: field(&row.comparator, MAX_FIELD, "comparator"),
+        follow_up: field(&row.follow_up, MAX_FIELD, "follow_up"),
+        blinding: field(&row.blinding, MAX_FIELD, "blinding"),
+        primary_endpoint: field(&row.primary_endpoint, MAX_FIELD, "primary_endpoint"),
         powered_for_primary: row.powered_for_primary,
-        surgeon_experience: f(&mut field, &row.surgeon_experience),
-        outcomes_verified: u32::try_from(outcomes.len()).unwrap_or(u32::MAX),
+        surgeon_experience: field(&row.surgeon_experience, MAX_FIELD, "surgeon_experience"),
+        outcomes_verified: u32::try_from(outcomes.iter().filter(|o| o.verified).count())
+            .unwrap_or(u32::MAX),
         outcomes,
         appraisal: Appraisal {
-            bias: field(&a.bias, MAX_TEXT),
-            power: field(&a.power, MAX_TEXT),
-            learning_curve: field(&a.learning_curve, MAX_TEXT),
-            applicability: field(&a.applicability, MAX_TEXT),
+            bias: field(&a.bias, MAX_TEXT, "appraisal.bias"),
+            power: field(&a.power, MAX_TEXT, "appraisal.power"),
+            learning_curve: field(&a.learning_curve, MAX_TEXT, "appraisal.learning_curve"),
+            applicability: field(&a.applicability, MAX_TEXT, "appraisal.applicability"),
         },
         independence: Independence {
             trial_registration: registration,
-            group_or_centre: f(&mut field, &ind.group_or_centre),
-            note: field(&ind.note, MAX_TEXT),
+            group_or_centre: field(
+                &ind.group_or_centre,
+                MAX_FIELD,
+                "independence.group_or_centre",
+            ),
+            note: field(&ind.note, MAX_TEXT, "independence.note"),
         },
-        funding: row
-            .funding
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(|t| field(t, MAX_TEXT)),
-        unverified_outcomes: unverified.iter().map(|u| field(u, MAX_FIELD)).collect(),
-        numbers_dropped: pass.numbers_dropped + dropped_n,
-        texts_cleaned: cleaned,
+        funding,
+        unverified_outcomes: unverified,
+        numbers_unverified: pass.numbers_unverified + flagged_n,
+        texts_flagged: 0,
+        spans: Vec::new(),
+        n_randomised_unverified,
+        n_analysed_unverified,
         corrections: corrections_made,
-    }
+    };
+    e.texts_flagged = u32::try_from(spans.len()).unwrap_or(u32::MAX);
+    e.spans = spans;
+    e
 }
 
 // ---------- prompts and schemas ----------
@@ -835,8 +1029,16 @@ impl Extraction {
     pub fn outcomes_verified(&self) -> u32 {
         self.rows.iter().map(|r| r.outcomes_verified).sum()
     }
-    pub fn numbers_dropped(&self) -> u32 {
-        self.rows.iter().map(|r| r.numbers_dropped).sum()
+    /// Structured numbers (and n) kept but not verified.
+    pub fn numbers_unverified(&self) -> u32 {
+        self.rows.iter().map(|r| r.numbers_unverified).sum()
+    }
+    /// Outcomes kept whose quote was not found.
+    pub fn outcomes_unverified(&self) -> u32 {
+        self.rows
+            .iter()
+            .map(|r| u32::try_from(r.unverified_outcomes.len()).unwrap_or(u32::MAX))
+            .sum()
     }
     pub fn corrections(&self) -> u32 {
         self.rows.iter().map(|r| r.corrections).sum()
@@ -927,7 +1129,8 @@ pub async fn extract_rows(
     let (lines, writer) = super::line_writer(ctx);
     let mut done = 0usize;
     let mut verified = 0u32;
-    let mut dropped = 0u32;
+    let mut unverified = 0u32;
+    let mut flagged = 0u32;
 
     let outcomes = bounded::run(
         &ctx.budget,
@@ -985,12 +1188,13 @@ pub async fn extract_rows(
             done += 1;
             if let Ok(row) = r {
                 verified += row.outcomes_verified;
-                dropped += row.numbers_dropped;
+                unverified += u32::try_from(row.unverified_outcomes.len()).unwrap_or(u32::MAX);
+                flagged += row.numbers_unverified;
             }
             let _ = lines.send((
                 StepKind::Extract,
                 format!(
-                    "Extractor: {done}/{total} studies ({verified} verified outcomes, {dropped} numbers dropped)"
+                    "Extractor: {done}/{total} studies ({verified} verified outcomes, {unverified} not verified, {flagged} numbers not verified; all kept, labelled)"
                 ),
             ));
         },
@@ -1026,7 +1230,8 @@ pub async fn extract_rows(
     tracing::info!(
         %run_id, step = "extractor", rows = out.rows.len(), full_text = full, no_text,
         failed = out.failed, stopped = out.stopped,
-        outcomes_verified = out.outcomes_verified(), numbers_dropped = out.numbers_dropped(),
+        outcomes_verified = out.outcomes_verified(), outcomes_unverified = out.outcomes_unverified(),
+        numbers_unverified = out.numbers_unverified(),
         corrections = out.corrections(), "extraction done"
     );
     Ok(out)
@@ -1064,7 +1269,13 @@ mod tests {
             ci_low: None,
             ci_high: None,
             p: None,
+            verified: true,
         }
+    }
+
+    fn unv(mut n: RowNumber) -> RowNumber {
+        n.verified = false;
+        n
     }
 
     #[test]
@@ -1152,10 +1363,15 @@ mod tests {
         }
     }
 
+    /// Stage 4 item 7: a failed number is kept, flagged; an outcome whose
+    /// quote fails twice is kept with its own values, flagged, and named.
     #[test]
-    fn quotes_are_verified_numbers_checked_and_failures_corrected_or_dropped() {
+    fn quotes_are_verified_numbers_checked_and_failures_flagged_not_dropped() {
         let src = source_text(&paper(Some(ABS)), None).unwrap();
         assert_eq!(src.kind, TextKind::Abstract);
+        let mut recurrence = outcome("Recurrence was 1%.", vec![num(1.0)]);
+        recurrence.outcome = "Recurrence".into();
+        recurrence.effect_text = "1% vs 3% at 2 years".into();
         let r = row(vec![
             // Found; one number (9.9) is not in it.
             outcome(
@@ -1164,8 +1380,8 @@ mod tests {
             ),
             // Not found (paraphrase), fixed by the correction.
             outcome("Robotic cost more.", vec![num(3258.0)]),
-            // Not found twice: dropped with its number.
-            outcome("Recurrence was 1%.", vec![num(1.0)]),
+            // Not found twice: kept, flagged.
+            recurrence,
         ]);
         let pass = first_pass(&src, &r);
         assert_eq!(pass.failed, vec![1, 2]);
@@ -1183,32 +1399,43 @@ mod tests {
         };
         let e = finish_row("111", &src, &r, pass, Some(&c), 1);
         assert_eq!(e.outcomes_verified, 2);
-        assert_eq!(e.outcomes[0].numbers, vec![num(2.1)]);
+        assert_eq!(e.outcomes.len(), 3, "nothing dropped");
+        assert_eq!(e.outcomes[0].numbers, vec![num(2.1), unv(num(9.9))]);
         assert_eq!(e.outcomes[0].source, QuoteSource::Abstract, "where found");
         assert_eq!(
             e.outcomes[1].quote,
             "Cost was higher with robotic repair ($3258 vs $1421)."
         );
-        assert_eq!(e.unverified_outcomes, vec!["Pain".to_string()]);
-        // 9.9, the dropped outcome's 1, and n randomised 100 (the abstract
-        // never says 100).
-        assert_eq!(e.numbers_dropped, 3);
+        let kept = &e.outcomes[2];
+        assert!(!kept.verified);
+        assert_eq!(kept.outcome, "Recurrence");
+        assert_eq!(kept.effect_text, "1% vs 3% at 2 years", "original values");
+        assert_eq!(kept.quote, "Recurrence was 1%.", "the quote it gave");
+        assert_eq!(kept.numbers, vec![unv(num(1.0))]);
+        assert_eq!(e.unverified_outcomes, vec!["Recurrence".to_string()]);
+        // 9.9, the unverified outcome's 1, and n randomised 100 (the
+        // abstract never says 100), which is kept aside.
+        assert_eq!(e.numbers_unverified, 3);
         assert_eq!(e.n_randomised, None);
+        assert_eq!(e.n_randomised_unverified, Some(100));
         assert_eq!(e.corrections, 1);
         assert_eq!(e.n_analysed, None, "0 is not a count");
-        // No correction at all: every failed outcome is dropped.
+        assert_eq!(e.n_analysed_unverified, None);
+        // No correction at all: every failed outcome is kept, flagged.
         let pass = first_pass(&src, &r);
         let e = finish_row("111", &src, &r, pass, None, 0);
         assert_eq!(e.outcomes_verified, 1);
+        assert_eq!(e.outcomes.len(), 3);
         assert_eq!(e.unverified_outcomes.len(), 2);
-        assert_eq!(e.numbers_dropped, 4);
+        assert_eq!(e.numbers_unverified, 4);
+        assert!(!serde_json::to_string(&e).unwrap().contains("[?]"));
     }
 
-    /// Review 1: no number reaches a "verified" row unless its quote (for
-    /// outcome text and structured numbers) or the source (for the row's
-    /// own fields and n) has it.
+    /// Stage 3 review 1, Stage 4 item 7: a number the quote (outcome text,
+    /// structured numbers) or the source (the row's own fields and n) does
+    /// not have is flagged and marked, never replaced: no `[?]`.
     #[test]
-    fn unverified_numbers_never_reach_a_verified_row() {
+    fn unverified_numbers_are_marked_never_replaced() {
         let abs = "Results: In 102 randomised patients (51 per arm), pain at 30 days was 2.1 vs 2.4 (p = 0.43). Trial NCT0123 was multicentre.";
         let src = source_text(&paper(Some(abs)), None).unwrap();
         let mut good = num(2.1);
@@ -1234,40 +1461,73 @@ mod tests {
         r.setting = "Two centres, 2019 to 2021".into();
         r.follow_up = "30 days".into();
         r.independence.trial_registration = Some("NCT0123".into());
+        r.funding = Some("Grant 4471 from a society".into());
         let pass = first_pass(&src, &r);
         assert!(pass.failed.is_empty());
         let e = finish_row("111", &src, &r, pass, None, 0);
         let v = &e.outcomes[0];
+        let verified: Vec<bool> = v.numbers.iter().map(|n| n.verified).collect();
         assert_eq!(
-            v.numbers.len(),
-            1,
-            "digits in label, unit or arm not in the quote"
+            verified,
+            [true, false, false, false],
+            "digits in label, unit or arm not in the quote: flagged, kept"
         );
-        assert_eq!(v.numbers[0].label, "VAS at 30 days");
+        assert_eq!(v.numbers[1].label, "VAS at 90 days");
         assert_eq!(v.outcome, "Pain at 30 days");
-        assert_eq!(v.effect_text, "2.1 vs 2.4, a [?] reduction (p = 0.43)");
+        assert_eq!(v.effect_text, "2.1 vs 2.4, a 12.5% reduction (p = 0.43)");
+        let at = |f: &str| -> Vec<&str> {
+            let t: &str = match f {
+                "outcomes.0.effect_text" => &v.effect_text,
+                "setting" => &e.setting,
+                "funding" => e.funding.as_deref().unwrap(),
+                _ => unreachable!(),
+            };
+            e.spans
+                .iter()
+                .filter(|s| s.field == f)
+                .map(|s| &t[s.start as usize..(s.start + s.len) as usize])
+                .collect()
+        };
+        assert_eq!(at("outcomes.0.effect_text"), ["12.5%"]);
+        assert_eq!(e.setting, "Two centres, 2019 to 2021", "text unchanged");
+        assert_eq!(at("setting"), ["2019", "2021"]);
+        assert_eq!(
+            at("funding"),
+            ["4471"],
+            "funding goes through the same rule"
+        );
         assert_eq!(e.n_randomised, Some(102), "in the source");
         assert_eq!(e.n_analysed, None, "98 is not in the source");
-        assert_eq!(e.setting, "Two centres, [?] to [?]");
+        assert_eq!(e.n_analysed_unverified, Some(98), "kept aside, labelled");
         assert_eq!(e.follow_up, "30 days");
         assert_eq!(
             e.independence.trial_registration.as_deref(),
             Some("NCT0123")
         );
-        // 12.5% and the two years.
-        assert_eq!(e.texts_cleaned, 3);
+        // 12.5%, the two years and the grant number.
+        assert_eq!(e.texts_flagged, 4);
         // Three numbers and n analysed.
-        assert_eq!(e.numbers_dropped, 4);
+        assert_eq!(e.numbers_unverified, 4);
+        assert!(!serde_json::to_string(&e).unwrap().contains("[?]"));
         let mut r2 = r.clone();
         r2.independence.trial_registration = Some("NCT9999".into());
         let e = finish_row("111", &src, &r2, first_pass(&src, &r2), None, 0);
         assert_eq!(e.independence.trial_registration, None, "not in the source");
     }
 
-    /// Re-review 1: ranges and hyphenated names survive the strip when the
-    /// quote has them; a genuine minus is still caught.
+    /// The spans of `text` against `allowed`, as the marked substrings.
+    fn marked<'a>(text: &'a str, allowed: &[f64]) -> Vec<&'a str> {
+        unverified_spans(text, allowed)
+            .into_iter()
+            .map(|(a, b)| &text[a..b])
+            .collect()
+    }
+
+    /// Re-review 1, Stage 4: ranges and hyphenated names are not marked when
+    /// the quote has them; a genuine minus is still caught; nothing is
+    /// rewritten.
     #[test]
-    fn verified_ranges_and_hyphens_are_kept_intact() {
+    fn verified_ranges_and_hyphens_are_not_marked() {
         let quote = "Pain fell (RR 0.8, 95% CI 0.48-1.13) over 75.5\u{2013}93.8 min in 2019\u{2013}2021, with COVID-19 and IL-6 noted; mean difference 2.3.";
         let allowed = quote_values(quote);
         for text in [
@@ -1278,45 +1538,72 @@ mod tests {
             "IL-6 levels",
             "a difference of 2.3",
         ] {
-            assert_eq!(
-                strip_unverified(text, &allowed),
-                (text.to_string(), 0),
-                "{text}"
-            );
+            assert!(marked(text, &allowed).is_empty(), "{text}");
         }
         assert_eq!(
-            strip_unverified("a difference of \u{2212}2.3", &allowed),
-            ("a difference of [?]".to_string(), 1),
+            marked("a difference of \u{2212}2.3", &allowed),
+            ["\u{2212}2.3"],
             "the quote says 2.3, not -2.3"
         );
         assert_eq!(
-            strip_unverified("a difference of -2.3 (CI -4.1 to 0.5)", &allowed),
-            ("a difference of [?] (CI [?] to [?])".to_string(), 3)
+            marked("a difference of -2.3 (CI -4.1 to 0.5)", &allowed),
+            ["-2.3", "-4.1", "0.5"]
         );
-        // Final re-review: a minus after a spaced number reads as in quotes.
+        // A minus after a spaced number reads as in quotes.
         let spaced = quote_values("a change of 12 \u{2212}2.3 points");
-        assert_eq!(
-            strip_unverified("12 \u{2212}2.3", &spaced),
-            ("12 \u{2212}2.3".to_string(), 0),
+        assert!(
+            marked("12 \u{2212}2.3", &spaced).is_empty(),
             "the quote has -2.3"
         );
         let positive = quote_values("a change of 12 and 2.3 points");
-        assert_eq!(
-            strip_unverified("12 \u{2212}2.3", &positive),
-            ("12 [?]".to_string(), 1),
-            "the quote has only 2.3"
-        );
+        assert_eq!(marked("12 \u{2212}2.3", &positive), ["\u{2212}2.3"]);
         // A spaced range verifies against a quote spaced the same way.
         let range = quote_values("from 2019 \u{2013} 2021");
-        assert_eq!(
-            strip_unverified("2019 \u{2013} 2021", &range),
-            ("2019 \u{2013} 2021".to_string(), 0)
-        );
+        assert!(marked("2019 \u{2013} 2021", &range).is_empty());
         // A range of which one end is not in the quote: that end only.
+        assert_eq!(marked("CI 0.48-1.25", &allowed), ["1.25"]);
+        // COVID-19 is 19 (never -19), and a bare 19 is checked as 19.
         assert_eq!(
-            strip_unverified("CI 0.48-1.25", &allowed),
-            ("CI 0.48-[?]".to_string(), 1)
+            marked("COVID-19 in 19 of 40", &quote_values("COVID-19")),
+            ["40"]
         );
+    }
+
+    /// Stage 4 item 10: numbers written as words in the source count for
+    /// n and for structured numbers ("Sixty patients", "Sixty-two").
+    #[test]
+    fn numbers_written_as_words_are_recognised() {
+        let w = |t: &str| word_values(t);
+        assert_eq!(w("Sixty patients were randomised"), [60.0]);
+        assert_eq!(w("Sixty-two and sixty two"), [62.0, 62.0]);
+        assert_eq!(w("zero, Nineteen, ninety-nine"), [0.0, 19.0, 99.0]);
+        assert_eq!(
+            w("one hundred and five; two hundred; hundred"),
+            [105.0, 200.0, 100.0]
+        );
+        assert_eq!(w("seven hundred twelve"), [712.0]);
+        assert!(
+            w("often, tension-free, network").is_empty(),
+            "whole words only"
+        );
+        // VOLTAIRE: n written in words is in the source.
+        let abs = "Sixty patients were randomised to robotic or laparoscopic repair. Fifty-nine were analysed. Operative time was longer (64.9 vs 31.7 min).";
+        let src = source_text(&paper(Some(abs)), None).unwrap();
+        let mut r = row(vec![]);
+        r.n_randomised = Some(60);
+        r.n_analysed = Some(59);
+        let e = finish_row("111", &src, &r, first_pass(&src, &r), None, 0);
+        assert_eq!((e.n_randomised, e.n_analysed), (Some(60), Some(59)));
+        assert_eq!(e.numbers_unverified, 0);
+        // A structured number written as a word in its quote.
+        assert!(number_in_quote(
+            &num(60.0),
+            "Sixty patients were randomised."
+        ));
+        assert!(!number_in_quote(
+            &num(61.0),
+            "Sixty patients were randomised."
+        ));
     }
 
     /// Stage 4 item 3: funding is taken from the reply, blank means not
