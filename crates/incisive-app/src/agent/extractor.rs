@@ -335,14 +335,7 @@ pub fn source_text(paper: &Paper, full: Option<&FullText>) -> Option<SourceText>
 pub(crate) fn quote_values(quote: &str) -> Vec<f64> {
     numbers(quote)
         .iter()
-        // A comma left in a token is a decimal comma (grouped thousands
-        // have lost theirs already).
-        .filter_map(|t| {
-            t.trim_end_matches('%')
-                .replace(',', ".")
-                .parse::<f64>()
-                .ok()
-        })
+        .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok())
         .collect()
 }
 
@@ -350,30 +343,66 @@ fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
 }
 
-/// A number written in free text (a digit run with separators, an
-/// optional sign and `%`), as found in the text as written.
+/// The digits of a number written in free text (a digit run with
+/// separators and an optional `%`), without any sign: whether a dash in
+/// front is a minus is decided from its context ([`signed_start`]).
 static WRITTEN_NUMBER: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"[-\u{2212}\u{2013}]?\d(?:[\d.,\u{b7}]*\d)?%?")
-        .expect("written number pattern is valid")
+    regex::Regex::new(r"\d(?:[\d.,\u{b7}]*\d)?%?").expect("written number pattern is valid")
 });
+
+/// Where a number written at `start` in `text` begins once its sign is
+/// taken into account: one character earlier when a dash (`-`, `−`, `–`)
+/// right before it is a minus sign. The dash is **not** a sign (it is a
+/// range dash or a hyphen) when the character before it is a digit, `%` or
+/// a letter (`0.48-1.13`, `12%-15%`, `COVID-19`), or a space that follows a
+/// digit or `%` (`2019 – 2021`). Stage 3 re-review 1.
+fn signed_start(text: &str, start: usize) -> usize {
+    let mut back = text[..start].chars().rev();
+    let Some(dash) = back.next() else {
+        return start;
+    };
+    if !matches!(dash, '-' | '\u{2212}' | '\u{2013}') {
+        return start;
+    }
+    let range = match back.next() {
+        None => false,
+        Some(c) if c.is_ascii_digit() || c == '%' || c.is_alphabetic() => true,
+        Some(c) if c.is_whitespace() => back.next().is_some_and(|d| d.is_ascii_digit() || d == '%'),
+        Some(_) => false,
+    };
+    if range {
+        start
+    } else {
+        start - dash.len_utf8()
+    }
+}
 
 /// `text` with every number that is not among `allowed` replaced by `[?]`,
 /// and how many were replaced (Stage 3 review 1: no number reaches the
-/// writer from a row unless the source has it).
+/// writer from a row unless the source has it). Ranges and hyphenated
+/// names keep their dash ([`signed_start`]): "CI 0.48-1.13" checks 0.48 and
+/// 1.13; a genuine minus ("of −2.3") checks -2.3.
 pub fn strip_unverified(text: &str, allowed: &[f64]) -> (String, u32) {
     let mut n = 0u32;
-    let out = WRITTEN_NUMBER.replace_all(text, |c: &regex::Captures| {
-        let ok = quote_values(&c[0])
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in WRITTEN_NUMBER.find_iter(text) {
+        let start = signed_start(text, m.start()).max(last);
+        let written = &text[start..m.end()];
+        let ok = quote_values(written)
             .iter()
             .all(|v| allowed.iter().any(|a| same(*a, *v)));
+        out.push_str(&text[last..start]);
         if ok {
-            c[0].to_string()
+            out.push_str(written);
         } else {
             n += 1;
-            "[?]".to_string()
+            out.push_str("[?]");
         }
-    });
-    (out.into_owned(), n)
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    (out, n)
 }
 
 /// Whether every number written in `text` is a number of `quote`.
@@ -1053,10 +1082,12 @@ mod tests {
         assert!(number_in_quote(&num(19.0), q));
         assert!(!number_in_quote(&num(-19.0), q), "COVID-19 is not minus 19");
         assert!(!number_in_quote(&num(-6.0), q));
-        assert!(number_in_quote(
-            &num(1.2),
-            "a decimal comma 1,2 stays one number"
-        ));
+        // Re-review 4: no decimal comma. English abstracts use points (and
+        // Lancet middle dots, handled above); "3,4" is a list ("references
+        // 3,4"), so it never verifies 3.4.
+        assert!(!number_in_quote(&num(3.4), "as in references 3,4 and 5"));
+        assert!(number_in_quote(&num(3.0), "as in references 3,4 and 5"));
+        assert!(number_in_quote(&num(4.0), "as in references 3,4 and 5"));
     }
 
     const ABS: &str = "Background: hernia repair. Results: Pain at 30 days was 2.1 vs 2.4 (p = 0.43). Cost was higher with robotic repair ($3258 vs $1421). Conclusions: no difference.";
@@ -1212,6 +1243,43 @@ mod tests {
         r2.independence.trial_registration = Some("NCT9999".into());
         let e = finish_row("111", &src, &r2, first_pass(&src, &r2), None, 0);
         assert_eq!(e.independence.trial_registration, None, "not in the source");
+    }
+
+    /// Re-review 1: ranges and hyphenated names survive the strip when the
+    /// quote has them; a genuine minus is still caught.
+    #[test]
+    fn verified_ranges_and_hyphens_are_kept_intact() {
+        let quote = "Pain fell (RR 0.8, 95% CI 0.48-1.13) over 75.5\u{2013}93.8 min in 2019\u{2013}2021, with COVID-19 and IL-6 noted; mean difference 2.3.";
+        let allowed = quote_values(quote);
+        for text in [
+            "RR 0.8 (CI 0.48-1.13)",
+            "75.5\u{2013}93.8 min",
+            "2019\u{2013}2021",
+            "2019 \u{2013} 2021",
+            "COVID-19 cases",
+            "IL-6 levels",
+            "a difference of 2.3",
+        ] {
+            assert_eq!(
+                strip_unverified(text, &allowed),
+                (text.to_string(), 0),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            strip_unverified("a difference of \u{2212}2.3", &allowed),
+            ("a difference of [?]".to_string(), 1),
+            "the quote says 2.3, not -2.3"
+        );
+        assert_eq!(
+            strip_unverified("a difference of -2.3 (CI -4.1 to 0.5)", &allowed),
+            ("a difference of [?] (CI [?] to [?])".to_string(), 3)
+        );
+        // A range of which one end is not in the quote: that end only.
+        assert_eq!(
+            strip_unverified("CI 0.48-1.25", &allowed),
+            ("CI 0.48-[?]".to_string(), 1)
+        );
     }
 
     #[tokio::test]

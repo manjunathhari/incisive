@@ -256,14 +256,20 @@ pub fn validate(
     let texts = texts_by_pmid(results);
     let mut dropped_unseen = 0u32;
     let mut dropped_quotes = 0u32;
-    // Numbers the skeptic may write in free text: any that its tools
-    // returned (the whole results: titles, abstracts, ids, years, counts)
-    // or the selection's PMIDs. Others become `[?]` (Stage 3 review 2).
-    let mut allowed: Vec<f64> = results
-        .iter()
-        .flat_map(|r| super::extractor::quote_values(r))
+    // Numbers the skeptic may write in free text: those in the titles and
+    // abstracts its tools returned (never their counts, years or other
+    // record fields: re-review 2), plus PMIDs as identifiers, only real
+    // ones (seen in its results, or selected). Others become `[?]`.
+    let mut allowed: Vec<f64> = texts
+        .values()
+        .flatten()
+        .flat_map(|t| super::extractor::quote_values(t))
         .collect();
-    allowed.extend(selected.iter().filter_map(|p| p.parse::<f64>().ok()));
+    allowed.extend(
+        seen.iter()
+            .chain(selected.iter())
+            .filter_map(|p| p.parse::<f64>().ok()),
+    );
     let removed = std::cell::Cell::new(0u32);
     let note = |s: &str| {
         let (t, n) = super::extractor::strip_unverified(&clip(s, MAX_NOTE), &allowed);
@@ -795,6 +801,41 @@ mod tests {
         assert_eq!(v.missed_rcts[0].why, "newer, n = 300");
         assert_eq!(v.numbers_removed, 3);
         assert_eq!(v.dropped_quotes, 1);
+    }
+
+    /// Re-review 1 and 2: a claim quoting a CI range survives; counts,
+    /// years and other record fields are not numbers the skeptic may use.
+    #[test]
+    fn a_claim_with_a_ci_survives_and_record_fields_are_not_sources() {
+        let res = vec![wrapped(
+            "t1-1",
+            json!({"count": 4711, "papers": [{"pmid": "222", "year": 2017, "title": "A trial",
+                "abstract": "Results: The risk ratio was 0.74 (95% CI 0.48-1.13) at 2 years."}]}),
+        )];
+        let mut rep = report();
+        rep.contradicting = vec![ReportedContradicting {
+            pmid: "222".into(),
+            claim: "RR 0.74 (95% CI 0.48-1.13), not significant".into(),
+            quote: "The risk ratio was 0.74 (95% CI 0.48-1.13) at 2 years.".into(),
+            strength_vs_rcts: "".into(),
+        }];
+        rep.must_mention = vec![
+            "Trial [222] at 2 years: RR 0.74.".into(),
+            "Searches found 4711 records since 2017.".into(),
+        ];
+        let v = validate(rep, &res, &[], vec![]);
+        assert_eq!(v.contradicting.len(), 1, "{v:?}");
+        assert_eq!(
+            v.contradicting[0].claim,
+            "RR 0.74 (95% CI 0.48-1.13), not significant"
+        );
+        assert_eq!(
+            v.must_mention,
+            [
+                "Trial [222] at 2 years: RR 0.74.",
+                "Searches found [?] records since [?]."
+            ]
+        );
     }
 
     #[test]

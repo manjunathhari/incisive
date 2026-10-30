@@ -1111,33 +1111,58 @@ fn skeptic_v3_view(
     k: crate::agent::answer_v3::SkepticV3,
     refs: &std::collections::HashMap<String, u16>,
 ) -> AnyView {
-    let item = |pmid: &str, text: &str| format!("{text} [{pmid}]");
+    // Each line: the skeptic's text (citations linked) and the studies it
+    // names: a numbered reference when there is one, otherwise a PubMed
+    // link (re-review 3: a study whose record could not be fetched is not
+    // dropped). Only PMIDs of 1 to 9 digits are linked.
+    let line = |text: String, pmids: Vec<String>| (text, pmids);
     let quoted = |i: &crate::agent::answer_v3::SkepticItem| match &i.quote {
-        Some(q) => format!("{} \u{2014} \u{201c}{q}\u{201d} [{}]", i.text, i.pmid),
-        None => item(&i.pmid, &i.text),
+        Some(q) => line(
+            format!("{} \u{2014} \u{201c}{q}\u{201d}", i.text),
+            vec![i.pmid.clone()],
+        ),
+        None => line(i.text.clone(), vec![i.pmid.clone()]),
     };
-    let overlaps: Vec<String> = k
+    let caveats: Vec<(String, Vec<String>)> = k
+        .must_mention
+        .iter()
+        .map(|m| line(m.clone(), vec![]))
+        .collect();
+    let overlaps: Vec<(String, Vec<String>)> = k
         .overlaps
         .iter()
-        .map(|o| format!("{} [{}]", o.note, o.pmids.join("; ")))
+        .map(|o| line(o.note.clone(), o.pmids.clone()))
         .collect();
-    let missed: Vec<String> = k
-        .missed_rcts
-        .iter()
-        .map(|m| item(&m.pmid, &m.text))
-        .collect();
+    let missed: Vec<(String, Vec<String>)> = k.missed_rcts.iter().map(quoted).collect();
     // Each with its verified quote (review 2).
-    let against: Vec<String> = k
+    let against: Vec<(String, Vec<String>)> = k
         .contradicting
         .iter()
         .chain(&k.guidelines)
         .map(quoted)
         .collect();
-    let list = |title: &'static str, xs: Vec<String>| {
+    let study = |p: String| -> AnyView {
+        if let Some(n) = refs.get(&p) {
+            view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
+                .into_any()
+        } else if (1..=9).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
+            let href = format!("https://pubmed.ncbi.nlm.nih.gov/{p}/");
+            view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
+                .into_any()
+        } else {
+            ().into_any()
+        }
+    };
+    let list = |title: &'static str, xs: Vec<(String, Vec<String>)>| {
         (!xs.is_empty()).then(|| {
             view! {
                 <p><strong>{title}</strong></p>
-                <ul>{xs.into_iter().map(|x| view! { <li>{cited(&x, refs)}</li> }).collect_view()}</ul>
+                <ul>
+                    {xs
+                        .into_iter()
+                        .map(|(t, ps)| view! { <li>{cited(&t, refs)} {ps.into_iter().map(study).collect_view()}</li> })
+                        .collect_view()}
+                </ul>
             }
         })
     };
@@ -1145,7 +1170,7 @@ fn skeptic_v3_view(
         <section class="box" aria-label="Challenged by the skeptic">
             <h3>"Challenged by the skeptic"</h3>
             <p>{format!("Verdict: the conclusion {}.", k.verdict)}</p>
-            {list("Caveats", k.must_mention.clone())}
+            {list("Caveats", caveats)}
             {list("Not independent", overlaps)}
             {list("Trials the search missed", missed)}
             {list("Evidence against, and guidelines", against)}

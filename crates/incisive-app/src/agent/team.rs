@@ -550,9 +550,10 @@ struct Reviewed {
     skeptic_note: Option<&'static str>,
     /// The skeptic's missed RCTs, fetched.
     missed: Vec<StudyInput>,
-    /// The records of the other studies the skeptic quotes (contradicting
-    /// evidence, guidelines), fetched for their references (at most
-    /// [`MAX_SKEPTIC_REFS`]).
+    /// The records of the other studies the skeptic names (contradicting
+    /// evidence, guidelines, overlaps), fetched for their references (at
+    /// most [`MAX_SKEPTIC_REFS`]). One whose fetch fails has no reference;
+    /// the page then links it to PubMed directly.
     cited: Vec<StudyInput>,
     notes: Vec<String>,
 }
@@ -682,11 +683,13 @@ async fn review_phase(
     // references (review 3): not selected, not missed, at most five.
     let mut cited_ids: Vec<String> = Vec::new();
     if let Some(r) = &out.review {
+        // Overlap PMIDs too (re-review 3), under the same cap.
         let quoted = r
             .contradicting
             .iter()
             .map(|c| &c.pmid)
-            .chain(r.guidelines.iter().map(|g| &g.pmid));
+            .chain(r.guidelines.iter().map(|g| &g.pmid))
+            .chain(r.overlaps.iter().flat_map(|o| &o.pmids));
         for p in quoted {
             if !studies.iter().any(|s| &s.pmid == p)
                 && !missed_ids.contains(p)

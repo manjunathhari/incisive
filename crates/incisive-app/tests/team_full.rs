@@ -44,6 +44,9 @@ const SEEN_B: &str = "39979619";
 const SEEN_C: &str = "35777031";
 /// In the hernia fixtures; never selected (the skeptic's contradiction).
 const SEEN_D: &str = "9657784";
+/// In the skeptic's search results (the hernia esearch fixture); named only
+/// in an overlap.
+const SEEN_E: &str = "23355162";
 const UNSEEN: &str = "12345678";
 
 fn usage(i: u32, o: u32) -> Usage {
@@ -728,7 +731,7 @@ fn full_script_impl(
             json!({
                 "contradicting": contra.map(|(p, q)| vec![json!({"pmid": p, "claim": "open repair differs", "quote": q, "strength_vs_rcts": "older trial"})]).unwrap_or_default(),
                 "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
-                "guidelines": [], "overlaps": [{"pmids": [SEEN_A, SEEN_B], "note": "same group"}],
+                "guidelines": [], "overlaps": [{"pmids": [SEEN_A, SEEN_B, SEEN_E], "note": "same group"}],
                 "verdict": "holds_with_caveats", "must_mention": ["A and B share a group."], "searches": []
             }),
             u(),
@@ -900,7 +903,8 @@ async fn full_team_run_end_to_end_through_the_worker() {
             (SEEN_A, false),
             (SEEN_B, false),
             (SEEN_C, true),
-            (SEEN_D, true)
+            (SEEN_D, true),
+            (SEEN_E, true)
         ]
     );
     assert_eq!(w.conflicts[0].pmids, [SEEN_D]);
@@ -928,7 +932,7 @@ async fn full_team_run_end_to_end_through_the_worker() {
     );
     let k = a.skeptic.as_ref().unwrap();
     assert_eq!(k.verdict, "holds with caveats");
-    assert_eq!(k.overlaps[0].pmids, [SEEN_A, SEEN_B]);
+    assert_eq!(k.overlaps[0].pmids, [SEEN_A, SEEN_B, SEEN_E]);
     assert!(a.notes.is_empty());
     // Every call charged.
     let reqs = llm.requests();

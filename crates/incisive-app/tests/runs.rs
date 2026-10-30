@@ -3627,7 +3627,8 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         }],
         guidelines: vec![],
         overlaps: vec![SkepticOverlap {
-            pmids: vec!["41060645".into(), "39979619".into()],
+            // 12345678 has no reference (its record could not be fetched).
+            pmids: vec!["41060645".into(), "39979619".into(), "12345678".into()],
             note: "same group".into(),
         }],
     });
@@ -3651,8 +3652,16 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
     assert!(m.contains("&lt;script&gt;alert(3)"));
     assert!(m.contains("Not independent"));
     assert!(m.contains("Trials the search missed"));
+    // Re-review 3: a named study without a reference is linked to PubMed.
+    assert!(
+        m.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/12345678/""#),
+        "{m}"
+    );
     // Review 2: the verified quote is shown, escaped.
-    assert!(m.contains("faster with experience \u{2014} \u{201c}Operative time fell to 38 &lt;b&gt;min&lt;/b&gt;.\u{201d}"), "{m}");
+    assert!(
+        m.contains("faster with experience \u{2014} \u{201c}Operative time fell to 38 &lt;b&gt;min&lt;/b&gt;.\u{201d}"),
+        "{m}"
+    );
     assert!(m.contains("#ref-1"), "citations link to references");
     assert!(m.contains("Evidence checked"));
     assert!(m.contains("full text \u{b7} 3 verified quotes"));

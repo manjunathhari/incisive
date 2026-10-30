@@ -360,9 +360,11 @@ pub fn find_verbatim<'a>(section: &'a str, quote: &str) -> Option<&'a str> {
 
 // ---------- the result must come from the quote ----------
 
-static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"-?(?:\d+(?:[.,]\d+)?|\.\d+)%?").expect("number pattern is valid")
-});
+/// One number: digits with an optional decimal point (no decimal comma:
+/// "3,4" is two numbers, Stage 3 re-review 4; grouped thousands are read
+/// whole first, [`THOUSANDS`]).
+static NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-?(?:\d+(?:\.\d+)?|\.\d+)%?").expect("number pattern is valid"));
 /// A run of digits with `.` / `,` separators (and an optional sign and `%`),
 /// read whole first so a thousands-grouped number is one token.
 static NUMBER_RUN: LazyLock<Regex> = LazyLock::new(|| {
