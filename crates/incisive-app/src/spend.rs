@@ -239,8 +239,11 @@ pub enum CapCheck {
 pub fn default_caps(role: Role) -> (i64, Option<i64>) {
     match role {
         Role::Owner => (150_000, None),
-        Role::Surgeon => (30_000, Some(300_000)),
-        Role::Fellow => (15_000, Some(150_000)),
+        // Daily caps: owner ruling R-S3b (30 Oct 2026), so a Full run
+        // (₹300 reserved while it runs) fits a fellow's and a surgeon's day.
+        // Monthly caps unchanged.
+        Role::Surgeon => (80_000, Some(300_000)),
+        Role::Fellow => (40_000, Some(150_000)),
     }
 }
 

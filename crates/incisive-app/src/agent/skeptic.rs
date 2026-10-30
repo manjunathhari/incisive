@@ -177,8 +177,13 @@ pub struct SkepticReview {
     pub searches: Vec<SearchEntry>,
     /// Entries naming a PMID no skeptic tool returned (or not a PMID).
     pub dropped_unseen: u32,
-    /// Entries whose quote was not found in that PMID's returned text.
+    /// Entries whose quote was not found in that PMID's returned text, or
+    /// whose claim has a number its quote does not.
     pub dropped_quotes: u32,
+    /// Numbers in the skeptic's free text (caveats, reasons, notes) that no
+    /// text its tools returned has, replaced by `[?]`.
+    #[serde(default)]
+    pub numbers_removed: u32,
 }
 
 /// One selected study as the skeptic sees it.
@@ -251,7 +256,20 @@ pub fn validate(
     let texts = texts_by_pmid(results);
     let mut dropped_unseen = 0u32;
     let mut dropped_quotes = 0u32;
-    let note = |s: &str| clip(s, MAX_NOTE);
+    // Numbers the skeptic may write in free text: any that its tools
+    // returned (the whole results: titles, abstracts, ids, years, counts)
+    // or the selection's PMIDs. Others become `[?]` (Stage 3 review 2).
+    let mut allowed: Vec<f64> = results
+        .iter()
+        .flat_map(|r| super::extractor::quote_values(r))
+        .collect();
+    allowed.extend(selected.iter().filter_map(|p| p.parse::<f64>().ok()));
+    let removed = std::cell::Cell::new(0u32);
+    let note = |s: &str| {
+        let (t, n) = super::extractor::strip_unverified(&clip(s, MAX_NOTE), &allowed);
+        removed.set(removed.get() + n);
+        t
+    };
 
     let mut contradicting = Vec::new();
     for c in report.contradicting.into_iter().take(MAX_ITEMS) {
@@ -260,13 +278,23 @@ pub fn validate(
             continue;
         };
         match verify_quote(texts.get(&pmid), &c.quote) {
-            Some(quote) => contradicting.push(Contradicting {
-                quote: clip(&quote, MAX_QUOTE_CHARS),
-                claim: note(&c.claim),
-                strength_vs_rcts: note(&c.strength_vs_rcts),
-                pmid,
-            }),
-            None => dropped_quotes += 1,
+            // The claim's numbers must be its quote's: it is what the
+            // writer reads as the contradiction.
+            Some(quote)
+                if super::extractor::strip_unverified(
+                    &c.claim,
+                    &super::extractor::quote_values(&quote),
+                )
+                .1 == 0 =>
+            {
+                contradicting.push(Contradicting {
+                    quote: clip(&quote, MAX_QUOTE_CHARS),
+                    claim: clip(&c.claim, MAX_NOTE),
+                    strength_vs_rcts: note(&c.strength_vs_rcts),
+                    pmid,
+                })
+            }
+            _ => dropped_quotes += 1,
         }
     }
     let mut guidelines = Vec::new();
@@ -278,7 +306,7 @@ pub fn validate(
         match verify_quote(texts.get(&pmid), &g.statement_quote) {
             Some(quote) => guidelines.push(Guideline {
                 statement_quote: clip(&quote, MAX_QUOTE_CHARS),
-                body: clip(&g.body, 200),
+                body: note(&clip(&g.body, 200)),
                 pmid,
             }),
             None => dropped_quotes += 1,
@@ -334,6 +362,7 @@ pub fn validate(
         searches,
         dropped_unseen,
         dropped_quotes,
+        numbers_removed: removed.get(),
     }
 }
 
@@ -720,6 +749,52 @@ mod tests {
         assert_eq!(v.overlaps[0].pmids, ["111", "555"]);
         assert_eq!(v.must_mention, ["Say it."]);
         assert_eq!(v.verdict, Verdict::HoldsWithCaveats);
+    }
+
+    /// Review 2: a claim with a number its quote lacks is dropped; numbers
+    /// in caveats, reasons and notes that no tool returned become `[?]`.
+    #[test]
+    fn skeptic_free_text_numbers_are_checked() {
+        let mut rep = report();
+        rep.contradicting = vec![
+            ReportedContradicting {
+                pmid: "222".into(),
+                claim: "Pain lower with X (2.0 vs 3.1)".into(),
+                quote: "Pain was lower with X (2.0 vs 3.1; p = 0.01).".into(),
+                strength_vs_rcts: "one RCT of 300, versus 2,500 in meta-analyses".into(),
+            },
+            ReportedContradicting {
+                pmid: "222".into(),
+                claim: "Pain 40% lower with X".into(),
+                quote: "Pain was lower with X (2.0 vs 3.1; p = 0.01).".into(),
+                strength_vs_rcts: "".into(),
+            },
+        ];
+        rep.must_mention = vec![
+            "Trial 222 had 300 patients.".into(),
+            "Recurrence was 7% in the 2019 cohort.".into(),
+        ];
+        rep.missed_rcts = vec![ReportedMissed {
+            pmid: "222".into(),
+            why: "newer, n = 300".into(),
+        }];
+        let v = validate(rep, &results(), &["111".to_string()], vec![]);
+        assert_eq!(v.contradicting.len(), 1, "40% is not in its quote");
+        assert_eq!(v.contradicting[0].claim, "Pain lower with X (2.0 vs 3.1)");
+        assert_eq!(
+            v.contradicting[0].strength_vs_rcts,
+            "one RCT of 300, versus [?] in meta-analyses"
+        );
+        assert_eq!(
+            v.must_mention,
+            [
+                "Trial 222 had 300 patients.",
+                "Recurrence was [?] in the [?] cohort."
+            ]
+        );
+        assert_eq!(v.missed_rcts[0].why, "newer, n = 300");
+        assert_eq!(v.numbers_removed, 3);
+        assert_eq!(v.dropped_quotes, 1);
     }
 
     #[test]

@@ -190,6 +190,9 @@ pub struct SkepticV3 {
 pub struct SkepticItem {
     pub pmid: String,
     pub text: String,
+    /// The verified quote behind it (contradictions and guidelines).
+    #[serde(default)]
+    pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

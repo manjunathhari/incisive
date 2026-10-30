@@ -399,7 +399,9 @@ Cite only the PMIDs provided.
 inconsistency, imprecision, indirectness, small or single-centre trials, short follow-up).
 - Treat non-independent trials (the same group, centre, registry or population, as the rows' independence notes or the \
 skeptic's overlaps say) as ONE body of evidence, and say so; never count them as separate confirmations.
-- Include every one of the skeptic's must-mention caveats somewhere in the answer.
+- Include every one of the skeptic's must-mention caveats somewhere in the answer. The skeptic's caveats, claims, \
+reasons and notes are caveats, NOT sources of numbers: take a number from the skeptic only when it is inside one of its \
+verified quotes. A [?] marks a number that was removed because no source had it; never fill it in.
 - Be concise and clinically sharp. Say what the evidence shows and how sure it is; do not hedge into mush.
 
 FIELDS:
@@ -759,6 +761,7 @@ pub fn worst_case_full_user(question: &str) -> String {
             unverified_outcomes: vec![x(k.field); MAX_OUTCOMES],
             outcomes_verified: 0,
             numbers_dropped: 0,
+            texts_cleaned: 0,
             corrections: 0,
         })
         .collect();
@@ -796,6 +799,7 @@ pub fn worst_case_full_user(question: &str) -> String {
         searches: vec![],
         dropped_unseen: 0,
         dropped_quotes: 0,
+        numbers_removed: 0,
     };
     let missed: Vec<StudyInput> = (0..MAX_MISSED).map(|i| worst_study(50 + i)).collect();
     let contradictions: Vec<Contradiction> = (0..MAX_CONTRADICTIONS)
@@ -1339,6 +1343,7 @@ mod tests {
             unverified_outcomes: vec!["Recurrence".into()],
             outcomes_verified: 1,
             numbers_dropped: 1,
+            texts_cleaned: 0,
             corrections: 1,
         }
     }
@@ -1365,6 +1370,7 @@ mod tests {
             searches: vec![],
             dropped_unseen: 0,
             dropped_quotes: 0,
+            numbers_removed: 0,
         }
     }
 
@@ -1555,6 +1561,7 @@ mod tests {
             "every one of the skeptic's must-mention caveats",
             "verified quote, a structured number of an evidence row, a skeptic quote",
             "not verifiable",
+            "are caveats, NOT sources of numbers",
         ] {
             assert!(SYSTEM_FULL.contains(must), "{must}");
         }

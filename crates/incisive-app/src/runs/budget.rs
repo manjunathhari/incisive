@@ -118,6 +118,15 @@ impl Drop for InFlightReserve {
     }
 }
 
+/// One consistent snapshot of a budget's money ([`RunBudget::committed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Committed {
+    pub spent: i64,
+    pub held: i64,
+    pub finish_reserve: i64,
+    pub in_flight_reserve: i64,
+}
+
 /// An in-flight reservation of part of the run's limit, taken before a Claude
 /// call. Pass it to [`RunBudget::charge`] to turn it into real spend; dropping
 /// it without charging releases it.
@@ -484,6 +493,19 @@ impl RunBudget {
     /// module's overshoot notes).
     pub fn count_unbooked(&self, paise: i64) {
         self.state().spent += paise.max(0);
+    }
+
+    /// Spent, held, the finish reserve and the in-flight shares, read under
+    /// **one** lock, so a check over them sees one consistent moment (Stage 3
+    /// review: concurrent calls change them between separate reads).
+    pub fn committed(&self) -> Committed {
+        let st = self.state();
+        Committed {
+            spent: st.spent,
+            held: st.held,
+            finish_reserve: st.finish_reserve,
+            in_flight_reserve: st.in_flight_reserve,
+        }
     }
 
     /// Paise currently held by Claude calls in flight (taken, not yet charged

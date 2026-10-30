@@ -3615,10 +3615,15 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         must_mention: vec![
             "Two trials share <script>alert(3)</script> one group [41060645].".into(),
         ],
-        contradicting: vec![],
+        contradicting: vec![SkepticItem {
+            pmid: "41060645".into(),
+            text: "faster with experience".into(),
+            quote: Some("Operative time fell to 38 <b>min</b>.".into()),
+        }],
         missed_rcts: vec![SkepticItem {
             pmid: "39979619".into(),
             text: "a newer trial".into(),
+            quote: None,
         }],
         guidelines: vec![],
         overlaps: vec![SkepticOverlap {
@@ -3646,6 +3651,8 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
     assert!(m.contains("&lt;script&gt;alert(3)"));
     assert!(m.contains("Not independent"));
     assert!(m.contains("Trials the search missed"));
+    // Review 2: the verified quote is shown, escaped.
+    assert!(m.contains("faster with experience \u{2014} \u{201c}Operative time fell to 38 &lt;b&gt;min&lt;/b&gt;.\u{201d}"), "{m}");
     assert!(m.contains("#ref-1"), "citations link to references");
     assert!(m.contains("Evidence checked"));
     assert!(m.contains("full text \u{b7} 3 verified quotes"));

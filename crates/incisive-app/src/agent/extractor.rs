@@ -211,6 +211,10 @@ pub struct EvidenceRow {
     pub unverified_outcomes: Vec<String>,
     pub outcomes_verified: u32,
     pub numbers_dropped: u32,
+    /// Numbers in the row's text (outcome names, effect texts, its own
+    /// fields) not found in the quote or the source, replaced by `[?]`.
+    #[serde(default)]
+    pub texts_cleaned: u32,
     /// Correction requests made for this study (0 or 1).
     pub corrections: u32,
 }
@@ -228,6 +232,10 @@ pub struct SourceText {
     pub kind: TextKind,
     body: String,
     sections: Vec<(QuoteSource, Section)>,
+    /// Every number token of the sent sections (for the row's own fields).
+    values: Vec<f64>,
+    /// The sent sections, folded, for identifiers (trial registrations).
+    folded: String,
 }
 
 impl SourceText {
@@ -305,8 +313,15 @@ pub fn source_text(paper: &Paper, full: Option<&FullText>) -> Option<SourceText>
     if quotable.is_empty() {
         return None;
     }
+    let sent: String = quotable
+        .iter()
+        .map(|(_, s)| s.sent())
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(SourceText {
         kind,
+        values: quote_values(&sent),
+        folded: super::extract::normalise(&sent).to_lowercase(),
         body,
         sections: quotable,
     })
@@ -317,15 +332,53 @@ pub fn source_text(paper: &Paper, full: Option<&FullText>) -> Option<SourceText>
 /// The numeric values of `quote`'s number tokens (the Phase 2 tokens:
 /// folded dashes and middle dots, range dashes, thousands separators,
 /// leading-dot decimals; a trailing `%` dropped).
-fn quote_values(quote: &str) -> Vec<f64> {
+pub(crate) fn quote_values(quote: &str) -> Vec<f64> {
     numbers(quote)
         .iter()
-        .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok())
+        // A comma left in a token is a decimal comma (grouped thousands
+        // have lost theirs already).
+        .filter_map(|t| {
+            t.trim_end_matches('%')
+                .replace(',', ".")
+                .parse::<f64>()
+                .ok()
+        })
         .collect()
 }
 
 fn same(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// A number written in free text (a digit run with separators, an
+/// optional sign and `%`), as found in the text as written.
+static WRITTEN_NUMBER: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"[-\u{2212}\u{2013}]?\d(?:[\d.,\u{b7}]*\d)?%?")
+        .expect("written number pattern is valid")
+});
+
+/// `text` with every number that is not among `allowed` replaced by `[?]`,
+/// and how many were replaced (Stage 3 review 1: no number reaches the
+/// writer from a row unless the source has it).
+pub fn strip_unverified(text: &str, allowed: &[f64]) -> (String, u32) {
+    let mut n = 0u32;
+    let out = WRITTEN_NUMBER.replace_all(text, |c: &regex::Captures| {
+        let ok = quote_values(&c[0])
+            .iter()
+            .all(|v| allowed.iter().any(|a| same(*a, *v)));
+        if ok {
+            c[0].to_string()
+        } else {
+            n += 1;
+            "[?]".to_string()
+        }
+    });
+    (out.into_owned(), n)
+}
+
+/// Whether every number written in `text` is a number of `quote`.
+fn numbers_in(text: &str, quote: &str) -> bool {
+    strip_unverified(text, &quote_values(quote)).1 == 0
 }
 
 /// Whether `n` (its value, CI bounds and every number in its `p`) is all
@@ -376,30 +429,44 @@ fn clean_number(n: &RowNumber) -> RowNumber {
 /// `o` verified against `src` with `quote`: `None` when the quote is not
 /// found; otherwise the outcome with the numbers found in the quote, and
 /// how many were dropped.
+/// `o` verified against `src` with `quote`: `None` when the quote is not
+/// found; otherwise the outcome with only the numbers found in the quote
+/// (a number whose label, unit or arm carries a number the quote does not
+/// have is dropped too), its name and `effect_text` with any number not in
+/// the quote replaced by `[?]`, the numbers dropped and the text numbers
+/// replaced.
 fn verify_outcome(
     src: &SourceText,
     o: &ReportedOutcome,
     quote: &str,
-) -> Option<(VerifiedOutcome, u32)> {
+) -> Option<(VerifiedOutcome, u32, u32)> {
     let (span, source) = locate(src, quote)?;
+    let allowed = quote_values(span);
     let mut dropped = 0u32;
     let mut kept = Vec::new();
     for n in o.numbers.iter().take(MAX_NUMBERS) {
-        if number_in_quote(n, span) {
+        let words_ok = [Some(&n.label), n.unit.as_ref(), n.arm.as_ref()]
+            .into_iter()
+            .flatten()
+            .all(|t| numbers_in(t, span));
+        if words_ok && number_in_quote(n, span) {
             kept.push(clean_number(n));
         } else {
             dropped += 1;
         }
     }
+    let (outcome, a) = strip_unverified(&clip(&o.outcome, MAX_FIELD), &allowed);
+    let (effect_text, b) = strip_unverified(&clip(&o.effect_text, MAX_TEXT), &allowed);
     Some((
         VerifiedOutcome {
-            outcome: clip(&o.outcome, MAX_FIELD),
-            effect_text: clip(&o.effect_text, MAX_TEXT),
+            outcome,
+            effect_text,
             numbers: kept,
             quote: span.to_string(),
             source,
         },
         dropped,
+        a + b,
     ))
 }
 
@@ -408,6 +475,7 @@ fn verify_outcome(
 struct FirstPass {
     verified: Vec<(usize, VerifiedOutcome)>,
     numbers_dropped: u32,
+    texts_cleaned: u32,
     failed: Vec<usize>,
 }
 
@@ -415,12 +483,14 @@ fn first_pass(src: &SourceText, row: &ReportedRow) -> FirstPass {
     let mut p = FirstPass {
         verified: Vec::new(),
         numbers_dropped: 0,
+        texts_cleaned: 0,
         failed: Vec::new(),
     };
     for (i, o) in row.outcomes.iter().take(MAX_OUTCOMES).enumerate() {
         match verify_outcome(src, o, &o.quote) {
-            Some((v, d)) => {
+            Some((v, d, t)) => {
                 p.numbers_dropped += d;
+                p.texts_cleaned += t;
                 p.verified.push((i, v));
             }
             None => p.failed.push(i),
@@ -453,7 +523,7 @@ fn finish_row(
     corrections: Option<&Corrections>,
     corrections_made: u32,
 ) -> EvidenceRow {
-    let mut unverified = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
     for &i in &pass.failed {
         let o = &row.outcomes[i];
         let fixed = corrections
@@ -464,8 +534,9 @@ fn finish_row(
             })
             .and_then(|c| verify_outcome(src, o, &c.quote));
         match fixed {
-            Some((v, d)) => {
+            Some((v, d, t)) => {
                 pass.numbers_dropped += d;
+                pass.texts_cleaned += t;
                 pass.verified.push((i, v));
             }
             None => {
@@ -477,41 +548,63 @@ fn finish_row(
     }
     pass.verified.sort_by_key(|(i, _)| *i);
     let outcomes: Vec<VerifiedOutcome> = pass.verified.into_iter().map(|(_, v)| v).collect();
-    let f = |s: &str| clip(s, MAX_FIELD);
+    // The row's own fields: a number the sent source does not have is
+    // replaced by `[?]` (counted); n only when the source has that integer;
+    // a registration only when it appears in the source.
+    let mut cleaned = pass.texts_cleaned;
+    let mut field = |s: &str, max: usize| {
+        let (t, k) = strip_unverified(&clip(s, max), &src.values);
+        cleaned += k;
+        t
+    };
+    let f = |field: &mut dyn FnMut(&str, usize) -> String, s: &str| field(s, MAX_FIELD);
     let a = &row.appraisal;
     let ind = &row.independence;
+    let in_source = |n: Option<i64>| {
+        n.filter(|v| *v > 0)
+            .filter(|v| src.values.iter().any(|x| same(*x, *v as f64)))
+    };
+    let registration = clip_opt(&ind.trial_registration, MAX_LABEL).filter(|r| {
+        src.folded
+            .contains(&super::extract::normalise(r).to_lowercase())
+    });
+    let n_randomised = in_source(row.n_randomised);
+    let n_analysed = in_source(row.n_analysed);
+    let dropped_n = u32::from(row.n_randomised.is_some_and(|v| v > 0) && n_randomised.is_none())
+        + u32::from(row.n_analysed.is_some_and(|v| v > 0) && n_analysed.is_none());
     EvidenceRow {
         pmid: pmid.to_string(),
         text: src.kind,
-        design: f(&row.design),
-        n_randomised: row.n_randomised.filter(|n| *n > 0),
-        n_analysed: row.n_analysed.filter(|n| *n > 0),
-        setting: f(&row.setting),
+        design: f(&mut field, &row.design),
+        n_randomised,
+        n_analysed,
+        setting: f(&mut field, &row.setting),
         centres: row.centres,
-        country: f(&row.country),
-        population: f(&row.population),
-        intervention: f(&row.intervention),
-        comparator: f(&row.comparator),
-        follow_up: f(&row.follow_up),
-        blinding: f(&row.blinding),
-        primary_endpoint: f(&row.primary_endpoint),
+        country: f(&mut field, &row.country),
+        population: f(&mut field, &row.population),
+        intervention: f(&mut field, &row.intervention),
+        comparator: f(&mut field, &row.comparator),
+        follow_up: f(&mut field, &row.follow_up),
+        blinding: f(&mut field, &row.blinding),
+        primary_endpoint: f(&mut field, &row.primary_endpoint),
         powered_for_primary: row.powered_for_primary,
-        surgeon_experience: f(&row.surgeon_experience),
+        surgeon_experience: f(&mut field, &row.surgeon_experience),
         outcomes_verified: u32::try_from(outcomes.len()).unwrap_or(u32::MAX),
         outcomes,
         appraisal: Appraisal {
-            bias: clip(&a.bias, MAX_TEXT),
-            power: clip(&a.power, MAX_TEXT),
-            learning_curve: clip(&a.learning_curve, MAX_TEXT),
-            applicability: clip(&a.applicability, MAX_TEXT),
+            bias: field(&a.bias, MAX_TEXT),
+            power: field(&a.power, MAX_TEXT),
+            learning_curve: field(&a.learning_curve, MAX_TEXT),
+            applicability: field(&a.applicability, MAX_TEXT),
         },
         independence: Independence {
-            trial_registration: clip_opt(&ind.trial_registration, MAX_LABEL),
-            group_or_centre: f(&ind.group_or_centre),
-            note: clip(&ind.note, MAX_TEXT),
+            trial_registration: registration,
+            group_or_centre: f(&mut field, &ind.group_or_centre),
+            note: field(&ind.note, MAX_TEXT),
         },
-        unverified_outcomes: unverified,
-        numbers_dropped: pass.numbers_dropped,
+        unverified_outcomes: unverified.iter().map(|u| field(u, MAX_FIELD)).collect(),
+        numbers_dropped: pass.numbers_dropped + dropped_n,
+        texts_cleaned: cleaned,
         corrections: corrections_made,
     }
 }
@@ -737,6 +830,29 @@ async fn fetch_one(ctx: &RunContext, lit: &Literature, s: &StudyRef) -> Option<F
     }
 }
 
+/// `f()`, made once more after [`super::bounded::OTHERS_POLL`] when it
+/// was refused for budget while other calls hold money and wrap-up is not
+/// due (Stage 3 review 10: a correction refused beside the skeptic's turn or
+/// a sibling extraction usually fits once one of them settles).
+pub(crate) async fn retry_if_others<T, F, Fut>(
+    budget: &crate::runs::budget::RunBudget,
+    mut f: F,
+) -> Result<T, StepError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, StepError>>,
+{
+    match f().await {
+        Err(StepError::OverBudget)
+            if budget.held() > 0 && !budget.should_wrap_up_settled(std::time::Instant::now()) =>
+        {
+            tokio::time::sleep(super::bounded::OTHERS_POLL).await;
+            f().await
+        }
+        other => other,
+    }
+}
+
 /// Extract every study (see the module docs). Only `Cancelled` and fatal
 /// errors are errors; everything else is recorded in the [`Extraction`].
 pub async fn extract_rows(
@@ -786,14 +902,15 @@ pub async fn extract_rows(
                             return Ok(Box::new(finish_row(pmid, src, &row, pass, None, 0)));
                         }
                         let fix_user = correction_prompt(user, &row, &pass.failed);
-                        let fixed = call
-                            .structured::<Corrections>(
+                        let fixed = retry_if_others(call.budget(), || {
+                            call.structured::<Corrections>(
                                 CORRECTION_SYSTEM,
                                 &fix_user,
                                 &CORRECTION_SCHEMA,
                                 max_tokens,
                             )
-                            .await;
+                        })
+                        .await;
                         let fixed = match fixed {
                             Ok(c) => Some(c),
                             Err(
@@ -924,6 +1041,22 @@ mod tests {
         n.p = Some("0.04".into());
         assert!(!number_in_quote(&n, q), "a p not in the quote");
         assert!(!number_in_quote(&num(f64::NAN), q));
+        // Review 7: thousands separators and hyphens after letters.
+        let q =
+            "Of 1,136,000 operations (12,345.5 hours), COVID-19 and IL-6 were recorded; HR 0.8.";
+        assert!(number_in_quote(&num(1_136_000.0), q));
+        assert!(number_in_quote(&num(12_345.5), q));
+        assert!(
+            !number_in_quote(&num(136.0), q),
+            "not a piece of a grouped number"
+        );
+        assert!(number_in_quote(&num(19.0), q));
+        assert!(!number_in_quote(&num(-19.0), q), "COVID-19 is not minus 19");
+        assert!(!number_in_quote(&num(-6.0), q));
+        assert!(number_in_quote(
+            &num(1.2),
+            "a decimal comma 1,2 stays one number"
+        ));
     }
 
     const ABS: &str = "Background: hernia repair. Results: Pain at 30 days was 2.1 vs 2.4 (p = 0.43). Cost was higher with robotic repair ($3258 vs $1421). Conclusions: no difference.";
@@ -1007,7 +1140,10 @@ mod tests {
             "Cost was higher with robotic repair ($3258 vs $1421)."
         );
         assert_eq!(e.unverified_outcomes, vec!["Pain".to_string()]);
-        assert_eq!(e.numbers_dropped, 2, "9.9 and the dropped outcome's 1");
+        // 9.9, the dropped outcome's 1, and n randomised 100 (the abstract
+        // never says 100).
+        assert_eq!(e.numbers_dropped, 3);
+        assert_eq!(e.n_randomised, None);
         assert_eq!(e.corrections, 1);
         assert_eq!(e.n_analysed, None, "0 is not a count");
         // No correction at all: every failed outcome is dropped.
@@ -1015,7 +1151,111 @@ mod tests {
         let e = finish_row("111", &src, &r, pass, None, 0);
         assert_eq!(e.outcomes_verified, 1);
         assert_eq!(e.unverified_outcomes.len(), 2);
-        assert_eq!(e.numbers_dropped, 3);
+        assert_eq!(e.numbers_dropped, 4);
+    }
+
+    /// Review 1: no number reaches a "verified" row unless its quote (for
+    /// outcome text and structured numbers) or the source (for the row's
+    /// own fields and n) has it.
+    #[test]
+    fn unverified_numbers_never_reach_a_verified_row() {
+        let abs = "Results: In 102 randomised patients (51 per arm), pain at 30 days was 2.1 vs 2.4 (p = 0.43). Trial NCT0123 was multicentre.";
+        let src = source_text(&paper(Some(abs)), None).unwrap();
+        let mut good = num(2.1);
+        good.label = "VAS at 30 days".into();
+        let mut bad_label = num(2.4);
+        bad_label.label = "VAS at 90 days".into();
+        let mut bad_unit = num(2.4);
+        bad_unit.unit = Some("points of 7".into());
+        let mut bad_arm = num(2.1);
+        bad_arm.arm = Some("arm 3".into());
+        let mut o = outcome(
+            "pain at 30 days was 2.1 vs 2.4 (p = 0.43).",
+            vec![good, bad_label, bad_unit, bad_arm],
+        );
+        o.quote =
+            "In 102 randomised patients (51 per arm), pain at 30 days was 2.1 vs 2.4 (p = 0.43)."
+                .into();
+        o.outcome = "Pain at 30 days".into();
+        o.effect_text = "2.1 vs 2.4, a 12.5% reduction (p = 0.43)".into();
+        let mut r = row(vec![o]);
+        r.n_randomised = Some(102);
+        r.n_analysed = Some(98);
+        r.setting = "Two centres, 2019 to 2021".into();
+        r.follow_up = "30 days".into();
+        r.independence.trial_registration = Some("NCT0123".into());
+        let pass = first_pass(&src, &r);
+        assert!(pass.failed.is_empty());
+        let e = finish_row("111", &src, &r, pass, None, 0);
+        let v = &e.outcomes[0];
+        assert_eq!(
+            v.numbers.len(),
+            1,
+            "digits in label, unit or arm not in the quote"
+        );
+        assert_eq!(v.numbers[0].label, "VAS at 30 days");
+        assert_eq!(v.outcome, "Pain at 30 days");
+        assert_eq!(v.effect_text, "2.1 vs 2.4, a [?] reduction (p = 0.43)");
+        assert_eq!(e.n_randomised, Some(102), "in the source");
+        assert_eq!(e.n_analysed, None, "98 is not in the source");
+        assert_eq!(e.setting, "Two centres, [?] to [?]");
+        assert_eq!(e.follow_up, "30 days");
+        assert_eq!(
+            e.independence.trial_registration.as_deref(),
+            Some("NCT0123")
+        );
+        // 12.5% and the two years.
+        assert_eq!(e.texts_cleaned, 3);
+        // Three numbers and n analysed.
+        assert_eq!(e.numbers_dropped, 4);
+        let mut r2 = r.clone();
+        r2.independence.trial_registration = Some("NCT9999".into());
+        let e = finish_row("111", &src, &r2, first_pass(&src, &r2), None, 0);
+        assert_eq!(e.independence.trial_registration, None, "not in the source");
+    }
+
+    #[tokio::test]
+    async fn a_refused_correction_is_retried_once_beside_other_calls() {
+        use crate::runs::budget::RunBudget;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let b = Arc::new(RunBudget::new(
+            uuid::Uuid::new_v4(),
+            0,
+            1_000,
+            std::time::Instant::now(),
+            crate::spend::Prices::from_json(r#"{"m": {"input": 1.0, "output": 5.0}}"#).unwrap(),
+            88.0,
+        ));
+        let n = AtomicUsize::new(0);
+        let refuse_first = || {
+            let k = n.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if k == 0 {
+                    Err(StepError::OverBudget)
+                } else {
+                    Ok(k)
+                }
+            }
+        };
+        // Nothing else in flight: refused stays refused.
+        assert_eq!(
+            retry_if_others(&b, refuse_first).await,
+            Err(StepError::OverBudget)
+        );
+        assert_eq!(n.load(Ordering::SeqCst), 1);
+        // Another call holding money: tried once more.
+        n.store(0, Ordering::SeqCst);
+        let h = b.try_hold_gathering(100).unwrap();
+        assert_eq!(retry_if_others(&b, refuse_first).await, Ok(1));
+        assert_eq!(n.load(Ordering::SeqCst), 2);
+        // Only once.
+        let always = || async { Err::<(), _>(StepError::OverBudget) };
+        assert_eq!(
+            retry_if_others(&b, always).await,
+            Err(StepError::OverBudget)
+        );
+        drop(h);
     }
 
     #[test]

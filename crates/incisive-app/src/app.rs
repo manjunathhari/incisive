@@ -1112,6 +1112,10 @@ fn skeptic_v3_view(
     refs: &std::collections::HashMap<String, u16>,
 ) -> AnyView {
     let item = |pmid: &str, text: &str| format!("{text} [{pmid}]");
+    let quoted = |i: &crate::agent::answer_v3::SkepticItem| match &i.quote {
+        Some(q) => format!("{} \u{2014} \u{201c}{q}\u{201d} [{}]", i.text, i.pmid),
+        None => item(&i.pmid, &i.text),
+    };
     let overlaps: Vec<String> = k
         .overlaps
         .iter()
@@ -1122,11 +1126,12 @@ fn skeptic_v3_view(
         .iter()
         .map(|m| item(&m.pmid, &m.text))
         .collect();
+    // Each with its verified quote (review 2).
     let against: Vec<String> = k
         .contradicting
         .iter()
         .chain(&k.guidelines)
-        .map(|c| item(&c.pmid, &c.text))
+        .map(quoted)
         .collect();
     let list = |title: &'static str, xs: Vec<String>| {
         (!xs.is_empty()).then(|| {

@@ -63,12 +63,6 @@ impl Engine {
             _ => None,
         }
     }
-
-    /// Whether a run of `mode` is answered by the evidence team when this
-    /// is the **Quick** engine (Stage 2's rule: Full is not this switch's).
-    pub fn uses_team(self, mode: RunMode) -> bool {
-        mode == RunMode::Quick && self == Engine::Team
-    }
 }
 
 /// The engine per mode (`QUICK_ENGINE`, `FULL_ENGINE`).
@@ -116,9 +110,9 @@ pub struct DepthSettings {
     // `limit_paise` / `time_limit_s` above until Stage 2 switches the run
     // over. `focused` carries Phase 3's **Full** mode (spec §5); `quick`
     // its Quick mode. The global, daily and monthly caps are unchanged.
-    /// Phase 3 cost limit in paise (Quick ₹60, Full ₹200).
+    /// Phase 3 cost limit in paise (Quick ₹100, Full ₹300).
     pub agent_limit_paise: i64,
-    /// Phase 3 time limit in seconds (Quick 4 min, Full 8 min).
+    /// Phase 3 time limit in seconds (Quick 6 min, Full 10 min).
     pub agent_time_limit_s: u32,
     /// Researcher tool-use turns at most (Quick 8, Full 15).
     pub researcher_turns: u8,
@@ -160,8 +154,9 @@ const AGENT_MAX_TOKENS: u32 = 4_000;
 const WRITER_MAX_TOKENS: u32 = 16_000;
 /// Seconds kept for the writer at the end of a Phase 3 run.
 const WRITER_TIME_ALLOWANCE_S: u32 = 150;
-/// Seconds kept for the Full review phase (extractor ∥ skeptic).
-const REVIEW_TIME_ALLOWANCE_S: u32 = 120;
+/// Seconds kept for the Full review phase (extractor ∥ skeptic): 180
+/// (owner ruling R-S3a).
+const REVIEW_TIME_ALLOWANCE_S: u32 = 180;
 /// Extractor calls in flight at once (spec §3: 3–4).
 const EXTRACTOR_CONCURRENCY: u8 = 3;
 /// Most extractor calls in flight a run may be given (`RUN_LIMITS`).
@@ -198,8 +193,11 @@ impl DepthSettings {
         full_text: true,
         limit_paise: 4000,
         time_limit_s: 300,
-        agent_limit_paise: 20000,
-        agent_time_limit_s: 480,
+        // ₹300 and 10 minutes (owner ruling R-S3a, 30 Oct 2026; was ₹200
+        // and 8 minutes): the extra money buys research rounds, so time
+        // becomes the limit.
+        agent_limit_paise: 30000,
+        agent_time_limit_s: 600,
         researcher_turns: 15,
         skeptic_turns: 8,
         researcher_max_tokens: AGENT_MAX_TOKENS,

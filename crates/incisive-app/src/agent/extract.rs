@@ -275,6 +275,11 @@ impl Section {
         Section { sent, norm }
     }
 
+    /// The section as sent.
+    pub(crate) fn sent(&self) -> &str {
+        &self.sent
+    }
+
     /// Characters of the section as sent.
     #[cfg(test)]
     pub(crate) fn sent_len(&self) -> usize {
@@ -358,39 +363,53 @@ pub fn find_verbatim<'a>(section: &'a str, quote: &str) -> Option<&'a str> {
 static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"-?(?:\d+(?:[.,]\d+)?|\.\d+)%?").expect("number pattern is valid")
 });
-static THOUSANDS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^-?\d{1,3},\d{3}%?$").expect("thousands pattern is valid"));
+/// A run of digits with `.` / `,` separators (and an optional sign and `%`),
+/// read whole first so a thousands-grouped number is one token.
+static NUMBER_RUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-?(?:\d+(?:[.,]\d+)*|\.\d+)%?").expect("number run pattern is valid")
+});
+/// Thousands grouping: `1,234`, `1,136,000`, `12,345.6` (Stage 3 review 7).
+static THOUSANDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?$").expect("thousands pattern is valid")
+});
 
 /// The number tokens of `s`, read from its normalised (folded) form, so a
 /// middle-dot decimal is one number. A `-` right after a digit or `%` is a
-/// range dash, not a sign; a comma before exactly three final digits is a
-/// thousands separator; a leading `.` reads as `0.` (".52" is 0.52).
+/// range dash, not a sign, and right after a letter a hyphen ("COVID-19"
+/// is 19, not -19); a thousands-grouped number (`1,136,000`) is one number
+/// without its commas; a leading `.` reads as `0.` (".52" is 0.52).
 pub(crate) fn numbers(s: &str) -> Vec<String> {
     let s = normalise(s);
-    NUMBER
-        .find_iter(&s)
-        .map(|m| {
-            let mut t = m.as_str();
+    let mut out = Vec::new();
+    for run in NUMBER_RUN.find_iter(&s) {
+        // Whole runs that are thousands-grouped are one token; anything
+        // else is read as before, piece by piece.
+        let pieces: Vec<(usize, String)> = if THOUSANDS.is_match(run.as_str()) {
+            vec![(run.start(), run.as_str().replace(',', ""))]
+        } else {
+            NUMBER
+                .find_iter(run.as_str())
+                .map(|m| (run.start() + m.start(), m.as_str().to_string()))
+                .collect()
+        };
+        for (start, t) in pieces {
+            let mut t = t.as_str();
             if t.starts_with('-')
-                && s[..m.start()]
+                && s[..start]
                     .chars()
                     .next_back()
-                    .is_some_and(|c| c.is_ascii_digit() || c == '%')
+                    .is_some_and(|c| c.is_ascii_digit() || c == '%' || c.is_alphabetic())
             {
                 t = &t[1..];
             }
-            let t = if THOUSANDS.is_match(t) {
-                t.replace(',', "")
-            } else {
-                t.to_string()
-            };
-            match t.strip_prefix('-') {
+            out.push(match t.strip_prefix('-') {
                 Some(r) if r.starts_with('.') => format!("-0{r}"),
                 _ if t.starts_with('.') => format!("0{t}"),
-                _ => t,
-            }
-        })
-        .collect()
+                _ => t.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Lower-cased words of 4+ letters.

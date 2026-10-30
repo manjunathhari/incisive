@@ -798,8 +798,8 @@ async fn the_engine_switch_picks_the_pipeline_and_the_limits() {
 }
 
 /// Stage 3 §0: `FULL_ENGINE` picks Full's pipeline and limits on its own.
-/// `team`: ₹200, 8 minutes (hard stop 540 s), research wrapping up at
-/// 480 − 150 (writer) − 120 (review) s. `classic`: exactly Phase 2
+/// `team`: ₹300, 10 minutes (hard stop 660 s; owner ruling R-S3a),
+/// research wrapping up at 600 − 150 (writer) − 180 (review) s. `classic`: exactly Phase 2
 /// Focused (₹40, 300 s, wrap-up at 60%, the Frame step first). Quick is
 /// untouched by it.
 #[tokio::test]
@@ -815,7 +815,7 @@ async fn the_full_engine_switch_picks_the_pipeline_and_the_limits() {
     }
     use incisive_app::runs::Engine;
     for (engine, limit, hard_stop_s, wrap_up_s) in [
-        (Engine::Team, 20000, 480 + 60, 480 - 150 - 120),
+        (Engine::Team, 30000, 600 + 60, 600 - 150 - 180),
         (Engine::Classic, 4000, 300 + 60, 180),
     ] {
         let mut st = app_state(

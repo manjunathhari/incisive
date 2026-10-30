@@ -103,8 +103,9 @@ fn prices_json_parse_errors_name_variable() {
 #[test]
 fn default_caps_match_policy() {
     assert_eq!(default_caps(Role::Owner), (150_000, None));
-    assert_eq!(default_caps(Role::Surgeon), (30_000, Some(300_000)));
-    assert_eq!(default_caps(Role::Fellow), (15_000, Some(150_000)));
+    // Owner ruling R-S3b (30 Oct 2026): fellow ₹400/day, surgeon ₹800/day.
+    assert_eq!(default_caps(Role::Surgeon), (80_000, Some(300_000)));
+    assert_eq!(default_caps(Role::Fellow), (40_000, Some(150_000)));
 }
 
 // ---------- database gated ----------

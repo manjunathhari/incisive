@@ -42,6 +42,8 @@ const SEEN_A: &str = "41060645";
 const PMC_A: &str = "PMC12509081";
 const SEEN_B: &str = "39979619";
 const SEEN_C: &str = "35777031";
+/// In the hernia fixtures; never selected (the skeptic's contradiction).
+const SEEN_D: &str = "9657784";
 const UNSEEN: &str = "12345678";
 
 fn usage(i: u32, o: u32) -> Usage {
@@ -402,15 +404,18 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
     assert_eq!(a.outcomes[0].numbers.len(), 1, "987654 is not in the quote");
     assert_eq!(a.outcomes[1].quote, a2, "fixed by the correction");
     assert_eq!(a.outcomes[1].numbers.len(), 1);
-    assert_eq!((a.numbers_dropped, a.corrections), (1, 1));
+    // 987654, and n randomised 120 / analysed 110: the source has neither
+    // (review 1: n only when the source states it).
+    assert_eq!((a.numbers_dropped, a.corrections), (3, 1));
+    assert_eq!((a.n_randomised, a.n_analysed), (None, None));
     assert!(a.unverified_outcomes.is_empty());
     let b = &x.rows[1];
     assert_eq!(b.text, TextKind::Abstract);
     assert_eq!(b.outcomes_verified, 0);
     assert_eq!(b.unverified_outcomes, ["Outcome B1"]);
-    assert_eq!((b.numbers_dropped, b.corrections), (1, 1));
+    assert_eq!((b.numbers_dropped, b.corrections), (3, 1));
     assert_eq!(b.independence.group_or_centre, "Aabenraa");
-    assert_eq!((x.outcomes_verified(), x.numbers_dropped()), (2, 2));
+    assert_eq!((x.outcomes_verified(), x.numbers_dropped()), (2, 6));
 
     // Requests: the extractor model, low effort, format, no tools; the
     // study's text wrapped; the question as data.
@@ -442,7 +447,7 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
     let l = lines(&steps_of(&ctx, uid).await);
     assert_eq!(
         l.last().map(String::as_str),
-        Some("Extractor: 2/2 studies (2 verified outcomes, 2 numbers dropped)"),
+        Some("Extractor: 2/2 studies (2 verified outcomes, 6 numbers dropped)"),
         "{l:?}"
     );
 }
@@ -675,7 +680,7 @@ fn writer_json() -> Value {
             {"pmid": SEEN_A, "label": "A (2025)", "design": "RCT", "n": 100, "setting": "s", "comparison": "c", "key_results": "k", "appraisal": "same group as B"},
             {"pmid": SEEN_B, "label": "B (2025)", "design": "RCT", "n": null, "setting": "s", "comparison": "c", "key_results": "k", "appraisal": "a"}
         ],
-        "conflicts": [],
+        "conflicts": [{"text": format!("An open-repair trial differs [{SEEN_D}]."), "pmids": [SEEN_D]}],
         "applicability": {"case_mix": "primary", "india_cost_context": "not known", "training": "none"},
         "would_change": ["an independent RCT"]
     })
@@ -689,10 +694,29 @@ fn full_script(research_turns: usize, quotes: Option<(&str, &str)>) -> ScriptedL
     full_script_with(research_turns, quotes, |_| usage(1500, 1500))
 }
 
+/// [`full_script`] whose skeptic also reports `contra` (pmid, quote) as
+/// contradicting evidence.
+fn full_script_contra(
+    research_turns: usize,
+    quotes: Option<(&str, &str)>,
+    contra: Option<(&str, &str)>,
+) -> ScriptedLlm {
+    full_script_impl(research_turns, quotes, contra, |_| usage(1500, 1500))
+}
+
 /// [`full_script`] with research turn `i` reporting `turn_usage(i)`.
 fn full_script_with(
     research_turns: usize,
     quotes: Option<(&str, &str)>,
+    turn_usage: impl Fn(usize) -> Usage,
+) -> ScriptedLlm {
+    full_script_impl(research_turns, quotes, None, turn_usage)
+}
+
+fn full_script_impl(
+    research_turns: usize,
+    quotes: Option<(&str, &str)>,
+    contra: Option<(&str, &str)>,
     turn_usage: impl Fn(usize) -> Usage,
 ) -> ScriptedLlm {
     let mut llm = ScriptedLlm::new()
@@ -702,7 +726,8 @@ fn full_script_with(
         .when(SKEPTIC_FINAL)
         .reply_json(
             json!({
-                "contradicting": [], "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
+                "contradicting": contra.map(|(p, q)| vec![json!({"pmid": p, "claim": "open repair differs", "quote": q, "strength_vs_rcts": "older trial"})]).unwrap_or_default(),
+                "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
                 "guidelines": [], "overlaps": [{"pmids": [SEEN_A, SEEN_B], "note": "same group"}],
                 "verdict": "holds_with_caveats", "must_mention": ["A and B share a group."], "searches": []
             }),
@@ -722,7 +747,11 @@ fn full_script_with(
         )
         .when(SKEPTIC_KEY)
         .reply_blocks(
-            vec![tool_call("k2", "get_abstracts", json!({"pmids": [SEEN_C]}))],
+            vec![tool_call(
+                "k2",
+                "get_abstracts",
+                json!({"pmids": [SEEN_C, SEEN_D]}),
+            )],
             Some(StopReason::ToolUse),
             u(),
         )
@@ -832,7 +861,16 @@ async fn full_team_run_end_to_end_through_the_worker() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let (qa, qb) = quotes_for(&pool, &server).await;
-    let llm = Arc::new(full_script(2, Some((&qa, &qb))));
+    let (dq_probe, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(Arc::new(ScriptedLlm::new()), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let qd = first_sentence(&abstract_of(&dq_probe, SEEN_D).await);
+    let llm = Arc::new(full_script_contra(2, Some((&qa, &qb)), Some((SEEN_D, &qd))));
     let mut st = app_state(pool.clone(), literature(&server));
     st.llm = Some(agent_llm(llm.clone(), MODEL));
     let (uid, user) = new_user(&pool).await;
@@ -853,9 +891,28 @@ async fn full_team_run_end_to_end_through_the_worker() {
         .iter()
         .map(|r| (r.pmid.as_str(), r.found_by_skeptic))
         .collect();
-    assert_eq!(refs, [(SEEN_A, false), (SEEN_B, false), (SEEN_C, true)]);
-    // The missed trial is citable: its citation and number survive.
     let w = a.answer.as_ref().unwrap();
+    // Review 3: the unselected study the skeptic quotes has a reference
+    // too, so the writer's citation of it survives and the page links it.
+    assert_eq!(
+        refs,
+        [
+            (SEEN_A, false),
+            (SEEN_B, false),
+            (SEEN_C, true),
+            (SEEN_D, true)
+        ]
+    );
+    assert_eq!(w.conflicts[0].pmids, [SEEN_D]);
+    assert!(w.conflicts[0].text.contains(&format!("[{SEEN_D}]")));
+    let k0 = a.skeptic.as_ref().unwrap();
+    assert_eq!(k0.contradicting[0].pmid, SEEN_D);
+    let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        k0.contradicting[0].quote.as_deref().map(flat),
+        Some(flat(&qd))
+    );
+    // The missed trial is citable: its citation and number survive.
     assert!(w.bottom_line.text.contains(&format!("[{SEEN_C}]")));
     assert_eq!(w.outcomes[0].numbers.len(), 1);
     assert_eq!(a.integrity.removed_citations, 0);
@@ -909,7 +966,7 @@ async fn full_team_run_end_to_end_through_the_worker() {
     let l = lines(&v.steps);
     for want in [
         "Extractor and skeptic: extracting 2 studies and challenging the conclusion",
-        "Extractor: 2/2 studies (2 verified outcomes, 0 numbers dropped)",
+        "Extractor: 2/2 studies (2 verified outcomes, 4 numbers dropped)",
         "Skeptic: verdict holds with caveats, 1 caveat",
         "Writer: writing the answer from 2 studies (2 with an abstract)",
         "Answer ready",
@@ -1206,7 +1263,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let mut min_viable = None;
-    for limit in (4000..=24000).step_by(1000) {
+    for limit in (4000..=34000).step_by(1000) {
         let llm = Arc::new(full_script(15, None));
         let (ctx, uid) = full_ctx(
             &pool,
@@ -1248,7 +1305,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, charged {spent}"
         );
     }
-    let mut hi = min_viable.expect("a Full run fits under ₹240");
+    let mut hi = min_viable.expect("a Full run fits under ₹340");
     // Narrow it to the paisa (monotone in the limit).
     let mut lo = hi - 1000;
     while hi - lo > 1 {
@@ -1438,7 +1495,7 @@ async fn a_cached_turn_is_held_at_the_write_price() {
     assert!(held >= written, "held {held}, written {written}");
 }
 
-/// Expected research rounds at ₹200 at real prices, with and without
+/// Expected research rounds at the Full default (₹300, R-S3a) at real prices, with and without
 /// prompt caching. Each round is a search and two abstracts (about 9 KB
 /// of results). Without caching a round is charged its whole conversation
 /// as input (1,500 + 3,000 × round tokens); with caching only the new part
@@ -1446,7 +1503,7 @@ async fn a_cached_turn_is_held_at_the_write_price() {
 /// 0.1 ×. The holds are the same either way (never assuming a hit, at the
 /// write price), so the difference is the charges.
 #[tokio::test]
-async fn research_rounds_at_200_with_and_without_caching() {
+async fn research_rounds_at_the_full_limit_with_and_without_caching() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let mut out = Vec::new();
@@ -1468,7 +1525,7 @@ async fn research_rounds_at_200_with_and_without_caching() {
             &pool,
             literature(&server),
             real_models(llm.clone()),
-            20000,
+            DepthSettings::FOCUSED.agent_limit_paise,
             DepthSettings::FOCUSED,
         )
         .await;
@@ -1480,8 +1537,12 @@ async fn research_rounds_at_200_with_and_without_caching() {
             .filter(|r| request_user_text(r).contains(RESEARCHER_KEY) && !r.tools.is_empty())
             .count();
         let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
+        let stop: Vec<String> = lines(&steps_of(&ctx, uid).await)
+            .into_iter()
+            .filter(|l| l.starts_with("Search stopped") || l.starts_with("Research stopped"))
+            .collect();
         eprintln!(
-            "MEASURED Full at ₹200, caching {cached}: research rounds {rounds}, charged {spent} paise"
+            "MEASURED Full at the default limit, caching {cached}: research rounds {rounds}, charged {spent} paise, {stop:?}"
         );
         out.push(rounds);
     }
@@ -1626,4 +1687,166 @@ async fn concurrent_step_lines_are_all_stored() {
     }
     let l = lines(&steps_of(&ctx, uid).await);
     assert_eq!(l.len(), 40, "{l:?}");
+}
+
+/// Review 4 and 6: with extraction holds H in flight, the skeptic loop's
+/// kept share never eats the room R-FB3 gives them. After every turn
+/// (when the loop has nothing of its own in flight) `spent + 2 × held +
+/// finish reserve + kept shares ≤ limit`, from one snapshot. Case A: H stays
+/// in flight; case B: a spawned task drops H part-way through the loop's
+/// turns. Whenever a turn ran, the final call was made.
+#[tokio::test]
+async fn the_kept_share_leaves_doubled_room_for_holds_in_flight() {
+    use async_trait::async_trait;
+    use incisive_app::agent::agent_loop::{
+        AgentSpec, ResultCaps, TurnLog, TurnObserver, run_agent_observed,
+    };
+    use incisive_app::agent::llm::OutputSchema;
+    use incisive_app::agent::tools::ToolRegistry;
+    use incisive_app::runs::budget::RunBudget;
+
+    /// Returns a large result: admitting it grows the kept share.
+    struct Big;
+    #[async_trait]
+    impl incisive_app::agent::tools::Tool for Big {
+        fn name(&self) -> &'static str {
+            "big"
+        }
+        fn description(&self) -> &'static str {
+            "big"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "additionalProperties": false, "properties": {}, "required": []})
+        }
+        async fn run(&self, _: &Value) -> Result<String, incisive_app::agent::tools::ToolError> {
+            Ok("x".repeat(30_000))
+        }
+    }
+
+    struct Invariant {
+        budget: Arc<RunBudget>,
+        limit: i64,
+        broken: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl TurnObserver for Invariant {
+        async fn turn_done(&self, t: &TurnLog) {
+            let c = self.budget.committed();
+            let total = c.spent + 2 * c.held + c.finish_reserve + c.in_flight_reserve;
+            if total > self.limit {
+                self.broken
+                    .lock()
+                    .unwrap()
+                    .push(format!("turn {}: {c:?}", t.turn));
+            }
+        }
+    }
+
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let schema = OutputSchema::new(
+        json!({"type": "object", "additionalProperties": false, "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}),
+    );
+    let mut finals = 0;
+    for dropped_by_task in [false, true] {
+        for ext in [60i64, 200] {
+            for limit in (300..=6000).step_by(190) {
+                let mut llm = ScriptedLlm::new()
+                    .when("=== Research transcript")
+                    .reply_json(json!({"ok": true}), usage(300, 50));
+                for k in 0..4 {
+                    llm = llm.reply_blocks(
+                        // Two results of 30,000 characters: more than the
+                        // turn's pad, so they are admitted only if the share
+                        // still fits.
+                        vec![
+                            tool_call(&format!("x{k}"), "big", json!({})),
+                            tool_call(&format!("y{k}"), "big", json!({})),
+                        ],
+                        Some(StopReason::ToolUse),
+                        usage(300 + 100 * k, 150),
+                    );
+                }
+                let llm = Arc::new(
+                    llm.reply_blocks(
+                        vec![ContentBlock::Text {
+                            text: "done".into(),
+                        }],
+                        Some(StopReason::EndTurn),
+                        usage(800, 50),
+                    )
+                    .delay(Duration::from_millis(10)),
+                );
+                let (ctx, uid) = full_ctx(
+                    &pool,
+                    literature(&server),
+                    agent_llm(llm.clone(), MODEL),
+                    limit,
+                    DepthSettings::FOCUSED,
+                )
+                .await;
+                ctx.budget.set_finish_reserve(60);
+                let Some(h) = ctx.budget.try_hold_gathering(ext) else {
+                    continue;
+                };
+                let mut held_here = None;
+                let task = if dropped_by_task {
+                    // Waiting for it is allowed until wrap-up: give the loop time.
+                    ctx.budget.set_wrap_up_after(Duration::from_secs(5));
+                    Some(tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        drop(h);
+                    }))
+                } else {
+                    ctx.budget.set_wrap_up_after(Duration::ZERO);
+                    held_here = Some(h);
+                    None
+                };
+                let obs = Invariant {
+                    budget: ctx.budget.clone(),
+                    limit,
+                    broken: std::sync::Mutex::new(Vec::new()),
+                };
+                let call = ctx.llm.call(&ctx, MODEL, "skeptic");
+                let spec = AgentSpec {
+                    system: "You are a skeptic.",
+                    user: "Challenge it.",
+                    max_turns: 8,
+                    max_tokens: 150,
+                    effort: None,
+                    final_system: "Report.",
+                    final_instruction: "Submit.",
+                    final_schema: &schema,
+                    final_max_tokens: 4000,
+                    caps: ResultCaps::default(),
+                };
+                let tools = ToolRegistry::new().with(Arc::new(Big));
+                let r = run_agent_observed::<Value>(&call, &tools, &spec, Some(&obs)).await;
+                if let Some(t) = task {
+                    t.await.unwrap();
+                }
+                let broken = obs.broken.into_inner().unwrap();
+                assert!(
+                    broken.is_empty(),
+                    "task {dropped_by_task} ext {ext} limit {limit}: {broken:?}"
+                );
+                let reqs = llm.requests();
+                let turns = reqs
+                    .iter()
+                    .filter(|q| !request_user_text(q).contains("=== Research transcript"))
+                    .count();
+                if turns > 0 {
+                    assert!(
+                        r.is_ok() && reqs.len() > turns,
+                        "task {dropped_by_task} ext {ext} limit {limit}: {turns} turns, no final: {r:?}"
+                    );
+                    finals += 1;
+                }
+                let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
+                assert!(spent <= limit, "{spent} > {limit}");
+                drop(held_here);
+            }
+        }
+    }
+    assert!(finals > 10, "{finals}");
 }

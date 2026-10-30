@@ -36,10 +36,12 @@
 //!   turn's pad) past the headroom is cut (or withheld) until it fits.
 //!
 //! **Beside another step** (Stage 3: the skeptic runs while the extractor's
-//! calls are in flight). The final call is held from its share counting
-//! in-flight holds once, as [`Final`]'s check does
-//! ([`RunBudget::try_hold_releasing`]), so a share that fits is always a
-//! hold that fits. When the share's resize or a turn's hold does not fit
+//! calls are in flight). [`Final`]'s check counts in-flight holds twice
+//! (as every gathering launch does, R-FB3), from one snapshot
+//! ([`RunBudget::committed`]); the final call is then held from its share
+//! counting them once ([`RunBudget::try_hold_releasing`]), so a share that
+//! fits is always a hold that fits, and the share never eats the room the
+//! calls in flight were given. When the share's resize or a turn's hold does not fit
 //! while other calls hold money, the loop waits [`OTHERS_POLL`] and checks
 //! everything again (cancel, hard stop, wrap-up first) instead of stopping:
 //! their charges usually free part of their holds.
@@ -464,13 +466,26 @@ impl Final<'_> {
     }
 
     /// Whether a final call estimated at `paise` would still fit beside
-    /// what is spent, held and kept free (this loop's share replaced).
+    /// what is spent, held and kept free (this loop's share replaced), read
+    /// in one snapshot. With other calls in flight (`held > 0`: this loop
+    /// has none of its own when it checks), their holds count **twice**, as
+    /// every gathering launch counts them (R-FB3), so the share kept never
+    /// eats the room those calls were given to cost more than their holds.
+    /// The final call is then held from the share counting them once
+    /// ([`RunBudget::try_hold_releasing`]): stricter here than there, so a
+    /// share that fits is always a hold that fits.
     fn fits(&self, paise: i64) -> bool {
         let b = self.budget();
-        let committed = i128::from(b.spent())
-            + i128::from(b.held())
-            + i128::from(b.finish_reserve())
-            + i128::from(b.in_flight_reserve())
+        let c = b.committed();
+        let held = if c.held > 0 {
+            2 * i128::from(c.held)
+        } else {
+            i128::from(c.held)
+        };
+        let committed = i128::from(c.spent)
+            + held
+            + i128::from(c.finish_reserve)
+            + i128::from(c.in_flight_reserve)
             - i128::from(self.current());
         committed + i128::from(paise) <= i128::from(b.limit_paise())
     }

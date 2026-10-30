@@ -21,10 +21,10 @@
 //! extraction launches). Every call of both is a gathering call: it leaves
 //! the writer's reserve **and** the skeptic's kept final-call share free,
 //! and with others in flight counts every in-flight hold twice (R-FB3). The
-//! skeptic's final call is held from its share counting in-flight holds
-//! once, exactly as its affordability check counts them (the deferred
-//! Stage 1 issue, `RunBudget::try_hold_releasing`), so it is always
-//! affordable while extraction calls are in flight. A refusal beside the
+//! skeptic's affordability check counts in-flight holds twice and its final
+//! call is held from its share counting them once (the deferred Stage 1
+//! issue, `RunBudget::try_hold_releasing`), so it is always affordable
+//! while extraction calls are in flight. A refusal beside the
 //! other step's calls waits for them (`bounded::OTHERS_POLL`,
 //! `agent_loop::OTHERS_POLL`) instead of ending the step. So the extractor's
 //! calls, the skeptic's turns and its kept share never together take the
@@ -385,7 +385,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     let mut reviewed = Reviewed::default();
     if full {
         reviewed = review_phase(ctx, &research, &fetched, &studies, reserve).await?;
-        for (k, m) in reviewed.missed.iter().enumerate() {
+        for (k, m) in reviewed.missed.iter().chain(&reviewed.cited).enumerate() {
             answer.references.push(ReferenceV3 {
                 n: u16::try_from(studies.len() + k + 1).unwrap_or(u16::MAX),
                 pmid: m.pmid.clone(),
@@ -463,6 +463,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     let selected: Vec<String> = studies
         .iter()
         .chain(&reviewed.missed)
+        .chain(&reviewed.cited)
         .map(|s| s.pmid.clone())
         .collect();
     match writer_v3::write_with(ctx, &ctx.llm, system, &user).await {
@@ -533,6 +534,10 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
 
 // ---------- Full: the review phase (Stage 3) ----------
 
+/// Studies quoted by the skeptic (contradictions, guidelines) given
+/// references, at most (Stage 3 review 3).
+pub const MAX_SKEPTIC_REFS: usize = 5;
+
 /// Bottom-line note when the skeptic's review failed.
 pub const SKEPTIC_FAILED: &str =
     "The skeptic's review could not be completed, so this answer was written without it.";
@@ -545,6 +550,10 @@ struct Reviewed {
     skeptic_note: Option<&'static str>,
     /// The skeptic's missed RCTs, fetched.
     missed: Vec<StudyInput>,
+    /// The records of the other studies the skeptic quotes (contradicting
+    /// evidence, guidelines), fetched for their references (at most
+    /// [`MAX_SKEPTIC_REFS`]).
+    cited: Vec<StudyInput>,
     notes: Vec<String>,
 }
 
@@ -669,7 +678,27 @@ async fn review_phase(
         .as_ref()
         .map(|r| r.missed_rcts.iter().map(|m| m.pmid.clone()).collect())
         .unwrap_or_default();
-    if !missed_ids.is_empty() {
+    // The studies the skeptic quotes, so its citations of them have
+    // references (review 3): not selected, not missed, at most five.
+    let mut cited_ids: Vec<String> = Vec::new();
+    if let Some(r) = &out.review {
+        let quoted = r
+            .contradicting
+            .iter()
+            .map(|c| &c.pmid)
+            .chain(r.guidelines.iter().map(|g| &g.pmid));
+        for p in quoted {
+            if !studies.iter().any(|s| &s.pmid == p)
+                && !missed_ids.contains(p)
+                && !cited_ids.contains(p)
+                && cited_ids.len() < MAX_SKEPTIC_REFS
+            {
+                cited_ids.push(p.clone());
+            }
+        }
+    }
+    let wanted: Vec<String> = missed_ids.iter().chain(&cited_ids).cloned().collect();
+    if !wanted.is_empty() {
         gate(ctx).await?;
         let lit = LitTools::new(
             ctx.lit.clone(),
@@ -677,7 +706,7 @@ async fn review_phase(
             ctx.run_id,
             &ctx.question,
         );
-        match lit.fetch_papers(&missed_ids, "skeptic_missed").await {
+        match lit.fetch_papers(&wanted, "skeptic_missed").await {
             Ok((papers, _)) => {
                 let why = |id: &str| {
                     out.review
@@ -689,6 +718,13 @@ async fn review_phase(
                 for id in &missed_ids {
                     if let Some(p) = papers.iter().find(|p| p.pmid.as_deref() == Some(id)) {
                         out.missed.push(missed_input(id, p, why(id)));
+                    }
+                }
+                for id in &cited_ids {
+                    if let Some(p) = papers.iter().find(|p| p.pmid.as_deref() == Some(id)) {
+                        let mut c = missed_input(id, p, String::new());
+                        c.design = "quoted by the skeptic".into();
+                        out.cited.push(c);
                     }
                 }
             }
@@ -749,6 +785,7 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
             .map(|c| SkepticItem {
                 pmid: c.pmid.clone(),
                 text: c.claim.clone(),
+                quote: Some(c.quote.clone()),
             })
             .collect(),
         missed_rcts: r
@@ -757,6 +794,7 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
             .map(|m| SkepticItem {
                 pmid: m.pmid.clone(),
                 text: m.why.clone(),
+                quote: None,
             })
             .collect(),
         guidelines: r
@@ -764,7 +802,8 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
             .iter()
             .map(|g| SkepticItem {
                 pmid: g.pmid.clone(),
-                text: format!("{}: {}", g.body, g.statement_quote),
+                text: g.body.clone(),
+                quote: Some(g.statement_quote.clone()),
             })
             .collect(),
         overlaps: r

@@ -599,8 +599,9 @@ mod tests {
                 full_text: true,
                 limit_paise: 4000,
                 time_limit_s: 300,
-                agent_limit_paise: 20000,
-                agent_time_limit_s: 480,
+                // Owner ruling R-S3a: ₹300, 10 minutes, 180 s for the review.
+                agent_limit_paise: 30000,
+                agent_time_limit_s: 600,
                 researcher_turns: 15,
                 skeptic_turns: 8,
                 researcher_max_tokens: 4000,
@@ -609,7 +610,7 @@ mod tests {
                 writer_max_tokens: 16000,
                 writer_time_allowance_s: 150,
                 // Stage 3: the Full review phase (extractor ∥ skeptic).
-                review_time_allowance_s: 120,
+                review_time_allowance_s: 180,
                 extractor_concurrency: 3,
             }
         );
@@ -674,7 +675,7 @@ mod tests {
             r#"{"focused": {"writer_time_allowance_s": 900}}"#,
             // Stage 3: the writer's and the review's time together must
             // leave research some time; the extractor runs 1 to 8 at once.
-            r#"{"focused": {"review_time_allowance_s": 330}}"#,
+            r#"{"focused": {"review_time_allowance_s": 450}}"#,
             r#"{"focused": {"extractor_concurrency": 0}}"#,
             r#"{"focused": {"extractor_concurrency": 9}}"#,
         ] {
