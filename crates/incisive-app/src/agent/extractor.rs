@@ -354,8 +354,10 @@ static WRITTEN_NUMBER: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// taken into account: one character earlier when a dash (`-`, `−`, `–`)
 /// right before it is a minus sign. The dash is **not** a sign (it is a
 /// range dash or a hyphen) when the character before it is a digit, `%` or
-/// a letter (`0.48-1.13`, `12%-15%`, `COVID-19`), or a space that follows a
-/// digit or `%` (`2019 – 2021`). Stage 3 re-review 1.
+/// a letter (`0.48-1.13`, `12%-15%`, `COVID-19`). Exactly the rule
+/// `extract::numbers` applies to quotes, so free text and quotes tokenise
+/// alike: after a space the dash is a sign in both ("12 −2.3" is 12 and
+/// -2.3; a spaced range "2019 – 2021" reads as 2019 and -2021 in both).
 fn signed_start(text: &str, start: usize) -> usize {
     let mut back = text[..start].chars().rev();
     let Some(dash) = back.next() else {
@@ -367,7 +369,6 @@ fn signed_start(text: &str, start: usize) -> usize {
     let range = match back.next() {
         None => false,
         Some(c) if c.is_ascii_digit() || c == '%' || c.is_alphabetic() => true,
-        Some(c) if c.is_whitespace() => back.next().is_some_and(|d| d.is_ascii_digit() || d == '%'),
         Some(_) => false,
     };
     if range {
@@ -1255,7 +1256,6 @@ mod tests {
             "RR 0.8 (CI 0.48-1.13)",
             "75.5\u{2013}93.8 min",
             "2019\u{2013}2021",
-            "2019 \u{2013} 2021",
             "COVID-19 cases",
             "IL-6 levels",
             "a difference of 2.3",
@@ -1274,6 +1274,25 @@ mod tests {
         assert_eq!(
             strip_unverified("a difference of -2.3 (CI -4.1 to 0.5)", &allowed),
             ("a difference of [?] (CI [?] to [?])".to_string(), 3)
+        );
+        // Final re-review: a minus after a spaced number reads as in quotes.
+        let spaced = quote_values("a change of 12 \u{2212}2.3 points");
+        assert_eq!(
+            strip_unverified("12 \u{2212}2.3", &spaced),
+            ("12 \u{2212}2.3".to_string(), 0),
+            "the quote has -2.3"
+        );
+        let positive = quote_values("a change of 12 and 2.3 points");
+        assert_eq!(
+            strip_unverified("12 \u{2212}2.3", &positive),
+            ("12 [?]".to_string(), 1),
+            "the quote has only 2.3"
+        );
+        // A spaced range verifies against a quote spaced the same way.
+        let range = quote_values("from 2019 \u{2013} 2021");
+        assert_eq!(
+            strip_unverified("2019 \u{2013} 2021", &range),
+            ("2019 \u{2013} 2021".to_string(), 0)
         );
         // A range of which one end is not in the quote: that end only.
         assert_eq!(
