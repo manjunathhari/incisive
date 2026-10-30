@@ -169,6 +169,10 @@ pub struct ReportedRow {
     pub outcomes: Vec<ReportedOutcome>,
     pub appraisal: Appraisal,
     pub independence: Independence,
+    /// Stage 4 item 3: funding and conflicts of interest as the text states
+    /// them, or null (default: a reply without it still reads).
+    #[serde(default)]
+    pub funding: Option<String>,
 }
 
 /// An outcome whose quote was found in the source.
@@ -206,6 +210,10 @@ pub struct EvidenceRow {
     pub outcomes: Vec<VerifiedOutcome>,
     pub appraisal: Appraisal,
     pub independence: Independence,
+    /// Stage 4 item 3: funding and conflicts of interest from the source
+    /// text, or `None` when it does not state them.
+    #[serde(default)]
+    pub funding: Option<String>,
     /// Names of outcomes reported but not verifiable (quote not found
     /// twice): dropped from the evidence, numbers included.
     pub unverified_outcomes: Vec<String>,
@@ -632,6 +640,12 @@ fn finish_row(
             group_or_centre: f(&mut field, &ind.group_or_centre),
             note: field(&ind.note, MAX_TEXT),
         },
+        funding: row
+            .funding
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| field(t, MAX_TEXT)),
         unverified_outcomes: unverified.iter().map(|u| field(u, MAX_FIELD)).collect(),
         numbers_dropped: pass.numbers_dropped + dropped_n,
         texts_cleaned: cleaned,
@@ -666,7 +680,9 @@ APPRAISAL, one line each: bias (risk-of-bias concerns), power (size or power lim
 and learning curve), applicability (e.g. lean primary cases only, single centre).
 INDEPENDENCE: trial_registration (the registry id, e.g. NCT number, as written, or null); group_or_centre (the research \
 group, lead centre or city running the study); note (anything suggesting overlap with other studies: the same group, \
-centre, registry or population, or a secondary report of an earlier trial).";
+centre, registry or population, or a secondary report of an earlier trial).
+FUNDING: funding (who funded the study and any conflicts of interest declared, in a few words taken from the text), or \
+null when the text does not state them. Never infer a funder.";
 
 const SUBMIT: &str = "Build the evidence row for this study now, as JSON matching the schema.";
 
@@ -711,7 +727,8 @@ pub fn row_schema() -> Value {
             "source": {"type": "string", "enum": ["abstract", "full_text"]}
         }))},
         "appraisal": obj(json!({"bias": s, "power": s, "learning_curve": s, "applicability": s})),
-        "independence": obj(json!({"trial_registration": s_null, "group_or_centre": s, "note": s}))
+        "independence": obj(json!({"trial_registration": s_null, "group_or_centre": s, "note": s})),
+        "funding": s_null
     }))
 }
 
@@ -1131,6 +1148,7 @@ mod tests {
                 group_or_centre: "Aabenraa".into(),
                 note: "".into(),
             },
+            funding: None,
         }
     }
 
@@ -1299,6 +1317,42 @@ mod tests {
             strip_unverified("CI 0.48-1.25", &allowed),
             ("CI 0.48-[?]".to_string(), 1)
         );
+    }
+
+    /// Stage 4 item 3: funding is taken from the reply, blank means not
+    /// stated, and a reply without the field still reads.
+    #[test]
+    fn funding_is_kept_from_the_source_or_none() {
+        let abs = "Results: Pain at 30 days was 2.1 vs 2.4 (p = 0.43). Funding: Intuitive Surgical, grant 2019.";
+        let src = source_text(&paper(Some(abs)), None).unwrap();
+        let mut r = row(vec![]);
+        r.funding = Some("Intuitive Surgical (industry), grant 2019".into());
+        let e = finish_row("111", &src, &r, first_pass(&src, &r), None, 0);
+        assert_eq!(
+            e.funding.as_deref(),
+            Some("Intuitive Surgical (industry), grant 2019")
+        );
+        r.funding = Some("  ".into());
+        let e = finish_row("111", &src, &r, first_pass(&src, &r), None, 0);
+        assert_eq!(e.funding, None);
+        let back: ReportedRow = serde_json::from_value(row_json_without_funding()).unwrap();
+        assert_eq!(back.funding, None);
+        assert_eq!(
+            row_schema()["properties"]["funding"]["type"],
+            json!(["string", "null"])
+        );
+        assert!(SYSTEM.contains("Never infer a funder"));
+    }
+
+    fn row_json_without_funding() -> Value {
+        json!({
+            "design": "RCT", "n_randomised": 60, "n_analysed": null, "setting": "s",
+            "centres": "single", "country": "IT", "population": "p", "intervention": "i",
+            "comparator": "c", "follow_up": "f", "blinding": "b", "primary_endpoint": "e",
+            "powered_for_primary": null, "surgeon_experience": "x", "outcomes": [],
+            "appraisal": {"bias": "b", "power": "p", "learning_curve": "l", "applicability": "a"},
+            "independence": {"trial_registration": null, "group_or_centre": "g", "note": ""}
+        })
     }
 
     #[tokio::test]

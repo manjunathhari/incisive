@@ -89,6 +89,40 @@ pub struct Number {
     pub pmid: String,
 }
 
+/// What kind of evidence an outcome row rests on (Stage 4 item 6): a label
+/// only; it blocks nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceType {
+    Rct,
+    RctMetaAnalysis,
+    NetworkMetaAnalysis,
+    Observational,
+    #[default]
+    Mixed,
+}
+
+impl EvidenceType {
+    /// The schema's enum values.
+    pub const ALL: [&'static str; 5] = [
+        "rct",
+        "rct_meta_analysis",
+        "network_meta_analysis",
+        "observational",
+        "mixed",
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EvidenceType::Rct => "RCTs",
+            EvidenceType::RctMetaAnalysis => "RCT meta-analysis",
+            EvidenceType::NetworkMetaAnalysis => "network meta-analysis",
+            EvidenceType::Observational => "observational",
+            EvidenceType::Mixed => "mixed evidence",
+        }
+    }
+}
+
 /// One row of the outcome table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outcome {
@@ -99,6 +133,112 @@ pub struct Outcome {
     pub certainty: Certainty,
     pub why: String,
     pub pmids: Vec<String>,
+    /// Stage 4 (additive; old answers: mixed).
+    #[serde(default)]
+    pub evidence_type: EvidenceType,
+}
+
+/// A guideline or consensus statement (Stage 4 item 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuidelineV3 {
+    pub pmid: Option<String>,
+    pub body: String,
+    pub year: Option<i32>,
+    pub statement: String,
+}
+
+/// One key number of the at-a-glance box.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyNumber {
+    pub label: String,
+    pub value_text: String,
+    pub pmid: String,
+}
+
+/// The at-a-glance box (Stage 4 item 8): about five lines at the top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtAGlance {
+    pub verdict: String,
+    pub key_numbers: Vec<KeyNumber>,
+    pub main_caveat: String,
+}
+
+/// What the evidence means for clinical practice (Stage 4 item 9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClinicalPractice {
+    pub default_choice: String,
+    pub who_may_benefit: String,
+    pub counselling: String,
+    /// A per-case range derived from verified trial numbers, or "not known".
+    pub cost_per_case: String,
+}
+
+/// A notable finding outside the outcome tables (Stage 4 item 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotableFinding {
+    pub text: String,
+    pub pmids: Vec<String>,
+}
+
+/// A marked run of stored text (Stage 4 items 5 and 7): `len` bytes from
+/// byte `start` of the text at `field` (a path such as
+/// `outcomes.2.effect_text`). The text itself is never changed; the page
+/// draws a small mark after the run. A span with `len` 0 marks the whole
+/// field (a structured number).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub field: String,
+    pub start: u32,
+    pub len: u32,
+}
+
+impl Span {
+    pub fn new(field: impl Into<String>, start: usize, end: usize) -> Span {
+        Span {
+            field: field.into(),
+            start: u32::try_from(start).unwrap_or(u32::MAX),
+            len: u32::try_from(end.saturating_sub(start)).unwrap_or(u32::MAX),
+        }
+    }
+}
+
+/// `text` cut into runs, each with whether it is marked by one of `spans`
+/// on `field`. A span outside the text or off a character boundary is
+/// ignored (stored data is never trusted to be well formed); overlapping
+/// spans are merged. A marked run is followed by the mark when drawn.
+pub fn marked_runs(text: &str, field: &str, spans: &[Span]) -> Vec<(String, bool)> {
+    let mut cuts: Vec<(usize, usize)> = spans
+        .iter()
+        .filter(|s| s.field == field && s.len > 0)
+        .filter_map(|s| {
+            let a = s.start as usize;
+            let b = a.checked_add(s.len as usize)?;
+            (b <= text.len() && text.is_char_boundary(a) && text.is_char_boundary(b))
+                .then_some((a, b))
+        })
+        .collect();
+    cuts.sort_unstable();
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut at = 0;
+    for (a, b) in cuts {
+        if a < at {
+            continue;
+        }
+        if a > at {
+            out.push((text[at..a].to_string(), false));
+        }
+        out.push((text[a..b].to_string(), true));
+        at = b;
+    }
+    if at < text.len() || out.is_empty() {
+        out.push((text[at..].to_string(), false));
+    }
+    out
+}
+
+/// Whether `spans` marks the whole of `field` (a `len` 0 span).
+pub fn whole_marked(field: &str, spans: &[Span]) -> bool {
+    spans.iter().any(|s| s.field == field && s.len == 0)
 }
 
 /// One row of the trials table.
@@ -139,6 +279,16 @@ pub struct WrittenAnswer {
     pub conflicts: Vec<Conflict>,
     pub applicability: Applicability,
     pub would_change: Vec<String>,
+    /// Stage 4 (additive, default empty or none: old answers and replies
+    /// that omit them still load).
+    #[serde(default)]
+    pub at_a_glance: Option<AtAGlance>,
+    #[serde(default)]
+    pub clinical_practice: Option<ClinicalPractice>,
+    #[serde(default)]
+    pub guidelines: Vec<GuidelineV3>,
+    #[serde(default)]
+    pub notable_findings: Vec<NotableFinding>,
 }
 
 /// A numbered reference, built by code from the fetched metadata.
@@ -167,9 +317,37 @@ pub struct EvidenceV3 {
     pub text: String,
     /// Outcomes whose quote was found in the source.
     pub verified_quotes: u32,
+    /// Before Stage 4: numbers dropped. Stage 4 keeps them, flagged
+    /// (`numbers_unverified`); new answers store 0 here.
     pub numbers_dropped: u32,
-    /// Outcomes reported but not verifiable (dropped).
+    /// Outcomes reported whose quote was not found (names).
     pub unverified_outcomes: Vec<String>,
+    /// Stage 4 (additive): numbers kept but not verified against their
+    /// quote or the source.
+    #[serde(default)]
+    pub numbers_unverified: u32,
+    /// Stage 4 (additive): each unverified outcome with its values, shown
+    /// labelled "not verified".
+    #[serde(default)]
+    pub unverified_details: Vec<UnverifiedOutcomeV3>,
+    /// Stage 4 (additive): funding and conflicts of interest as the source
+    /// states them (`None`: not stated). Only meaningful when
+    /// `funding_checked` (old answers never looked).
+    #[serde(default)]
+    pub funding: Option<String>,
+    #[serde(default)]
+    pub funding_checked: bool,
+    /// Stage 4 (additive): numbers in `funding` the source does not have.
+    #[serde(default)]
+    pub spans: Vec<Span>,
+}
+
+/// An extracted outcome whose quote was not found in the paper (Stage 4
+/// item 7): kept with its values, labelled "not verified".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnverifiedOutcomeV3 {
+    pub outcome: String,
+    pub effect_text: String,
 }
 
 /// Full (Stage 3): the skeptic's checked review, as the page shows it.
@@ -184,6 +362,14 @@ pub struct SkepticV3 {
     /// (PMID, body: statement) of each guideline with a verified quote.
     pub guidelines: Vec<SkepticItem>,
     pub overlaps: Vec<SkepticOverlap>,
+    /// Stage 4 (additive): what a meta-analysis actually pooled.
+    #[serde(default)]
+    pub ma_notes: Vec<SkepticItem>,
+    /// Stage 4 (additive): numbers in the skeptic's text that no text its
+    /// tools returned has (paths such as `must_mention.0`,
+    /// `contradicting.1.text`, `overlaps.0.note`).
+    #[serde(default)]
+    pub spans: Vec<Span>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +410,18 @@ pub struct IntegrityV3 {
     pub dropped_numbers: u32,
     /// Trial rows whose study is outside the selection.
     pub dropped_studies: u32,
+    /// Stage 4 item 5 (additive): numbers written in the answer's text,
+    /// and how many of them are not traced to a source (marked).
+    #[serde(default)]
+    pub numbers_checked: u32,
+    #[serde(default)]
+    pub numbers_untraced: u32,
+    /// Stage 4 item 7 (additive): extractor numbers and outcomes kept but
+    /// not verified.
+    #[serde(default)]
+    pub numbers_unverified: u32,
+    #[serde(default)]
+    pub outcomes_unverified: u32,
 }
 
 /// The stored Phase 3 answer.
@@ -256,6 +454,14 @@ pub struct AnswerV3 {
     /// extractor stopped early), in plain words.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Stage 4 item 5 (additive): numbers in the writer's text not traced
+    /// to a source, as spans of `answer`'s fields. The text is unchanged.
+    #[serde(default)]
+    pub untraced: Vec<Span>,
+    /// Stage 4 item 12 (additive): notable findings built by code from the
+    /// skeptic's and extractor's output (no AI call).
+    #[serde(default)]
+    pub notable_code: Vec<NotableFinding>,
 }
 
 impl AnswerV3 {

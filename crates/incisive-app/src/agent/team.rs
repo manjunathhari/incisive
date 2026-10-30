@@ -181,6 +181,8 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         skeptic: None,
         evidence: Vec::new(),
         notes: Vec::new(),
+        untraced: Vec::new(),
+        notable_code: Vec::new(),
     }
 }
 
@@ -689,7 +691,8 @@ async fn review_phase(
             .iter()
             .map(|c| &c.pmid)
             .chain(r.guidelines.iter().map(|g| &g.pmid))
-            .chain(r.overlaps.iter().flat_map(|o| &o.pmids));
+            .chain(r.overlaps.iter().flat_map(|o| &o.pmids))
+            .chain(r.ma_notes.iter().map(|m| &m.pmid));
         for p in quoted {
             if !studies.iter().any(|s| &s.pmid == p)
                 && !missed_ids.contains(p)
@@ -765,6 +768,11 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
                 verified_quotes: r.outcomes_verified,
                 numbers_dropped: r.numbers_dropped,
                 unverified_outcomes: r.unverified_outcomes.clone(),
+                numbers_unverified: 0,
+                unverified_details: Vec::new(),
+                funding: r.funding.clone(),
+                funding_checked: true,
+                spans: Vec::new(),
             },
             None => EvidenceV3 {
                 pmid: s.pmid.clone(),
@@ -772,6 +780,11 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
                 verified_quotes: 0,
                 numbers_dropped: 0,
                 unverified_outcomes: Vec::new(),
+                numbers_unverified: 0,
+                unverified_details: Vec::new(),
+                funding: None,
+                funding_checked: false,
+                spans: Vec::new(),
             },
         })
         .collect()
@@ -817,5 +830,15 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
                 note: o.note.clone(),
             })
             .collect(),
+        ma_notes: r
+            .ma_notes
+            .iter()
+            .map(|m| SkepticItem {
+                pmid: m.pmid.clone(),
+                text: m.note.clone(),
+                quote: None,
+            })
+            .collect(),
+        spans: Vec::new(),
     }
 }

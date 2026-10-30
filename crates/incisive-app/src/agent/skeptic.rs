@@ -117,6 +117,12 @@ pub struct ReportedOverlap {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ReportedMaNote {
+    pub pmid: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ReportedSearch {
     pub query: String,
     pub source: String,
@@ -133,6 +139,9 @@ pub struct SkepticReport {
     pub verdict: Verdict,
     pub must_mention: Vec<String>,
     pub searches: Vec<ReportedSearch>,
+    /// Stage 4 item 4 (default empty: a reply without it still reads).
+    #[serde(default)]
+    pub ma_notes: Vec<ReportedMaNote>,
 }
 
 /// A contradiction with its verified quote.
@@ -164,6 +173,13 @@ pub struct Overlap {
     pub note: String,
 }
 
+/// What a meta-analysis actually pooled (Stage 4 item 4): a note only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaNote {
+    pub pmid: String,
+    pub note: String,
+}
+
 /// The skeptic's checked review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkepticReview {
@@ -173,6 +189,9 @@ pub struct SkepticReview {
     pub missed_rcts: Vec<MissedRct>,
     pub guidelines: Vec<Guideline>,
     pub overlaps: Vec<Overlap>,
+    /// Stage 4 item 4: meta-analysis pool notes (selected or seen PMIDs).
+    #[serde(default)]
+    pub ma_notes: Vec<MaNote>,
     /// Recorded by code as the tools ran.
     pub searches: Vec<SearchEntry>,
     /// Entries naming a PMID no skeptic tool returned (or not a PMID).
@@ -351,6 +370,18 @@ pub fn validate(
             });
         }
     }
+    // Meta-analysis notes: kept for a selected or seen PMID (the overlap
+    // rule); notes only, they exclude nothing.
+    let mut ma_notes = Vec::new();
+    for m in report.ma_notes.into_iter().take(MAX_ITEMS) {
+        match clean_pmid(&m.pmid).filter(|p| selected.contains(p) || seen.contains(p)) {
+            Some(pmid) => ma_notes.push(MaNote {
+                pmid,
+                note: note(&m.note),
+            }),
+            None => dropped_unseen += 1,
+        }
+    }
     let must_mention = report
         .must_mention
         .iter()
@@ -365,6 +396,7 @@ pub fn validate(
         missed_rcts,
         guidelines,
         overlaps,
+        ma_notes,
         searches,
         dropped_unseen,
         dropped_quotes,
@@ -390,12 +422,17 @@ HUNT FOR:
 1. Evidence AGAINST the emerging conclusion: trials or reviews with different results, and why they differ.
 2. Newer or missed randomised trials the researcher did not select (search recent years, trial acronyms, find_related on \
 the key trials).
-3. Guideline or consensus statements indexed in PubMed.
+3. Guideline or consensus statements indexed in PubMed. Run AT LEAST ONE guideline search, matching publication types \
+and title words with plurals and variants, e.g. topic terms AND (\"practice guideline\"[pt] OR guideline[pt] OR \
+guideline*[ti] OR consensus[ti] OR recommendation*[ti]).
 4. OVERLAPPING or NON-INDEPENDENT studies: the same research group, centre, trial registry entry or patient population \
 reported more than once, or a secondary report of an earlier trial. Use the titles and abstracts (authors' centre, trial \
 names, registration numbers) to check.
 5. Subgroups the conclusion may not cover: complex or recurrent cases, obesity, the learning curve and surgeon \
 experience, different platforms or settings.
+6. WHAT EACH META-ANALYSIS ACTUALLY POOLED: from its abstract, note when its pool includes observational studies, or \
+counts as randomised a study that is not (for example an observational study inside an \"RCT-only\" pool). These are \
+notes for the writer; nothing is excluded because of them.
 
 QUOTES: every quote you give must be copied exactly, character for character, from the title or abstract of that PMID as \
 get_abstracts returned it. Quotes are checked by code; an entry whose quote is not found is discarded.
@@ -411,7 +448,9 @@ title or abstract as returned, and why it is weaker or stronger than the randomi
 missed_rcts: randomised trials the researcher did not select, with why they matter (at most 3). \
 guidelines: guideline or consensus statements, with the issuing body and an exact quote. \
 overlaps: groups of PMIDs (selected or found) that are not independent evidence (same group, centre, registry or \
-population), with a note. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
+population), with a note. ma_notes: for a meta-analysis (selected or found), what its pool actually included when that \
+is not only randomised trials (observational studies, or a study labelled RCT that is not one), with its PMID and a \
+one-sentence note; empty when there is nothing to note. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
 must state, each one sentence or two. searches: each search you ran.";
 
 pub const FINAL_INSTRUCTION: &str = "Submit your review now, as JSON matching the schema.";
@@ -441,6 +480,7 @@ pub fn report_schema() -> Value {
         "overlaps": {"type": "array", "items": obj(json!({
             "pmids": {"type": "array", "items": {"type": "string"}}, "note": s
         }))},
+        "ma_notes": {"type": "array", "items": obj(json!({"pmid": pmid, "note": s}))},
         "verdict": {"type": "string", "enum": ["holds", "holds_with_caveats", "does_not_hold"]},
         "must_mention": {"type": "array", "items": s},
         "searches": {"type": "array", "items": obj(json!({
@@ -727,6 +767,7 @@ mod tests {
             verdict: Verdict::HoldsWithCaveats,
             must_mention: vec!["Say it.".into(), "  ".into()],
             searches: vec![],
+            ma_notes: vec![],
         }
     }
 
@@ -872,6 +913,59 @@ mod tests {
         cut.truncate(cut.len() / 2);
         cut.push_str("\n</source>\n[Result truncated: first 10 of 20 characters shown.]");
         assert!(texts_by_pmid(&[cut]).is_empty());
+    }
+
+    /// Stage 4 item 4: meta-analysis pool notes are kept (notes only) for
+    /// selected or seen PMIDs; a reply without the field still reads.
+    #[test]
+    fn meta_analysis_pool_notes_are_kept() {
+        let mut rep = report();
+        rep.ma_notes = vec![
+            ReportedMaNote {
+                pmid: "555".into(),
+                note: "Its 7-RCT pool counts an observational study as an RCT.".into(),
+            },
+            ReportedMaNote {
+                pmid: "333".into(),
+                note: "Pools cohorts with trials.".into(),
+            },
+            ReportedMaNote {
+                pmid: "999".into(),
+                note: "never returned".into(),
+            },
+        ];
+        let v = validate(rep, &results(), &["555".to_string()], vec![]);
+        let kept: Vec<&str> = v.ma_notes.iter().map(|m| m.pmid.as_str()).collect();
+        assert_eq!(kept, ["555", "333"]);
+        assert_eq!(
+            v.dropped_unseen, 4,
+            "444 (contradicting), 111 and 999 (missed), 999 (note)"
+        );
+        let r: SkepticReport = serde_json::from_value(json!({
+            "contradicting": [], "missed_rcts": [], "guidelines": [], "overlaps": [],
+            "verdict": "holds", "must_mention": [], "searches": []
+        }))
+        .unwrap();
+        assert!(r.ma_notes.is_empty());
+        let s = report_schema();
+        let req = s["properties"]["ma_notes"]["items"]["required"].to_string();
+        assert!(
+            req.contains("\"pmid\"") && req.contains("\"note\""),
+            "{req}"
+        );
+        assert!(FINAL_SYSTEM.contains("ma_notes:"));
+    }
+
+    /// Stage 4 item 1: the skeptic is told to run at least one guideline
+    /// search with the publication-type and title-variant filter.
+    #[test]
+    fn the_skeptic_must_search_for_guidelines() {
+        let p = system_prompt(8);
+        assert!(p.contains("Run AT LEAST ONE guideline search"));
+        assert!(p.contains(
+            r#"("practice guideline"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])"#
+        ), "{p}");
+        assert!(p.contains("WHAT EACH META-ANALYSIS ACTUALLY POOLED"));
     }
 
     #[test]

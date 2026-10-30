@@ -124,7 +124,10 @@ abstract does not state it), setting, comparison, key_results (cited), appraisal
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
 evidence means in the Indian cost context: say what is not known, and never invent costs, prices or figures); training \
 (what it means for a training or fellowship programme, or say it has no particular bearing).
-- would_change: what new evidence would change this answer.";
+- would_change: what new evidence would change this answer.
+- guidelines: each guideline or consensus statement among the studies provided: pmid (or null), body (the issuing \
+society or group), year (or null), statement (what it recommends, in its own words where the abstract gives them, \
+cited). Empty when none was provided; never from memory.";
 
 /// Heads the study section of the writer's prompt.
 pub const STUDIES_HEADING: &str = "STUDIES SELECTED BY THE RESEARCHER";
@@ -163,7 +166,10 @@ pub fn writer_schema() -> Value {
         }))},
         "conflicts": {"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))},
         "applicability": obj(json!({"case_mix": s, "india_cost_context": s, "training": s})),
-        "would_change": {"type": "array", "items": s}
+        "would_change": {"type": "array", "items": s},
+        "guidelines": {"type": "array", "items": obj(json!({
+            "pmid": s_null, "body": s, "year": {"type": ["integer", "null"]}, "statement": s
+        }))}
     }))
 }
 
@@ -402,6 +408,8 @@ skeptic's overlaps say) as ONE body of evidence, and say so; never count them as
 - Include every one of the skeptic's must-mention caveats somewhere in the answer. The skeptic's caveats, claims, \
 reasons and notes are caveats, NOT sources of numbers: take a number from the skeptic only when it is inside one of its \
 verified quotes. A [?] marks a number that was removed because no source had it; never fill it in.
+- When the skeptic notes that a meta-analysis pooled observational studies, or counted as randomised a study that is \
+not, say so beside that pooled estimate and weigh it accordingly.
 - Be concise and clinically sharp. Say what the evidence shows and how sure it is; do not hedge into mush.
 
 FIELDS:
@@ -417,7 +425,10 @@ stated), setting, comparison, key_results (cited), appraisal (main limitations, 
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
 evidence means in the Indian cost context: say what is not known, and never invent costs, prices or figures); training \
 (what it means for a training or fellowship programme, or say it has no particular bearing).
-- would_change: what new evidence would change this answer.";
+- would_change: what new evidence would change this answer.
+- guidelines: each guideline or consensus statement provided (the skeptic's guidelines with their verified quotes, or a \
+selected guideline's row or abstract): pmid (or null), body (the issuing society or group), year (or null), statement \
+(what it recommends, in its verified words where you have them, cited). Empty when none was provided; never from memory.";
 
 /// Byte caps of the Full-mode row and review fields shown to the writer
 /// (after neutralising).
@@ -572,7 +583,22 @@ Independence: registration: {}; group or centre: {}; note: {}",
         f(&i.group_or_centre),
         capped(&flatten(&i.note), k.text),
     ));
+    t.push_str(&format!(
+        "\nFunding and conflicts of interest: {}",
+        r.funding.as_deref().map_or_else(
+            || format!("not stated in the {}", text_word(r.text)),
+            |x| capped(&flatten(x), k.text)
+        )
+    ));
     wrap_source(&format!("row-{}", s.pmid), &t)
+}
+
+/// "abstract" or "text" (what a row was read from), for "not stated in the …".
+pub fn text_word(k: TextKind) -> &'static str {
+    match k {
+        TextKind::Abstract => "abstract",
+        TextKind::FullText => "text",
+    }
 }
 
 /// The skeptic's review as wrapped data.
@@ -612,6 +638,10 @@ fn skeptic_block(r: &SkepticReview) -> String {
     }
     for m in r.missed_rcts.iter().take(super::skeptic::MAX_MISSED) {
         t.push_str(&format!("Missed trial [{}]: {}\n", m.pmid, c(&m.why)));
+    }
+    t.push_str("What the meta-analyses actually pooled (notes only):\n");
+    for m in r.ma_notes.iter().take(SKEPTIC_SHOWN) {
+        t.push_str(&format!("- [{}] {}\n", m.pmid, c(&m.note)));
     }
     wrap_source("skeptic", &t)
 }
@@ -694,7 +724,7 @@ pub fn writer_user_full(
 pub fn worst_case_full_user(question: &str) -> String {
     use super::extractor::{Appraisal, Independence, VerifiedOutcome};
     use super::skeptic::{
-        Contradicting, Guideline, MAX_MISSED, MAX_MUST_MENTION, MissedRct, Overlap, Verdict,
+        Contradicting, Guideline, MAX_MISSED, MAX_MUST_MENTION, MaNote, MissedRct, Overlap, Verdict,
     };
     let x = |n: usize| "x".repeat(n);
     let k = FULL_CAPS;
@@ -758,6 +788,7 @@ pub fn worst_case_full_user(question: &str) -> String {
                 group_or_centre: x(k.field),
                 note: x(k.text),
             },
+            funding: Some(x(k.text)),
             unverified_outcomes: vec![x(k.field); MAX_OUTCOMES],
             outcomes_verified: 0,
             numbers_dropped: 0,
@@ -793,6 +824,12 @@ pub fn worst_case_full_user(question: &str) -> String {
         overlaps: (0..SKEPTIC_SHOWN)
             .map(|_| Overlap {
                 pmids: (0..10).map(id).collect(),
+                note: x(k.claim),
+            })
+            .collect(),
+        ma_notes: (0..SKEPTIC_SHOWN)
+            .map(|i| MaNote {
+                pmid: id(i),
                 note: x(k.claim),
             })
             .collect(),
@@ -966,6 +1003,10 @@ pub fn check_citations(a: &mut WrittenAnswer, selected: &[String], integrity: &m
     for w in &mut a.would_change {
         clean(w);
     }
+    for g in &mut a.guidelines {
+        clean(&mut g.body);
+        clean(&mut g.statement);
+    }
 
     let mut filter = |ids: &mut Vec<String>| {
         let mut kept: Vec<String> = Vec::new();
@@ -984,6 +1025,17 @@ pub fn check_citations(a: &mut WrittenAnswer, selected: &[String], integrity: &m
     }
     for c in &mut a.conflicts {
         filter(&mut c.pmids);
+    }
+    // A guideline citing an unknown study keeps its text; only the id goes.
+    for g in &mut a.guidelines {
+        if let Some(p) = g.pmid.take() {
+            let p = p.trim().to_string();
+            if known(&p) {
+                g.pmid = Some(p);
+            } else if !p.is_empty() {
+                removed += 1;
+            }
+        }
     }
     let mut dropped_numbers = 0u32;
     for o in &mut a.outcomes {
@@ -1044,6 +1096,7 @@ mod tests {
                 certainty: Certainty::Moderate,
                 why: "w".into(),
                 pmids: vec!["11111111".into(), "99999999".into(), "11111111".into()],
+                evidence_type: Default::default(),
             }],
             studies: vec![study("11111111"), study("77777777")],
             conflicts: vec![Conflict {
@@ -1056,6 +1109,15 @@ mod tests {
                 training: "t".into(),
             },
             would_change: vec!["a large RCT [44444444]".into()],
+            at_a_glance: None,
+            clinical_practice: None,
+            guidelines: vec![crate::agent::answer_v3::GuidelineV3 {
+                pmid: Some("66666666".into()),
+                body: "A society [66666666]".into(),
+                year: Some(2020),
+                statement: "Use either [11111111].".into(),
+            }],
+            notable_findings: vec![],
         }
     }
 
@@ -1085,7 +1147,12 @@ mod tests {
         // Text markers 999, 888, 777 (the label of the row that is then
         // dropped) and 444; ids 999 (outcome) and 555 (conflict). The
         // repeated known 111 is de-duplicated, not counted.
-        assert_eq!(i.removed_citations, 8);
+        // Stage 4 item 1: a guideline citing an unknown study keeps its
+        // text; its id and marker go (2 more).
+        assert_eq!(a.guidelines[0].pmid, None);
+        assert_eq!(a.guidelines[0].body, "A society");
+        assert_eq!(a.guidelines[0].statement, "Use either [11111111].");
+        assert_eq!(i.removed_citations, 10);
         assert_eq!(i.dropped_numbers, 1);
         assert_eq!(i.dropped_studies, 1);
     }
@@ -1294,7 +1361,7 @@ mod tests {
     // ---------- Full (Stage 3) ----------
 
     use crate::agent::extractor::{Appraisal, Independence, VerifiedOutcome};
-    use crate::agent::skeptic::{Contradicting, MissedRct, Overlap, Verdict};
+    use crate::agent::skeptic::{Contradicting, MaNote, MissedRct, Overlap, Verdict};
 
     fn evidence_row(pmid: &str) -> EvidenceRow {
         EvidenceRow {
@@ -1340,6 +1407,7 @@ mod tests {
                 group_or_centre: "Aabenraa".into(),
                 note: "same group as 22222222".into(),
             },
+            funding: Some("Funded by the Region of Southern Denmark".into()),
             unverified_outcomes: vec!["Recurrence".into()],
             outcomes_verified: 1,
             numbers_dropped: 1,
@@ -1366,6 +1434,10 @@ mod tests {
             overlaps: vec![Overlap {
                 pmids: vec!["11111111".into(), "22222222".into()],
                 note: "same group".into(),
+            }],
+            ma_notes: vec![MaNote {
+                pmid: "22222222".into(),
+                note: "its RCT pool includes an observational study".into(),
             }],
             searches: vec![],
             dropped_unseen: 0,
@@ -1413,6 +1485,11 @@ mod tests {
         assert!(u.contains("Verdict on the emerging conclusion: holds with caveats"));
         assert!(u.contains("- [11111111; 22222222] same group"));
         assert!(u.contains("Found by the skeptic - PMID 44444444"));
+        // Stage 4 items 3 and 4.
+        assert!(u.contains(
+            "Funding and conflicts of interest: Funded by the Region of Southern Denmark"
+        ));
+        assert!(u.contains("- [22222222] its RCT pool includes an observational study"));
         assert!(u.contains("A newer trial found by the skeptic."));
         assert!(u.ends_with(SUBMIT));
         // Without the skeptic: the note instead.
@@ -1468,6 +1545,7 @@ mod tests {
             *f = nasty.clone();
         }
         row.independence.trial_registration = Some(nasty.clone());
+        row.funding = Some(nasty.clone());
         row.n_randomised = Some(i64::MIN);
         let mut o = row.outcomes[0].clone();
         o.outcome = nasty.clone();
@@ -1519,6 +1597,13 @@ mod tests {
             MissedRct {
                 pmid: "123456789".into(),
                 why: nasty.clone(),
+            };
+            30
+        ];
+        r.ma_notes = vec![
+            MaNote {
+                pmid: "123456789".into(),
+                note: nasty.clone(),
             };
             30
         ];

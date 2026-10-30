@@ -3327,6 +3327,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 certainty: Certainty::VeryLow,
                 why: "wide CI".into(),
                 pmids: vec!["41060645".into()],
+                evidence_type: EvidenceType::RctMetaAnalysis,
             }],
             studies: vec![Study {
                 pmid: "39979619".into(),
@@ -3348,6 +3349,10 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 training: "A low-risk index case.".into(),
             },
             would_change: vec!["A multicentre blinded RCT".into()],
+            at_a_glance: None,
+            clinical_practice: None,
+            guidelines: vec![],
+            notable_findings: vec![],
         }),
         empty_reason: None,
         references: vec![
@@ -3387,6 +3392,8 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         skeptic: None,
         evidence: vec![],
         notes: vec![],
+        untraced: vec![],
+        notable_code: vec![],
     };
     serde_json::to_value(a).unwrap()
 }
@@ -3631,6 +3638,8 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
             pmids: vec!["41060645".into(), "39979619".into(), "12345678".into()],
             note: "same group".into(),
         }],
+        ma_notes: vec![],
+        spans: vec![],
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3638,6 +3647,11 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         verified_quotes: 3,
         numbers_dropped: 1,
         unverified_outcomes: vec![],
+        numbers_unverified: 0,
+        unverified_details: vec![],
+        funding: None,
+        funding_checked: false,
+        spans: vec![],
     }];
     a.notes = vec![
         "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
@@ -3668,4 +3682,107 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
     assert!(m.contains("Extraction stopped at the Full limit"));
     // The box comes before the references.
     assert!(m.find("Challenged by the skeptic").unwrap() < m.find(">References<").unwrap());
+}
+
+// ---------- Phase 3 Stage 4: refine the answer, flag, never delete ----------
+
+/// Stage 4 items 1, 3 and 4: the guidelines section (the writer's, then the
+/// skeptic's verified quotes it did not list), funding in the trials
+/// table's appraisal, and the skeptic's meta-analysis pool notes, escaped.
+#[tokio::test]
+async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.guidelines = vec![GuidelineV3 {
+        pmid: Some("41060645".into()),
+        body: "European <b>Hernia</b> Society".into(),
+        year: Some(2023),
+        statement: "Either approach is acceptable [41060645].".into(),
+    }];
+    let mut second = w.studies[0].clone();
+    second.pmid = "41060645".into();
+    w.studies.push(second);
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![
+            SkepticItem {
+                pmid: "41060645".into(),
+                text: "EHS".into(),
+                quote: Some("already listed by the writer".into()),
+            },
+            SkepticItem {
+                pmid: "39979619".into(),
+                text: "ACG".into(),
+                quote: Some("We recommend <i>POEM</i> or LHM.".into()),
+            },
+        ],
+        overlaps: vec![],
+        ma_notes: vec![SkepticItem {
+            pmid: "39979619".into(),
+            text: "Its 7-RCT pool counts one observational study as an RCT.".into(),
+            quote: None,
+        }],
+        spans: vec![],
+    });
+    a.evidence = vec![
+        EvidenceV3 {
+            pmid: "39979619".into(),
+            text: "abstract only".into(),
+            verified_quotes: 2,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: None,
+            funding_checked: true,
+            spans: vec![],
+        },
+        EvidenceV3 {
+            pmid: "41060645".into(),
+            text: "full text".into(),
+            verified_quotes: 2,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: Some("Intuitive <script>x</script> Surgical".into()),
+            funding_checked: true,
+            spans: vec![],
+        },
+    ];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("Guidelines and consensus statements"), "{m}");
+    assert!(m.contains(
+        "European &lt;b&gt;Hernia&lt;/b&gt; Society (2023): Either approach is acceptable"
+    ));
+    let section =
+        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    assert!(
+        section
+            .contains("ACG \u{2014} \u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"),
+        "{section}"
+    );
+    assert!(
+        !section.contains("EHS \u{2014}"),
+        "a skeptic guideline the writer listed is not repeated there"
+    );
+    assert!(m.contains("Funding: not stated in the abstract"));
+    assert!(!m.contains("<script>x"));
+    assert!(m.contains("Funding: Intuitive &lt;script&gt;x&lt;/script&gt; Surgical"));
+    assert!(m.contains("What the meta-analyses pooled"));
+    assert!(m.contains("Its 7-RCT pool counts one observational study as an RCT."));
+    // The guidelines come after the conflicts and before applicability.
+    let g = m.find("Guidelines and consensus statements").unwrap();
+    assert!(m.find("Conflicting evidence").unwrap() < g);
+    assert!(g < m.find(">Applicability<").unwrap());
 }

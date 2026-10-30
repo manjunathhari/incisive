@@ -24,7 +24,9 @@ use crate::agent::answer::{
     mode_label, render_text, rerun_href, screened_text, show_insufficient, stopped_text,
     unavailable_text,
 };
-use crate::agent::answer_v3::{AnswerV3, ReferenceV3, Segment, WrittenAnswer, split_citations};
+use crate::agent::answer_v3::{
+    AnswerV3, EvidenceV3, ReferenceV3, Segment, SkepticItem, WrittenAnswer, split_citations,
+};
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
@@ -704,7 +706,9 @@ fn run_view(v: RunView) -> impl IntoView {
     }
 }
 
-/// A stored answer, by format.
+/// A stored answer, by format. Short-lived (one per page render), so the
+/// size difference between the variants does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Body {
     V2(Answer),
     V3(AnswerV3),
@@ -971,9 +975,36 @@ fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
 fn written_v3_view(
     w: WrittenAnswer,
     refs: &std::collections::HashMap<String, u16>,
-    evidence: &std::collections::HashMap<String, String>,
+    evidence: &std::collections::HashMap<String, EvidenceV3>,
+    skeptic_guidelines: Vec<SkepticItem>,
 ) -> impl IntoView {
     let full = !evidence.is_empty();
+    // Guidelines (Stage 4 item 1): the writer's, then the skeptic's verified
+    // guideline quotes the writer did not list.
+    let mut guidelines: Vec<(String, Option<String>)> = w
+        .guidelines
+        .iter()
+        .map(|g| {
+            let head = match g.year {
+                Some(y) => format!("{} ({y})", g.body),
+                None => g.body.clone(),
+            };
+            (format!("{head}: {}", g.statement), g.pmid.clone())
+        })
+        .collect();
+    for g in skeptic_guidelines {
+        if w.guidelines
+            .iter()
+            .any(|x| x.pmid.as_deref() == Some(g.pmid.as_str()))
+        {
+            continue;
+        }
+        let text = match &g.quote {
+            Some(q) => format!("{} \u{2014} \u{201c}{q}\u{201d}", g.text),
+            None => g.text.clone(),
+        };
+        guidelines.push((text, Some(g.pmid)));
+    }
     let c = w.bottom_line.certainty;
     view! {
         <h3>"Bottom line"</h3>
@@ -1041,12 +1072,11 @@ fn written_v3_view(
                                 .into_iter()
                                 .map(|s| {
                                     let n = refs.get(&s.pmid).copied();
+                                    let e = evidence.get(s.pmid.trim());
                                     let checked = full.then(|| {
-                                        evidence
-                                            .get(s.pmid.trim())
-                                            .cloned()
-                                            .unwrap_or_else(|| "not extracted".to_string())
+                                        e.map_or_else(|| "not extracted".to_string(), evidence_line)
                                     });
+                                    let funding = e.and_then(funding_line);
                                     let design = match s.n {
                                         Some(n) => format!("{} \u{b7} n = {n} \u{b7} {}", s.design, s.setting),
                                         None => format!("{} \u{b7} {}", s.design, s.setting),
@@ -1060,7 +1090,10 @@ fn written_v3_view(
                                             <td>{cited(&design, refs)}</td>
                                             <td>{cited(&s.comparison, refs)}</td>
                                             <td>{cited(&s.key_results, refs)}</td>
-                                            <td>{cited(&s.appraisal, refs)}</td>
+                                            <td>
+                                                {cited(&s.appraisal, refs)}
+                                                {funding.map(|f| view! { <br /><span class="conf">{f}</span> })}
+                                            </td>
                                             {checked.map(|c| view! { <td>{c}</td> })}
                                         </tr>
                                     }
@@ -1088,6 +1121,24 @@ fn written_v3_view(
                 .into_any()
         }}
 
+        {(!guidelines.is_empty()).then(|| view! {
+            <h3>"Guidelines and consensus statements"</h3>
+            <ul>
+                {guidelines
+                    .into_iter()
+                    .map(|(t, p)| {
+                        let n = p.as_ref().and_then(|p| refs.get(p).copied());
+                        view! {
+                            <li>
+                                {cited(&t, refs)}
+                                {n.map(|n| view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> })}
+                            </li>
+                        }
+                    })
+                    .collect_view()}
+            </ul>
+        })}
+
         <h3>"Applicability"</h3>
         <dl>
             <dt>"Case mix"</dt><dd>{cited(&w.applicability.case_mix, refs)}</dd>
@@ -1103,6 +1154,36 @@ fn written_v3_view(
                 .collect_view()}
         </ul>
     }
+}
+
+/// What the extractor read for a study and how many quotes it verified.
+fn evidence_line(e: &EvidenceV3) -> String {
+    if e.text == "not extracted" {
+        return "not extracted (abstract)".to_string();
+    }
+    format!(
+        "{} \u{b7} {} verified {}",
+        e.text,
+        e.verified_quotes,
+        if e.verified_quotes == 1 {
+            "quote"
+        } else {
+            "quotes"
+        }
+    )
+}
+
+/// "Funding: …" from the extracted row (Stage 4 item 3), when it was
+/// looked for.
+fn funding_line(e: &EvidenceV3) -> Option<String> {
+    if !e.funding_checked {
+        return None;
+    }
+    Some(match &e.funding {
+        Some(f) => format!("Funding: {f}"),
+        None if e.text == "full text" => "Funding: not stated in the text".to_string(),
+        None => "Funding: not stated in the abstract".to_string(),
+    })
 }
 
 /// The skeptic's review (Full): verdict, caveats, overlaps, missed trials,
@@ -1134,6 +1215,7 @@ fn skeptic_v3_view(
         .map(|o| line(o.note.clone(), o.pmids.clone()))
         .collect();
     let missed: Vec<(String, Vec<String>)> = k.missed_rcts.iter().map(quoted).collect();
+    let pooled: Vec<(String, Vec<String>)> = k.ma_notes.iter().map(quoted).collect();
     // Each with its verified quote (review 2).
     let against: Vec<(String, Vec<String>)> = k
         .contradicting
@@ -1173,6 +1255,7 @@ fn skeptic_v3_view(
             {list("Caveats", caveats)}
             {list("Not independent", overlaps)}
             {list("Trials the search missed", missed)}
+            {list("What the meta-analyses pooled", pooled)}
             {list("Evidence against, and guidelines", against)}
         </section>
     }
@@ -1215,30 +1298,20 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         ));
     }
     let n_searches = a.searches.len();
-    // Full: per study, what the extractor read and how many quotes it
-    // verified.
-    let evidence: std::collections::HashMap<String, String> = a
+    // Full: per study, what the extractor read and checked.
+    let evidence: std::collections::HashMap<String, EvidenceV3> = a
         .evidence
         .iter()
-        .map(|e| {
-            let line = if e.text == "not extracted" {
-                "not extracted (abstract)".to_string()
-            } else {
-                format!(
-                    "{} \u{b7} {} verified {}",
-                    e.text,
-                    e.verified_quotes,
-                    if e.verified_quotes == 1 {
-                        "quote"
-                    } else {
-                        "quotes"
-                    }
-                )
-            };
-            (e.pmid.clone(), line)
-        })
+        .map(|e| (e.pmid.clone(), e.clone()))
         .collect();
-    let written = a.answer.map(|w| written_v3_view(w, &refs, &evidence));
+    let skeptic_guidelines = a
+        .skeptic
+        .as_ref()
+        .map(|k| k.guidelines.clone())
+        .unwrap_or_default();
+    let written = a
+        .answer
+        .map(|w| written_v3_view(w, &refs, &evidence, skeptic_guidelines));
     let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
     let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
