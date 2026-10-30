@@ -262,17 +262,23 @@ const BAD_BEFORE: &[char] = &[
 /// Characters a quote may start right after (the clause starts).
 const CLAUSE_OPENERS: &[char] = &['.', ';', ':', '(', '['];
 
-/// A source section prepared for matching.
-struct Section {
+/// A source section prepared for matching (also the Phase 3 extractor's).
+pub(crate) struct Section {
     /// The section exactly as sent (neutralised).
     sent: String,
     norm: Mapped,
 }
 
 impl Section {
-    fn new(sent: String) -> Section {
+    pub(crate) fn new(sent: String) -> Section {
         let norm = normalise_mapped(&sent);
         Section { sent, norm }
+    }
+
+    /// Characters of the section as sent.
+    #[cfg(test)]
+    pub(crate) fn sent_len(&self) -> usize {
+        self.sent.chars().count()
     }
 
     fn starts_clause(&self, at: usize) -> bool {
@@ -311,7 +317,7 @@ impl Section {
 
     /// The span of `sent` at the first properly bounded occurrence of the
     /// normalised quote `q` (non-empty, trimmed).
-    fn find(&self, q: &str) -> Option<&str> {
+    pub(crate) fn find(&self, q: &str) -> Option<&str> {
         self.norm.text.match_indices(q).find_map(|(at, _)| {
             let end = at + q.len();
             (self.starts_clause(at) && self.bounded_before(at) && self.bounded_after(end)).then(
@@ -325,7 +331,7 @@ impl Section {
     }
 }
 
-fn quote_key(quote: &str) -> Option<String> {
+pub(crate) fn quote_key(quote: &str) -> Option<String> {
     let q = normalise(quote);
     let len = q.chars().count();
     (MIN_QUOTE..=MAX_QUOTE).contains(&len).then_some(q)
@@ -359,7 +365,7 @@ static THOUSANDS: LazyLock<Regex> =
 /// middle-dot decimal is one number. A `-` right after a digit or `%` is a
 /// range dash, not a sign; a comma before exactly three final digits is a
 /// thousands separator; a leading `.` reads as `0.` (".52" is 0.52).
-fn numbers(s: &str) -> Vec<String> {
+pub(crate) fn numbers(s: &str) -> Vec<String> {
     let s = normalise(s);
     NUMBER
         .find_iter(&s)
@@ -465,7 +471,7 @@ pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
 });
 
 /// A section label: lower-case ASCII letters only.
-fn label(name: &str) -> String {
+pub(crate) fn label(name: &str) -> String {
     let l: String = name
         .chars()
         .filter(char::is_ascii_alphabetic)
@@ -476,7 +482,7 @@ fn label(name: &str) -> String {
 }
 
 /// Order in which sections get room under [`MAX_TEXT`].
-fn priority(label: &str) -> u8 {
+pub(crate) fn priority(label: &str) -> u8 {
     match label {
         "abstract" => 0,
         "results" => 1,
@@ -488,7 +494,7 @@ fn priority(label: &str) -> u8 {
 
 /// `text` cut to at most `max` characters, at its last whitespace (empty when
 /// a cut is needed and there is none).
-fn cut(text: &str, max: usize) -> &str {
+pub(crate) fn cut(text: &str, max: usize) -> &str {
     match text.char_indices().nth(max) {
         None => text,
         Some((at, c)) if c.is_whitespace() => text[..at].trim_end(),

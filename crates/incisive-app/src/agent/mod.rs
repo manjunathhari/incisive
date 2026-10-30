@@ -16,6 +16,7 @@ pub mod answer_v3;
 mod bounded;
 pub mod check;
 pub mod extract;
+pub mod extractor;
 pub mod frame;
 pub mod llm;
 mod pipeline;
@@ -219,6 +220,31 @@ pub(crate) async fn add_line(ctx: &RunContext, kind: StepKind, line: &str) {
     {
         tracing::warn!(run_id = %ctx.run_id, step = kind.as_str(), "step line not stored");
     }
+}
+
+/// A writer of progress lines for steps whose items settle in a
+/// synchronous callback (the bounded runner): lines sent are stored in
+/// order (each cut to [`MAX_STEP_LINE`]) by one task, which ends once the
+/// sender is dropped; await it to know every line is stored. A failed write
+/// is logged by kind only.
+pub(crate) fn line_writer(
+    ctx: &RunContext,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<(StepKind, String)>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(StepKind, String)>();
+    let pool = ctx.state.pool.clone();
+    let run_id = ctx.run_id;
+    let handle = tokio::spawn(async move {
+        while let Some((kind, line)) = rx.recv().await {
+            let line = clip(&line, MAX_STEP_LINE);
+            if store::add_step(&pool, run_id, kind, &line).await.is_err() {
+                tracing::warn!(%run_id, step = kind.as_str(), "step line not stored");
+            }
+        }
+    });
+    (tx, handle)
 }
 
 /// What the pipeline produced.

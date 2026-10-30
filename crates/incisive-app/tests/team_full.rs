@@ -1,0 +1,449 @@
+//! Phase 3 Stage 3: Full mode from the evidence team (researcher →
+//! extractor ∥ skeptic → writer → stored AnswerV3), with a scripted Claude
+//! and wiremock literature (no network). Needs `TEST_DATABASE_URL`
+//! (skipped when unset).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use claude_client::{ContentBlock, MessagesRequest, StopReason, Usage};
+use incisive_app::agent::extractor::{self, StudyRef, TextKind};
+use incisive_app::agent::llm::{LlmClient, ScriptedLlm};
+use incisive_app::agent::tools::lit::LitTools;
+use incisive_app::agent::{AgentLlm, Literature, RunContext};
+use incisive_app::db::{lazy_pool, migrate};
+use incisive_app::gate::OfflineClassifier;
+use incisive_app::identity::{IapVerifier, JwkSource};
+use incisive_app::lit::Paper;
+use incisive_app::lit::europepmc::{EuropePmc, full_text_from_xml};
+use incisive_app::lit::http::{AllowlistedClient, OaPolicy};
+use incisive_app::lit::pubmed::PubMed;
+use incisive_app::runs::budget::RunBudget;
+use incisive_app::runs::store::{create_run, get_run_for_user};
+use incisive_app::runs::worker::{CancelFlag, WorkerHandle};
+use incisive_app::runs::{DepthSettings, Engine, RunMode, RunStatus, RunsConfig, StepLine};
+use incisive_app::server::AppState;
+use incisive_app::spend::{CapCheck, CapsConfig, Prices, reserve};
+use secrecy::SecretString;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const MODEL: &str = "m-test";
+const QUESTION: &str = "In adults with a primary inguinal hernia, does mesh type change chronic pain after laparoscopic repair?";
+const ESEARCH: &str = "/entrez/eutils/esearch.fcgi";
+const ESUMMARY: &str = "/entrez/eutils/esummary.fcgi";
+const EFETCH: &str = "/entrez/eutils/efetch.fcgi";
+const ELINK: &str = "/entrez/eutils/elink.fcgi";
+const EPMC_SEARCH: &str = "/europepmc/webservices/rest/search";
+/// In the hernia fixtures; A has a PMC full text in this server.
+const SEEN_A: &str = "41060645";
+const PMC_A: &str = "PMC12509081";
+const SEEN_B: &str = "39979619";
+const SEEN_C: &str = "35777031";
+const UNSEEN: &str = "12345678";
+
+fn usage(i: u32, o: u32) -> Usage {
+    Usage {
+        input_tokens: i,
+        output_tokens: o,
+    }
+}
+
+fn u() -> Usage {
+    usage(1000, 200)
+}
+
+fn prices() -> Prices {
+    Prices::from_json(
+        r#"{"m-test": {"input": 1.0, "output": 5.0}, "claude-opus-5-5": {"input": 4.0, "output": 20.0}, "claude-sonnet-5-5": {"input": 2.0, "output": 10.0}}"#,
+    )
+    .unwrap()
+}
+
+fn lit_fixture(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/tests/fixtures/lit/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+async fn pool() -> Option<PgPool> {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        eprintln!("SKIP: TEST_DATABASE_URL not set");
+        return None;
+    };
+    let pool = lazy_pool(&SecretString::from(url)).expect("lazy pool");
+    migrate(&pool).await.expect("migrate");
+    Some(pool)
+}
+
+fn literature(server: &MockServer) -> Arc<Literature> {
+    let oa = OaPolicy::default();
+    let client = AllowlistedClient::new("Incisive/test", oa.clone())
+        .with_base_override(server.uri())
+        .with_retry_backoff(Duration::from_millis(1));
+    Arc::new(Literature {
+        pubmed: PubMed::new(client.clone(), None).with_min_interval(Duration::ZERO),
+        epmc: EuropePmc::new(client, oa),
+    })
+}
+
+async fn mount(server: &MockServer, route: &str, status: u16, body: String) {
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body))
+        .mount(server)
+        .await;
+}
+
+/// PubMed hernia fixtures (esearch count 327, five RCT records with
+/// abstracts), and a PMC full text for study A (the fixture XML); every
+/// other full text and Europe PMC search fail.
+async fn hernia_server() -> MockServer {
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        ESEARCH,
+        200,
+        lit_fixture("pubmed_esearch_hernia.json"),
+    )
+    .await;
+    mount(
+        &server,
+        ESUMMARY,
+        200,
+        lit_fixture("pubmed_esummary_hernia.json"),
+    )
+    .await;
+    mount(
+        &server,
+        EFETCH,
+        200,
+        lit_fixture("pubmed_efetch_hernia.xml"),
+    )
+    .await;
+    mount(&server, ELINK, 500, String::new()).await;
+    mount(&server, EPMC_SEARCH, 500, String::new()).await;
+    mount(
+        &server,
+        &format!("/europepmc/webservices/rest/{PMC_A}/fullTextXML"),
+        200,
+        lit_fixture("epmc_fulltext.xml"),
+    )
+    .await;
+    server
+}
+
+fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
+    AppState {
+        pool,
+        verifier: Arc::new(IapVerifier::new(
+            "aud".into(),
+            JwkSource::Static(serde_json::from_str(r#"{"keys":[]}"#).unwrap()),
+        )),
+        gate: Arc::new(OfflineClassifier),
+        prices: prices(),
+        usd_inr: 88.0,
+        caps: CapsConfig {
+            global_monthly_paise: i64::MAX / 4,
+        },
+        gate_model: MODEL.into(),
+        dev_mode: true,
+        runs: RunsConfig::default(),
+        quick_engine: Engine::Team,
+        full_engine: Engine::Team,
+        worker: WorkerHandle::default(),
+        llm: None,
+        lit,
+    }
+}
+
+fn agent_llm(llm: Arc<dyn LlmClient>, model: &str) -> Arc<AgentLlm> {
+    incisive_app::agent::testing::agent_llm(llm, model)
+}
+
+async fn new_user(pool: &PgPool) -> (i64, incisive_app::identity::User) {
+    let email = format!("full-{}@example.com", Uuid::new_v4());
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise) \
+         VALUES ($1, 'T', 'surgeon', 1000000) RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let user = incisive_app::identity::find_user(pool, &email)
+        .await
+        .unwrap()
+        .unwrap();
+    (uid, user)
+}
+
+/// A running Full run over `lit` and `llm`, `limit` reserved.
+async fn full_ctx(
+    pool: &PgPool,
+    lit: Arc<Literature>,
+    llm: Arc<AgentLlm>,
+    limit: i64,
+    settings: DepthSettings,
+) -> (RunContext, i64) {
+    let (uid, user) = new_user(pool).await;
+    let run = create_run(pool, uid, QUESTION, RunMode::Focused, limit)
+        .await
+        .unwrap()
+        .unwrap();
+    let caps = CapsConfig {
+        global_monthly_paise: i64::MAX / 4,
+    };
+    let c = reserve(pool, &user, &caps, limit, run, "run")
+        .await
+        .unwrap();
+    assert!(matches!(c, CapCheck::Ok { .. }));
+    incisive_app::runs::store::set_status(pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    let budget = Arc::new(
+        RunBudget::new(run, uid, limit, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s),
+    );
+    let ctx = RunContext {
+        state: app_state(pool.clone(), lit.clone()),
+        llm,
+        lit,
+        run_id: run,
+        user,
+        question: QUESTION.to_string(),
+        mode: RunMode::Focused,
+        settings,
+        budget,
+        cancel: CancelFlag::default(),
+    };
+    (ctx, uid)
+}
+
+async fn steps_of(ctx: &RunContext, uid: i64) -> Vec<StepLine> {
+    get_run_for_user(&ctx.state.pool, uid, ctx.run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .steps
+}
+
+fn lines(steps: &[StepLine]) -> Vec<String> {
+    steps.iter().map(|s| s.line.clone()).collect()
+}
+
+async fn charges(pool: &PgPool, uid: i64) -> Vec<i64> {
+    sqlx::query_scalar(
+        "SELECT paise FROM incisive.spend WHERE user_id = $1 AND kind = 'charge' ORDER BY id",
+    )
+    .bind(uid)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Wait (up to 5 s) for `n` charges to be booked.
+async fn charges_settle(pool: &PgPool, uid: i64, n: usize) -> Vec<i64> {
+    for _ in 0..500 {
+        let c = charges(pool, uid).await;
+        if c.len() >= n {
+            return c;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    charges(pool, uid).await
+}
+
+fn request_user_text(r: &MessagesRequest) -> String {
+    r.messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The fetched records for these PMIDs (cache, then efetch).
+async fn papers(ctx: &RunContext, ids: &[&str]) -> Vec<StudyRef> {
+    let lit = LitTools::new(
+        ctx.lit.clone(),
+        ctx.state.pool.clone(),
+        ctx.run_id,
+        QUESTION,
+    );
+    let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+    let (found, _) = lit.fetch_papers(&ids, "test").await.unwrap();
+    ids.iter()
+        .map(|id| StudyRef {
+            pmid: id.clone(),
+            paper: found
+                .iter()
+                .find(|p| p.pmid.as_deref() == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("{id} not fetched")),
+        })
+        .collect()
+}
+
+/// The first sentence (up to its full stop) of `text` that contains a digit
+/// and starts a clause.
+fn sentence_with_digit(text: &str) -> String {
+    text.split(". ")
+        .map(str::trim)
+        .find(|s| s.chars().any(|c| c.is_ascii_digit()) && s.len() > 30 && s.len() < 400)
+        .map(|s| format!("{}.", s.trim_end_matches('.')))
+        .expect("a sentence with a digit")
+}
+
+/// A first number of `s`, as the extractor would report it.
+fn first_number(s: &str) -> f64 {
+    let re = regex::Regex::new(r"\d+(?:\.\d+)?").unwrap();
+    re.find(s).unwrap().as_str().parse().unwrap()
+}
+
+fn num(value: f64) -> Value {
+    json!({"label": "n", "value": value, "unit": null, "arm": null, "ci_low": null, "ci_high": null, "p": null})
+}
+
+fn row(outcomes: Vec<Value>) -> Value {
+    json!({
+        "design": "RCT", "n_randomised": 120, "n_analysed": 110, "setting": "university hospital",
+        "centres": "single", "country": "Denmark", "population": "adults", "intervention": "x",
+        "comparator": "y", "follow_up": "1 year", "blinding": "patient", "primary_endpoint": "pain",
+        "powered_for_primary": true, "surgeon_experience": "experienced",
+        "outcomes": outcomes,
+        "appraisal": {"bias": "open label", "power": "small", "learning_curve": "expert", "applicability": "lean"},
+        "independence": {"trial_registration": "NCT0001", "group_or_centre": "Aabenraa", "note": "same group as another trial"}
+    })
+}
+
+fn outcome(name: &str, quote: &str, numbers: Vec<Value>) -> Value {
+    json!({"outcome": name, "effect_text": format!("{name} effect"), "numbers": numbers, "quote": quote, "source": "abstract"})
+}
+
+// ---------- T7: the extractor ----------
+
+/// Study A is read from its PMC full text, study B from its abstract. A's
+/// first quote is found, but one of its numbers is not in it (dropped); A's
+/// second quote fails and is fixed by the correction; B's quote fails twice
+/// and is dropped with its number. Every call is charged.
+#[tokio::test]
+async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let ft = full_text_from_xml(&lit_fixture("epmc_fulltext.xml")).unwrap();
+    let results = ft
+        .sections
+        .iter()
+        .find(|(n, _)| n == "results")
+        .map(|(_, t)| t.clone())
+        .expect("results section");
+    let a1 = sentence_with_digit(&results);
+    let a1_n = first_number(&a1);
+    // A second sentence of the full text, for the correction.
+    let a2 = sentence_with_digit(&results[results.find(&a1[..a1.len() - 1]).unwrap() + a1.len()..]);
+    let a2_n = first_number(&a2);
+
+    let llm = ScriptedLlm::new()
+        // Corrections first (their needles only appear in correction prompts).
+        .when("index 1: Outcome A2 (quote given")
+        .reply_json(json!({"corrections": [{"index": 1, "quote": a2}]}), u())
+        .when("index 0: Outcome B1 (quote given")
+        .reply_json(
+            json!({"corrections": [{"index": 0, "quote": "Still not a sentence of the paper at all."}]}),
+            u(),
+        )
+        .when(&format!("Study PMID {SEEN_A}:"))
+        .reply_json(
+            row(vec![
+                outcome("Outcome A1", &a1, vec![num(a1_n), num(987_654.0)]),
+                outcome("Outcome A2", "A paraphrase that is not in the paper.", vec![num(a2_n)]),
+            ]),
+            u(),
+        )
+        .when(&format!("Study PMID {SEEN_B}:"))
+        .reply_json(
+            row(vec![outcome("Outcome B1", "Self-fixating mesh was better by 50%.", vec![num(50.0)])]),
+            u(),
+        );
+    let llm = Arc::new(llm);
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let studies = papers(&ctx, &[SEEN_A, SEEN_B]).await;
+    assert_eq!(studies[0].paper.pmcid.as_deref(), Some(PMC_A));
+    let fts = extractor::fetch_full_texts(&ctx, &ctx.lit, &studies)
+        .await
+        .unwrap();
+    assert!(fts[0].is_some(), "A's full text from Europe PMC");
+    assert!(fts[1].is_none(), "B's full text fails: abstract");
+    let x = extractor::extract_rows(&ctx, &ctx.llm, &studies, &fts)
+        .await
+        .unwrap();
+
+    assert_eq!(x.rows.len(), 2);
+    let a = &x.rows[0];
+    assert_eq!(a.pmid, SEEN_A);
+    assert_eq!(a.text, TextKind::FullText);
+    assert_eq!(a.outcomes_verified, 2);
+    assert_eq!(a.outcomes[0].quote, a1);
+    assert_eq!(a.outcomes[0].numbers.len(), 1, "987654 is not in the quote");
+    assert_eq!(a.outcomes[1].quote, a2, "fixed by the correction");
+    assert_eq!(a.outcomes[1].numbers.len(), 1);
+    assert_eq!((a.numbers_dropped, a.corrections), (1, 1));
+    assert!(a.unverified_outcomes.is_empty());
+    let b = &x.rows[1];
+    assert_eq!(b.text, TextKind::Abstract);
+    assert_eq!(b.outcomes_verified, 0);
+    assert_eq!(b.unverified_outcomes, ["Outcome B1"]);
+    assert_eq!((b.numbers_dropped, b.corrections), (1, 1));
+    assert_eq!(b.independence.group_or_centre, "Aabenraa");
+    assert_eq!((x.outcomes_verified(), x.numbers_dropped()), (2, 2));
+
+    // Requests: the extractor model, low effort, format, no tools; the
+    // study's text wrapped; the question as data.
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 4, "two rows and two corrections");
+    for r in &reqs {
+        assert!(r.tools.is_empty());
+        let oc = r.output_config.as_ref().unwrap();
+        assert!(oc.format.is_some());
+        assert_eq!(oc.effort, Some(claude_client::Effort::Low));
+        assert_eq!(r.max_tokens, DepthSettings::FOCUSED.extractor_max_tokens);
+        assert!(r.system.as_deref().unwrap().contains("<source> tags"));
+    }
+    let first_a = reqs
+        .iter()
+        .find(|r| {
+            let t = request_user_text(r);
+            t.contains(&format!("Study PMID {SEEN_A}:")) && !t.contains("were not found")
+        })
+        .unwrap();
+    let t = request_user_text(first_a);
+    assert!(t.contains(&format!("<source id=\"study-{SEEN_A}\">")));
+    assert!(t.contains("Text: full text"));
+    assert!(t.contains("[results]"));
+    assert!(t.contains(&format!("<question>\n{QUESTION}\n</question>")));
+
+    assert_eq!(charges_settle(&pool, uid, 4).await.len(), 4);
+    assert_eq!(ctx.budget.held(), 0);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert_eq!(
+        l.last().map(String::as_str),
+        Some("Extractor: 2/2 studies (2 verified outcomes, 2 numbers dropped)"),
+        "{l:?}"
+    );
+    let _ = (SEEN_C, UNSEEN, StopReason::EndTurn, Paper::clone);
+}
