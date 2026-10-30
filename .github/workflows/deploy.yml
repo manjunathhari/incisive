@@ -39,6 +39,7 @@ jobs:
           AGENT_MODELS: ${{ vars.AGENT_MODELS }}
           RUN_LIMITS: ${{ vars.RUN_LIMITS }}
           QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
+          FULL_ENGINE: ${{ vars.FULL_ENGINE }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -77,7 +78,7 @@ jobs:
             case "$v" in
               AGENT_MODELS) allowed="frame search screen extract write check researcher writer extractor skeptic"; fields="" ;;
               RUN_LIMITS) allowed="quick focused"
-                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens writer_time_allowance_s" ;;
+                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens writer_time_allowance_s review_time_allowance_s extractor_concurrency" ;;
             esac
             if ! msg=$(printf '%s' "${!v}" | python3 -c '
           import json, sys
@@ -141,6 +142,14 @@ jobs:
             ""|team|classic) ;;
             *) echo "::error::vars.QUICK_ENGINE must be team or classic (see infra/README.md section 12)"; exit 1 ;;
           esac
+          # Optional Full engine (Stage 3): the same rule. classic runs the
+          # Phase 2 Focused pipeline.
+          fe="${FULL_ENGINE#"${FULL_ENGINE%%[![:space:]]*}"}"
+          fe="${fe%"${fe##*[![:space:]]}"}"
+          case "$fe" in
+            ""|team|classic) ;;
+            *) echo "::error::vars.FULL_ENGINE must be team or classic (see infra/README.md section 12)"; exit 1 ;;
+          esac
           # Optional switches: unset, true or false (a typo must not silently mean off).
           for v in HAS_NCBI_KEY CPU_ALWAYS; do
             case "${!v//[[:space:]]/}" in
@@ -186,6 +195,7 @@ jobs:
           AGENT_MODELS: ${{ vars.AGENT_MODELS }}
           RUN_LIMITS: ${{ vars.RUN_LIMITS }}
           QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
+          FULL_ENGINE: ${{ vars.FULL_ENGINE }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -202,7 +212,7 @@ jobs:
           names = ["CLAUDE_MODEL", "IAP_AUDIENCE", "OWNER_EMAIL", "GATE_MODEL",
                    "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR", "UNPAYWALL_EMAIL"]
           # Optional: written only when set, so the app's defaults apply otherwise.
-          optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE"]
+          optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}"

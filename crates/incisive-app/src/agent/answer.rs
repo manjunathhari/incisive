@@ -233,7 +233,8 @@ pub fn date_ist(t: DateTime<Utc>) -> String {
 pub fn mode_label(m: RunMode) -> &'static str {
     match m {
         RunMode::Quick => "Quick",
-        RunMode::Focused => "Focused",
+        // Stage 3: shown as Full; stored as `focused`.
+        RunMode::Focused => "Full",
     }
 }
 

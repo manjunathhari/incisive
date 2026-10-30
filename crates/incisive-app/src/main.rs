@@ -154,6 +154,7 @@ async fn main() {
         dev_mode: config.app_env == AppEnv::Dev,
         runs: config.runs,
         quick_engine: config.quick_engine,
+        full_engine: config.full_engine,
         worker: WorkerHandle::default(),
         llm,
         lit,

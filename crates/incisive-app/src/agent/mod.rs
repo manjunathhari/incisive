@@ -50,11 +50,11 @@ use llm::{AgentModels, LlmCall, LlmClient};
 
 pub use pipeline::run_pipeline;
 
-/// The pipeline the worker runs for `ctx`: the Phase 3 evidence team for
-/// Quick runs when `QUICK_ENGINE` is `team` (the default), the Phase 2
-/// pipeline otherwise (Focused, or `classic`).
+/// The pipeline the worker runs for `ctx`: the Phase 3 evidence team when
+/// the mode's engine (`QUICK_ENGINE` for Quick, `FULL_ENGINE` for Full) is
+/// `team` (the default), the Phase 2 pipeline when it is `classic`.
 pub fn run_engine(ctx: &RunContext) -> PipelineFuture<'_> {
-    if ctx.state.quick_engine.uses_team(ctx.mode) {
+    if ctx.state.engines().uses_team(ctx.mode) {
         Box::pin(team::run_team(ctx))
     } else {
         Box::pin(run_pipeline(ctx))

@@ -334,11 +334,11 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
     )
     // Wrap-up and hard stop from the mode's time limit (RUN_LIMITS):
     // `agent_time_limit_s` when the evidence team answers the run
-    // (QUICK_ENGINE), `time_limit_s` otherwise.
-    .with_time_limit(state.runs.limits(mode, state.quick_engine).1);
-    // A team run keeps the writer's allowance at the end: research wraps up
-    // at the time limit less it.
-    if let Some(s) = state.runs.team_wrap_up_s(mode, state.quick_engine) {
+    // (QUICK_ENGINE / FULL_ENGINE), `time_limit_s` otherwise.
+    .with_time_limit(state.runs.limits(mode, state.engines()).1);
+    // A team run keeps the writer's allowance (and, Full, the review
+    // phase's) at the end: research wraps up at the time limit less them.
+    if let Some(s) = state.runs.team_wrap_up_s(mode, state.engines()) {
         budget = budget.with_wrap_up_after(Duration::from_secs(u64::from(s)));
     }
     let ctx = RunContext {

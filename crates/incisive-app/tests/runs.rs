@@ -961,6 +961,7 @@ fn app_state(pool: PgPool) -> AppState {
         runs: RunsConfig::default(),
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
+        full_engine: incisive_app::runs::Engine::Classic,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
@@ -2828,7 +2829,7 @@ fn mode_hint_text() {
     );
     assert_eq!(
         mode_hint(RunMode::Focused, 4000),
-        "Focused \u{b7} up to \u{20b9}40"
+        "Full \u{b7} up to \u{20b9}40"
     );
     // Not whole rupees: shown with paise.
     assert_eq!(
@@ -2853,7 +2854,8 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
     assert!(body.contains(r#"value="quick""#), "{body}");
     assert!(body.contains(r#"value="focused""#), "{body}");
     assert!(body.contains("Quick \u{b7} up to \u{20b9}12"), "{body}");
-    assert!(body.contains("Focused \u{b7} up to \u{20b9}40"), "{body}");
+    // Stage 3: shown as Full; the stored value is still `focused`.
+    assert!(body.contains("Full \u{b7} up to \u{20b9}40"), "{body}");
     // Focused is the one checked before the browser applies a saved choice.
     let focused = body.find(r#"value="focused""#).unwrap();
     let tag_start = body[..focused].rfind('<').unwrap();
@@ -2923,7 +2925,7 @@ async fn ssr_run_page_shows_mode_badge() {
     let (s, body) = send(router(st), api("GET", &format!("/runs/{focused}"), &email)).await;
     assert_eq!(s, StatusCode::OK);
     assert!(
-        body.contains(r#"<span class="badge mode">Focused</span>"#),
+        body.contains(r#"<span class="badge mode">Full</span>"#),
         "{body}"
     );
     assert!(!body.contains(r#"<span class="badge mode">Quick</span>"#));
@@ -3161,7 +3163,7 @@ fn deploy_workflow_wires_phase3_settings() {
         .expect("deploy step")
         .1;
     assert!(
-        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE"]"#),
+        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE"]"#),
         "QUICK_ENGINE must be an optional env var"
     );
     assert_eq!(
@@ -3513,4 +3515,53 @@ async fn ssr_empty_v3_answer_and_phase2_answers_still_render() {
     let html = markup_of(&html);
     assert!(html.contains("How I read your question"), "Phase 2 view");
     assert!(!html.contains("Outcome by outcome"));
+}
+
+/// The deploy check's FULL_ENGINE lines (from the trim to its `esac`).
+fn full_engine_check(check: &str) -> String {
+    let start = check.find("fe=").expect("FULL_ENGINE trim");
+    let end = start + check[start..].find("esac").expect("esac") + "esac".len();
+    check[start..end].to_string()
+}
+
+/// Stage 3 §0: the Full engine switch reaches the deploy like QUICK_ENGINE:
+/// optional, checked against team|classic with only the ends trimmed, and
+/// written to the env-vars file only when set.
+#[test]
+fn deploy_workflow_wires_the_full_engine() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    assert!(check.contains("FULL_ENGINE"), "check misses FULL_ENGINE");
+    assert!(
+        !check.contains("${FULL_ENGINE//[[:space:]]/}"),
+        "inner spaces must not be removed"
+    );
+    for (value, ok) in [
+        ("team", true),
+        ("  classic ", true),
+        ("", true),
+        ("tea m", false),
+        ("Classic", false),
+        ("focused", false),
+    ] {
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}\nexit 0", full_engine_check(check)))
+            .env("FULL_ENGINE", value)
+            .status()
+            .expect("bash");
+        assert_eq!(status.success(), ok, "FULL_ENGINE={value:?}");
+    }
+    assert_eq!(
+        deploy
+            .matches("FULL_ENGINE: ${{ vars.FULL_ENGINE }}")
+            .count(),
+        2,
+        "FULL_ENGINE must reach both the check and the deploy step"
+    );
 }

@@ -4,7 +4,7 @@ use secrecy::SecretString;
 use std::fmt;
 
 use crate::agent::llm::AgentModels;
-use crate::runs::{QuickEngine, RunsConfig};
+use crate::runs::{Engine, QuickEngine, RunsConfig};
 use crate::spend::Prices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,9 @@ pub struct Config {
     /// Engine for Quick runs (`QUICK_ENGINE`: `team`, the default, or
     /// `classic`, the Phase 2 pipeline). The owner's rollback switch.
     pub quick_engine: QuickEngine,
+    /// Engine for Full runs (`FULL_ENGINE`: `team`, the default, or
+    /// `classic`, the Phase 2 Focused pipeline). The owner's rollback switch.
+    pub full_engine: Engine,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -198,6 +201,14 @@ impl Config {
             })?,
         };
 
+        let full_engine = match lookup("FULL_ENGINE") {
+            None => Engine::default(),
+            Some(v) => Engine::parse(&v).ok_or_else(|| ConfigError::Invalid {
+                var: "FULL_ENGINE",
+                reason: "expected `team` or `classic`".to_string(),
+            })?,
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -272,6 +283,7 @@ impl Config {
             unpaywall_email,
             agent_models,
             quick_engine,
+            full_engine,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -574,6 +586,8 @@ mod tests {
                 extractor_max_tokens: 4000,
                 writer_max_tokens: 16000,
                 writer_time_allowance_s: 150,
+                review_time_allowance_s: 0,
+                extractor_concurrency: 3,
             }
         );
         assert_eq!(
@@ -594,6 +608,9 @@ mod tests {
                 extractor_max_tokens: 4000,
                 writer_max_tokens: 16000,
                 writer_time_allowance_s: 150,
+                // Stage 3: the Full review phase (extractor ∥ skeptic).
+                review_time_allowance_s: 120,
+                extractor_concurrency: 3,
             }
         );
 
@@ -655,6 +672,11 @@ mod tests {
             // The writer's time must leave research some time.
             r#"{"quick": {"writer_time_allowance_s": 360}}"#,
             r#"{"focused": {"writer_time_allowance_s": 900}}"#,
+            // Stage 3: the writer's and the review's time together must
+            // leave research some time; the extractor runs 1 to 8 at once.
+            r#"{"focused": {"review_time_allowance_s": 330}}"#,
+            r#"{"focused": {"extractor_concurrency": 0}}"#,
+            r#"{"focused": {"extractor_concurrency": 9}}"#,
         ] {
             let mut pairs = full();
             pairs.push(("RUN_LIMITS", bad));
@@ -776,6 +798,53 @@ mod tests {
         assert_eq!(
             Config::from_lookup(lookup(&prod)).unwrap().quick_engine,
             QuickEngine::Classic
+        );
+    }
+
+    /// Stage 3 §0: `FULL_ENGINE` is `team` (default) or `classic`, checked
+    /// like `QUICK_ENGINE`, and independent of it.
+    #[test]
+    fn full_engine_switch() {
+        use crate::runs::{Engine, QuickEngine};
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.full_engine, Engine::Team);
+        for (v, want) in [
+            ("team", Engine::Team),
+            ("classic", Engine::Classic),
+            (" classic ", Engine::Classic),
+            ("   ", Engine::Team),
+        ] {
+            let mut pairs = full();
+            pairs.push(("FULL_ENGINE", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.full_engine, want, "{v:?}");
+            assert_eq!(c.quick_engine, QuickEngine::Team, "Quick is its own switch");
+        }
+        for bad in ["Team", "CLASSIC", "phase2", "team,classic", "1"] {
+            let mut pairs = full();
+            pairs.push(("FULL_ENGINE", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "FULL_ENGINE",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(!msg.contains(bad), "the value is not echoed: {msg}");
+        }
+        let mut prod = prod_with(PROD_PRICES);
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
+        prod.push(("FULL_ENGINE", "classic"));
+        prod.push(("QUICK_ENGINE", "team"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(
+            (c.quick_engine, c.full_engine),
+            (Engine::Team, Engine::Classic)
         );
     }
 

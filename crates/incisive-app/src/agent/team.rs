@@ -194,7 +194,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .await
         .map_err(StepError::kind)?;
     let stopped = research.stopped_early();
-    if let Some(at) = research.stopped_at() {
+    if let Some(at) = research.stopped_at(ctx.mode) {
         add_line(
             ctx,
             StepKind::Note,

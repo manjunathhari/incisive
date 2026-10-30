@@ -410,7 +410,7 @@ fn AskPage() -> impl IntoView {
     }
 }
 
-/// Quick or Focused: two radio buttons drawn as a segmented control, each
+/// Quick or Full (stored as `focused`): two radio buttons drawn as a segmented control, each
 /// with its cost limit from config. The choice is remembered in this browser.
 #[component]
 fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
@@ -452,7 +452,7 @@ fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
             <legend>"Depth"</legend>
             <div class="seg">{option(RunMode::Quick)} {option(RunMode::Focused)}</div>
             <p class="hint" id="depth-hint">
-                "Quick reads abstracts only. Focused reads more papers, with free full text where available. The amount is each run's cost limit."
+                "Quick reads abstracts only. Full reads more papers, with free full text where available, and checks the evidence more deeply. The amount is each run's cost limit."
             </p>
         </fieldset>
     }

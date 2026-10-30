@@ -329,6 +329,8 @@ The global, daily and monthly caps apply as before.
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
 | `writer_max_tokens` | 16000 | 16000 | output tokens of the writer's call (its cost is reserved before research starts) |
 | `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
+| `review_time_allowance_s` | 0 | 120 | seconds kept for the Full review (extractor ∥ skeptic): research wraps up this much earlier again; with `writer_time_allowance_s` it must be below `agent_time_limit_s` |
+| `extractor_concurrency` | 3 | 3 | extractor calls in flight at once (1 to 8) |
 
 Each call's full `max_tokens` is held against the cost limit before it is made,
 so raising these makes each turn harder to fit, not more expensive in itself.
@@ -483,7 +485,23 @@ default or set; the Deploy workflow checks the defaults too.
 | `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
 | `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |
 
-**Rolling back.** Prefer `QUICK_ENGINE=classic` to rolling back the image: it needs
+**Full (Stage 3).** **Full** (shown as Full; the stored mode and the `RUN_LIMITS`
+key stay `focused`) runs the whole team: the researcher (Opus, abstracts and full
+text, up to `researcher_turns` 15), then the extractor and appraiser (Sonnet, one call
+per study, `extractor_concurrency` 3 at once) beside the skeptic (Sonnet, up to
+`skeptic_turns` 8), then the writer. A second optional variable switches it:
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `FULL_ENGINE` | no | `team` (the evidence team) or `classic` (the Phase 2 Focused pipeline) | `team` |
+
+It is checked like `QUICK_ENGINE`. Under `team` a Full run reserves
+`agent_limit_paise` (₹200) and runs under `agent_time_limit_s` (480 s, hard stop at
+540 s): research wraps up `writer_time_allowance_s + review_time_allowance_s`
+(150 + 120 s) before the time limit, the extractor and skeptic `writer_time_allowance_s`
+before it. Under `classic` it reserves `limit_paise` (₹40) and uses `time_limit_s`.
+
+**Rolling back.** Prefer `QUICK_ENGINE=classic` / `FULL_ENGINE=classic` to rolling back the image: it needs
 no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an
 `answer_version` column on `run_answers`); an older image refuses a database that
 has it and its readiness stays down, as described for Phase 2 in section 11. Phase 3
