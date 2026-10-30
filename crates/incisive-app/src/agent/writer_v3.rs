@@ -35,8 +35,8 @@ use serde_json::{Value, json};
 
 use super::answer_v3::{
     Applicability, AtAGlance, BottomLine, Certainty, ClinicalPractice, Conflict, EvidenceType,
-    GuidelineV3, IntegrityV3, NotableFinding, Number, Outcome, SearchEntry, Span, Study,
-    WrittenAnswer, citation_ranges, clean_citations, marked_runs, text_fields,
+    IntegrityV3, KeyNumber, NotableFinding, Number, Outcome, SearchEntry, Segment, Span, Study,
+    WrittenAnswer, citation_ranges, clean_citations, marked_runs, split_citations, text_fields,
 };
 use super::extractor::{
     Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind, all_allowed,
@@ -125,33 +125,28 @@ FIELDS:
 Moderate, Low, Very low.
 - outcomes: one entry per outcome the evidence covers (benefits and harms; operative time and cost when reported). \
 rct_evidence names the trials or meta-analyses; effect_text gives the effect with its numbers, cited; numbers lists each \
-of those numbers as a structured entry (value is the number itself; unit, or \"\"; arm names the group it belongs to, \
-or \"\"; ci_low and ci_high as numbers written as text when a confidence interval is given, else \"\"; p as written, or \
-\"\"; pmid of the source study); \
-certainty and why; pmids of the studies behind the row; evidence_type: what the row rests on (rct: one or more \
-randomised trials; rct_meta_analysis: a meta-analysis pooling randomised trials only; network_meta_analysis; \
-observational; mixed: more than one of these, or a meta-analysis pooling observational studies).
-- studies: one row per study: label (short name with year and journal), design, n (participants, or 0 when the \
+of those numbers as a structured entry (value is the number itself; unit; arm names the group it belongs to, or null; \
+ci_low and ci_high when a confidence interval is given, else null; p as written, or null; pmid of the source study); \
+certainty and why; pmids of the studies behind the row.
+- studies: one row per study: label (short name with year and journal), design, n (participants, or null when the \
 abstract does not state it), setting, comparison, key_results (cited), appraisal (main limitations).
 - conflicts: where studies disagree, and why they may differ.
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
 evidence means in Indian practice and the Indian cost context: say what is not known, and never invent costs, prices or \
 figures); training (what it means for training programmes, or say it has no particular bearing).
 - would_change: what new evidence would change this answer.
-- guidelines: each guideline or consensus statement among the studies provided: pmid (or \"\"), body (the issuing \
-society or group), year (or 0), statement (what it recommends, in its own words where the abstract gives them, \
-cited). Empty when none was provided; never from memory.
-- at_a_glance: about five lines for a busy clinician: verdict (one sentence), key_numbers (the 2 to 4 numbers that \
-matter most for the decision: label, value_text with the arms named, pmid of the source study), main_caveat (one \
-sentence).
-- clinical_practice, written for any clinician (not one reader): default_choice (what most patients should be offered by \
-default, given this evidence), who_may_benefit (patients or settings where the alternative may be worth it, or say the \
-evidence does not show any), counselling (what to tell patients, in plain words), cost_per_case (the per-case cost \
+- at_a_glance: ONE text of about five short lines, separated by newlines, for a busy clinician: first the \
+verdict (one sentence); then the 2 to 4 numbers that matter most, one per line as \"label: value with the arms \
+named [PMID]\"; then a line \"Main caveat: …\".
+- clinical_practice, written for any clinician (not one reader): ONE text of four labelled lines, separated by \
+newlines: \"Default choice: …\" (what most patients should be offered by \
+default, given this evidence), \"Who may benefit: …\" (patients or settings where the alternative may be worth it, or say the \
+evidence does not show any), \"Counselling: …\" (what to tell patients, in plain words), \"Cost per case: …\" (the per-case cost \
 difference as a range derived only from cost numbers in the provided abstracts, with their currency and setting, cited; say \"not known\" when \
 there are none; never convert currencies, never estimate Indian prices, never invent figures).
-- notable_findings: 3 to 5 important things noticed in the evidence that the outcome tables do not show (for example a \
+- notable_findings: ONE text of 3 to 5 lines, separated by newlines, each one important thing noticed in the evidence that the outcome tables do not show (for example a \
 study that contradicts itself, lopsided withdrawals between arms, industry funding or conflicts, a design that is not \
-what its label says), each citing its study in text and in pmids, drawn only from the records and abstracts provided.";
+what its label says), each citing its study with a [PMID] marker, drawn only from the records and abstracts provided.";
 
 /// Heads the study section of the writer's prompt.
 pub const STUDIES_HEADING: &str = "STUDIES SELECTED BY THE RESEARCHER";
@@ -159,53 +154,24 @@ const SUBMIT: &str = "Write the answer now, as JSON matching the schema.";
 
 // ---------- the schema, within the API's grammar limits ----------
 
-/// What a writer schema variant contains (Stage 4 schema fix). The live
-/// API compiles a strict schema into a grammar and refuses one that is too
-/// large ("The compiled grammar is too large"): the Stage 4 fields on top of
-/// Stage 3's nullable unions and enums crossed that line on 30 Oct.
+/// The writer schema variants (owner ruling R-S4a, 31 Oct). The live API
+/// compiles a strict schema into a grammar and refuses one that is too
+/// large. The Cloud Shell probe of 31 Oct refused every Stage 4 variant
+/// with structured additions (58 properties, 12 objects, with or without
+/// nullable unions and enums) and accepted the Stage 3 schema. So the
+/// writer keeps the Stage 3 schema exactly and adds only three top-level
+/// plain strings, parsed in code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SchemaOpts {
-    /// The Stage 4 fields (guidelines, at a glance, clinical practice,
-    /// notable findings, evidence type).
-    pub stage4_fields: bool,
-    /// Optional values as `["T","null"]` unions (Stage 3 and A). Without:
-    /// plain types and a sentinel (`""`, `0`), CI bounds as strings.
-    pub nullable: bool,
-    /// Certainty and evidence type as JSON Schema enums. Without: plain
-    /// strings, checked in code ([`parse_certainty`], [`parse_evidence_type`]).
-    pub enums: bool,
+pub enum SchemaOpts {
+    /// B: the Stage 3 schema, byte-identical (the control).
+    Stage3,
+    /// S: Stage 3 plus `at_a_glance`, `clinical_practice` and
+    /// `notable_findings` as plain strings. **Live**.
+    Stage3PlusText,
 }
 
-impl SchemaOpts {
-    /// A: the Stage 4 schema as first built (refused live, 30 Oct).
-    pub const STAGE4_FIRST: SchemaOpts = SchemaOpts {
-        stage4_fields: true,
-        nullable: true,
-        enums: true,
-    };
-    /// B: the Stage 3 schema (accepted live), the control.
-    pub const STAGE3: SchemaOpts = SchemaOpts {
-        stage4_fields: false,
-        nullable: true,
-        enums: true,
-    };
-    /// C: A without nullable unions.
-    pub const NO_NULLABLE: SchemaOpts = SchemaOpts {
-        stage4_fields: true,
-        nullable: false,
-        enums: true,
-    };
-    /// D: C without enums. **Live** ([`LIVE_SCHEMA`]).
-    pub const FLAT: SchemaOpts = SchemaOpts {
-        stage4_fields: true,
-        nullable: false,
-        enums: false,
-    };
-}
-
-/// The variant the writer sends (D): no nullable unions and no enums, so
-/// its grammar is smaller than Stage 3's although it has more fields.
-pub const LIVE_SCHEMA: SchemaOpts = SchemaOpts::FLAT;
+/// The variant the writer sends (S).
+pub const LIVE_SCHEMA: SchemaOpts = SchemaOpts::Stage3PlusText;
 
 /// The writer's JSON Schema: the live variant (see [`SchemaOpts`]).
 pub fn writer_schema() -> Value {
@@ -213,7 +179,8 @@ pub fn writer_schema() -> Value {
 }
 
 /// A writer schema variant (strict-compatible: every object
-/// `additionalProperties: false`, every property required, no ranges).
+/// `additionalProperties: false`, every property required, nullable as
+/// `["type","null"]`, no ranges).
 pub fn writer_schema_with(o: SchemaOpts) -> Value {
     fn obj(props: Value) -> Value {
         let required: Vec<String> = props
@@ -225,77 +192,34 @@ pub fn writer_schema_with(o: SchemaOpts) -> Value {
         json!({"type": "object", "additionalProperties": false, "properties": props, "required": required})
     }
     let s = json!({"type": "string"});
-    let int = json!({"type": "integer"});
-    let (s_opt, n_opt, i_opt) = if o.nullable {
-        (
-            json!({"type": ["string", "null"]}),
-            json!({"type": ["number", "null"]}),
-            json!({"type": ["integer", "null"]}),
-        )
-    } else {
-        // Sentinels: "" for text and CI bounds (written as text), 0 for n
-        // and year.
-        (s.clone(), s.clone(), int.clone())
-    };
-    let certainty = if o.enums {
-        json!({"type": "string", "enum": Certainty::ALL})
-    } else {
-        s.clone()
-    };
+    let s_null = json!({"type": ["string", "null"]});
+    let n_null = json!({"type": ["number", "null"]});
+    let certainty = json!({"type": "string", "enum": Certainty::ALL});
     let pmids = json!({"type": "array", "items": {"type": "string"}});
     let number = obj(json!({
-        "label": s, "value": {"type": "number"}, "unit": s_opt, "arm": s_opt,
-        "ci_low": n_opt, "ci_high": n_opt, "p": s_opt, "pmid": s
+        "label": s, "value": {"type": "number"}, "unit": s_null, "arm": s_null,
+        "ci_low": n_null, "ci_high": n_null, "p": s_null, "pmid": s
     }));
-    let mut outcome = json!({
-        "outcome": s, "rct_evidence": s, "effect_text": s,
-        "numbers": {"type": "array", "items": number},
-        "certainty": certainty, "why": s, "pmids": pmids
-    });
-    if o.stage4_fields {
-        outcome["evidence_type"] = if o.enums {
-            json!({"type": "string", "enum": EvidenceType::ALL})
-        } else {
-            s.clone()
-        };
-    }
     let mut top = json!({
         "bottom_line": obj(json!({"text": s, "certainty": certainty, "certainty_reason": s})),
-        "outcomes": {"type": "array", "items": obj(outcome)},
+        "outcomes": {"type": "array", "items": obj(json!({
+            "outcome": s, "rct_evidence": s, "effect_text": s,
+            "numbers": {"type": "array", "items": number},
+            "certainty": certainty, "why": s, "pmids": pmids
+        }))},
         "studies": {"type": "array", "items": obj(json!({
-            "pmid": s, "label": s, "design": s, "n": i_opt,
+            "pmid": s, "label": s, "design": s, "n": {"type": ["integer", "null"]},
             "setting": s, "comparison": s, "key_results": s, "appraisal": s
         }))},
         "conflicts": {"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))},
         "applicability": obj(json!({"case_mix": s, "india_cost_context": s, "training": s})),
         "would_change": {"type": "array", "items": s}
     });
-    if o.stage4_fields {
+    if o == SchemaOpts::Stage3PlusText {
         let t = top.as_object_mut().expect("object");
-        t.insert(
-            "guidelines".into(),
-            json!({"type": "array", "items": obj(json!({
-                "pmid": s_opt, "body": s, "year": i_opt, "statement": s
-            }))}),
-        );
-        t.insert(
-            "at_a_glance".into(),
-            obj(json!({
-                "verdict": s,
-                "key_numbers": {"type": "array", "items": obj(json!({"label": s, "value_text": s, "pmid": s}))},
-                "main_caveat": s
-            })),
-        );
-        t.insert(
-            "clinical_practice".into(),
-            obj(json!({
-                "default_choice": s, "who_may_benefit": s, "counselling": s, "cost_per_case": s
-            })),
-        );
-        t.insert(
-            "notable_findings".into(),
-            json!({"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))}),
-        );
+        for f in ["at_a_glance", "clinical_practice", "notable_findings"] {
+            t.insert(f.into(), s.clone());
+        }
     }
     obj(top)
 }
@@ -368,24 +292,6 @@ pub fn parse_certainty(s: &str) -> Option<Certainty> {
     }
 }
 
-/// An evidence type, as the schema's words (case and separators ignored).
-/// `None` when it is none of them.
-pub fn parse_evidence_type(s: &str) -> Option<EvidenceType> {
-    let k: String = s
-        .chars()
-        .filter(char::is_ascii_alphabetic)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    match k.as_str() {
-        "rct" | "rcts" => Some(EvidenceType::Rct),
-        "rctmetaanalysis" => Some(EvidenceType::RctMetaAnalysis),
-        "networkmetaanalysis" => Some(EvidenceType::NetworkMetaAnalysis),
-        "observational" => Some(EvidenceType::Observational),
-        "mixed" => Some(EvidenceType::Mixed),
-        _ => None,
-    }
-}
-
 /// Optional text: `None` for null or blank (the schema's `""` sentinel).
 fn opt_text(v: Option<String>) -> Option<String> {
     v.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
@@ -443,8 +349,6 @@ struct WireOutcome {
     certainty: String,
     why: String,
     pmids: Vec<String>,
-    #[serde(default)]
-    evidence_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -468,16 +372,6 @@ struct WireBottomLine {
 }
 
 #[derive(Deserialize)]
-struct WireGuideline {
-    #[serde(default)]
-    pmid: Option<String>,
-    body: String,
-    #[serde(default)]
-    year: Option<Value>,
-    statement: String,
-}
-
-#[derive(Deserialize)]
 struct WireNotable {
     text: String,
     #[serde(default)]
@@ -495,14 +389,210 @@ pub struct WireAnswer {
     conflicts: Vec<Conflict>,
     applicability: Applicability,
     would_change: Vec<String>,
+    /// R-S4a: about five lines (an object is read too).
     #[serde(default)]
-    guidelines: Vec<WireGuideline>,
+    at_a_glance: Option<Value>,
+    /// R-S4a: labelled lines (an object is read too).
     #[serde(default)]
-    at_a_glance: Option<AtAGlance>,
+    clinical_practice: Option<Value>,
+    /// R-S4a: 3 to 5 lines with `[PMID]` markers (an array is read too).
     #[serde(default)]
-    clinical_practice: Option<ClinicalPractice>,
-    #[serde(default)]
-    notable_findings: Vec<WireNotable>,
+    notable_findings: Option<Value>,
+}
+
+/// The PMIDs of the citation markers in `text` (ids of 5+ digits).
+fn cited_ids(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for seg in split_citations(text, |_| false) {
+        if let Segment::Cite(ids) = seg {
+            for id in ids {
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A line without a list bullet ("- ", "• ", "* ") and outer blanks.
+fn unbullet(line: &str) -> &str {
+    let t = line.trim();
+    for b in ["- ", "\u{2022} ", "* ", "\u{2013} "] {
+        if let Some(r) = t.strip_prefix(b) {
+            return r.trim();
+        }
+    }
+    t
+}
+
+/// `line` without a leading label (case ignored) and the colon after it.
+fn after_label<'a>(line: &'a str, labels: &[&str]) -> Option<&'a str> {
+    let low = line.to_lowercase();
+    labels.iter().find_map(|l| {
+        low.starts_with(&l.to_lowercase())
+            .then(|| line[l.len()..].trim_start())
+            .and_then(|r| r.strip_prefix(':'))
+            .map(str::trim)
+    })
+}
+
+/// The at-a-glance text (flat), parsed: the first line is the verdict
+/// ("Verdict:" optional), a "Main caveat:" / "Caveat:" line the caveat,
+/// every other line a key number ("label: value [PMID]", or the whole line
+/// as its value). Every line is kept; markers stay in the text, where the
+/// citation check and the number trace read them. `None` when empty.
+pub fn parse_glance(text: &str) -> Option<AtAGlance> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(unbullet)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let (first, rest) = lines.split_first()?;
+    let verdict = after_label(first, &["Verdict", "At a glance"])
+        .unwrap_or(first)
+        .to_string();
+    let mut main_caveat = String::new();
+    let mut key_numbers = Vec::new();
+    for l in rest {
+        if let Some(c) = after_label(l, &["Main caveat", "Caveat"]) {
+            if !main_caveat.is_empty() {
+                main_caveat.push(' ');
+            }
+            main_caveat.push_str(c);
+            continue;
+        }
+        let l = after_label(l, &["Key number", "Key numbers"]).unwrap_or(l);
+        let (label, value_text) = match l.split_once(": ") {
+            Some((a, b)) if !a.trim().is_empty() && a.len() <= 80 => {
+                (a.trim().to_string(), b.trim().to_string())
+            }
+            _ => (String::new(), l.to_string()),
+        };
+        key_numbers.push(KeyNumber {
+            label,
+            value_text,
+            pmid: String::new(),
+        });
+    }
+    Some(AtAGlance {
+        verdict,
+        key_numbers,
+        main_caveat,
+    })
+}
+
+/// The clinical-practice text (flat), parsed by its labelled lines
+/// ("Default choice:", "Who may benefit:", "Counselling:", "Cost per
+/// case:"; a line without a label continues the one before). Text before
+/// any label is kept in `text` and drawn as written. `None` when empty.
+pub fn parse_practice(text: &str) -> Option<ClinicalPractice> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut c = ClinicalPractice {
+        default_choice: String::new(),
+        who_may_benefit: String::new(),
+        counselling: String::new(),
+        cost_per_case: String::new(),
+        text: String::new(),
+    };
+    let mut at: u8 = 0;
+    for raw in text.lines() {
+        let l = unbullet(raw);
+        if l.is_empty() {
+            continue;
+        }
+        let (field, body) = if let Some(b) = after_label(l, &["Default choice"]) {
+            (1, b)
+        } else if let Some(b) = after_label(l, &["Who may benefit"]) {
+            (2, b)
+        } else if let Some(b) = after_label(l, &["Counselling", "Counseling"]) {
+            (3, b)
+        } else if let Some(b) = after_label(l, &["Cost per case"]) {
+            (4, b)
+        } else {
+            (at, l)
+        };
+        at = field;
+        let slot = match field {
+            1 => &mut c.default_choice,
+            2 => &mut c.who_may_benefit,
+            3 => &mut c.counselling,
+            4 => &mut c.cost_per_case,
+            _ => &mut c.text,
+        };
+        if !slot.is_empty() {
+            slot.push(' ');
+        }
+        slot.push_str(body);
+    }
+    Some(c)
+}
+
+/// One notable finding from a line: its text without a bullet, and the
+/// PMIDs of its markers. `None` for a blank line.
+fn notable_line(line: &str) -> Option<NotableFinding> {
+    let t = unbullet(line);
+    (!t.is_empty()).then(|| NotableFinding {
+        pmids: cited_ids(t),
+        text: t.to_string(),
+        spans: Vec::new(),
+    })
+}
+
+/// The evidence type of each outcome row (R-S4a), derived in code from the
+/// designs of the studies it cites (its `pmids` and the citation markers
+/// of its evidence and effect text): all RCTs → RCT; all meta-analyses →
+/// meta-analysis; all observational → observational; any mix → mixed. A
+/// row citing no study of known design gets no label. A label only; it
+/// blocks nothing. `design_of` gives a PMID's class ([`design_class`]).
+pub fn evidence_types(a: &mut WrittenAnswer, design_of: impl Fn(&str) -> Option<&'static str>) {
+    for o in &mut a.outcomes {
+        let mut ids: Vec<String> = o.pmids.iter().map(|p| p.trim().to_string()).collect();
+        for t in [&o.rct_evidence, &o.effect_text] {
+            ids.extend(cited_ids(t));
+        }
+        let kinds: std::collections::BTreeSet<&str> =
+            ids.iter().filter_map(|p| design_of(p)).collect();
+        o.evidence_type = match (
+            kinds.contains("rct"),
+            kinds.contains("ma"),
+            kinds.contains("obs"),
+        ) {
+            (false, false, false) => EvidenceType::Unknown,
+            (true, false, false) => EvidenceType::Rct,
+            (false, true, false) => EvidenceType::MetaAnalysis,
+            (false, false, true) => EvidenceType::Observational,
+            _ => EvidenceType::Mixed,
+        };
+    }
+}
+
+/// The design class of a study's researcher label (`RCT`, `SR_MA`,
+/// `other`; a trial the skeptic found missing is an RCT): "rct", "ma" or
+/// "obs". `None` for anything else (e.g. a study only quoted by the
+/// skeptic).
+pub fn design_class(label: &str) -> Option<&'static str> {
+    let l = label.trim().to_ascii_lowercase();
+    if l == "rct" || l.starts_with("found by the skeptic") {
+        Some("rct")
+    } else if l == "sr_ma" {
+        Some("ma")
+    } else if l == "other" {
+        Some("obs")
+    } else {
+        None
+    }
+}
+
+/// A value the wire gave as text or as an object: the text, or the
+/// object's JSON when it does not read as `T` (kept, never dropped).
+fn text_or<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
+    match v {
+        Value::String(t) => Err(t),
+        other => serde_json::from_value::<T>(other.clone()).map_err(|_| other.to_string()),
+    }
 }
 
 impl WireAnswer {
@@ -526,13 +616,6 @@ impl WireAnswer {
         let mut outcomes = Vec::with_capacity(self.outcomes.len());
         for o in self.outcomes {
             let certainty = cert(&o.certainty);
-            let evidence_type = match o.evidence_type.as_deref().map(str::trim) {
-                None | Some("") => EvidenceType::Mixed,
-                Some(t) => parse_evidence_type(t).unwrap_or_else(|| {
-                    defaulted.set(defaulted.get() + 1);
-                    EvidenceType::Mixed
-                }),
-            };
             let numbers = o
                 .numbers
                 .into_iter()
@@ -570,7 +653,9 @@ impl WireAnswer {
                 certainty,
                 why: o.why,
                 pmids: o.pmids,
-                evidence_type,
+                // R-S4a: derived in code from the cited studies' designs
+                // ([`evidence_types`]), not written by the model.
+                evidence_type: EvidenceType::Unknown,
             });
         }
         let studies = self
@@ -587,26 +672,36 @@ impl WireAnswer {
                 appraisal: x.appraisal,
             })
             .collect();
-        let guidelines = self
-            .guidelines
-            .into_iter()
-            .map(|g| GuidelineV3 {
-                year: opt_count(&g.year),
-                pmid: opt_text(g.pmid),
-                body: g.body,
-                statement: g.statement,
-                pmid_removed: false,
-            })
-            .collect();
-        let notable_findings = self
-            .notable_findings
-            .into_iter()
-            .map(|n| NotableFinding {
-                text: n.text,
-                pmids: n.pmids,
-                spans: Vec::new(),
-            })
-            .collect();
+        // One finding per line (or per array item), its studies read from
+        // its markers; blank lines are not findings.
+        let notable_findings = match self.notable_findings {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .into_iter()
+                .filter_map(|v| match text_or::<WireNotable>(v) {
+                    Ok(n) => Some(NotableFinding {
+                        text: n.text,
+                        pmids: n.pmids,
+                        spans: Vec::new(),
+                    }),
+                    Err(t) => notable_line(&t),
+                })
+                .collect(),
+            Some(Value::String(t)) => t.lines().filter_map(notable_line).collect(),
+            Some(other) => notable_line(&other.to_string()).into_iter().collect(),
+        };
+        let at_a_glance = self
+            .at_a_glance
+            .and_then(|v| match text_or::<AtAGlance>(v) {
+                Ok(g) => Some(g),
+                Err(t) => parse_glance(&t),
+            });
+        let clinical_practice =
+            self.clinical_practice
+                .and_then(|v| match text_or::<ClinicalPractice>(v) {
+                    Ok(c) => Some(c),
+                    Err(t) => parse_practice(&t),
+                });
         (
             WrittenAnswer {
                 bottom_line,
@@ -615,9 +710,11 @@ impl WireAnswer {
                 conflicts: self.conflicts,
                 applicability: self.applicability,
                 would_change: self.would_change,
-                at_a_glance: self.at_a_glance,
-                clinical_practice: self.clinical_practice,
-                guidelines,
+                at_a_glance,
+                clinical_practice,
+                // R-S4a: the writer no longer writes guidelines; the page
+                // shows the skeptic's verified ones.
+                guidelines: Vec::new(),
                 notable_findings,
             },
             defaulted.get(),
@@ -876,33 +973,28 @@ FIELDS:
 Moderate, Low, Very low.
 - outcomes: one entry per outcome the evidence covers (benefits and harms; operative time and cost when reported). \
 rct_evidence names the trials or meta-analyses; effect_text gives the effect with its numbers, cited; numbers lists each \
-of those numbers as a structured entry (value is the number itself; unit, or \"\"; arm names the group it belongs to, \
-or \"\"; ci_low and ci_high as numbers written as text when a confidence interval is given, else \"\"; p as written, or \
-\"\"; pmid of the source study); \
-certainty and why; pmids of the studies behind the row; evidence_type: what the row rests on (rct: one or more \
-randomised trials; rct_meta_analysis: a meta-analysis pooling randomised trials only; network_meta_analysis; \
-observational; mixed: more than one of these, or a meta-analysis pooling observational studies).
-- studies: one row per study: label (short name with year and journal), design, n (participants, or 0 when not \
+of those numbers as a structured entry (value is the number itself; unit; arm names the group it belongs to, or null; \
+ci_low and ci_high when a confidence interval is given, else null; p as written, or null; pmid of the source study); \
+certainty and why; pmids of the studies behind the row.
+- studies: one row per study: label (short name with year and journal), design, n (participants, or null when not \
 stated), setting, comparison, key_results (cited), appraisal (main limitations, including overlap with other trials).
 - conflicts: where studies disagree (including the skeptic's contradicting evidence), and why they may differ.
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
 evidence means in Indian practice and the Indian cost context: say what is not known, and never invent costs, prices or \
 figures); training (what it means for training programmes, or say it has no particular bearing).
 - would_change: what new evidence would change this answer.
-- guidelines: each guideline or consensus statement provided (the skeptic's guidelines with their verified quotes, or a \
-selected guideline's row or abstract): pmid (or \"\"), body (the issuing society or group), year (or 0), statement \
-(what it recommends, in its verified words where you have them, cited). Empty when none was provided; never from memory.
-- at_a_glance: about five lines for a busy clinician: verdict (one sentence), key_numbers (the 2 to 4 numbers that \
-matter most for the decision: label, value_text with the arms named, pmid of the source study), main_caveat (one \
-sentence).
-- clinical_practice, written for any clinician (not one reader): default_choice (what most patients should be offered by \
-default, given this evidence), who_may_benefit (patients or settings where the alternative may be worth it, or say the \
-evidence does not show any), counselling (what to tell patients, in plain words), cost_per_case (the per-case cost \
+- at_a_glance: ONE text of about five short lines, separated by newlines, for a busy clinician: first the \
+verdict (one sentence); then the 2 to 4 numbers that matter most, one per line as \"label: value with the arms \
+named [PMID]\"; then a line \"Main caveat: …\".
+- clinical_practice, written for any clinician (not one reader): ONE text of four labelled lines, separated by \
+newlines: \"Default choice: …\" (what most patients should be offered by \
+default, given this evidence), \"Who may benefit: …\" (patients or settings where the alternative may be worth it, or say the \
+evidence does not show any), \"Counselling: …\" (what to tell patients, in plain words), \"Cost per case: …\" (the per-case cost \
 difference as a range derived only from cost numbers in verified quotes, structured numbers of evidence rows or provided abstracts, with their currency and setting, cited; say \"not known\" when \
 there are none; never convert currencies, never estimate Indian prices, never invent figures).
-- notable_findings: 3 to 5 important things noticed in the evidence that the outcome tables do not show (for example a \
+- notable_findings: ONE text of 3 to 5 lines, separated by newlines, each one important thing noticed in the evidence that the outcome tables do not show (for example a \
 study that contradicts itself, lopsided withdrawals between arms, industry funding or conflicts, a design that is not \
-what its label says), each citing its study in text and in pmids, drawn only from the evidence rows, appraisals and skeptic review provided.";
+what its label says), each citing its study with a [PMID] marker, drawn only from the evidence rows, appraisals and skeptic review provided.";
 
 /// Byte caps of the Full-mode row and review fields shown to the writer
 /// (after neutralising).
@@ -1820,6 +1912,7 @@ pub fn check_citations(a: &mut WrittenAnswer, selected: &[String], integrity: &m
         clean(&mut c.who_may_benefit);
         clean(&mut c.counselling);
         clean(&mut c.cost_per_case);
+        clean(&mut c.text);
     }
     for n in &mut a.notable_findings {
         clean(&mut n.text);
@@ -2023,6 +2116,7 @@ mod tests {
             who_may_benefit: "unknown".into(),
             counselling: "say so".into(),
             cost_per_case: "not known [77777777]".into(),
+            text: String::new(),
         });
         a.notable_findings = vec![NotableFinding {
             text: "Withdrawals were 2 vs 9 [11111111].".into(),
@@ -2047,87 +2141,124 @@ mod tests {
         assert!(i.removed_citations >= before + 5, "{}", i.removed_citations);
     }
 
-    /// Stage 4 schema fix: the live writer schema (Quick and Full share it)
-    /// stays within a grammar budget no higher than variant D's, the
-    /// variant chosen after the API refused A ("compiled grammar is too
-    /// large"). A future field must fit, or this fails in CI, not live.
-    /// Stage 3's schema (B, accepted live) is the reference for the drivers
-    /// that grow the grammar most: nullable unions and enum values.
+    /// R-S4a: the live writer schema (Quick and Full share it) is the Stage
+    /// 3 schema plus three plain strings, within a grammar budget: at most
+    /// 40 properties and 7 objects, and no more nullable unions or enum
+    /// values than Stage 3. The 31 Oct probe refused every variant with
+    /// structured Stage 4 additions (58 properties, 12 objects) and accepted
+    /// Stage 3 (37, 7). A future field must fit, or this fails in CI.
     #[test]
     fn the_writer_schema_stays_within_the_grammar_budget() {
-        const BUDGET: Complexity = Complexity {
-            bytes: 3_314,
-            enum_values: 0,
-            nullable_unions: 0,
-            depth: 6,
-            properties: 58,
-            objects: 12,
-        };
         let live = schema_complexity(&writer_schema());
-        assert_eq!(writer_schema(), writer_schema_with(SchemaOpts::FLAT));
-        for (what, got, max) in [
-            ("bytes", live.bytes, BUDGET.bytes),
-            ("enum values", live.enum_values, BUDGET.enum_values),
-            (
-                "nullable unions",
-                live.nullable_unions,
-                BUDGET.nullable_unions,
-            ),
-            ("depth", live.depth, BUDGET.depth),
-            ("properties", live.properties, BUDGET.properties),
-            ("objects", live.objects, BUDGET.objects),
-        ] {
-            assert!(got <= max, "writer schema {what}: {got} > budget {max}");
-        }
-        let stage3 = schema_complexity(&writer_schema_with(SchemaOpts::STAGE3));
-        assert!(live.nullable_unions < stage3.nullable_unions);
-        assert!(live.enum_values < stage3.enum_values);
+        let stage3 = schema_complexity(&writer_schema_with(SchemaOpts::Stage3));
+        assert_eq!(
+            writer_schema(),
+            writer_schema_with(SchemaOpts::Stage3PlusText)
+        );
+        assert!(live.properties <= 40, "properties {}", live.properties);
+        assert!(live.objects <= 7, "objects {}", live.objects);
+        assert!(live.nullable_unions <= stage3.nullable_unions);
+        assert!(live.enum_values <= stage3.enum_values);
         assert!(live.depth <= stage3.depth);
-        // The variants the probe sends, as generated from this code.
-        let a = schema_complexity(&writer_schema_with(SchemaOpts::STAGE4_FIRST));
-        assert_eq!((a.nullable_unions, a.enum_values), (8, 13));
-        assert_eq!((stage3.nullable_unions, stage3.enum_values), (6, 8));
-        let c = schema_complexity(&writer_schema_with(SchemaOpts::NO_NULLABLE));
-        assert_eq!((c.nullable_unions, c.enum_values), (0, 13));
+        assert_eq!(
+            (
+                stage3.properties,
+                stage3.objects,
+                stage3.nullable_unions,
+                stage3.enum_values
+            ),
+            (37, 7, 6, 8)
+        );
+        assert_eq!(
+            (
+                live.properties,
+                live.objects,
+                live.nullable_unions,
+                live.enum_values
+            ),
+            (40, 7, 6, 8)
+        );
     }
 
-    /// Stage 4 schema fix: the reply is read leniently and checked in code,
-    /// flag never fail: sentinels and nulls become "none", CI bounds written
-    /// as text become numbers, an unknown label becomes its default and is
-    /// counted, a CI bound that is not a number is kept in its label.
+    /// R-S4a: the three text fields are parsed for display, every line kept
+    /// (flag, never delete).
+    #[test]
+    fn the_text_fields_are_parsed_and_nothing_is_dropped() {
+        let g = parse_glance(
+            "Verdict: No patient benefit; costs more.\n- Cost: $3258 robotic vs $1421 laparoscopic [32186683]\n- Time: 75.5 vs 40.5 min [32186683]\nAn unlabelled line\nMain caveat: Small trials.",
+        )
+        .unwrap();
+        assert_eq!(g.verdict, "No patient benefit; costs more.");
+        let k: Vec<(&str, &str)> = g
+            .key_numbers
+            .iter()
+            .map(|k| (k.label.as_str(), k.value_text.as_str()))
+            .collect();
+        assert_eq!(
+            k,
+            [
+                ("Cost", "$3258 robotic vs $1421 laparoscopic [32186683]"),
+                ("Time", "75.5 vs 40.5 min [32186683]"),
+                ("", "An unlabelled line"),
+            ]
+        );
+        assert_eq!(g.main_caveat, "Small trials.");
+        assert!(parse_glance("  \n ").is_none());
+        assert_eq!(
+            parse_glance("Just one line").unwrap().verdict,
+            "Just one line"
+        );
+
+        let c = parse_practice(
+            "Default choice: Laparoscopic repair.\nWho may benefit: Not shown\nby the trials.\nCOUNSELLING: Similar recovery [32186683].\nCost per case: not known",
+        )
+        .unwrap();
+        assert_eq!(c.default_choice, "Laparoscopic repair.");
+        assert_eq!(
+            c.who_may_benefit, "Not shown by the trials.",
+            "continuation kept"
+        );
+        assert_eq!(c.counselling, "Similar recovery [32186683].");
+        assert_eq!(c.cost_per_case, "not known");
+        assert!(c.text.is_empty());
+        let raw = parse_practice("No labels at all, but advice.").unwrap();
+        assert_eq!(
+            raw.text, "No labels at all, but advice.",
+            "drawn as written"
+        );
+        assert!(raw.default_choice.is_empty());
+    }
+
+    /// R-S4a: the reply (the Stage 3 shape plus three strings) is read
+    /// leniently and checked in code: the text fields are parsed; a CI bound
+    /// that is not a number is kept in its label; an unknown certainty
+    /// becomes Very low and is counted; a reply without the new fields
+    /// still reads; the evidence type is left to code.
     #[test]
     fn the_wire_reply_is_checked_in_code_with_defaults() {
         let reply = json!({
-            "bottom_line": {"text": "t", "certainty": "very low", "certainty_reason": "r"},
+            "bottom_line": {"text": "t", "certainty": "Very low", "certainty_reason": "r"},
             "outcomes": [{
                 "outcome": "Pain", "rct_evidence": "2 RCTs", "effect_text": "e",
                 "numbers": [
-                    {"label": "RR", "value": 0.76, "unit": "", "arm": "", "ci_low": "0.49",
-                     "ci_high": "1.17", "p": "", "pmid": "11111111"},
+                    {"label": "RR", "value": 0.76, "unit": null, "arm": null, "ci_low": 0.49,
+                     "ci_high": 1.17, "p": null, "pmid": "11111111"},
                     {"label": "MD", "value": -0.34, "unit": "points", "arm": "robotic",
-                     "ci_low": "\u{2212}0.9", "ci_high": "about one", "p": "0.26", "pmid": "11111111"},
-                    {"label": "x", "value": 1, "unit": null, "arm": null, "ci_low": null,
-                     "ci_high": 2.5, "p": null, "pmid": "11111111"}
+                     "ci_low": "\u{2212}0.9", "ci_high": "about one", "p": "0.26", "pmid": "11111111"}
                 ],
-                "certainty": "SURE", "why": "w", "pmids": ["11111111"], "evidence_type": "RCT meta-analysis"
-            }, {
-                "outcome": "Cost", "rct_evidence": "", "effect_text": "", "numbers": [],
-                "certainty": "Moderate", "why": "", "pmids": [], "evidence_type": "cohorts"
+                "certainty": "SURE", "why": "w", "pmids": ["11111111"]
             }],
             "studies": [
-                {"pmid": "11111111", "label": "A", "design": "RCT", "n": 0, "setting": "", "comparison": "",
+                {"pmid": "11111111", "label": "A", "design": "RCT", "n": null, "setting": "", "comparison": "",
                  "key_results": "", "appraisal": ""},
-                {"pmid": "22222222", "label": "B", "design": "RCT", "n": "60", "setting": "", "comparison": "",
+                {"pmid": "22222222", "label": "B", "design": "RCT", "n": 60, "setting": "", "comparison": "",
                  "key_results": "", "appraisal": ""}
             ],
             "conflicts": [], "applicability": {"case_mix": "", "india_cost_context": "", "training": ""},
             "would_change": [],
-            "guidelines": [{"pmid": "", "body": "S", "year": 0, "statement": "s"},
-                           {"pmid": "11111111", "body": "T", "year": 2020, "statement": "t"}],
-            "at_a_glance": {"verdict": "v", "key_numbers": [], "main_caveat": "c"},
-            "clinical_practice": {"default_choice": "d", "who_may_benefit": "w", "counselling": "c",
-                                  "cost_per_case": "not known"},
-            "notable_findings": [{"text": "n", "pmids": ["11111111"]}]
+            "at_a_glance": "No benefit.\nCost: $3258 vs $1421 [11111111]\nMain caveat: small trials",
+            "clinical_practice": "Default choice: lap\nCost per case: not known",
+            "notable_findings": "- Withdrawals 2 vs 9 [11111111; 22222222].\n\n- Funding by the maker [22222222]."
         });
         let (a, defaulted) = serde_json::from_value::<WireAnswer>(reply)
             .unwrap()
@@ -2135,32 +2266,56 @@ mod tests {
         assert_eq!(a.bottom_line.certainty, Certainty::VeryLow);
         let o = &a.outcomes[0];
         assert_eq!(o.certainty, Certainty::VeryLow, "unknown: the default");
-        assert_eq!(o.evidence_type, EvidenceType::RctMetaAnalysis);
-        assert_eq!(a.outcomes[1].certainty, Certainty::Moderate);
-        assert_eq!(a.outcomes[1].evidence_type, EvidenceType::Mixed);
-        assert_eq!(defaulted, 2, "SURE and cohorts");
+        assert_eq!(defaulted, 1);
+        assert_eq!(o.evidence_type, EvidenceType::Unknown, "left to code");
         let n = &o.numbers;
         assert_eq!(
-            (n[0].unit.clone(), n[0].arm.clone(), n[0].p.clone()),
-            (None, None, None)
+            (n[0].unit.clone(), n[0].ci_low, n[0].ci_high),
+            (None, Some(0.49), Some(1.17))
         );
-        assert_eq!((n[0].ci_low, n[0].ci_high), (Some(0.49), Some(1.17)));
-        assert_eq!(n[1].ci_low, Some(-0.9));
-        assert_eq!(n[1].ci_high, None);
+        assert_eq!((n[1].ci_low, n[1].ci_high), (Some(-0.9), None));
         assert_eq!(
             n[1].label, "MD (CI as written: about one)",
             "kept, never dropped"
         );
-        assert_eq!((n[2].unit.clone(), n[2].ci_high), (None, Some(2.5)));
         assert_eq!((a.studies[0].n, a.studies[1].n), (None, Some(60)));
+        let g = a.at_a_glance.unwrap();
         assert_eq!(
-            (a.guidelines[0].pmid.clone(), a.guidelines[0].year),
-            (None, None)
+            (
+                g.verdict.as_str(),
+                g.key_numbers.len(),
+                g.main_caveat.as_str()
+            ),
+            ("No benefit.", 1, "small trials")
         );
-        assert_eq!(a.guidelines[1].year, Some(2020));
-        assert_eq!(a.notable_findings[0].pmids, ["11111111"]);
-        assert!(a.at_a_glance.is_some() && a.clinical_practice.is_some());
-        // A reply without the Stage 4 fields still reads.
+        let c = a.clinical_practice.unwrap();
+        assert_eq!(
+            (c.default_choice.as_str(), c.cost_per_case.as_str()),
+            ("lap", "not known")
+        );
+        let nf: Vec<(&str, Vec<String>)> = a
+            .notable_findings
+            .iter()
+            .map(|n| (n.text.as_str(), n.pmids.clone()))
+            .collect();
+        assert_eq!(
+            nf,
+            [
+                (
+                    "Withdrawals 2 vs 9 [11111111; 22222222].",
+                    vec!["11111111".to_string(), "22222222".into()]
+                ),
+                (
+                    "Funding by the maker [22222222].",
+                    vec!["22222222".to_string()]
+                ),
+            ]
+        );
+        assert!(
+            a.guidelines.is_empty(),
+            "the writer no longer writes guidelines"
+        );
+        // A Stage 3 reply (none of the new fields) still reads.
         let old = json!({
             "bottom_line": {"text": "t", "certainty": "Low", "certainty_reason": "r"},
             "outcomes": [], "studies": [], "conflicts": [],
@@ -2171,9 +2326,51 @@ mod tests {
             .unwrap()
             .into_answer();
         assert_eq!(
-            (a.guidelines.len(), a.at_a_glance.is_none(), d),
-            (0, true, 0)
+            (a.at_a_glance.is_none(), a.notable_findings.is_empty(), d),
+            (true, true, 0)
         );
+    }
+
+    /// R-S4a: the evidence label per outcome comes from the cited studies'
+    /// designs, never from the model; nothing known, no label.
+    #[test]
+    fn evidence_types_are_derived_from_the_cited_designs() {
+        let mut a = answer();
+        let base = a.outcomes[0].clone();
+        let row = |pmids: &[&str], text: &str| Outcome {
+            pmids: pmids.iter().map(|p| p.to_string()).collect(),
+            effect_text: text.into(),
+            ..base.clone()
+        };
+        a.outcomes = vec![
+            row(&["11111111"], ""),
+            row(&["33333333"], ""),
+            row(&["11111111"], "and a pooled RR [33333333]"),
+            row(&["44444444"], ""),
+            row(&["99999999"], ""),
+            row(&["55555555"], ""),
+        ];
+        let design = |p: &str| match p {
+            "11111111" => design_class("RCT"),
+            "33333333" => design_class("SR_MA"),
+            "44444444" => design_class("other"),
+            "55555555" => design_class("found by the skeptic; not extracted"),
+            _ => design_class("quoted by the skeptic"),
+        };
+        evidence_types(&mut a, design);
+        let got: Vec<EvidenceType> = a.outcomes.iter().map(|o| o.evidence_type).collect();
+        assert_eq!(
+            got,
+            [
+                EvidenceType::Rct,
+                EvidenceType::MetaAnalysis,
+                EvidenceType::Mixed,
+                EvidenceType::Observational,
+                EvidenceType::Unknown,
+                EvidenceType::Rct,
+            ]
+        );
+        assert_eq!(EvidenceType::Unknown.label(), None, "no label drawn");
     }
 
     #[test]
@@ -2205,71 +2402,54 @@ mod tests {
                 }
             }
         }
-        // Every variant is strict; the Stage 3 shape (A, B) carries the
-        // nullable unions and enums, the live one (D) plain types.
-        for o in [
-            SchemaOpts::STAGE4_FIRST,
-            SchemaOpts::STAGE3,
-            SchemaOpts::NO_NULLABLE,
-            SchemaOpts::FLAT,
-        ] {
-            walk(&writer_schema_with(o), "$");
+        let s = writer_schema();
+        walk(&s, "$");
+        // The Stage 3 schema exactly, plus three plain strings (R-S4a).
+        let mut b = writer_schema_with(SchemaOpts::Stage3);
+        walk(&b, "$");
+        for f in ["at_a_glance", "clinical_practice", "notable_findings"] {
+            assert_eq!(s["properties"][f], json!({"type": "string"}), "{f}");
+            assert!(b["properties"].get(f).is_none());
+            b["properties"][f] = json!({"type": "string"});
+            b["required"].as_array_mut().unwrap().push(json!(f));
         }
-        let a = writer_schema_with(SchemaOpts::STAGE4_FIRST);
-        let num = &a["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
+        let mut sr: Vec<String> = s["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        let mut br: Vec<String> = b["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        sr.sort();
+        br.sort();
+        assert_eq!(sr, br);
+        assert_eq!(s["properties"], b["properties"], "nothing else changed");
+        let num = &s["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
         assert_eq!(
             num["properties"]["ci_low"]["type"],
             json!(["number", "null"])
         );
-        assert_eq!(
-            a["properties"]["bottom_line"]["properties"]["certainty"]["enum"],
-            json!(["High", "Moderate", "Low", "Very low"])
-        );
-        assert_eq!(
-            a["properties"]["outcomes"]["items"]["properties"]["evidence_type"]["enum"],
-            json!([
-                "rct",
-                "rct_meta_analysis",
-                "network_meta_analysis",
-                "observational",
-                "mixed"
-            ])
-        );
-        let s = writer_schema();
-        let num = &s["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
-        for f in ["unit", "arm", "ci_low", "ci_high", "p"] {
-            assert_eq!(num["properties"][f]["type"], json!("string"), "{f}");
-        }
+        assert_eq!(num["properties"]["unit"]["type"], json!(["string", "null"]));
         assert_eq!(
             s["properties"]["studies"]["items"]["properties"]["n"]["type"],
-            json!("integer")
+            json!(["integer", "null"])
         );
         assert_eq!(
-            s["properties"]["bottom_line"]["properties"]["certainty"],
-            json!({"type": "string"})
+            s["properties"]["bottom_line"]["properties"]["certainty"]["enum"],
+            json!(["High", "Moderate", "Low", "Very low"])
         );
-        // B has none of the Stage 4 fields: it is the Stage 3 schema.
-        let b = writer_schema_with(SchemaOpts::STAGE3);
-        for f in [
-            "guidelines",
-            "at_a_glance",
-            "clinical_practice",
-            "notable_findings",
-        ] {
-            assert!(b["properties"].get(f).is_none(), "{f}");
-        }
         assert!(
-            b["properties"]["outcomes"]["items"]["properties"]
+            s["properties"]["outcomes"]["items"]["properties"]
                 .get("evidence_type")
-                .is_none()
+                .is_none(),
+            "derived in code, not written"
         );
-        assert!(SYSTEM.contains("evidence_type:") && SYSTEM_FULL.contains("evidence_type:"));
-        let o: crate::agent::answer_v3::Outcome = serde_json::from_value(json!({
-            "outcome": "o", "rct_evidence": "r", "effect_text": "e", "numbers": [],
-            "certainty": "Low", "why": "w", "pmids": []
-        }))
-        .unwrap();
-        assert_eq!(o.evidence_type, EvidenceType::Mixed, "default when omitted");
+        assert!(s["properties"].get("guidelines").is_none());
     }
 
     fn input(pmid: &str, abs: &str) -> StudyInput {
@@ -2389,36 +2569,17 @@ mod tests {
                 "ARMS: always give the intervention arm",
                 "at_a_glance:",
                 "clinical_practice, written for any clinician",
-                "cost_per_case",
+                "Default choice:",
+                "Cost per case:",
+                "Main caveat:",
                 "say \"not known\"",
-                "notable_findings: 3 to 5",
+                "notable_findings: ONE text of 3 to 5 lines",
                 "never invent",
             ] {
                 assert!(p.contains(must), "{must}");
             }
         }
         assert!(SYSTEM_FULL.contains("the evidence rows, appraisals and skeptic review provided"));
-        let s = writer_schema();
-        for (f, keys) in [
-            (
-                "at_a_glance",
-                &["verdict", "key_numbers", "main_caveat"][..],
-            ),
-            (
-                "clinical_practice",
-                &[
-                    "default_choice",
-                    "who_may_benefit",
-                    "counselling",
-                    "cost_per_case",
-                ][..],
-            ),
-        ] {
-            for k in keys {
-                assert!(s["properties"][f]["properties"][k].is_object(), "{f}.{k}");
-            }
-        }
-        assert!(s["properties"]["notable_findings"]["items"]["properties"]["pmids"].is_object());
         // A reply without the new fields still reads (they default).
         let mut v = serde_json::to_value(answer()).unwrap();
         for k in [

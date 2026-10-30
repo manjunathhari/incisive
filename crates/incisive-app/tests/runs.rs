@@ -3931,7 +3931,8 @@ async fn ssr_v3_answers_stored_before_stage4_still_render() {
     assert!(wa.guidelines.is_empty() && wa.notable_findings.is_empty());
     assert_eq!(
         wa.outcomes[0].evidence_type,
-        incisive_app::agent::answer_v3::EvidenceType::Mixed
+        incisive_app::agent::answer_v3::EvidenceType::Unknown,
+        "R-S4a: no label for answers stored before Stage 4"
     );
     assert!(a.untraced.is_empty() && a.notable_code.is_empty());
     // A Stage 3 skeptic and evidence entry without the Stage 4 fields.
@@ -3949,6 +3950,10 @@ async fn ssr_v3_answers_stored_before_stage4_still_render() {
     assert!(!m.contains("not traced"));
     assert!(!m.contains("Funding:"), "old rows never looked for funding");
     assert!(!m.contains("Guidelines and consensus"));
+    assert!(
+        !m.contains(r#"class="etype""#),
+        "no evidence label for old answers"
+    );
 }
 
 /// Stage 4 items 8-10 and 12: the at-a-glance box at the top, clinical
@@ -3978,6 +3983,7 @@ async fn ssr_readability_sections_arms_and_copy_text() {
         who_may_benefit: "Not shown.".into(),
         counselling: "Pain is similar.".into(),
         cost_per_case: "not known".into(),
+        text: String::new(),
     });
     w.studies[0].comparison = "Self-fixating vs tacked".into();
     w.outcomes[0].numbers = vec![
@@ -4100,10 +4106,16 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         overlaps: vec![],
         ma_notes: vec![],
         spans: vec![Span::new("guidelines.0.text", 4, 8)],
-        leads: vec![SkepticLead {
-            pmid: "39999999".into(),
-            kind: "contradicting study".into(),
-        }],
+        leads: vec![
+            SkepticLead {
+                pmid: "39999999".into(),
+                kind: "contradicting study".into(),
+            },
+            SkepticLead {
+                pmid: "38888888".into(),
+                kind: "guideline".into(),
+            },
+        ],
         dropped_unseen: 2,
         dropped_quotes: 0,
     });
@@ -4135,6 +4147,13 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         ),
         "{section}"
     );
+    // R-S4a: the skeptic's guideline lead is listed in the section, PMID
+    // only, flagged.
+    assert!(
+        section.contains("Possible guideline: quote not found in the abstract, check the paper"),
+        "{section}"
+    );
+    assert!(section.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/38888888/""#));
     // Review 3: the skeptic's mark carried into the Guidelines section.
     assert!(section.contains("EHS 2023<sup title="), "{section}");
     assert!(section.contains(">not verified</sup> statement"));

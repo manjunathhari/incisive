@@ -1041,6 +1041,7 @@ fn written_v3_view(
     evidence: &std::collections::HashMap<String, EvidenceV3>,
     skeptic_guidelines: Vec<(usize, SkepticItem)>,
     skeptic_spans: &[Span],
+    guideline_leads: Vec<crate::agent::answer_v3::SkepticLead>,
 ) -> impl IntoView {
     let full = !evidence.is_empty();
     let mk = Marks {
@@ -1049,8 +1050,9 @@ fn written_v3_view(
         mark: Mark::NotTraced,
     };
     let c = w.bottom_line.certainty;
-    // Guidelines (Stage 4 item 1): the writer's, then the skeptic's verified
-    // guideline quotes the writer did not list.
+    // Guidelines (Stage 4 item 1; R-S4a): the skeptic's verified guidelines
+    // and its unverified guideline leads. The writer no longer writes them;
+    // answers stored with writer guidelines still show them first.
     let mut guidelines: Vec<AnyView> = w
         .guidelines
         .iter()
@@ -1086,16 +1088,31 @@ fn written_v3_view(
             continue;
         }
         let n = refs.get(&g.pmid).copied();
+        let unsourced = g.pmid.trim().is_empty();
         guidelines.push(
             view! {
                 <li>
                     {sk.t(&g.text, &format!("guidelines.{i}.text"))}
                     {g.quote.map(|q| view! { " \u{2014} " {cited(&format!("\u{201c}{q}\u{201d}"), refs)} })}
                     {n.map(ref_link)}
+                    {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
                 </li>
             }
             .into_any(),
         );
+    }
+    for l in guideline_leads {
+        let link = match refs.get(&l.pmid) {
+            Some(n) => ref_link(*n),
+            None => pubmed_link(&l.pmid)
+                .map(|href| {
+                    view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", l.pmid)}</a> }
+                        .into_any()
+                })
+                .unwrap_or_else(|| ().into_any()),
+        };
+        guidelines
+            .push(view! { <li><span class="flag-label">{l.text()}</span> {link}</li> }.into_any());
     }
     // At a glance (Stage 4 item 8): about five lines, at the top.
     let glance = w.at_a_glance.as_ref().map(|g| {
@@ -1109,7 +1126,9 @@ fn written_v3_view(
                             .enumerate()
                             .map(|(i, k)| view! {
                                 <li>
-                                    {mk.t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))} ": "
+                                    {(!k.label.is_empty()).then(|| view! {
+                                        {mk.t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))} ": "
+                                    })}
                                     {mk.t(&k.value_text, &format!("at_a_glance.key_numbers.{i}.value_text"))}
                                     {refs.get(&k.pmid).copied().map(ref_link)}
                                 </li>
@@ -1117,20 +1136,32 @@ fn written_v3_view(
                             .collect_view()}
                     </ul>
                 })}
-                <p><strong>"Main caveat: "</strong> {mk.t(&g.main_caveat, "at_a_glance.main_caveat")}</p>
+                {(!g.main_caveat.is_empty()).then(|| view! {
+                    <p><strong>"Main caveat: "</strong> {mk.t(&g.main_caveat, "at_a_glance.main_caveat")}</p>
+                })}
             </section>
         }
     });
     // What this means for clinical practice (Stage 4 item 9).
     let practice = w.clinical_practice.as_ref().map(|p| {
+        // Labelled parts as a list; text under no label as written
+        // (flat schema: parsed from labelled lines, never dropped).
+        let parts: Vec<AnyView> = [
+            ("Default choice", &p.default_choice, "default_choice"),
+            ("Who may benefit", &p.who_may_benefit, "who_may_benefit"),
+            ("Counselling", &p.counselling, "counselling"),
+            ("Cost per case", &p.cost_per_case, "cost_per_case"),
+        ]
+        .into_iter()
+        .filter(|(_, t, _)| !t.is_empty())
+        .map(|(label, t, f)| {
+            view! { <dt>{label}</dt><dd>{mk.t(t, &format!("clinical_practice.{f}"))}</dd> }.into_any()
+        })
+        .collect();
         view! {
             <h3>"What this means for clinical practice"</h3>
-            <dl>
-                <dt>"Default choice"</dt><dd>{mk.t(&p.default_choice, "clinical_practice.default_choice")}</dd>
-                <dt>"Who may benefit"</dt><dd>{mk.t(&p.who_may_benefit, "clinical_practice.who_may_benefit")}</dd>
-                <dt>"Counselling"</dt><dd>{mk.t(&p.counselling, "clinical_practice.counselling")}</dd>
-                <dt>"Cost per case"</dt><dd>{mk.t(&p.cost_per_case, "clinical_practice.cost_per_case")}</dd>
-            </dl>
+            {(!parts.is_empty()).then(|| view! { <dl>{parts}</dl> })}
+            {(!p.text.is_empty()).then(|| view! { <p>{mk.t(&p.text, "clinical_practice.text")}</p> })}
         }
     });
     // Each outcome's structured numbers, by label and study, the
@@ -1200,7 +1231,7 @@ fn written_v3_view(
                                     <tr>
                                         <td>
                                             {mk.t(&o.outcome, &format!("outcomes.{i}.outcome"))}
-                                            <br /><span class="etype">{o.evidence_type.label()}</span>
+                                            {o.evidence_type.label().map(|l| view! { <br /><span class="etype">{l}</span> })}
                                         </td>
                                         <td>{mk.t(&o.rct_evidence, &format!("outcomes.{i}.rct_evidence"))}</td>
                                         <td>
@@ -1551,6 +1582,17 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         .iter()
         .map(|e| (e.pmid.clone(), e.clone()))
         .collect();
+    let guideline_leads: Vec<crate::agent::answer_v3::SkepticLead> = a
+        .skeptic
+        .as_ref()
+        .map(|k| {
+            k.leads
+                .iter()
+                .filter(|l| l.kind == "guideline")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     let skeptic_guidelines: Vec<(usize, SkepticItem)> = a
         .skeptic
         .as_ref()
@@ -1569,6 +1611,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             &evidence,
             skeptic_guidelines,
             &skeptic_spans,
+            guideline_leads,
         )
     });
     let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));

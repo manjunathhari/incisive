@@ -90,35 +90,34 @@ pub struct Number {
 }
 
 /// What kind of evidence an outcome row rests on (Stage 4 item 6): a label
-/// only; it blocks nothing.
+/// only; it blocks nothing. Since R-S4a it is derived in code from the
+/// cited studies' designs (`writer_v3::evidence_types`); `Unknown` (the
+/// default, and answers stored before Stage 4) draws no label.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceType {
     Rct,
     RctMetaAnalysis,
     NetworkMetaAnalysis,
+    /// Meta-analyses (what they pooled is in the skeptic's notes).
+    MetaAnalysis,
     Observational,
-    #[default]
     Mixed,
+    #[default]
+    Unknown,
 }
 
 impl EvidenceType {
-    /// The schema's enum values.
-    pub const ALL: [&'static str; 5] = [
-        "rct",
-        "rct_meta_analysis",
-        "network_meta_analysis",
-        "observational",
-        "mixed",
-    ];
-
-    pub fn label(self) -> &'static str {
+    /// The label drawn under the outcome; `None` draws nothing.
+    pub fn label(self) -> Option<&'static str> {
         match self {
-            EvidenceType::Rct => "RCTs",
-            EvidenceType::RctMetaAnalysis => "RCT meta-analysis",
-            EvidenceType::NetworkMetaAnalysis => "network meta-analysis",
-            EvidenceType::Observational => "observational",
-            EvidenceType::Mixed => "mixed evidence",
+            EvidenceType::Rct => Some("RCTs"),
+            EvidenceType::RctMetaAnalysis => Some("RCT meta-analysis"),
+            EvidenceType::NetworkMetaAnalysis => Some("network meta-analysis"),
+            EvidenceType::MetaAnalysis => Some("meta-analysis"),
+            EvidenceType::Observational => Some("observational"),
+            EvidenceType::Mixed => Some("mixed evidence"),
+            EvidenceType::Unknown => None,
         }
     }
 }
@@ -180,6 +179,11 @@ pub struct ClinicalPractice {
     pub counselling: String,
     /// A per-case range derived from verified trial numbers, or "not known".
     pub cost_per_case: String,
+    /// Stage 4 schema fix (additive): the writer's text that sat under no
+    /// label (the flat schema gives one text with labelled lines), drawn as
+    /// written.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
 }
 
 /// A notable finding outside the outcome tables (Stage 4 item 12).
@@ -632,6 +636,7 @@ pub fn text_fields(a: &WrittenAnswer) -> Vec<(String, &str)> {
         ));
         v.push(("clinical_practice.counselling".into(), &c.counselling));
         v.push(("clinical_practice.cost_per_case".into(), &c.cost_per_case));
+        v.push(("clinical_practice.text".into(), &c.text));
     }
     for (i, o) in a.outcomes.iter().enumerate() {
         v.push((format!("outcomes.{i}.outcome"), &o.outcome));
@@ -918,19 +923,28 @@ impl AnswerV3 {
                             .get(&k.pmid)
                             .map(|n| format!(" [{n}]"))
                             .unwrap_or_default();
+                        let label = if k.label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "{}: ",
+                                t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))
+                            )
+                        };
                         o.push_str(&format!(
-                            "- {}: {}{cite}\n",
-                            t(&k.label, &format!("at_a_glance.key_numbers.{i}.label")),
+                            "- {label}{}{cite}\n",
                             t(
                                 &k.value_text,
                                 &format!("at_a_glance.key_numbers.{i}.value_text")
                             )
                         ));
                     }
-                    o.push_str(&format!(
-                        "Main caveat: {}\n",
-                        t(&g.main_caveat, "at_a_glance.main_caveat")
-                    ));
+                    if !g.main_caveat.is_empty() {
+                        o.push_str(&format!(
+                            "Main caveat: {}\n",
+                            t(&g.main_caveat, "at_a_glance.main_caveat")
+                        ));
+                    }
                 }
                 h(&mut o, "Bottom line");
                 o.push_str(&format!(
@@ -950,18 +964,26 @@ impl AnswerV3 {
                         ("Counselling", &c.counselling, "counselling"),
                         ("Cost per case", &c.cost_per_case, "cost_per_case"),
                     ] {
-                        o.push_str(&format!(
-                            "{label}: {}\n",
-                            t(text, &format!("clinical_practice.{f}"))
-                        ));
+                        if !text.is_empty() {
+                            o.push_str(&format!(
+                                "{label}: {}\n",
+                                t(text, &format!("clinical_practice.{f}"))
+                            ));
+                        }
+                    }
+                    if !c.text.is_empty() {
+                        o.push_str(&format!("{}\n", t(&c.text, "clinical_practice.text")));
                     }
                 }
                 h(&mut o, "Outcome by outcome");
                 for (i, x) in w.outcomes.iter().enumerate() {
                     o.push_str(&format!(
-                        "- {} ({}; certainty {}): {}\n  RCT evidence: {}\n  Why: {}\n",
+                        "- {} ({}certainty {}): {}\n  RCT evidence: {}\n  Why: {}\n",
                         t(&x.outcome, &format!("outcomes.{i}.outcome")),
-                        x.evidence_type.label(),
+                        x.evidence_type
+                            .label()
+                            .map(|l| format!("{l}; "))
+                            .unwrap_or_default(),
                         x.certainty.as_str(),
                         t(&x.effect_text, &format!("outcomes.{i}.effect_text")),
                         t(&x.rct_evidence, &format!("outcomes.{i}.rct_evidence")),
@@ -1534,6 +1556,7 @@ mod tests {
                     who_may_benefit: "Not shown.".into(),
                     counselling: "Similar recovery.".into(),
                     cost_per_case: "not known".into(),
+                    text: String::new(),
                 }),
                 guidelines: vec![],
                 notable_findings: vec![NotableFinding {

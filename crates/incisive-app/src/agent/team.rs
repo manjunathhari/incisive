@@ -477,6 +477,19 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         Ok((mut written, labels_defaulted)) => {
             integrity.labels_defaulted = labels_defaulted;
             check_citations(&mut written, &selected, &mut integrity);
+            // R-S4a: the evidence label per outcome, from the cited studies'
+            // designs (the researcher's labels; missed trials are RCTs).
+            let designs: Vec<(String, String)> = studies
+                .iter()
+                .chain(&reviewed.missed)
+                .map(|s| (s.pmid.clone(), s.design.clone()))
+                .collect();
+            writer_v3::evidence_types(&mut written, |p| {
+                designs
+                    .iter()
+                    .find(|(id, _)| id == p)
+                    .and_then(|(_, d)| writer_v3::design_class(d))
+            });
             // Stage 4 item 5: mark (never change) the numbers not traced to
             // what the writer was given.
             let allowed = writer_v3::allowed_numbers(&studies, full.then_some(&full_input));
