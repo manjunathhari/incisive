@@ -473,8 +473,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .chain(&reviewed.cited)
         .map(|s| s.pmid.clone())
         .collect();
-    match writer_v3::write_with(ctx, &ctx.llm, system, &user).await {
-        Ok(mut written) => {
+    match writer_v3::write_counted(ctx, &ctx.llm, system, &user).await {
+        Ok((mut written, labels_defaulted)) => {
+            integrity.labels_defaulted = labels_defaulted;
             check_citations(&mut written, &selected, &mut integrity);
             // Stage 4 item 5: mark (never change) the numbers not traced to
             // what the writer was given.

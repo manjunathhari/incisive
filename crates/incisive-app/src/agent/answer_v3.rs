@@ -482,6 +482,10 @@ pub struct IntegrityV3 {
     pub numbers_unverified: u32,
     #[serde(default)]
     pub outcomes_unverified: u32,
+    /// Stage 4 schema fix (additive): certainty or evidence-type labels the
+    /// writer gave that were not recognised, set to Very low / mixed.
+    #[serde(default)]
+    pub labels_defaulted: u32,
 }
 
 /// The stored Phase 3 answer.
@@ -870,6 +874,12 @@ impl AnswerV3 {
             "Extraction: {} outcomes and {} numbers could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}.",
             i.outcomes_unverified, i.numbers_unverified
         ));
+        }
+        if i.labels_defaulted > 0 {
+            notes.push(format!(
+                "{} certainty or evidence labels from the writer were not recognised; set to \u{201c}Very low\u{201d} or \u{201c}mixed evidence\u{201d}.",
+                i.labels_defaulted
+            ));
         }
         if let Some(n) = self.skeptic.as_ref().and_then(SkepticV3::dropped_note) {
             notes.push(n);

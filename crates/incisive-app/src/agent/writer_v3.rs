@@ -30,11 +30,13 @@
 //! Privacy: nothing here logs the question, abstracts or the answer; only
 //! the run id and counts.
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::answer_v3::{
-    Certainty, EvidenceType, IntegrityV3, SearchEntry, Span, WrittenAnswer, citation_ranges,
-    clean_citations, marked_runs, text_fields,
+    Applicability, AtAGlance, BottomLine, Certainty, ClinicalPractice, Conflict, EvidenceType,
+    GuidelineV3, IntegrityV3, NotableFinding, Number, Outcome, SearchEntry, Span, Study,
+    WrittenAnswer, citation_ranges, clean_citations, marked_runs, text_fields,
 };
 use super::extractor::{
     Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind, all_allowed,
@@ -119,23 +121,25 @@ at_a_glance and numbers (arm is required whenever a number belongs to a group); 
 - Be concise and clinically sharp. Say what the evidence shows and how sure it is; do not hedge into mush.
 
 FIELDS:
-- bottom_line: 2 to 3 sentences, the overall certainty and its reason.
+- bottom_line: 2 to 3 sentences, the overall certainty and its reason. Every certainty is exactly one of: High, \
+Moderate, Low, Very low.
 - outcomes: one entry per outcome the evidence covers (benefits and harms; operative time and cost when reported). \
 rct_evidence names the trials or meta-analyses; effect_text gives the effect with its numbers, cited; numbers lists each \
-of those numbers as a structured entry (value is the number itself; unit; arm names the group it belongs to, or null; \
-ci_low and ci_high when a confidence interval is given, else null; p as written, or null; pmid of the source study); \
+of those numbers as a structured entry (value is the number itself; unit, or \"\"; arm names the group it belongs to, \
+or \"\"; ci_low and ci_high as numbers written as text when a confidence interval is given, else \"\"; p as written, or \
+\"\"; pmid of the source study); \
 certainty and why; pmids of the studies behind the row; evidence_type: what the row rests on (rct: one or more \
 randomised trials; rct_meta_analysis: a meta-analysis pooling randomised trials only; network_meta_analysis; \
 observational; mixed: more than one of these, or a meta-analysis pooling observational studies).
-- studies: one row per study: label (short name with year and journal), design, n (participants, or null when the \
+- studies: one row per study: label (short name with year and journal), design, n (participants, or 0 when the \
 abstract does not state it), setting, comparison, key_results (cited), appraisal (main limitations).
 - conflicts: where studies disagree, and why they may differ.
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
 evidence means in Indian practice and the Indian cost context: say what is not known, and never invent costs, prices or \
 figures); training (what it means for training programmes, or say it has no particular bearing).
 - would_change: what new evidence would change this answer.
-- guidelines: each guideline or consensus statement among the studies provided: pmid (or null), body (the issuing \
-society or group), year (or null), statement (what it recommends, in its own words where the abstract gives them, \
+- guidelines: each guideline or consensus statement among the studies provided: pmid (or \"\"), body (the issuing \
+society or group), year (or 0), statement (what it recommends, in its own words where the abstract gives them, \
 cited). Empty when none was provided; never from memory.
 - at_a_glance: about five lines for a busy clinician: verdict (one sentence), key_numbers (the 2 to 4 numbers that \
 matter most for the decision: label, value_text with the arms named, pmid of the source study), main_caveat (one \
@@ -153,8 +157,64 @@ what its label says), each citing its study in text and in pmids, drawn only fro
 pub const STUDIES_HEADING: &str = "STUDIES SELECTED BY THE RESEARCHER";
 const SUBMIT: &str = "Write the answer now, as JSON matching the schema.";
 
-/// The writer's JSON Schema (strict-compatible; see the module docs).
+// ---------- the schema, within the API's grammar limits ----------
+
+/// What a writer schema variant contains (Stage 4 schema fix). The live
+/// API compiles a strict schema into a grammar and refuses one that is too
+/// large ("The compiled grammar is too large"): the Stage 4 fields on top of
+/// Stage 3's nullable unions and enums crossed that line on 30 Oct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemaOpts {
+    /// The Stage 4 fields (guidelines, at a glance, clinical practice,
+    /// notable findings, evidence type).
+    pub stage4_fields: bool,
+    /// Optional values as `["T","null"]` unions (Stage 3 and A). Without:
+    /// plain types and a sentinel (`""`, `0`), CI bounds as strings.
+    pub nullable: bool,
+    /// Certainty and evidence type as JSON Schema enums. Without: plain
+    /// strings, checked in code ([`parse_certainty`], [`parse_evidence_type`]).
+    pub enums: bool,
+}
+
+impl SchemaOpts {
+    /// A: the Stage 4 schema as first built (refused live, 30 Oct).
+    pub const STAGE4_FIRST: SchemaOpts = SchemaOpts {
+        stage4_fields: true,
+        nullable: true,
+        enums: true,
+    };
+    /// B: the Stage 3 schema (accepted live), the control.
+    pub const STAGE3: SchemaOpts = SchemaOpts {
+        stage4_fields: false,
+        nullable: true,
+        enums: true,
+    };
+    /// C: A without nullable unions.
+    pub const NO_NULLABLE: SchemaOpts = SchemaOpts {
+        stage4_fields: true,
+        nullable: false,
+        enums: true,
+    };
+    /// D: C without enums. **Live** ([`LIVE_SCHEMA`]).
+    pub const FLAT: SchemaOpts = SchemaOpts {
+        stage4_fields: true,
+        nullable: false,
+        enums: false,
+    };
+}
+
+/// The variant the writer sends (D): no nullable unions and no enums, so
+/// its grammar is smaller than Stage 3's although it has more fields.
+pub const LIVE_SCHEMA: SchemaOpts = SchemaOpts::FLAT;
+
+/// The writer's JSON Schema: the live variant (see [`SchemaOpts`]).
 pub fn writer_schema() -> Value {
+    writer_schema_with(LIVE_SCHEMA)
+}
+
+/// A writer schema variant (strict-compatible: every object
+/// `additionalProperties: false`, every property required, no ranges).
+pub fn writer_schema_with(o: SchemaOpts) -> Value {
     fn obj(props: Value) -> Value {
         let required: Vec<String> = props
             .as_object()
@@ -165,42 +225,404 @@ pub fn writer_schema() -> Value {
         json!({"type": "object", "additionalProperties": false, "properties": props, "required": required})
     }
     let s = json!({"type": "string"});
-    let s_null = json!({"type": ["string", "null"]});
-    let n_null = json!({"type": ["number", "null"]});
-    let certainty = json!({"type": "string", "enum": Certainty::ALL});
+    let int = json!({"type": "integer"});
+    let (s_opt, n_opt, i_opt) = if o.nullable {
+        (
+            json!({"type": ["string", "null"]}),
+            json!({"type": ["number", "null"]}),
+            json!({"type": ["integer", "null"]}),
+        )
+    } else {
+        // Sentinels: "" for text and CI bounds (written as text), 0 for n
+        // and year.
+        (s.clone(), s.clone(), int.clone())
+    };
+    let certainty = if o.enums {
+        json!({"type": "string", "enum": Certainty::ALL})
+    } else {
+        s.clone()
+    };
     let pmids = json!({"type": "array", "items": {"type": "string"}});
     let number = obj(json!({
-        "label": s, "value": {"type": "number"}, "unit": s_null, "arm": s_null,
-        "ci_low": n_null, "ci_high": n_null, "p": s_null, "pmid": s
+        "label": s, "value": {"type": "number"}, "unit": s_opt, "arm": s_opt,
+        "ci_low": n_opt, "ci_high": n_opt, "p": s_opt, "pmid": s
     }));
-    obj(json!({
+    let mut outcome = json!({
+        "outcome": s, "rct_evidence": s, "effect_text": s,
+        "numbers": {"type": "array", "items": number},
+        "certainty": certainty, "why": s, "pmids": pmids
+    });
+    if o.stage4_fields {
+        outcome["evidence_type"] = if o.enums {
+            json!({"type": "string", "enum": EvidenceType::ALL})
+        } else {
+            s.clone()
+        };
+    }
+    let mut top = json!({
         "bottom_line": obj(json!({"text": s, "certainty": certainty, "certainty_reason": s})),
-        "outcomes": {"type": "array", "items": obj(json!({
-            "outcome": s, "rct_evidence": s, "effect_text": s,
-            "numbers": {"type": "array", "items": number},
-            "certainty": certainty, "why": s, "pmids": pmids,
-            "evidence_type": {"type": "string", "enum": EvidenceType::ALL}
-        }))},
+        "outcomes": {"type": "array", "items": obj(outcome)},
         "studies": {"type": "array", "items": obj(json!({
-            "pmid": s, "label": s, "design": s, "n": {"type": ["integer", "null"]},
+            "pmid": s, "label": s, "design": s, "n": i_opt,
             "setting": s, "comparison": s, "key_results": s, "appraisal": s
         }))},
         "conflicts": {"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))},
         "applicability": obj(json!({"case_mix": s, "india_cost_context": s, "training": s})),
-        "would_change": {"type": "array", "items": s},
-        "guidelines": {"type": "array", "items": obj(json!({
-            "pmid": s_null, "body": s, "year": {"type": ["integer", "null"]}, "statement": s
-        }))},
-        "at_a_glance": obj(json!({
-            "verdict": s,
-            "key_numbers": {"type": "array", "items": obj(json!({"label": s, "value_text": s, "pmid": s}))},
-            "main_caveat": s
-        })),
-        "clinical_practice": obj(json!({
-            "default_choice": s, "who_may_benefit": s, "counselling": s, "cost_per_case": s
-        })),
-        "notable_findings": {"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))}
-    }))
+        "would_change": {"type": "array", "items": s}
+    });
+    if o.stage4_fields {
+        let t = top.as_object_mut().expect("object");
+        t.insert(
+            "guidelines".into(),
+            json!({"type": "array", "items": obj(json!({
+                "pmid": s_opt, "body": s, "year": i_opt, "statement": s
+            }))}),
+        );
+        t.insert(
+            "at_a_glance".into(),
+            obj(json!({
+                "verdict": s,
+                "key_numbers": {"type": "array", "items": obj(json!({"label": s, "value_text": s, "pmid": s}))},
+                "main_caveat": s
+            })),
+        );
+        t.insert(
+            "clinical_practice".into(),
+            obj(json!({
+                "default_choice": s, "who_may_benefit": s, "counselling": s, "cost_per_case": s
+            })),
+        );
+        t.insert(
+            "notable_findings".into(),
+            json!({"type": "array", "items": obj(json!({"text": s, "pmids": pmids}))}),
+        );
+    }
+    obj(top)
+}
+
+/// A rough size of the grammar a schema compiles to: its JSON bytes, enum
+/// values, nullable unions, deepest nesting, properties and objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Complexity {
+    pub bytes: usize,
+    pub enum_values: usize,
+    pub nullable_unions: usize,
+    pub depth: usize,
+    pub properties: usize,
+    pub objects: usize,
+}
+
+/// [`Complexity`] of `schema`.
+pub fn schema_complexity(schema: &Value) -> Complexity {
+    fn walk(v: &Value, depth: usize, c: &mut Complexity) {
+        match v {
+            Value::Object(o) => {
+                c.depth = c.depth.max(depth);
+                if let Some(e) = o.get("enum").and_then(Value::as_array) {
+                    c.enum_values += e.len();
+                }
+                if o.get("type").is_some_and(Value::is_array) {
+                    c.nullable_unions += 1;
+                }
+                if o.get("type") == Some(&json!("object")) {
+                    c.objects += 1;
+                }
+                if let Some(p) = o.get("properties").and_then(Value::as_object) {
+                    c.properties += p.len();
+                    for x in p.values() {
+                        walk(x, depth + 1, c);
+                    }
+                }
+                if let Some(i) = o.get("items") {
+                    walk(i, depth + 1, c);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, depth, c)),
+            _ => {}
+        }
+    }
+    let mut c = Complexity {
+        bytes: schema.to_string().len(),
+        ..Complexity::default()
+    };
+    walk(schema, 1, &mut c);
+    c
+}
+
+// ---------- the reply, read leniently and checked in code ----------
+
+/// A certainty word, case and separators ignored ("Very low", "very_low",
+/// "VERY LOW"). `None` when it is none of the four.
+pub fn parse_certainty(s: &str) -> Option<Certainty> {
+    let k: String = s
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match k.as_str() {
+        "high" => Some(Certainty::High),
+        "moderate" => Some(Certainty::Moderate),
+        "low" => Some(Certainty::Low),
+        "verylow" => Some(Certainty::VeryLow),
+        _ => None,
+    }
+}
+
+/// An evidence type, as the schema's words (case and separators ignored).
+/// `None` when it is none of them.
+pub fn parse_evidence_type(s: &str) -> Option<EvidenceType> {
+    let k: String = s
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match k.as_str() {
+        "rct" | "rcts" => Some(EvidenceType::Rct),
+        "rctmetaanalysis" => Some(EvidenceType::RctMetaAnalysis),
+        "networkmetaanalysis" => Some(EvidenceType::NetworkMetaAnalysis),
+        "observational" => Some(EvidenceType::Observational),
+        "mixed" => Some(EvidenceType::Mixed),
+        _ => None,
+    }
+}
+
+/// Optional text: `None` for null or blank (the schema's `""` sentinel).
+fn opt_text(v: Option<String>) -> Option<String> {
+    v.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+/// A number written as JSON number or text (`"-0.34"`, `"−0.34"`); `None`
+/// for null, blank or anything else.
+fn opt_number(v: &Option<Value>) -> Option<f64> {
+    match v.as_ref()? {
+        Value::Number(n) => n.as_f64(),
+        Value::String(t) => t
+            .trim()
+            .replace(['\u{2212}', '\u{2013}'], "-")
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite()),
+        _ => None,
+    }
+}
+
+/// A positive integer written as JSON number or text; `None` for null, 0
+/// (the sentinel), blank or anything else.
+fn opt_count<T: TryFrom<i64>>(v: &Option<Value>) -> Option<T> {
+    let n = match v.as_ref()? {
+        Value::Number(n) => n.as_i64(),
+        Value::String(t) => t.trim().parse::<i64>().ok(),
+        _ => None,
+    }?;
+    (n > 0).then(|| T::try_from(n).ok()).flatten()
+}
+
+#[derive(Deserialize)]
+struct WireNumber {
+    label: String,
+    value: f64,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    arm: Option<String>,
+    #[serde(default)]
+    ci_low: Option<Value>,
+    #[serde(default)]
+    ci_high: Option<Value>,
+    #[serde(default)]
+    p: Option<String>,
+    pmid: String,
+}
+
+#[derive(Deserialize)]
+struct WireOutcome {
+    outcome: String,
+    rct_evidence: String,
+    effect_text: String,
+    numbers: Vec<WireNumber>,
+    certainty: String,
+    why: String,
+    pmids: Vec<String>,
+    #[serde(default)]
+    evidence_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WireStudy {
+    pmid: String,
+    label: String,
+    design: String,
+    #[serde(default)]
+    n: Option<Value>,
+    setting: String,
+    comparison: String,
+    key_results: String,
+    appraisal: String,
+}
+
+#[derive(Deserialize)]
+struct WireBottomLine {
+    text: String,
+    certainty: String,
+    certainty_reason: String,
+}
+
+#[derive(Deserialize)]
+struct WireGuideline {
+    #[serde(default)]
+    pmid: Option<String>,
+    body: String,
+    #[serde(default)]
+    year: Option<Value>,
+    statement: String,
+}
+
+#[derive(Deserialize)]
+struct WireNotable {
+    text: String,
+    #[serde(default)]
+    pmids: Vec<String>,
+}
+
+/// The writer's reply as the wire carries it (any schema variant: null or
+/// a sentinel for optional values, an enum word or free text for the
+/// labels). The Stage 4 fields default when missing.
+#[derive(Deserialize)]
+pub struct WireAnswer {
+    bottom_line: WireBottomLine,
+    outcomes: Vec<WireOutcome>,
+    studies: Vec<WireStudy>,
+    conflicts: Vec<Conflict>,
+    applicability: Applicability,
+    would_change: Vec<String>,
+    #[serde(default)]
+    guidelines: Vec<WireGuideline>,
+    #[serde(default)]
+    at_a_glance: Option<AtAGlance>,
+    #[serde(default)]
+    clinical_practice: Option<ClinicalPractice>,
+    #[serde(default)]
+    notable_findings: Vec<WireNotable>,
+}
+
+impl WireAnswer {
+    /// The stored answer, and how many labels were not recognised (flag,
+    /// never fail): an unknown certainty becomes Very low and an unknown
+    /// evidence type mixed; a CI bound that is not a number is kept,
+    /// written into its number's label as "CI as written: …".
+    pub fn into_answer(self) -> (WrittenAnswer, u32) {
+        let defaulted = std::cell::Cell::new(0u32);
+        let cert = |s: &str| {
+            parse_certainty(s).unwrap_or_else(|| {
+                defaulted.set(defaulted.get() + 1);
+                Certainty::VeryLow
+            })
+        };
+        let bottom_line = BottomLine {
+            certainty: cert(&self.bottom_line.certainty),
+            text: self.bottom_line.text,
+            certainty_reason: self.bottom_line.certainty_reason,
+        };
+        let mut outcomes = Vec::with_capacity(self.outcomes.len());
+        for o in self.outcomes {
+            let certainty = cert(&o.certainty);
+            let evidence_type = match o.evidence_type.as_deref().map(str::trim) {
+                None | Some("") => EvidenceType::Mixed,
+                Some(t) => parse_evidence_type(t).unwrap_or_else(|| {
+                    defaulted.set(defaulted.get() + 1);
+                    EvidenceType::Mixed
+                }),
+            };
+            let numbers = o
+                .numbers
+                .into_iter()
+                .map(|n| {
+                    let mut label = n.label;
+                    let mut bound = |v: &Option<Value>| {
+                        let x = opt_number(v);
+                        if x.is_none()
+                            && let Some(Value::String(t)) = v
+                            && !t.trim().is_empty()
+                        {
+                            label.push_str(&format!(" (CI as written: {})", t.trim()));
+                        }
+                        x
+                    };
+                    let ci_low = bound(&n.ci_low);
+                    let ci_high = bound(&n.ci_high);
+                    Number {
+                        label,
+                        value: n.value,
+                        unit: opt_text(n.unit),
+                        arm: opt_text(n.arm),
+                        ci_low,
+                        ci_high,
+                        p: opt_text(n.p),
+                        pmid: n.pmid,
+                    }
+                })
+                .collect();
+            outcomes.push(Outcome {
+                outcome: o.outcome,
+                rct_evidence: o.rct_evidence,
+                effect_text: o.effect_text,
+                numbers,
+                certainty,
+                why: o.why,
+                pmids: o.pmids,
+                evidence_type,
+            });
+        }
+        let studies = self
+            .studies
+            .into_iter()
+            .map(|x| Study {
+                n: opt_count(&x.n),
+                pmid: x.pmid,
+                label: x.label,
+                design: x.design,
+                setting: x.setting,
+                comparison: x.comparison,
+                key_results: x.key_results,
+                appraisal: x.appraisal,
+            })
+            .collect();
+        let guidelines = self
+            .guidelines
+            .into_iter()
+            .map(|g| GuidelineV3 {
+                year: opt_count(&g.year),
+                pmid: opt_text(g.pmid),
+                body: g.body,
+                statement: g.statement,
+                pmid_removed: false,
+            })
+            .collect();
+        let notable_findings = self
+            .notable_findings
+            .into_iter()
+            .map(|n| NotableFinding {
+                text: n.text,
+                pmids: n.pmids,
+                spans: Vec::new(),
+            })
+            .collect();
+        (
+            WrittenAnswer {
+                bottom_line,
+                outcomes,
+                studies,
+                conflicts: self.conflicts,
+                applicability: self.applicability,
+                would_change: self.would_change,
+                at_a_glance: self.at_a_glance,
+                clinical_practice: self.clinical_practice,
+                guidelines,
+                notable_findings,
+            },
+            defaulted.get(),
+        )
+    }
 }
 
 /// Neutralised, then cut to `max` bytes on a character boundary.
@@ -450,15 +872,17 @@ at_a_glance and numbers (arm is required whenever a number belongs to a group); 
 - Be concise and clinically sharp. Say what the evidence shows and how sure it is; do not hedge into mush.
 
 FIELDS:
-- bottom_line: 2 to 3 sentences, the overall certainty and its reason.
+- bottom_line: 2 to 3 sentences, the overall certainty and its reason. Every certainty is exactly one of: High, \
+Moderate, Low, Very low.
 - outcomes: one entry per outcome the evidence covers (benefits and harms; operative time and cost when reported). \
 rct_evidence names the trials or meta-analyses; effect_text gives the effect with its numbers, cited; numbers lists each \
-of those numbers as a structured entry (value is the number itself; unit; arm names the group it belongs to, or null; \
-ci_low and ci_high when a confidence interval is given, else null; p as written, or null; pmid of the source study); \
+of those numbers as a structured entry (value is the number itself; unit, or \"\"; arm names the group it belongs to, \
+or \"\"; ci_low and ci_high as numbers written as text when a confidence interval is given, else \"\"; p as written, or \
+\"\"; pmid of the source study); \
 certainty and why; pmids of the studies behind the row; evidence_type: what the row rests on (rct: one or more \
 randomised trials; rct_meta_analysis: a meta-analysis pooling randomised trials only; network_meta_analysis; \
 observational; mixed: more than one of these, or a meta-analysis pooling observational studies).
-- studies: one row per study: label (short name with year and journal), design, n (participants, or null when not \
+- studies: one row per study: label (short name with year and journal), design, n (participants, or 0 when not \
 stated), setting, comparison, key_results (cited), appraisal (main limitations, including overlap with other trials).
 - conflicts: where studies disagree (including the skeptic's contradicting evidence), and why they may differ.
 - applicability: case_mix (which cases the evidence covers, e.g. simple versus complex); india_cost_context (what the \
@@ -466,7 +890,7 @@ evidence means in Indian practice and the Indian cost context: say what is not k
 figures); training (what it means for training programmes, or say it has no particular bearing).
 - would_change: what new evidence would change this answer.
 - guidelines: each guideline or consensus statement provided (the skeptic's guidelines with their verified quotes, or a \
-selected guideline's row or abstract): pmid (or null), body (the issuing society or group), year (or null), statement \
+selected guideline's row or abstract): pmid (or \"\"), body (the issuing society or group), year (or 0), statement \
 (what it recommends, in its verified words where you have them, cited). Empty when none was provided; never from memory.
 - at_a_glance: about five lines for a busy clinician: verdict (one sentence), key_numbers (the 2 to 4 numbers that \
 matter most for the decision: label, value_text with the arms named, pmid of the source study), main_caveat (one \
@@ -1064,6 +1488,18 @@ pub async fn write_with(
     system: &str,
     user: &str,
 ) -> Result<WrittenAnswer, WriteFailure> {
+    write_counted(ctx, llm, system, user).await.map(|(a, _)| a)
+}
+
+/// [`write_with`], also returning how many certainty or evidence-type
+/// labels were not recognised and set to their default (the schema no
+/// longer enforces them: [`LIVE_SCHEMA`]).
+pub async fn write_counted(
+    ctx: &RunContext,
+    llm: &AgentLlm,
+    system: &str,
+    user: &str,
+) -> Result<(WrittenAnswer, u32), WriteFailure> {
     let call = llm.call(ctx, &llm.models.writer, "write");
     let schema = OutputSchema::new(writer_schema());
     let max = ctx.settings.writer_max_tokens;
@@ -1071,8 +1507,8 @@ pub async fn write_with(
         .reply(system, user, Some(&schema), max)
         .await
         .map_err(WriteFailure::Step)?;
-    let fault = match read_structured::<WrittenAnswer>(&first) {
-        Ok(a) => return Ok(a),
+    let fault = match read_structured::<WireAnswer>(&first) {
+        Ok(a) => return Ok(a.into_answer()),
         Err(f) => f,
     };
     log_unreadable(
@@ -1089,13 +1525,15 @@ pub async fn write_with(
     let low = schema.clone().with_effort(Effort::Low);
     let retry_user = format!("{user}{SCHEMA_NUDGE}");
     match call.reply(system, &retry_user, Some(&low), max).await {
-        Ok(r) => read_structured::<WrittenAnswer>(&r).map_err(|f| {
-            log_unreadable(&call, &r, f, "writer retry unusable");
-            if r.truncated() {
-                fail = WriteFailure::Truncated;
-            }
-            fail
-        }),
+        Ok(r) => read_structured::<WireAnswer>(&r)
+            .map(WireAnswer::into_answer)
+            .map_err(|f| {
+                log_unreadable(&call, &r, f, "writer retry unusable");
+                if r.truncated() {
+                    fail = WriteFailure::Truncated;
+                }
+                fail
+            }),
         Err(e @ (StepError::Cancelled | StepError::Unrecorded | StepError::HardStop)) => {
             Err(WriteFailure::Step(e))
         }
@@ -1609,6 +2047,135 @@ mod tests {
         assert!(i.removed_citations >= before + 5, "{}", i.removed_citations);
     }
 
+    /// Stage 4 schema fix: the live writer schema (Quick and Full share it)
+    /// stays within a grammar budget no higher than variant D's, the
+    /// variant chosen after the API refused A ("compiled grammar is too
+    /// large"). A future field must fit, or this fails in CI, not live.
+    /// Stage 3's schema (B, accepted live) is the reference for the drivers
+    /// that grow the grammar most: nullable unions and enum values.
+    #[test]
+    fn the_writer_schema_stays_within_the_grammar_budget() {
+        const BUDGET: Complexity = Complexity {
+            bytes: 3_314,
+            enum_values: 0,
+            nullable_unions: 0,
+            depth: 6,
+            properties: 58,
+            objects: 12,
+        };
+        let live = schema_complexity(&writer_schema());
+        assert_eq!(writer_schema(), writer_schema_with(SchemaOpts::FLAT));
+        for (what, got, max) in [
+            ("bytes", live.bytes, BUDGET.bytes),
+            ("enum values", live.enum_values, BUDGET.enum_values),
+            (
+                "nullable unions",
+                live.nullable_unions,
+                BUDGET.nullable_unions,
+            ),
+            ("depth", live.depth, BUDGET.depth),
+            ("properties", live.properties, BUDGET.properties),
+            ("objects", live.objects, BUDGET.objects),
+        ] {
+            assert!(got <= max, "writer schema {what}: {got} > budget {max}");
+        }
+        let stage3 = schema_complexity(&writer_schema_with(SchemaOpts::STAGE3));
+        assert!(live.nullable_unions < stage3.nullable_unions);
+        assert!(live.enum_values < stage3.enum_values);
+        assert!(live.depth <= stage3.depth);
+        // The variants the probe sends, as generated from this code.
+        let a = schema_complexity(&writer_schema_with(SchemaOpts::STAGE4_FIRST));
+        assert_eq!((a.nullable_unions, a.enum_values), (8, 13));
+        assert_eq!((stage3.nullable_unions, stage3.enum_values), (6, 8));
+        let c = schema_complexity(&writer_schema_with(SchemaOpts::NO_NULLABLE));
+        assert_eq!((c.nullable_unions, c.enum_values), (0, 13));
+    }
+
+    /// Stage 4 schema fix: the reply is read leniently and checked in code,
+    /// flag never fail: sentinels and nulls become "none", CI bounds written
+    /// as text become numbers, an unknown label becomes its default and is
+    /// counted, a CI bound that is not a number is kept in its label.
+    #[test]
+    fn the_wire_reply_is_checked_in_code_with_defaults() {
+        let reply = json!({
+            "bottom_line": {"text": "t", "certainty": "very low", "certainty_reason": "r"},
+            "outcomes": [{
+                "outcome": "Pain", "rct_evidence": "2 RCTs", "effect_text": "e",
+                "numbers": [
+                    {"label": "RR", "value": 0.76, "unit": "", "arm": "", "ci_low": "0.49",
+                     "ci_high": "1.17", "p": "", "pmid": "11111111"},
+                    {"label": "MD", "value": -0.34, "unit": "points", "arm": "robotic",
+                     "ci_low": "\u{2212}0.9", "ci_high": "about one", "p": "0.26", "pmid": "11111111"},
+                    {"label": "x", "value": 1, "unit": null, "arm": null, "ci_low": null,
+                     "ci_high": 2.5, "p": null, "pmid": "11111111"}
+                ],
+                "certainty": "SURE", "why": "w", "pmids": ["11111111"], "evidence_type": "RCT meta-analysis"
+            }, {
+                "outcome": "Cost", "rct_evidence": "", "effect_text": "", "numbers": [],
+                "certainty": "Moderate", "why": "", "pmids": [], "evidence_type": "cohorts"
+            }],
+            "studies": [
+                {"pmid": "11111111", "label": "A", "design": "RCT", "n": 0, "setting": "", "comparison": "",
+                 "key_results": "", "appraisal": ""},
+                {"pmid": "22222222", "label": "B", "design": "RCT", "n": "60", "setting": "", "comparison": "",
+                 "key_results": "", "appraisal": ""}
+            ],
+            "conflicts": [], "applicability": {"case_mix": "", "india_cost_context": "", "training": ""},
+            "would_change": [],
+            "guidelines": [{"pmid": "", "body": "S", "year": 0, "statement": "s"},
+                           {"pmid": "11111111", "body": "T", "year": 2020, "statement": "t"}],
+            "at_a_glance": {"verdict": "v", "key_numbers": [], "main_caveat": "c"},
+            "clinical_practice": {"default_choice": "d", "who_may_benefit": "w", "counselling": "c",
+                                  "cost_per_case": "not known"},
+            "notable_findings": [{"text": "n", "pmids": ["11111111"]}]
+        });
+        let (a, defaulted) = serde_json::from_value::<WireAnswer>(reply)
+            .unwrap()
+            .into_answer();
+        assert_eq!(a.bottom_line.certainty, Certainty::VeryLow);
+        let o = &a.outcomes[0];
+        assert_eq!(o.certainty, Certainty::VeryLow, "unknown: the default");
+        assert_eq!(o.evidence_type, EvidenceType::RctMetaAnalysis);
+        assert_eq!(a.outcomes[1].certainty, Certainty::Moderate);
+        assert_eq!(a.outcomes[1].evidence_type, EvidenceType::Mixed);
+        assert_eq!(defaulted, 2, "SURE and cohorts");
+        let n = &o.numbers;
+        assert_eq!(
+            (n[0].unit.clone(), n[0].arm.clone(), n[0].p.clone()),
+            (None, None, None)
+        );
+        assert_eq!((n[0].ci_low, n[0].ci_high), (Some(0.49), Some(1.17)));
+        assert_eq!(n[1].ci_low, Some(-0.9));
+        assert_eq!(n[1].ci_high, None);
+        assert_eq!(
+            n[1].label, "MD (CI as written: about one)",
+            "kept, never dropped"
+        );
+        assert_eq!((n[2].unit.clone(), n[2].ci_high), (None, Some(2.5)));
+        assert_eq!((a.studies[0].n, a.studies[1].n), (None, Some(60)));
+        assert_eq!(
+            (a.guidelines[0].pmid.clone(), a.guidelines[0].year),
+            (None, None)
+        );
+        assert_eq!(a.guidelines[1].year, Some(2020));
+        assert_eq!(a.notable_findings[0].pmids, ["11111111"]);
+        assert!(a.at_a_glance.is_some() && a.clinical_practice.is_some());
+        // A reply without the Stage 4 fields still reads.
+        let old = json!({
+            "bottom_line": {"text": "t", "certainty": "Low", "certainty_reason": "r"},
+            "outcomes": [], "studies": [], "conflicts": [],
+            "applicability": {"case_mix": "", "india_cost_context": "", "training": ""},
+            "would_change": []
+        });
+        let (a, d) = serde_json::from_value::<WireAnswer>(old)
+            .unwrap()
+            .into_answer();
+        assert_eq!(
+            (a.guidelines.len(), a.at_a_glance.is_none(), d),
+            (0, true, 0)
+        );
+    }
+
     #[test]
     fn schema_is_strict_with_nullable_types_and_no_ranges() {
         fn walk(v: &Value, at: &str) {
@@ -1638,25 +2205,28 @@ mod tests {
                 }
             }
         }
-        let s = writer_schema();
-        walk(&s, "$");
-        let num = &s["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
+        // Every variant is strict; the Stage 3 shape (A, B) carries the
+        // nullable unions and enums, the live one (D) plain types.
+        for o in [
+            SchemaOpts::STAGE4_FIRST,
+            SchemaOpts::STAGE3,
+            SchemaOpts::NO_NULLABLE,
+            SchemaOpts::FLAT,
+        ] {
+            walk(&writer_schema_with(o), "$");
+        }
+        let a = writer_schema_with(SchemaOpts::STAGE4_FIRST);
+        let num = &a["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
         assert_eq!(
             num["properties"]["ci_low"]["type"],
             json!(["number", "null"])
         );
-        assert_eq!(num["properties"]["unit"]["type"], json!(["string", "null"]));
         assert_eq!(
-            s["properties"]["studies"]["items"]["properties"]["n"]["type"],
-            json!(["integer", "null"])
-        );
-        assert_eq!(
-            s["properties"]["bottom_line"]["properties"]["certainty"]["enum"],
+            a["properties"]["bottom_line"]["properties"]["certainty"]["enum"],
             json!(["High", "Moderate", "Low", "Very low"])
         );
-        // Stage 4 item 6.
         assert_eq!(
-            s["properties"]["outcomes"]["items"]["properties"]["evidence_type"]["enum"],
+            a["properties"]["outcomes"]["items"]["properties"]["evidence_type"]["enum"],
             json!([
                 "rct",
                 "rct_meta_analysis",
@@ -1664,6 +2234,34 @@ mod tests {
                 "observational",
                 "mixed"
             ])
+        );
+        let s = writer_schema();
+        let num = &s["properties"]["outcomes"]["items"]["properties"]["numbers"]["items"];
+        for f in ["unit", "arm", "ci_low", "ci_high", "p"] {
+            assert_eq!(num["properties"][f]["type"], json!("string"), "{f}");
+        }
+        assert_eq!(
+            s["properties"]["studies"]["items"]["properties"]["n"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            s["properties"]["bottom_line"]["properties"]["certainty"],
+            json!({"type": "string"})
+        );
+        // B has none of the Stage 4 fields: it is the Stage 3 schema.
+        let b = writer_schema_with(SchemaOpts::STAGE3);
+        for f in [
+            "guidelines",
+            "at_a_glance",
+            "clinical_practice",
+            "notable_findings",
+        ] {
+            assert!(b["properties"].get(f).is_none(), "{f}");
+        }
+        assert!(
+            b["properties"]["outcomes"]["items"]["properties"]
+                .get("evidence_type")
+                .is_none()
         );
         assert!(SYSTEM.contains("evidence_type:") && SYSTEM_FULL.contains("evidence_type:"));
         let o: crate::agent::answer_v3::Outcome = serde_json::from_value(json!({
