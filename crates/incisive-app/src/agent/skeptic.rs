@@ -54,6 +54,7 @@ use super::llm::{Effort, OutputSchema, StepError, neutralise_source_tags, wrap_s
 use super::researcher::{
     Contradiction, MAX_CONTRADICTIONS, QUICK_TOOLS, SearchRecorder, recording, seen_pmids,
 };
+use super::team::plural;
 use super::tools::lit::LitTools;
 use super::{AgentLlm, Literature, RunContext, add_line, clip};
 use crate::gate::neutralise_close_tag;
@@ -735,8 +736,8 @@ pub async fn review(
             ctx,
             StepKind::Note,
             &format!(
-                "Skeptic: {} entries naming studies its searches did not return; not shown",
-                r.dropped_unseen
+                "Skeptic: {} naming studies its searches did not return; not shown",
+                plural(r.dropped_unseen as usize, "entry", "entries")
             ),
         )
         .await;
@@ -746,8 +747,8 @@ pub async fn review(
             ctx,
             StepKind::Note,
             &format!(
-                "Skeptic: {} studies whose quote was not found kept as unverified leads (PMID only)",
-                r.leads.len()
+                "Skeptic: {} whose quote was not found kept as unverified leads (PMID only)",
+                plural(r.leads.len(), "study", "studies")
             ),
         )
         .await;

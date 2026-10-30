@@ -663,8 +663,8 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
     for want in [
         "Skeptic: 1 search so far (turn 1 of 8)",
         "Skeptic: verdict holds with caveats, 2 caveats",
-        "Skeptic: 1 entries naming studies its searches did not return; not shown",
-        "Skeptic: 1 studies whose quote was not found kept as unverified leads (PMID only)",
+        "Skeptic: 1 entry naming studies its searches did not return; not shown",
+        "Skeptic: 1 study whose quote was not found kept as unverified leads (PMID only)",
     ] {
         assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
     }

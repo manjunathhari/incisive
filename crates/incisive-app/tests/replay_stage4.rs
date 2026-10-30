@@ -727,6 +727,10 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     assert_eq!(counts["page_outcome_rows"], 51);
     assert_eq!(counts["page_references"], 10);
     assert_eq!(counts["page_caveats"], 8);
+    // Pinned: what the trace marks on the prototype payloads (22 of 523;
+    // see the stage report §8 for each).
+    assert_eq!(counts["numbers_checked"], 523);
+    assert_eq!(counts["numbers_untraced"], 22);
     // What the trace marked, as text, for the report.
     let fields = incisive_app::agent::answer_v3::text_fields(&written);
     let marked: Vec<String> = untraced

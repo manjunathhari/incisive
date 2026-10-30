@@ -3251,9 +3251,21 @@ async fn recovery_releases_reservations_whose_run_is_gone() {
     assert_eq!(reservation(&pool, fresh).await, Some(4000));
     assert_eq!(reservation(&pool, live).await, Some(4000));
     assert_eq!(reservation(&pool, gate_req).await, Some(30));
-    // The caps no longer count it.
+    // The caps no longer count it. Asked as of the gate reservation's own
+    // instant, so the IST day boundary cannot split the reservations (it
+    // did at 00:04 IST, with "now" on the next day).
+    let gate_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT at FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation'",
+    )
+    .bind(gate_req)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
-        totals(&pool, u1).await.unwrap().today_paise,
+        incisive_app::spend::totals_at(&pool, u1, gate_at)
+            .await
+            .unwrap()
+            .today_paise,
         30,
         "only the gate reservation remains"
     );

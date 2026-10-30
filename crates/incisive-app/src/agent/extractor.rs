@@ -505,6 +505,10 @@ static WRITTEN_NUMBER: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// alike: after a space the dash is a sign in both ("12 −2.3" is 12 and
 /// -2.3; a spaced range "2019 – 2021" reads as 2019 and -2021 in both).
 fn signed_start(text: &str, start: usize) -> usize {
+    // A spaced minus after a value opener ("CI, - 0.34"), as in quotes.
+    if let Some(at) = super::extract::spaced_minus(text, start) {
+        return at;
+    }
     let mut back = text[..start].chars().rev();
     let Some(dash) = back.next() else {
         return start;
@@ -531,8 +535,13 @@ pub(crate) fn written_numbers(text: &str) -> Vec<(usize, usize, Vec<f64>)> {
     let mut last = 0;
     for m in WRITTEN_NUMBER.find_iter(text) {
         let start = signed_start(text, m.start()).max(last);
-        let written = &text[start..m.end()];
-        let values: Vec<f64> = numbers(written)
+        // A spaced sign ("CI, - 0.34") is read with the number it signs.
+        let written = if start < m.start() && text[start..m.start()].ends_with(' ') {
+            format!("-{}", &text[m.start()..m.end()])
+        } else {
+            text[start..m.end()].to_string()
+        };
+        let values: Vec<f64> = numbers(&written)
             .iter()
             .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok())
             .collect();
@@ -1585,6 +1594,28 @@ mod tests {
         assert!(marked("2019 \u{2013} 2021", &range).is_empty());
         // A range of which one end is not in the quote: that end only.
         assert_eq!(marked("CI 0.48-1.25", &allowed), ["1.25"]);
+        // Stage 4 follow-up: a spaced minus after a value opener is a sign,
+        // in quotes and text alike ("CI, - 0.34" is -0.34) ...
+        let q = quote_values("mean difference 0.28 (95% CI, - 0.34 to 0.90; - 0.16)");
+        assert!(q.contains(&-0.34) && !q.contains(&0.34), "{q:?}");
+        assert!(q.contains(&-0.16));
+        assert!(marked("95% CI -0.34 to 0.90", &q).is_empty());
+        assert!(marked("CI, - 0.34 to 0.90", &q).is_empty());
+        assert_eq!(marked("0.34 to 0.90", &q), ["0.34"], "sign matters");
+        for opener in ["(", ":", "[", ";"] {
+            let t = format!("x{opener} - 0.5");
+            assert_eq!(quote_values(&t), [-0.5], "{t}");
+        }
+        // ... but after a number it stays a range or subtraction, as now.
+        assert_eq!(quote_values("12 - 2.3"), [12.0, 2.3]);
+        assert_eq!(
+            marked("12 - 2.3", &quote_values("12 and 2.3")),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            marked("12 \u{2212}2.3", &quote_values("12 and 2.3")),
+            ["\u{2212}2.3"]
+        );
         // COVID-19 is 19 (never -19), and a bare 19 is checked as 19.
         assert_eq!(
             marked("COVID-19 in 19 of 40", &quote_values("COVID-19")),
