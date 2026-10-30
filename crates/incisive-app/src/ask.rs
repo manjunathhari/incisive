@@ -494,7 +494,9 @@ mod server {
         gate_alert: Option<String>,
     ) -> Result<AskOutcome, AskFailure> {
         let uid = Some(user.id);
-        let limit = state.runs.for_mode(mode).limit_paise;
+        // The engine's cost limit: Phase 3's `agent_limit_paise` for a team
+        // run (QUICK_ENGINE), Phase 2's `limit_paise` otherwise.
+        let (limit, _) = state.runs.limits(mode, state.quick_engine);
 
         // 1-2. The active-run check and the insert are one atomic step. If the
         // user's active run is abandoned (stale heartbeat), self-heal: interrupt
@@ -599,8 +601,8 @@ mod server {
             role: user.role.as_str().to_string(),
             today_paise: totals.today_paise,
             daily_cap_paise: user.daily_cap_paise,
-            quick_limit_paise: state.runs.quick.limit_paise,
-            focused_limit_paise: state.runs.focused.limit_paise,
+            quick_limit_paise: state.runs.limits(RunMode::Quick, state.quick_engine).0,
+            focused_limit_paise: state.runs.limits(RunMode::Focused, state.quick_engine).0,
         })
     }
 

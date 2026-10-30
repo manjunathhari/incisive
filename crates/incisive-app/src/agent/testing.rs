@@ -70,7 +70,11 @@ pub fn agent_llm(client: Arc<dyn LlmClient>, model: &str) -> Arc<AgentLlm> {
             screen: m.clone(),
             extract: m.clone(),
             write: m.clone(),
-            check: m,
+            check: m.clone(),
+            researcher: m.clone(),
+            writer: m.clone(),
+            extractor: m.clone(),
+            skeptic: m,
         },
     })
 }

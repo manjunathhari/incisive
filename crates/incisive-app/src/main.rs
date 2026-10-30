@@ -153,6 +153,7 @@ async fn main() {
         gate_model: config.gate_model.clone(),
         dev_mode: config.app_env == AppEnv::Dev,
         runs: config.runs,
+        quick_engine: config.quick_engine,
         worker: WorkerHandle::default(),
         llm,
         lit,

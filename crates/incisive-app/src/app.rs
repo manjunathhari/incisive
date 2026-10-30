@@ -5,7 +5,10 @@
 //! bodies, so this module also builds for the browser (`hydrate`).
 //!
 //! Everything shown is plain text: Leptos escapes it, and no `inner_html` is used.
-//! The answer (`agent::answer::Answer`) is drawn from its structured fields.
+//! The answer is drawn from its structured fields: a Phase 2
+//! `agent::answer::Answer` (`answer_version` 2) with its own view, or a
+//! Phase 3 `agent::answer_v3::AnswerV3` (version 3) with [`answer_v3_view`],
+//! whose `[PMID]` citations become numbered links to the reference list.
 
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
@@ -21,6 +24,7 @@ use crate::agent::answer::{
     mode_label, render_text, rerun_href, screened_text, show_insufficient, stopped_text,
     unavailable_text,
 };
+use crate::agent::answer_v3::{AnswerV3, ReferenceV3, Segment, WrittenAnswer, split_citations};
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
@@ -87,6 +91,10 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .seg label + label span { border-left:1px solid var(--accent); }
 .seg input:checked + span { background:var(--accent); color:#fff; }
 .seg input:focus-visible + span { outline:2px solid var(--fg); outline-offset:-4px; }
+.answer table.wide { min-width:720px; }
+.answer .cite a { text-decoration:none; }
+.answer .retracted { color:var(--red); font-weight:600; }
+.answer details summary { cursor:pointer; font-weight:600; margin:18px 0 6px; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -641,14 +649,24 @@ fn is_not_found(e: &ServerFnError) -> bool {
 fn run_view(v: RunView) -> impl IntoView {
     let status = v.summary.status;
     let ended_without_answer = v.answer.is_none() && !status.is_active();
-    // The stored body is drawn from its fields, never shown raw.
-    let answer = v.answer.map(|a| serde_json::from_value::<Answer>(a).ok());
+    // The stored body is drawn from its fields, never shown raw: Phase 3
+    // answers (version 3) with their own view, everything else as Phase 2.
+    let answer = v.answer.map(|a| {
+        if v.answer_version == crate::agent::answer_v3::ANSWER_VERSION {
+            serde_json::from_value::<AnswerV3>(a).ok().map(Body::V3)
+        } else {
+            serde_json::from_value::<Answer>(a).ok().map(Body::V2)
+        }
+    });
     // The header is the full question once the answer holds it (§4), else
     // the stored 80-character title. Plain text: Leptos escapes it.
     let heading = answer
         .as_ref()
         .and_then(Option::as_ref)
-        .map_or(v.summary.title, |a| a.question.clone());
+        .map_or(v.summary.title, |a| match a {
+            Body::V2(a) => a.question.clone(),
+            Body::V3(a) => a.question.clone(),
+        });
     view! {
         <h2 class="run-question">{heading}</h2>
         <p>
@@ -668,7 +686,8 @@ fn run_view(v: RunView) -> impl IntoView {
         }}
         {answer
             .map(|a| match a {
-                Some(a) => answer_view(a).into_any(),
+                Some(Body::V2(a)) => answer_view(a).into_any(),
+                Some(Body::V3(a)) => answer_v3_view(a).into_any(),
                 None => view! {
                     <p class="box amber" role="status">
                         "This answer can't be shown. Please ask the question again."
@@ -683,6 +702,12 @@ fn run_view(v: RunView) -> impl IntoView {
                 </p>
             })}
     }
+}
+
+/// A stored answer, by format.
+enum Body {
+    V2(Answer),
+    V3(AnswerV3),
 }
 
 /// `https://pubmed.ncbi.nlm.nih.gov/<pmid>/` for an all-digit PMID.
@@ -873,6 +898,281 @@ fn answer_view(a: Answer) -> impl IntoView {
             >
                 {move || if copied.get() { "Copied" } else { "Copy as text" }}
             </button>
+        </section>
+    }
+}
+
+/// Answer text with its `[PMID]` markers as numbered links to the
+/// references (`#ref-N`). Text stays plain (escaped); a PMID with no
+/// reference (none should be left after the citation check) is not shown.
+fn cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
+    split_citations(text, |p| refs.contains_key(p))
+        .into_iter()
+        .map(|seg| match seg {
+            Segment::Text(t) => t.into_any(),
+            Segment::Cite(ids) => {
+                let mut nums: Vec<u16> = ids.iter().filter_map(|p| refs.get(p).copied()).collect();
+                nums.sort_unstable();
+                nums.dedup();
+                if nums.is_empty() {
+                    return ().into_any();
+                }
+                let last = nums.len() - 1;
+                view! {
+                    <span class="cite">
+                        "["
+                        {nums
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, n)| {
+                                view! {
+                                    <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a>
+                                    {(i < last).then_some(", ")}
+                                }
+                            })
+                            .collect_view()}
+                        "]"
+                    </span>
+                }
+                .into_any()
+            }
+        })
+        .collect_view()
+        .into_any()
+}
+
+fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
+    let mut head = r.title.trim_end_matches('.').to_string();
+    head.push('.');
+    match (&r.journal, r.year) {
+        (Some(j), Some(y)) => head.push_str(&format!(" {j}, {y}.")),
+        (Some(j), None) => head.push_str(&format!(" {j}.")),
+        (None, Some(y)) => head.push_str(&format!(" {y}.")),
+        (None, None) => {}
+    }
+    let pmid = pubmed_link(&r.pmid).map(|href| (r.pmid.clone(), href));
+    let doi = r
+        .doi
+        .clone()
+        .and_then(|d| doi_link(&d).map(|href| (d, href)));
+    view! {
+        <li id=format!("ref-{}", r.n)>
+            {format!("[{}] ", r.n)}
+            {r.retracted.then(|| view! { <span class="retracted">"RETRACTED \u{2014} do not rely on this paper. "</span> })}
+            {head}
+            {pmid.map(|(p, href)| view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> })}
+            {doi.map(|(d, href)| view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("DOI {d}")}</a> })}
+        </li>
+    }
+}
+
+/// The written part of a Phase 3 answer: bottom line, outcome table,
+/// trials table, conflicts, applicability, what would change it.
+fn written_v3_view(
+    w: WrittenAnswer,
+    refs: &std::collections::HashMap<String, u16>,
+) -> impl IntoView {
+    let c = w.bottom_line.certainty;
+    view! {
+        <h3>"Bottom line"</h3>
+        <p>{cited(&w.bottom_line.text, refs)}</p>
+        <p>
+            <span class=c.class()>{format!("Certainty: {}", c.as_str())}</span>
+            " " <span class="conf">{cited(&w.bottom_line.certainty_reason, refs)}</span>
+        </p>
+
+        <h3>"Outcome by outcome"</h3>
+        {if w.outcomes.is_empty() {
+            view! { <p>"No outcome could be assessed from the evidence found."</p> }.into_any()
+        } else {
+            view! {
+                <div class="scroll">
+                    <table class="wide">
+                        <thead>
+                            <tr>
+                                <th>"Outcome"</th>
+                                <th>"RCT evidence"</th>
+                                <th>"Effect"</th>
+                                <th>"Certainty"</th>
+                                <th>"Why"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {w.outcomes
+                                .into_iter()
+                                .map(|o| view! {
+                                    <tr>
+                                        <td>{cited(&o.outcome, refs)}</td>
+                                        <td>{cited(&o.rct_evidence, refs)}</td>
+                                        <td>{cited(&o.effect_text, refs)}</td>
+                                        <td><span class=o.certainty.class()>{o.certainty.as_str()}</span></td>
+                                        <td>{cited(&o.why, refs)}</td>
+                                    </tr>
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                </div>
+            }
+                .into_any()
+        }}
+
+        <h3>"The trials"</h3>
+        {if w.studies.is_empty() {
+            view! { <p>"None."</p> }.into_any()
+        } else {
+            view! {
+                <div class="scroll">
+                    <table class="wide">
+                        <thead>
+                            <tr>
+                                <th>"Trial"</th>
+                                <th>"Design / n / setting"</th>
+                                <th>"Comparison"</th>
+                                <th>"Key results"</th>
+                                <th>"Appraisal"</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {w.studies
+                                .into_iter()
+                                .map(|s| {
+                                    let n = refs.get(&s.pmid).copied();
+                                    let design = match s.n {
+                                        Some(n) => format!("{} \u{b7} n = {n} \u{b7} {}", s.design, s.setting),
+                                        None => format!("{} \u{b7} {}", s.design, s.setting),
+                                    };
+                                    view! {
+                                        <tr>
+                                            <td>
+                                                {cited(&s.label, refs)}
+                                                {n.map(|n| view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> })}
+                                            </td>
+                                            <td>{cited(&design, refs)}</td>
+                                            <td>{cited(&s.comparison, refs)}</td>
+                                            <td>{cited(&s.key_results, refs)}</td>
+                                            <td>{cited(&s.appraisal, refs)}</td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                </div>
+            }
+                .into_any()
+        }}
+
+        <h3>"Conflicting evidence"</h3>
+        {if w.conflicts.is_empty() {
+            view! { <p>"None identified."</p> }.into_any()
+        } else {
+            view! {
+                <ul>
+                    {w.conflicts
+                        .into_iter()
+                        .map(|x| view! { <li>{cited(&x.text, refs)}</li> })
+                        .collect_view()}
+                </ul>
+            }
+                .into_any()
+        }}
+
+        <h3>"Applicability"</h3>
+        <dl>
+            <dt>"Case mix"</dt><dd>{cited(&w.applicability.case_mix, refs)}</dd>
+            <dt>"India and cost"</dt><dd>{cited(&w.applicability.india_cost_context, refs)}</dd>
+            <dt>"Training"</dt><dd>{cited(&w.applicability.training, refs)}</dd>
+        </dl>
+
+        <h3>"What would change this answer"</h3>
+        <ul>
+            {w.would_change
+                .into_iter()
+                .map(|x| view! { <li>{cited(&x, refs)}</li> })
+                .collect_view()}
+        </ul>
+    }
+}
+
+/// A Phase 3 answer (AnswerV3), in the spec §2 order, as escaped text and
+/// links only. The polished layout is Stage 4.
+fn answer_v3_view(a: AnswerV3) -> impl IntoView {
+    let refs = a.ref_numbers();
+    let rerun = rerun_href(&a.question, a.mode);
+    let cost = format!(
+        "{} \u{b7} {}",
+        rupees(a.cost_paise),
+        duration_text(a.elapsed_s)
+    );
+    let i = a.integrity;
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(r) = &a.stopped_early {
+        notes.push(format!(
+            "Research stopped early ({r}); the answer uses what was found by then."
+        ));
+    }
+    if i.dropped_unseen > 0 {
+        notes.push(format!(
+            "{} selected by the researcher but not returned by this run's searches: left out.",
+            i.dropped_unseen
+        ));
+    }
+    if i.dropped_unfetched > 0 {
+        notes.push(format!(
+            "{} selected but could not be fetched: left out.",
+            i.dropped_unfetched
+        ));
+    }
+    if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
+        notes.push(format!(
+            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
+            i.removed_citations, i.dropped_numbers, i.dropped_studies
+        ));
+    }
+    let n_searches = a.searches.len();
+    let written = a.answer.map(|w| written_v3_view(w, &refs));
+    let empty = a.empty_reason.clone();
+    view! {
+        <section class="answer" aria-label="Answer">
+            <p class="decision">{DECISION_SUPPORT}</p>
+            <p class="meta">{format!("{} \u{b7} {}", mode_label(a.mode), date_ist(a.created_at))}</p>
+            <p><a href=rerun rel="external">"Edit & re-run"</a></p>
+
+            {match written {
+                Some(w) => w.into_any(),
+                None => view! {
+                    <h3>"Bottom line"</h3>
+                    <p>{empty.unwrap_or_else(|| answer::NO_EVIDENCE.to_string())}</p>
+                }
+                    .into_any(),
+            }}
+
+            <h3>"References"</h3>
+            {if a.references.is_empty() {
+                view! { <p>"None."</p> }.into_any()
+            } else {
+                view! {
+                    <ul class="refs-list">
+                        {a.references.into_iter().map(reference_v3_view).collect_view()}
+                    </ul>
+                }
+                    .into_any()
+            }}
+
+            <details>
+                <summary>{format!("Search trail ({n_searches} searches)")}</summary>
+                <ul>
+                    {a.searches
+                        .into_iter()
+                        .map(|s| view! { <li>{format!("{}: ", s.source)} <code>{s.query}</code> {format!(" \u{2014} {} hits", s.hits)}</li> })
+                        .collect_view()}
+                    {notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}
+                </ul>
+            </details>
+
+            <h3>"Cost and time"</h3>
+            <p>{cost}</p>
         </section>
     }
 }

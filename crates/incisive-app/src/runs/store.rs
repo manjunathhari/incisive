@@ -128,7 +128,19 @@ pub async fn add_cost(pool: &PgPool, run_id: Uuid, paise: i64) -> sqlx::Result<(
     Ok(())
 }
 
-/// Store (or replace) the structured answer, only while the run is `running`.
+/// The answer format of a stored body: its `version` field when it is a
+/// small positive number (the Phase 3 AnswerV3 carries `"version": 3`),
+/// else 2 (Phase 2 answers have no such field).
+pub fn answer_version_of(body: &serde_json::Value) -> i16 {
+    body.get("version")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|v| i16::try_from(v).ok())
+        .filter(|v| *v >= 2)
+        .unwrap_or(2)
+}
+
+/// Store (or replace) the structured answer, only while the run is `running`,
+/// with its format version ([`answer_version_of`]) in `answer_version`.
 /// Returns false (nothing stored) if the run is gone or no longer running,
 /// e.g. interrupted by recovery or deleted by the user.
 pub async fn save_answer(
@@ -137,12 +149,14 @@ pub async fn save_answer(
     body: &serde_json::Value,
 ) -> sqlx::Result<bool> {
     let r = sqlx::query(
-        "INSERT INTO incisive.run_answers (run_id, body) \
-         SELECT id, $2 FROM incisive.runs WHERE id = $1 AND status = 'running' \
-         ON CONFLICT (run_id) DO UPDATE SET body = EXCLUDED.body",
+        "INSERT INTO incisive.run_answers (run_id, body, answer_version) \
+         SELECT id, $2, $3 FROM incisive.runs WHERE id = $1 AND status = 'running' \
+         ON CONFLICT (run_id) DO UPDATE SET body = EXCLUDED.body, \
+         answer_version = EXCLUDED.answer_version",
     )
     .bind(run_id)
     .bind(body)
+    .bind(answer_version_of(body))
     .execute(pool)
     .await?;
     Ok(r.rows_affected() > 0)
@@ -194,14 +208,17 @@ pub async fn get_run_for_user(
     })
     .collect::<sqlx::Result<Vec<_>>>()?;
 
-    let answer = sqlx::query_scalar("SELECT body FROM incisive.run_answers WHERE run_id = $1")
-        .bind(run_id)
-        .fetch_optional(pool)
-        .await?;
+    let answer: Option<(serde_json::Value, i16)> =
+        sqlx::query_as("SELECT body, answer_version FROM incisive.run_answers WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await?;
+    let answer_version = answer.as_ref().map_or(2, |(_, v)| *v);
     Ok(Some(RunView {
         summary,
         steps,
-        answer,
+        answer: answer.map(|(b, _)| b),
+        answer_version,
     }))
 }
 

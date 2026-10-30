@@ -132,7 +132,8 @@ fn gathering<T>(r: Result<T, StepError>) -> Result<Option<T>, Stop> {
 }
 
 /// Before every step: cancelled, past the hard stop, or no longer running.
-async fn gate(ctx: &RunContext) -> Result<(), Stop> {
+/// Shared with the Phase 3 team pipeline.
+pub(super) async fn gate(ctx: &RunContext) -> Result<(), Stop> {
     if ctx.cancel.is_cancelled() {
         return Err("cancelled");
     }

@@ -186,6 +186,23 @@ impl RunBudget {
         self
     }
 
+    /// Wrap up at `after` from the start instead (Phase 3: the time limit
+    /// less the writer's allowance). Call after [`RunBudget::with_time_limit`].
+    pub fn with_wrap_up_after(mut self, after: Duration) -> RunBudget {
+        self.wrap_up_after = after;
+        self
+    }
+
+    /// When this run wraps up for time.
+    pub fn wrap_up_after(&self) -> Duration {
+        self.wrap_up_after
+    }
+
+    /// Time left before the hard stop; zero once it has passed.
+    pub fn until_hard_stop(&self, now: Instant) -> Duration {
+        self.hard_stop_after.saturating_sub(self.age(now))
+    }
+
     /// When this run is failed for time (see [`RunBudget::with_time_limit`]).
     pub fn hard_stop(&self) -> Duration {
         self.hard_stop_after

@@ -30,6 +30,41 @@ pub enum RunMode {
     Focused,
 }
 
+/// Which engine answers Quick questions (`QUICK_ENGINE`, Phase 3 Stage 2):
+/// the evidence team (researcher → writer, the default) or the Phase 2
+/// pipeline (`classic`, the owner's rollback switch). Focused always runs
+/// the Phase 2 pipeline until Stage 3.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickEngine {
+    #[default]
+    Team,
+    Classic,
+}
+
+impl QuickEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuickEngine::Team => "team",
+            QuickEngine::Classic => "classic",
+        }
+    }
+
+    /// Exactly `team` or `classic` (lower case).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "team" => Some(QuickEngine::Team),
+            "classic" => Some(QuickEngine::Classic),
+            _ => None,
+        }
+    }
+
+    /// Whether a run of `mode` is answered by the evidence team.
+    pub fn uses_team(self, mode: RunMode) -> bool {
+        mode == RunMode::Quick && self == QuickEngine::Team
+    }
+}
+
 /// The limits one depth runs under (owner-editable through `RUN_LIMITS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,8 +102,13 @@ pub struct DepthSettings {
     pub skeptic_max_tokens: u32,
     /// `max_tokens` per extractor + appraiser call.
     pub extractor_max_tokens: u32,
-    /// `max_tokens` of the writer's call.
+    /// `max_tokens` of the writer's call (16,000; its finish reserve is
+    /// sized on it).
     pub writer_max_tokens: u32,
+    /// Seconds of the Phase 3 time limit kept for the writer: research
+    /// wraps up at `agent_time_limit_s - writer_time_allowance_s`. Must be
+    /// below `agent_time_limit_s`.
+    pub writer_time_allowance_s: u32,
 }
 
 /// Most tool-use turns a role may be given (`RUN_LIMITS`).
@@ -80,7 +120,10 @@ pub const MAX_ROLE_TOKENS: u32 = 64_000;
 /// it (thinking counts toward it), so these are kept modest: at Opus-class
 /// prices a 4,000-token turn holds about ₹9 of output before input.
 const AGENT_MAX_TOKENS: u32 = 4_000;
-const WRITER_MAX_TOKENS: u32 = 8_000;
+/// Review fix: 8,000 could truncate a full answer (thinking counts too).
+const WRITER_MAX_TOKENS: u32 = 16_000;
+/// Seconds kept for the writer at the end of a Phase 3 run.
+const WRITER_TIME_ALLOWANCE_S: u32 = 150;
 
 impl DepthSettings {
     pub const QUICK: DepthSettings = DepthSettings {
@@ -92,14 +135,17 @@ impl DepthSettings {
         // finish reserve for Write and Check (Ruling R-13c).
         limit_paise: 1500,
         time_limit_s: 300,
-        agent_limit_paise: 6000,
-        agent_time_limit_s: 240,
+        // ₹100 (owner ruling R-S2a, 29 Oct 2026; was ₹60) and 6 minutes
+        // (review: time for the writer).
+        agent_limit_paise: 10000,
+        agent_time_limit_s: 360,
         researcher_turns: 8,
         skeptic_turns: 0,
         researcher_max_tokens: AGENT_MAX_TOKENS,
         skeptic_max_tokens: AGENT_MAX_TOKENS,
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
+        writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
     };
     pub const FOCUSED: DepthSettings = DepthSettings {
         refinements: 3,
@@ -116,6 +162,7 @@ impl DepthSettings {
         skeptic_max_tokens: AGENT_MAX_TOKENS,
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
+        writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
     };
 
     fn validate(&self) -> Result<(), String> {
@@ -136,6 +183,9 @@ impl DepthSettings {
         }
         if self.agent_time_limit_s == 0 {
             return Err("agent_time_limit_s must be positive".into());
+        }
+        if self.writer_time_allowance_s >= self.agent_time_limit_s {
+            return Err("writer_time_allowance_s must be below agent_time_limit_s".into());
         }
         if !(1..=MAX_AGENT_TURNS).contains(&self.researcher_turns) {
             return Err(format!("researcher_turns must be 1 to {MAX_AGENT_TURNS}"));
@@ -179,6 +229,30 @@ impl RunsConfig {
             RunMode::Quick => self.quick,
             RunMode::Focused => self.focused,
         }
+    }
+
+    /// The cost limit (paise, reserved in full when the run starts) and the
+    /// time limit (seconds) of a run of `mode` under `engine`: the Phase 3
+    /// limits (`agent_limit_paise`, `agent_time_limit_s`) when the evidence
+    /// team answers it, the Phase 2 ones otherwise.
+    pub fn limits(&self, mode: RunMode, engine: QuickEngine) -> (i64, u32) {
+        let s = self.for_mode(mode);
+        if engine.uses_team(mode) {
+            (s.agent_limit_paise, s.agent_time_limit_s)
+        } else {
+            (s.limit_paise, s.time_limit_s)
+        }
+    }
+
+    /// When research wraps up, in seconds from the start, for a team run:
+    /// the time limit less the writer's allowance. `None` for a Phase 2 run
+    /// (its wrap-up stays at 60% of the time limit).
+    pub fn team_wrap_up_s(&self, mode: RunMode, engine: QuickEngine) -> Option<u32> {
+        let s = self.for_mode(mode);
+        engine.uses_team(mode).then(|| {
+            s.agent_time_limit_s
+                .saturating_sub(s.writer_time_allowance_s)
+        })
     }
 
     /// Parse `RUN_LIMITS`: `{"quick": {...}, "focused": {...}}`, either key
@@ -347,4 +421,12 @@ pub struct RunView {
     pub summary: RunSummary,
     pub steps: Vec<StepLine>,
     pub answer: Option<serde_json::Value>,
+    /// `run_answers.answer_version`: 2 for a Phase 2 `Answer`, 3 for a
+    /// Phase 3 `AnswerV3` (2 when there is no answer).
+    #[serde(default = "phase2_version")]
+    pub answer_version: i16,
+}
+
+fn phase2_version() -> i16 {
+    2
 }

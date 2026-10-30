@@ -38,6 +38,7 @@ jobs:
           UNPAYWALL_EMAIL: ${{ vars.UNPAYWALL_EMAIL }}
           AGENT_MODELS: ${{ vars.AGENT_MODELS }}
           RUN_LIMITS: ${{ vars.RUN_LIMITS }}
+          QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -74,9 +75,9 @@ jobs:
           for v in AGENT_MODELS RUN_LIMITS; do
             [ -n "${!v//[[:space:]]/}" ] || continue
             case "$v" in
-              AGENT_MODELS) allowed="frame search screen extract write check"; fields="" ;;
+              AGENT_MODELS) allowed="frame search screen extract write check researcher writer extractor skeptic"; fields="" ;;
               RUN_LIMITS) allowed="quick focused"
-                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens" ;;
+                          fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens writer_time_allowance_s" ;;
             esac
             if ! msg=$(printf '%s' "${!v}" | python3 -c '
           import json, sys
@@ -105,13 +106,16 @@ jobs:
           done
           # Every agent model, configured or default, must be priced in
           # MODEL_PRICES: the app refuses to start otherwise, and failing here
-          # saves a build and push. The defaults mirror DEFAULT_MODEL and
-          # DEFAULT_SCREEN_MODEL in crates/incisive-app/src/agent/llm.rs.
+          # saves a build and push. The defaults mirror AgentModels::default()
+          # in crates/incisive-app/src/agent/llm.rs (Phase 2 steps and Phase 3
+          # roles), so a default model with no price fails here too.
           if ! msg=$(python3 -c '
           import json, os, sys
           defaults = {"frame": "claude-sonnet-5-5", "search": "claude-sonnet-5-5",
                       "screen": "claude-haiku-5-5", "extract": "claude-sonnet-5-5",
-                      "write": "claude-sonnet-5-5", "check": "claude-sonnet-5-5"}
+                      "write": "claude-sonnet-5-5", "check": "claude-sonnet-5-5",
+                      "researcher": "claude-opus-5-5", "writer": "claude-opus-5-5",
+                      "extractor": "claude-sonnet-5-5", "skeptic": "claude-sonnet-5-5"}
           prices = json.loads(os.environ["MODEL_PRICES"])
           if not isinstance(prices, dict):
               sys.exit("vars.MODEL_PRICES must be a JSON object")
@@ -128,6 +132,15 @@ jobs:
             echo "::error::$msg (see infra/README.md sections 10 and 11)"
             exit 1
           fi
+          # Optional Quick engine: unset (team), team or classic (the Phase 2
+          # pipeline, the rollback switch). The app refuses anything else.
+          # Only leading and trailing blanks are stripped, as the app trims.
+          qe="${QUICK_ENGINE#"${QUICK_ENGINE%%[![:space:]]*}"}"
+          qe="${qe%"${qe##*[![:space:]]}"}"
+          case "$qe" in
+            ""|team|classic) ;;
+            *) echo "::error::vars.QUICK_ENGINE must be team or classic (see infra/README.md section 12)"; exit 1 ;;
+          esac
           # Optional switches: unset, true or false (a typo must not silently mean off).
           for v in HAS_NCBI_KEY CPU_ALWAYS; do
             case "${!v//[[:space:]]/}" in
@@ -172,6 +185,7 @@ jobs:
           UNPAYWALL_EMAIL: ${{ vars.UNPAYWALL_EMAIL }}
           AGENT_MODELS: ${{ vars.AGENT_MODELS }}
           RUN_LIMITS: ${{ vars.RUN_LIMITS }}
+          QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -188,7 +202,7 @@ jobs:
           names = ["CLAUDE_MODEL", "IAP_AUDIENCE", "OWNER_EMAIL", "GATE_MODEL",
                    "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR", "UNPAYWALL_EMAIL"]
           # Optional: written only when set, so the app's defaults apply otherwise.
-          optional = ["AGENT_MODELS", "RUN_LIMITS"]
+          optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}"

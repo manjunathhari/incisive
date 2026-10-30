@@ -73,6 +73,13 @@
 //! blocks of unknown type are dropped. Thinking never enters the
 //! transcript, logs or output.
 //!
+//! **Observers and results (Phase 3 Stage 2).** [`run_agent_observed`]
+//! calls a [`TurnObserver`] after every completed turn (the researcher's
+//! progress lines), and [`AgentRun::results`] holds every successful tool
+//! result exactly as the model saw it (capped and wrapped), so a role can
+//! check its output against what its tools really returned. Withheld and
+//! errored results are not in it.
+//!
 //! **Logs** (privacy): per turn, the turn number, stop reason, tokens and,
 //! per tool call, the registered tool name (`unknown` otherwise), result
 //! size, and whether it was cut, withheld or an error. Never tool inputs,
@@ -80,6 +87,7 @@
 
 use std::time::Instant;
 
+use async_trait::async_trait;
 use claude_client::{ContentBlock, Effort, Message, Role, StopReason};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -284,6 +292,16 @@ impl AgentLog {
 pub struct AgentRun<T> {
     pub output: T,
     pub log: AgentLog,
+    /// Every successful tool result as the model saw it (capped, wrapped),
+    /// in order. Paper data: never logged.
+    pub results: Vec<String>,
+}
+
+/// Told about every completed turn (its content-free log), before the next
+/// one starts. Used for progress lines; it cannot stop the loop.
+#[async_trait]
+pub trait TurnObserver: Send + Sync {
+    async fn turn_done(&self, turn: &TurnLog);
 }
 
 /// The final call's plain-text transcript.
@@ -455,6 +473,16 @@ pub async fn run_agent<T: DeserializeOwned>(
     tools: &ToolRegistry,
     spec: &AgentSpec<'_>,
 ) -> Result<AgentRun<T>, StepError> {
+    run_agent_observed(call, tools, spec, None).await
+}
+
+/// [`run_agent`], telling `observer` about every completed turn.
+pub async fn run_agent_observed<T: DeserializeOwned>(
+    call: &LlmCall,
+    tools: &ToolRegistry,
+    spec: &AgentSpec<'_>,
+    observer: Option<&dyn TurnObserver>,
+) -> Result<AgentRun<T>, StepError> {
     let budget = call.budget().clone();
     let run_id = budget.run_id();
     let step = call.step();
@@ -481,6 +509,7 @@ pub async fn run_agent<T: DeserializeOwned>(
         stop: LoopStop::EndTurn,
         result_chars: 0,
     };
+    let mut seen: Vec<String> = Vec::new();
 
     let stop = loop {
         if call.cancel_flag().is_cancelled() {
@@ -575,6 +604,9 @@ pub async fn run_agent<T: DeserializeOwned>(
         let mut fits = fin.update(&transcript, run_n * CALL_PAD_BYTES);
         if let Some(stop) = next {
             log_turn(run_id, step, &turn_log);
+            if let Some(o) = observer {
+                o.turn_done(&turn_log).await;
+            }
             log.turns.push(turn_log);
             break stop;
         }
@@ -611,6 +643,9 @@ pub async fn run_agent<T: DeserializeOwned>(
             )
             .await?;
             fits &= ok;
+            if !(entry.error || entry.withheld) {
+                seen.push(content.clone());
+            }
             results.push(ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content,
@@ -626,6 +661,9 @@ pub async fn run_agent<T: DeserializeOwned>(
             content: results,
         });
         log_turn(run_id, step, &turn_log);
+        if let Some(o) = observer {
+            o.turn_done(&turn_log).await;
+        }
         log.turns.push(turn_log);
         if !fits {
             // Only reachable if real charges ran past their holds: stop
@@ -661,7 +699,11 @@ pub async fn run_agent<T: DeserializeOwned>(
             share,
         )
         .await?;
-    Ok(AgentRun { output, log })
+    Ok(AgentRun {
+        output,
+        log,
+        results: seen,
+    })
 }
 
 fn log_turn(run_id: uuid::Uuid, step: &'static str, t: &TurnLog) {

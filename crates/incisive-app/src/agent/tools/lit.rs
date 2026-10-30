@@ -142,6 +142,72 @@ impl LitTools {
             .collect())
     }
 
+    /// Papers with abstracts for `pmids` (distinct, valid ids): the cache
+    /// first, then esummary + efetch for the rest, written back to the cache
+    /// (retraction from either source). Returns the papers found (in no set
+    /// order; ids PubMed does not know are absent) and how many came from
+    /// the cache. `Err` only when the lookup failed and nothing was cached;
+    /// a partial failure is logged under `tool` and the rest returned.
+    /// Shared by `get_abstracts` and the Phase 3 writer's input.
+    pub async fn fetch_papers(
+        &self,
+        pmids: &[String],
+        tool: &'static str,
+    ) -> Result<(Vec<Paper>, usize), LitError> {
+        let mut papers = self.cached(pmids).await;
+        let cached: HashSet<String> = papers.iter().filter_map(|p| p.pmid.clone()).collect();
+        let missing: Vec<String> = pmids
+            .iter()
+            .filter(|p| !cached.contains(*p))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            let summaries = match self.lit.pubmed.summaries(&missing).await {
+                Ok(s) => s,
+                Err(e) if papers.is_empty() => return Err(e),
+                Err(e) => {
+                    let _ = self.failed(tool, &e);
+                    Vec::new()
+                }
+            };
+            // Only the ids asked for (a reply may carry others).
+            let summaries: Vec<Paper> = summaries
+                .into_iter()
+                .filter(|p| p.pmid.as_ref().is_some_and(|id| missing.contains(id)))
+                .collect();
+            if !summaries.is_empty() {
+                let ids: Vec<String> = summaries.iter().filter_map(|p| p.pmid.clone()).collect();
+                match self.lit.pubmed.details(&ids).await {
+                    Ok(details) => {
+                        let mut fetched = Vec::new();
+                        for mut p in summaries {
+                            if let Some(rec) = p.pmid.as_ref().and_then(|id| details.get(id)) {
+                                if p.abstract_text.is_none() {
+                                    p.abstract_text.clone_from(&rec.abstract_text);
+                                }
+                                if p.pub_types.is_empty() {
+                                    p.pub_types.clone_from(&rec.pub_types);
+                                }
+                                p.retracted |= rec.retracted;
+                                fetched.push(p.clone());
+                            }
+                            papers.push(p);
+                        }
+                        if cache::put_many(&self.pool, &fetched).await.is_err() {
+                            tracing::warn!(run_id = %self.run_id, tool, "paper cache write failed");
+                        }
+                    }
+                    Err(e) => {
+                        // Summaries without abstracts; not cached.
+                        let _ = self.failed(tool, &e);
+                        papers.extend(summaries);
+                    }
+                }
+            }
+        }
+        Ok((papers, cached.len()))
+    }
+
     /// Fresh cached papers (a cache error is a miss).
     async fn cached(&self, pmids: &[String]) -> Vec<Paper> {
         match cache::get_many(&self.pool, pmids).await {
@@ -371,57 +437,10 @@ impl Tool for GetAbstracts {
             }
         }
 
-        let mut papers = t.cached(&pmids).await;
-        let cached: HashSet<String> = papers.iter().filter_map(|p| p.pmid.clone()).collect();
-        let missing: Vec<String> = pmids
-            .iter()
-            .filter(|p| !cached.contains(*p))
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            let summaries = match t.lit.pubmed.summaries(&missing).await {
-                Ok(s) => s,
-                Err(e) if papers.is_empty() => return Err(t.failed(self.name(), &e)),
-                Err(e) => {
-                    let _ = t.failed(self.name(), &e);
-                    Vec::new()
-                }
-            };
-            // Only the ids asked for (a reply may carry others).
-            let summaries: Vec<Paper> = summaries
-                .into_iter()
-                .filter(|p| p.pmid.as_ref().is_some_and(|id| missing.contains(id)))
-                .collect();
-            if !summaries.is_empty() {
-                let ids: Vec<String> = summaries.iter().filter_map(|p| p.pmid.clone()).collect();
-                match t.lit.pubmed.details(&ids).await {
-                    Ok(details) => {
-                        let mut fetched = Vec::new();
-                        for mut p in summaries {
-                            if let Some(rec) = p.pmid.as_ref().and_then(|id| details.get(id)) {
-                                if p.abstract_text.is_none() {
-                                    p.abstract_text.clone_from(&rec.abstract_text);
-                                }
-                                if p.pub_types.is_empty() {
-                                    p.pub_types.clone_from(&rec.pub_types);
-                                }
-                                p.retracted |= rec.retracted;
-                                fetched.push(p.clone());
-                            }
-                            papers.push(p);
-                        }
-                        if cache::put_many(&t.pool, &fetched).await.is_err() {
-                            tracing::warn!(run_id = %t.run_id, tool = self.name(), "paper cache write failed");
-                        }
-                    }
-                    Err(e) => {
-                        // Summaries without abstracts; not cached.
-                        let _ = t.failed(self.name(), &e);
-                        papers.extend(summaries);
-                    }
-                }
-            }
-        }
+        let (papers, cached) = t
+            .fetch_papers(&pmids, self.name())
+            .await
+            .map_err(|e| t.failed(self.name(), &e))?;
 
         let mut out = Vec::new();
         let mut not_found = Vec::new();
@@ -441,7 +460,7 @@ impl Tool for GetAbstracts {
                 None => not_found.push(id.clone()),
             }
         }
-        tracing::info!(run_id = %t.run_id, tool = self.name(), asked = pmids.len(), cached = cached.len(), returned = out.len(), "literature tool done");
+        tracing::info!(run_id = %t.run_id, tool = self.name(), asked = pmids.len(), cached, returned = out.len(), "literature tool done");
         to_json(&json!({"papers": out, "not_found": not_found}))
     }
 }

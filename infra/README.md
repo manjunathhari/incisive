@@ -204,16 +204,25 @@ To confirm the exact string, open Google Cloud console → Security → Identity
 Proxy, find `incisive-app`, click the three-dot menu → **Get JWT audience code**, and
 copy the value.
 
-**`MODEL_PRICES`.** One JSON object, keyed by model id. Take the numbers from
-Anthropic's pricing page (https://www.anthropic.com/pricing); do not guess them.
-Every model the app calls (`GATE_MODEL` and `CLAUDE_MODEL`) needs an entry:
+**`MODEL_PRICES`.** One JSON object, keyed by model id, in USD per million
+tokens. Take the numbers from Anthropic's pricing page; do not guess them. Every
+model the app calls needs an entry: `GATE_MODEL`, `CLAUDE_MODEL` and every agent
+step and role in `AGENT_MODELS`, including the defaults (sections 11 and 12), so
+Opus 5.5 must be priced for the Phase 3 researcher and writer. The official prices
+on platform.claude.com as of 29 Oct 2026:
 
 ```json
 {
-  "claude-haiku-5-5":  {"input": <input USD per million tokens>, "output": <output USD per million tokens>},
-  "claude-sonnet-5-5": {"input": <input USD per million tokens>, "output": <output USD per million tokens>}
+  "claude-haiku-5-5":  {"input": 0.10, "output": 0.50},
+  "claude-sonnet-5-5": {"input": 2,    "output": 10},
+  "claude-opus-5-5":   {"input": 4,    "output": 20}
 }
 ```
+
+Haiku 5.5 costs more for prompts above 100k tokens; the figure above is the rate
+up to 100k. Incisive never sends Haiku a prompt that large (the gate and the
+screening batches are a few thousand tokens), so that is the rate to use. If the
+pricing page changes, update this variable; the app reads it at startup.
 
 The deploy passes this through an env-vars file, so the commas and quotes in the JSON
 are safe. Paste it as a single value in the GitHub variable.
@@ -272,13 +281,14 @@ names below (a typo such as `limt_paise` is caught here), or if `HAS_NCBI_KEY` o
 | Variable | Required? | What it is | Default |
 |---|---|---|---|
 | `UNPAYWALL_EMAIL` | yes | Contact address sent to Unpaywall (which requires one) and to NCBI | none; the app will not start in prod without it |
-| `AGENT_MODELS` | no | Model per agent step (JSON) | `screen` = `claude-haiku-5-5`; `frame`, `search`, `extract`, `write`, `check` = `claude-sonnet-5-5` |
+| `AGENT_MODELS` | no | Model per agent step (JSON); the Phase 3 roles are in section 12 | `screen` = `claude-haiku-5-5`; `frame`, `search`, `extract`, `write`, `check` = `claude-sonnet-5-5` |
 | `RUN_LIMITS` | no | Limits for Quick and Focused (JSON) | see the table below |
 | `HAS_NCBI_KEY` | no | `true` once the `ncbi-api-key` secret exists (see below) | `false` |
 | `CPU_ALWAYS` | no | `true` keeps the CPU on between requests (see below) | `false` |
 
 **`AGENT_MODELS`.** Any of the keys `frame`, `search`, `screen`, `extract`, `write`,
-`check`; keys you leave out keep their default. Every model named here must also
+`check`, and the Phase 3 roles `researcher`, `writer`, `extractor`, `skeptic`
+(section 12); keys you leave out keep their default. Every model named here must also
 have an entry in `MODEL_PRICES` (section 10), or the app refuses to start. The
 Deploy workflow checks this before building, using the defaults above for any key
 you leave out, so a missing price fails the deploy early.
@@ -310,14 +320,15 @@ The global, daily and monthly caps apply as before.
 
 | Field | Quick | Focused (Full) | Meaning |
 |---|---|---|---|
-| `agent_limit_paise` | 6000 (₹60) | 20000 (₹200) | Phase 3 cost limit |
-| `agent_time_limit_s` | 240 | 480 | Phase 3 time limit in seconds |
+| `agent_limit_paise` | 10000 (₹100) | 20000 (₹200) | Phase 3 cost limit |
+| `agent_time_limit_s` | 360 | 480 | Phase 3 time limit in seconds (hard stop at it plus 60 s) |
 | `researcher_turns` | 8 | 15 | researcher tool-use turns at most (1 to 50) |
 | `skeptic_turns` | 0 | 8 | skeptic tool-use turns at most (0 = no skeptic; up to 50) |
 | `researcher_max_tokens` | 4000 | 4000 | output tokens per researcher turn (1 to 64000) |
 | `skeptic_max_tokens` | 4000 | 4000 | output tokens per skeptic turn |
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
-| `writer_max_tokens` | 8000 | 8000 | output tokens of the writer's call |
+| `writer_max_tokens` | 16000 | 16000 | output tokens of the writer's call (its cost is reserved before research starts) |
+| `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
 
 Each call's full `max_tokens` is held against the cost limit before it is made,
 so raising these makes each turn harder to fit, not more expensive in itself.
@@ -435,3 +446,46 @@ serving, but:
 
   Charges already made stand. After rolling forward, recovery marks those runs
   `interrupted` within a minute.
+
+## 12. Phase 3 settings: evidence team (Quick)
+
+Phase 3 Stage 2 answers **Quick** questions with the evidence team: a researcher
+(Opus 5.5, searching PubMed and Europe PMC in several turns, abstracts only) and a
+writer (Opus 5.5, one structured answer). **Focused** questions still use the
+Phase 2 pipeline until Stage 3. One new optional repository variable and four new
+`AGENT_MODELS` keys:
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `QUICK_ENGINE` | no | `team` (the evidence team) or `classic` (the Phase 2 Quick pipeline) | `team` |
+
+**`QUICK_ENGINE`** is the rollback switch: set it to `classic` and deploy to send
+Quick questions back to the Phase 2 pipeline, with no code change; set it to
+`team` (or delete the variable) to return. The Deploy workflow refuses any other
+value, and so does the app at startup. A question is reserved and run by the same
+instance right after it is sent, so it always runs on the engine it was reserved
+for; runs that are in flight during a deploy are interrupted as before.
+
+Under `team`, a Quick run reserves `agent_limit_paise` (default ₹100, owner ruling of
+29 Oct 2026) and runs under `agent_time_limit_s` (default 360 s, hard stop at 420 s)
+from `RUN_LIMITS` (section 11); research wraps up `writer_time_allowance_s` (150 s)
+before the time limit so the writer has time, and the writer is not started with less
+than 60 s left. The question box shows the limit next to Quick. Under `classic` it reserves
+`limit_paise` (₹15) and uses `time_limit_s`, as before.
+
+**New `AGENT_MODELS` keys.** Each must be priced in `MODEL_PRICES` (section 10),
+default or set; the Deploy workflow checks the defaults too.
+
+| Key | Role | Default |
+|---|---|---|
+| `researcher` | finds and selects the studies (tool loop) | `claude-opus-5-5` |
+| `writer` | writes the structured answer | `claude-opus-5-5` |
+| `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
+| `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |
+
+**Rolling back.** Prefer `QUICK_ENGINE=classic` to rolling back the image: it needs
+no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an
+`answer_version` column on `run_answers`); an older image refuses a database that
+has it and its readiness stays down, as described for Phase 2 in section 11. Phase 3
+answers are stored with `answer_version = 3` and are shown by the Phase 3 answer
+view; Phase 2 answers keep `answer_version = 2` and their own view.

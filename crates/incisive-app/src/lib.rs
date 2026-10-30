@@ -5,6 +5,7 @@ pub mod agent;
 #[cfg(not(feature = "ssr"))]
 pub mod agent {
     pub mod answer;
+    pub mod answer_v3;
 }
 pub mod app;
 pub mod ask;
