@@ -21,7 +21,9 @@ pub mod worker;
 /// the browser, which stops polling when it sees it.
 pub const RUN_NOT_FOUND_MESSAGE: &str = "That question wasn't found. It may have been deleted.";
 
-/// How deep the run goes. Focused unless the user picks Quick.
+/// How deep the run goes. Focused unless the user picks Quick. Phase 3
+/// Stage 3 shows `Focused` as **Full** everywhere a user reads it; the
+/// stored value stays `focused`, so history and `RUN_LIMITS` keep working.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
@@ -30,38 +32,58 @@ pub enum RunMode {
     Focused,
 }
 
-/// Which engine answers Quick questions (`QUICK_ENGINE`, Phase 3 Stage 2):
-/// the evidence team (researcher → writer, the default) or the Phase 2
-/// pipeline (`classic`, the owner's rollback switch). Focused always runs
-/// the Phase 2 pipeline until Stage 3.
+/// Which engine answers a mode's questions: the evidence team (the default)
+/// or the Phase 2 pipeline (`classic`, the owner's rollback switch).
+/// `QUICK_ENGINE` picks it for Quick (Phase 3 Stage 2), `FULL_ENGINE` for
+/// Full (Stage 3; the stored mode value is still `focused`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QuickEngine {
+pub enum Engine {
     #[default]
     Team,
     Classic,
 }
 
-impl QuickEngine {
+/// Stage 2's name for [`Engine`], kept for the Quick switch.
+pub type QuickEngine = Engine;
+
+impl Engine {
     pub fn as_str(self) -> &'static str {
         match self {
-            QuickEngine::Team => "team",
-            QuickEngine::Classic => "classic",
+            Engine::Team => "team",
+            Engine::Classic => "classic",
         }
     }
 
     /// Exactly `team` or `classic` (lower case).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "team" => Some(QuickEngine::Team),
-            "classic" => Some(QuickEngine::Classic),
+            "team" => Some(Engine::Team),
+            "classic" => Some(Engine::Classic),
             _ => None,
+        }
+    }
+}
+
+/// The engine per mode (`QUICK_ENGINE`, `FULL_ENGINE`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Engines {
+    pub quick: Engine,
+    pub full: Engine,
+}
+
+impl Engines {
+    /// The engine answering a run of `mode`.
+    pub fn for_mode(self, mode: RunMode) -> Engine {
+        match mode {
+            RunMode::Quick => self.quick,
+            RunMode::Focused => self.full,
         }
     }
 
     /// Whether a run of `mode` is answered by the evidence team.
     pub fn uses_team(self, mode: RunMode) -> bool {
-        mode == RunMode::Quick && self == QuickEngine::Team
+        self.for_mode(mode) == Engine::Team
     }
 }
 
@@ -88,9 +110,9 @@ pub struct DepthSettings {
     // `limit_paise` / `time_limit_s` above until Stage 2 switches the run
     // over. `focused` carries Phase 3's **Full** mode (spec §5); `quick`
     // its Quick mode. The global, daily and monthly caps are unchanged.
-    /// Phase 3 cost limit in paise (Quick ₹60, Full ₹200).
+    /// Phase 3 cost limit in paise (Quick ₹100, Full ₹300).
     pub agent_limit_paise: i64,
-    /// Phase 3 time limit in seconds (Quick 4 min, Full 8 min).
+    /// Phase 3 time limit in seconds (Quick 6 min, Full 10 min).
     pub agent_time_limit_s: u32,
     /// Researcher tool-use turns at most (Quick 8, Full 15).
     pub researcher_turns: u8,
@@ -109,6 +131,14 @@ pub struct DepthSettings {
     /// wraps up at `agent_time_limit_s - writer_time_allowance_s`. Must be
     /// below `agent_time_limit_s`.
     pub writer_time_allowance_s: u32,
+    /// Seconds of the Phase 3 time limit kept for the Full review phase
+    /// (extractor ∥ skeptic, Stage 3): research wraps up at
+    /// `agent_time_limit_s - writer_time_allowance_s -
+    /// review_time_allowance_s`, the review at `agent_time_limit_s -
+    /// writer_time_allowance_s`. 0 in Quick (no review phase).
+    pub review_time_allowance_s: u32,
+    /// Extractor calls in flight at once (Full, Stage 3).
+    pub extractor_concurrency: u8,
 }
 
 /// Most tool-use turns a role may be given (`RUN_LIMITS`).
@@ -124,6 +154,13 @@ const AGENT_MAX_TOKENS: u32 = 4_000;
 const WRITER_MAX_TOKENS: u32 = 16_000;
 /// Seconds kept for the writer at the end of a Phase 3 run.
 const WRITER_TIME_ALLOWANCE_S: u32 = 150;
+/// Seconds kept for the Full review phase (extractor ∥ skeptic): 180
+/// (owner ruling R-S3a).
+const REVIEW_TIME_ALLOWANCE_S: u32 = 180;
+/// Extractor calls in flight at once (spec §3: 3–4).
+const EXTRACTOR_CONCURRENCY: u8 = 3;
+/// Most extractor calls in flight a run may be given (`RUN_LIMITS`).
+pub const MAX_EXTRACTOR_CONCURRENCY: u8 = 8;
 
 impl DepthSettings {
     pub const QUICK: DepthSettings = DepthSettings {
@@ -146,6 +183,8 @@ impl DepthSettings {
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
         writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
+        review_time_allowance_s: 0,
+        extractor_concurrency: EXTRACTOR_CONCURRENCY,
     };
     pub const FOCUSED: DepthSettings = DepthSettings {
         refinements: 3,
@@ -154,8 +193,11 @@ impl DepthSettings {
         full_text: true,
         limit_paise: 4000,
         time_limit_s: 300,
-        agent_limit_paise: 20000,
-        agent_time_limit_s: 480,
+        // ₹300 and 10 minutes (owner ruling R-S3a, 30 Oct 2026; was ₹200
+        // and 8 minutes): the extra money buys research rounds, so time
+        // becomes the limit.
+        agent_limit_paise: 30000,
+        agent_time_limit_s: 600,
         researcher_turns: 15,
         skeptic_turns: 8,
         researcher_max_tokens: AGENT_MAX_TOKENS,
@@ -163,6 +205,8 @@ impl DepthSettings {
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
         writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
+        review_time_allowance_s: REVIEW_TIME_ALLOWANCE_S,
+        extractor_concurrency: EXTRACTOR_CONCURRENCY,
     };
 
     fn validate(&self) -> Result<(), String> {
@@ -186,6 +230,19 @@ impl DepthSettings {
         }
         if self.writer_time_allowance_s >= self.agent_time_limit_s {
             return Err("writer_time_allowance_s must be below agent_time_limit_s".into());
+        }
+        if u64::from(self.writer_time_allowance_s) + u64::from(self.review_time_allowance_s)
+            >= u64::from(self.agent_time_limit_s)
+        {
+            return Err(
+                "writer_time_allowance_s + review_time_allowance_s must be below agent_time_limit_s"
+                    .into(),
+            );
+        }
+        if !(1..=MAX_EXTRACTOR_CONCURRENCY).contains(&self.extractor_concurrency) {
+            return Err(format!(
+                "extractor_concurrency must be 1 to {MAX_EXTRACTOR_CONCURRENCY}"
+            ));
         }
         if !(1..=MAX_AGENT_TURNS).contains(&self.researcher_turns) {
             return Err(format!("researcher_turns must be 1 to {MAX_AGENT_TURNS}"));
@@ -232,12 +289,12 @@ impl RunsConfig {
     }
 
     /// The cost limit (paise, reserved in full when the run starts) and the
-    /// time limit (seconds) of a run of `mode` under `engine`: the Phase 3
+    /// time limit (seconds) of a run of `mode` under `engines`: the Phase 3
     /// limits (`agent_limit_paise`, `agent_time_limit_s`) when the evidence
     /// team answers it, the Phase 2 ones otherwise.
-    pub fn limits(&self, mode: RunMode, engine: QuickEngine) -> (i64, u32) {
+    pub fn limits(&self, mode: RunMode, engines: Engines) -> (i64, u32) {
         let s = self.for_mode(mode);
-        if engine.uses_team(mode) {
+        if engines.uses_team(mode) {
             (s.agent_limit_paise, s.agent_time_limit_s)
         } else {
             (s.limit_paise, s.time_limit_s)
@@ -245,13 +302,15 @@ impl RunsConfig {
     }
 
     /// When research wraps up, in seconds from the start, for a team run:
-    /// the time limit less the writer's allowance. `None` for a Phase 2 run
-    /// (its wrap-up stays at 60% of the time limit).
-    pub fn team_wrap_up_s(&self, mode: RunMode, engine: QuickEngine) -> Option<u32> {
+    /// the time limit less the writer's allowance and (Full) the review
+    /// phase's. `None` for a Phase 2 run (its wrap-up stays at 60% of the
+    /// time limit).
+    pub fn team_wrap_up_s(&self, mode: RunMode, engines: Engines) -> Option<u32> {
         let s = self.for_mode(mode);
-        engine.uses_team(mode).then(|| {
+        engines.uses_team(mode).then(|| {
             s.agent_time_limit_s
                 .saturating_sub(s.writer_time_allowance_s)
+                .saturating_sub(s.review_time_allowance_s)
         })
     }
 

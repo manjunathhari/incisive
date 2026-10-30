@@ -72,6 +72,7 @@ impl Fixed {
                 usage: Some(Usage {
                     input_tokens: 812,
                     output_tokens: 37,
+                    ..Usage::default()
                 }),
                 model: Some(GATE_MODEL.to_string()),
             }),
@@ -104,6 +105,8 @@ fn prices() -> Prices {
         ModelPrice {
             input_usd_per_mtok: 1.0,
             output_usd_per_mtok: 5.0,
+            cache_write_usd_per_mtok: 1.25,
+            cache_read_usd_per_mtok: 0.1,
         },
     );
     Prices::new(m)
@@ -128,6 +131,7 @@ fn state_with(pool: PgPool, gate: Arc<dyn Classifier>, dev_mode: bool) -> AppSta
         runs: RunsConfig::default(),
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
+        full_engine: incisive_app::runs::Engine::Classic,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm(GATE_MODEL)),
@@ -453,6 +457,7 @@ fn bad_response(model: &str, input_tokens: u32, output_tokens: u32) -> GateError
         usage: Usage {
             input_tokens,
             output_tokens,
+            ..Usage::default()
         },
     }
 }

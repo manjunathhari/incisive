@@ -100,3 +100,33 @@ async fn migrate_retry_keeps_trying_when_db_unreachable() {
     assert!(res.is_err(), "should still be retrying");
     assert!(!migrated.load(Ordering::Acquire));
 }
+
+/// Stage 3 review 8: an image whose migrations are older than the
+/// database's (an image rollback after an additive migration) still
+/// migrates and starts: applied migrations it does not know are ignored.
+#[tokio::test]
+async fn an_older_image_runs_against_a_newer_additive_schema() {
+    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        eprintln!("SKIP: TEST_DATABASE_URL not set");
+        return;
+    };
+    let pool = lazy_pool(&SecretString::from(url)).expect("lazy pool");
+    migrate(&pool).await.expect("migrate");
+    // A migration from a newer image, as sqlx records it.
+    let version: i64 = 99_990_000 + i64::from(std::process::id() % 9_999);
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES ($1, 'from a newer image', true, '\\x00'::bytea, 0) ON CONFLICT DO NOTHING",
+    )
+    .bind(version)
+    .execute(&pool)
+    .await
+    .expect("record a newer migration");
+    let r = migrate(&pool).await;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("clean up");
+    r.expect("an unknown applied migration is ignored");
+}

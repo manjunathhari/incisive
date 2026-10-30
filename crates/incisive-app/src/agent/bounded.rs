@@ -29,8 +29,11 @@
 //!   together pass the run's limit, and near it fewer calls run at once. A hold refused while
 //!   other calls are in flight is tried again (same item, wrap-up checked
 //!   again) after the next one settles, since a settled call usually frees
-//!   part of its hold; refused with nothing in flight (`OverBudget`, as
-//!   before Fix B), it stops launching;
+//!   part of its hold; refused with nothing of its own in flight but another
+//!   step's calls holding (Stage 3: the skeptic beside the extractor), it is
+//!   tried again after [`OTHERS_POLL`] while wrap-up is not due; refused
+//!   with nothing in flight at all (`OverBudget`, as before Fix B), it stops
+//!   launching;
 //! * calls already in flight finish and are charged (the spawned call task
 //!   owns its hold, Ruling R-8b). A JSON retry of an in-flight item is a new
 //!   hold, checked against the budget like any call, as before Fix B.
@@ -77,6 +80,12 @@ thread_local! {
     /// Passes through the step loop (tests: no busy-waiting).
     static WAKES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+/// How long an item whose hold was refused beside **another step's**
+/// calls in flight waits before it is tried again (Stage 3: the extractor
+/// beside the skeptic). Only when this step has nothing of its own in
+/// flight to wait for.
+pub const OTHERS_POLL: Duration = Duration::from_millis(200);
 
 /// Longest single sleep while an item waits, so a cancel is seen within it.
 const CANCEL_POLL: Duration = Duration::from_millis(250);
@@ -198,6 +207,16 @@ where
                         next = i;
                     }
                     blocked = true;
+                    break;
+                }
+                Some(Err(StepError::OverBudget))
+                    if budget.held() > 0 && !budget.should_wrap_up_settled(now) =>
+                {
+                    // Refused while another step's calls are in flight (Full:
+                    // the skeptic's turn beside extraction): this step has
+                    // none to wait for, so try the same item again shortly,
+                    // with every check made again (Stage 3).
+                    waiting.push((now + OTHERS_POLL, i));
                     break;
                 }
                 Some(Err(StepError::OverBudget)) => {

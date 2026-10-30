@@ -21,7 +21,7 @@ use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
 use crate::runs::api as runs_api;
 use crate::runs::worker::WorkerHandle;
-use crate::runs::{QuickEngine, RunsConfig};
+use crate::runs::{Engine, Engines, QuickEngine, RunsConfig};
 use crate::spend::{CapsConfig, Prices};
 
 /// Everything a request needs. Also provided as Leptos context to server functions.
@@ -40,6 +40,8 @@ pub struct AppState {
     pub runs: RunsConfig,
     /// Which engine answers Quick runs (`QUICK_ENGINE`; default `team`).
     pub quick_engine: QuickEngine,
+    /// Which engine answers Full runs (`FULL_ENGINE`; default `team`).
+    pub full_engine: Engine,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev
@@ -48,6 +50,16 @@ pub struct AppState {
     pub llm: Option<Arc<AgentLlm>>,
     /// The literature clients (one allowlisted HTTP client, shared OA policy).
     pub lit: Arc<Literature>,
+}
+
+impl AppState {
+    /// The engine per mode.
+    pub fn engines(&self) -> Engines {
+        Engines {
+            quick: self.quick_engine,
+            full: self.full_engine,
+        }
+    }
 }
 
 impl FromRef<AppState> for IdentityState {

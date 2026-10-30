@@ -164,6 +164,7 @@ mod server {
         Usage {
             input_tokens: gate::GATE_PROMPT_TOKENS.saturating_add(question_tokens),
             output_tokens: gate::GATE_MAX_TOKENS,
+            ..Usage::default()
         }
     }
     const ACTIVITY_DEFAULT: i64 = 50;
@@ -495,8 +496,8 @@ mod server {
     ) -> Result<AskOutcome, AskFailure> {
         let uid = Some(user.id);
         // The engine's cost limit: Phase 3's `agent_limit_paise` for a team
-        // run (QUICK_ENGINE), Phase 2's `limit_paise` otherwise.
-        let (limit, _) = state.runs.limits(mode, state.quick_engine);
+        // run (QUICK_ENGINE / FULL_ENGINE), Phase 2's `limit_paise` otherwise.
+        let (limit, _) = state.runs.limits(mode, state.engines());
 
         // 1-2. The active-run check and the insert are one atomic step. If the
         // user's active run is abandoned (stale heartbeat), self-heal: interrupt
@@ -601,8 +602,8 @@ mod server {
             role: user.role.as_str().to_string(),
             today_paise: totals.today_paise,
             daily_cap_paise: user.daily_cap_paise,
-            quick_limit_paise: state.runs.limits(RunMode::Quick, state.quick_engine).0,
-            focused_limit_paise: state.runs.limits(RunMode::Focused, state.quick_engine).0,
+            quick_limit_paise: state.runs.limits(RunMode::Quick, state.engines()).0,
+            focused_limit_paise: state.runs.limits(RunMode::Focused, state.engines()).0,
         })
     }
 

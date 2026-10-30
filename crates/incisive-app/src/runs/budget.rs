@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,10 @@ const DEFAULT_TIME_LIMIT_S: u32 = 300;
 /// 180 s at the default 300 s.
 pub const fn wrap_up_after(time_limit_s: u32) -> Duration {
     Duration::from_millis(time_limit_s as u64 * 600)
+}
+
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The hard stop for `time_limit_s`: the limit plus 60 s (360 s at the
@@ -113,6 +118,15 @@ impl Drop for InFlightReserve {
     }
 }
 
+/// One consistent snapshot of a budget's money ([`RunBudget::committed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Committed {
+    pub spent: i64,
+    pub held: i64,
+    pub finish_reserve: i64,
+    pub in_flight_reserve: i64,
+}
+
 /// An in-flight reservation of part of the run's limit, taken before a Claude
 /// call. Pass it to [`RunBudget::charge`] to turn it into real spend; dropping
 /// it without charging releases it.
@@ -149,8 +163,10 @@ pub struct RunBudget {
     /// Added to the run's age (tests only, [`RunBudget::aged_for_test`]), so
     /// time-limit tests do not depend on the host's monotonic clock.
     age_offset: Duration,
-    /// From the run's `time_limit_s` ([`RunBudget::with_time_limit`]).
-    wrap_up_after: Duration,
+    /// From the run's `time_limit_s` ([`RunBudget::with_time_limit`]), in
+    /// milliseconds; moved by the team pipeline between its phases
+    /// ([`RunBudget::set_wrap_up_after`]).
+    wrap_up_after_ms: AtomicU64,
     hard_stop_after: Duration,
 }
 
@@ -172,7 +188,7 @@ impl RunBudget {
             usd_inr,
             state: Mutex::new(State::default()),
             age_offset: Duration::ZERO,
-            wrap_up_after: wrap_up_after(DEFAULT_TIME_LIMIT_S),
+            wrap_up_after_ms: AtomicU64::new(millis(wrap_up_after(DEFAULT_TIME_LIMIT_S))),
             hard_stop_after: hard_stop_after(DEFAULT_TIME_LIMIT_S),
         }
     }
@@ -181,21 +197,28 @@ impl RunBudget {
     /// 60% of it, hard stop at it plus 60 s. Without this, the defaults for
     /// 300 s apply (180 s and 360 s).
     pub fn with_time_limit(mut self, time_limit_s: u32) -> RunBudget {
-        self.wrap_up_after = wrap_up_after(time_limit_s);
+        self.wrap_up_after_ms = AtomicU64::new(millis(wrap_up_after(time_limit_s)));
         self.hard_stop_after = hard_stop_after(time_limit_s);
         self
     }
 
     /// Wrap up at `after` from the start instead (Phase 3: the time limit
     /// less the writer's allowance). Call after [`RunBudget::with_time_limit`].
-    pub fn with_wrap_up_after(mut self, after: Duration) -> RunBudget {
-        self.wrap_up_after = after;
+    pub fn with_wrap_up_after(self, after: Duration) -> RunBudget {
+        self.set_wrap_up_after(after);
         self
+    }
+
+    /// Move the wrap-up point to `after` from the start (Phase 3 Full: once
+    /// research is done, the review phase wraps up at the time limit less
+    /// the writer's allowance).
+    pub fn set_wrap_up_after(&self, after: Duration) {
+        self.wrap_up_after_ms.store(millis(after), Ordering::SeqCst);
     }
 
     /// When this run wraps up for time.
     pub fn wrap_up_after(&self) -> Duration {
-        self.wrap_up_after
+        Duration::from_millis(self.wrap_up_after_ms.load(Ordering::SeqCst))
     }
 
     /// Time left before the hard stop; zero once it has passed.
@@ -256,6 +279,19 @@ impl RunBudget {
     /// final structured call's estimate free while it runs tool turns, then
     /// makes that call from it). The share is gone either way; refused, the
     /// caller makes no call.
+    ///
+    /// **In-flight holds count once here** (Stage 3, the deferred Stage 1
+    /// issue), exactly as the loop's own affordability check (`Final::fits`)
+    /// counts them, so a share that fits is a hold that fits even while
+    /// other calls (the extractor's) are in flight. The doubling of R-FB3
+    /// is room for calls in flight to cost more than their holds; every
+    /// gathering launch beside this share already left that room *and* the
+    /// share free (each counts itself and all in-flight holds twice, plus
+    /// the share once), so moving the share into `held` takes no headroom
+    /// another call was promised. The call made from the share is then a
+    /// single call like any other: its own input excess is the documented
+    /// single-call figure (`llm::estimate_usage`), absorbed by the finish
+    /// reserve first, and later launches count its hold twice.
     pub fn try_hold_releasing(
         self: &Arc<Self>,
         estimate_paise: i64,
@@ -268,19 +304,22 @@ impl RunBudget {
         drop(share);
         let mut st = self.state();
         st.in_flight_reserve -= amount;
-        self.hold_locked(&mut st, estimate_paise, gathering)
+        self.hold_locked(&mut st, estimate_paise, gathering, false)
     }
 
     fn hold_leaving(self: &Arc<Self>, estimate_paise: i64, reserve: bool) -> Option<Hold> {
         let mut st = self.state();
-        self.hold_locked(&mut st, estimate_paise, reserve)
+        self.hold_locked(&mut st, estimate_paise, reserve, reserve)
     }
 
+    /// `reserve`: leave the finish reserve and the in-flight shares free;
+    /// `double`: count in-flight holds twice when there are any (R-FB3).
     fn hold_locked(
         self: &Arc<Self>,
         st: &mut MutexGuard<'_, State>,
         estimate_paise: i64,
         reserve: bool,
+        double: bool,
     ) -> Option<Hold> {
         if estimate_paise < 0 {
             return None;
@@ -294,7 +333,7 @@ impl RunBudget {
         // others are in flight must fit with every in-flight hold, its own
         // included, counted twice. With nothing in flight the rule is the
         // one a single call always had.
-        let factor = if reserve && st.held > 0 { 2 } else { 1 };
+        let factor = if double && st.held > 0 { 2 } else { 1 };
         let total = i128::from(st.spent)
             + factor * (i128::from(st.held) + i128::from(estimate_paise))
             + i128::from(kept);
@@ -456,6 +495,19 @@ impl RunBudget {
         self.state().spent += paise.max(0);
     }
 
+    /// Spent, held, the finish reserve and the in-flight shares, read under
+    /// **one** lock, so a check over them sees one consistent moment (Stage 3
+    /// review: concurrent calls change them between separate reads).
+    pub fn committed(&self) -> Committed {
+        let st = self.state();
+        Committed {
+            spent: st.spent,
+            held: st.held,
+            finish_reserve: st.finish_reserve,
+            in_flight_reserve: st.in_flight_reserve,
+        }
+    }
+
     /// Paise currently held by Claude calls in flight (taken, not yet charged
     /// or dropped).
     pub fn held(&self) -> i64 {
@@ -541,7 +593,7 @@ impl RunBudget {
             || (reserve > 0 && i128::from(spent) + i128::from(held) + i128::from(reserve) >= limit)
         {
             Some("cost limit")
-        } else if self.age(now) >= self.wrap_up_after {
+        } else if self.age(now) >= self.wrap_up_after() {
             Some("time limit")
         } else {
             None
@@ -560,7 +612,7 @@ impl RunBudget {
     /// Time left before the wrap-up time (60% of `time_limit_s`); zero once
     /// it has passed.
     pub fn until_wrap_up(&self, now: Instant) -> Duration {
-        self.wrap_up_after.saturating_sub(self.age(now))
+        self.wrap_up_after().saturating_sub(self.age(now))
     }
 
     /// [`RunBudget::should_wrap_up`] leaving out what calls in flight hold
@@ -578,7 +630,7 @@ impl RunBudget {
         let limit = i128::from(self.limit_paise);
         i128::from(spent) * 100 >= limit * WRAP_UP_PERCENT
             || (reserve > 0 && i128::from(spent) + i128::from(reserve) >= limit)
-            || self.age(now) >= self.wrap_up_after
+            || self.age(now) >= self.wrap_up_after()
     }
 
     /// True when [`RunBudget::wrap_up_reason`] gives a reason.

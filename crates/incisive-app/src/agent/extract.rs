@@ -262,17 +262,28 @@ const BAD_BEFORE: &[char] = &[
 /// Characters a quote may start right after (the clause starts).
 const CLAUSE_OPENERS: &[char] = &['.', ';', ':', '(', '['];
 
-/// A source section prepared for matching.
-struct Section {
+/// A source section prepared for matching (also the Phase 3 extractor's).
+pub(crate) struct Section {
     /// The section exactly as sent (neutralised).
     sent: String,
     norm: Mapped,
 }
 
 impl Section {
-    fn new(sent: String) -> Section {
+    pub(crate) fn new(sent: String) -> Section {
         let norm = normalise_mapped(&sent);
         Section { sent, norm }
+    }
+
+    /// The section as sent.
+    pub(crate) fn sent(&self) -> &str {
+        &self.sent
+    }
+
+    /// Characters of the section as sent.
+    #[cfg(test)]
+    pub(crate) fn sent_len(&self) -> usize {
+        self.sent.chars().count()
     }
 
     fn starts_clause(&self, at: usize) -> bool {
@@ -311,7 +322,7 @@ impl Section {
 
     /// The span of `sent` at the first properly bounded occurrence of the
     /// normalised quote `q` (non-empty, trimmed).
-    fn find(&self, q: &str) -> Option<&str> {
+    pub(crate) fn find(&self, q: &str) -> Option<&str> {
         self.norm.text.match_indices(q).find_map(|(at, _)| {
             let end = at + q.len();
             (self.starts_clause(at) && self.bounded_before(at) && self.bounded_after(end)).then(
@@ -325,7 +336,7 @@ impl Section {
     }
 }
 
-fn quote_key(quote: &str) -> Option<String> {
+pub(crate) fn quote_key(quote: &str) -> Option<String> {
     let q = normalise(quote);
     let len = q.chars().count();
     (MIN_QUOTE..=MAX_QUOTE).contains(&len).then_some(q)
@@ -349,42 +360,58 @@ pub fn find_verbatim<'a>(section: &'a str, quote: &str) -> Option<&'a str> {
 
 // ---------- the result must come from the quote ----------
 
-static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"-?(?:\d+(?:[.,]\d+)?|\.\d+)%?").expect("number pattern is valid")
+/// One number: digits with an optional decimal point (no decimal comma:
+/// "3,4" is two numbers, Stage 3 re-review 4; grouped thousands are read
+/// whole first, [`THOUSANDS`]).
+static NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-?(?:\d+(?:\.\d+)?|\.\d+)%?").expect("number pattern is valid"));
+/// A run of digits with `.` / `,` separators (and an optional sign and `%`),
+/// read whole first so a thousands-grouped number is one token.
+static NUMBER_RUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-?(?:\d+(?:[.,]\d+)*|\.\d+)%?").expect("number run pattern is valid")
 });
-static THOUSANDS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^-?\d{1,3},\d{3}%?$").expect("thousands pattern is valid"));
+/// Thousands grouping: `1,234`, `1,136,000`, `12,345.6` (Stage 3 review 7).
+static THOUSANDS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?$").expect("thousands pattern is valid")
+});
 
 /// The number tokens of `s`, read from its normalised (folded) form, so a
 /// middle-dot decimal is one number. A `-` right after a digit or `%` is a
-/// range dash, not a sign; a comma before exactly three final digits is a
-/// thousands separator; a leading `.` reads as `0.` (".52" is 0.52).
-fn numbers(s: &str) -> Vec<String> {
+/// range dash, not a sign, and right after a letter a hyphen ("COVID-19"
+/// is 19, not -19); a thousands-grouped number (`1,136,000`) is one number
+/// without its commas; a leading `.` reads as `0.` (".52" is 0.52).
+pub(crate) fn numbers(s: &str) -> Vec<String> {
     let s = normalise(s);
-    NUMBER
-        .find_iter(&s)
-        .map(|m| {
-            let mut t = m.as_str();
+    let mut out = Vec::new();
+    for run in NUMBER_RUN.find_iter(&s) {
+        // Whole runs that are thousands-grouped are one token; anything
+        // else is read as before, piece by piece.
+        let pieces: Vec<(usize, String)> = if THOUSANDS.is_match(run.as_str()) {
+            vec![(run.start(), run.as_str().replace(',', ""))]
+        } else {
+            NUMBER
+                .find_iter(run.as_str())
+                .map(|m| (run.start() + m.start(), m.as_str().to_string()))
+                .collect()
+        };
+        for (start, t) in pieces {
+            let mut t = t.as_str();
             if t.starts_with('-')
-                && s[..m.start()]
+                && s[..start]
                     .chars()
                     .next_back()
-                    .is_some_and(|c| c.is_ascii_digit() || c == '%')
+                    .is_some_and(|c| c.is_ascii_digit() || c == '%' || c.is_alphabetic())
             {
                 t = &t[1..];
             }
-            let t = if THOUSANDS.is_match(t) {
-                t.replace(',', "")
-            } else {
-                t.to_string()
-            };
-            match t.strip_prefix('-') {
+            out.push(match t.strip_prefix('-') {
                 Some(r) if r.starts_with('.') => format!("-0{r}"),
                 _ if t.starts_with('.') => format!("0{t}"),
-                _ => t,
-            }
-        })
-        .collect()
+                _ => t.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Lower-cased words of 4+ letters.
@@ -465,7 +492,7 @@ pub static SCHEMA: LazyLock<OutputSchema> = LazyLock::new(|| {
 });
 
 /// A section label: lower-case ASCII letters only.
-fn label(name: &str) -> String {
+pub(crate) fn label(name: &str) -> String {
     let l: String = name
         .chars()
         .filter(char::is_ascii_alphabetic)
@@ -476,7 +503,7 @@ fn label(name: &str) -> String {
 }
 
 /// Order in which sections get room under [`MAX_TEXT`].
-fn priority(label: &str) -> u8 {
+pub(crate) fn priority(label: &str) -> u8 {
     match label {
         "abstract" => 0,
         "results" => 1,
@@ -488,7 +515,7 @@ fn priority(label: &str) -> u8 {
 
 /// `text` cut to at most `max` characters, at its last whitespace (empty when
 /// a cut is needed and there is none).
-fn cut(text: &str, max: usize) -> &str {
+pub(crate) fn cut(text: &str, max: usize) -> &str {
     match text.char_indices().nth(max) {
         None => text,
         Some((at, c)) if c.is_whitespace() => text[..at].trim_end(),

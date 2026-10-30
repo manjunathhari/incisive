@@ -49,6 +49,7 @@ fn usage() -> Usage {
     Usage {
         input_tokens: 10,
         output_tokens: 10,
+        ..Usage::default()
     }
 }
 

@@ -45,6 +45,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -143,6 +144,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         dev_mode: true,
         runs: RunsConfig::default(),
         quick_engine: QuickEngine::Team,
+        full_engine: incisive_app::runs::Engine::Classic,
         worker: WorkerHandle::default(),
         llm: None,
         lit,
@@ -795,6 +797,89 @@ async fn the_engine_switch_picks_the_pipeline_and_the_limits() {
     );
 }
 
+/// Stage 3 §0: `FULL_ENGINE` picks Full's pipeline and limits on its own.
+/// `team`: ₹300, 10 minutes (hard stop 660 s; owner ruling R-S3a),
+/// research wrapping up at 600 − 150 (writer) − 180 (review) s. `classic`: exactly Phase 2
+/// Focused (₹40, 300 s, wrap-up at 60%, the Frame step first). Quick is
+/// untouched by it.
+#[tokio::test]
+async fn the_full_engine_switch_picks_the_pipeline_and_the_limits() {
+    let Some(pool) = pool().await else { return };
+    fn timing(ctx: &RunContext) -> PipelineFuture<'_> {
+        Box::pin(async move {
+            PipelineOutcome::Done(json!({
+                "hard_stop_s": ctx.budget.hard_stop().as_secs(),
+                "wrap_up_s": ctx.budget.wrap_up_after().as_secs()
+            }))
+        })
+    }
+    use incisive_app::runs::Engine;
+    for (engine, limit, hard_stop_s, wrap_up_s) in [
+        (Engine::Team, 30000, 600 + 60, 600 - 150 - 180),
+        (Engine::Classic, 4000, 300 + 60, 180),
+    ] {
+        let mut st = app_state(
+            pool.clone(),
+            incisive_app::agent::testing::offline_literature(),
+        );
+        st.full_engine = engine;
+        st.worker = WorkerHandle::with_pipeline(timing);
+        st.llm = Some(incisive_app::agent::testing::idle_llm(MODEL));
+        let (uid, user) = new_user(&pool).await;
+        let me = me_view(&st, &user).await.unwrap();
+        assert_eq!(me.focused_limit_paise, limit, "{engine:?}");
+        assert_eq!(me.quick_limit_paise, 10000, "Quick keeps its own switch");
+        let AskOutcome::RunStarted { run_id, .. } =
+            start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Focused, None)
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(run_limit(&pool, run_id).await, limit, "{engine:?}");
+        let v = wait_done(&pool, uid, run_id).await;
+        wait_idle(&st, run_id).await;
+        assert_eq!(
+            v.answer,
+            Some(json!({"hard_stop_s": hard_stop_s, "wrap_up_s": wrap_up_s})),
+            "{engine:?}"
+        );
+    }
+
+    // The default pipeline: classic Full runs Phase 2's Frame first.
+    let llm = Arc::new(ScriptedLlm::new());
+    let mut st = team_state(
+        &pool,
+        incisive_app::agent::testing::offline_literature(),
+        agent_llm(llm.clone(), MODEL),
+    );
+    st.full_engine = Engine::Classic;
+    let (uid, user) = new_user(&pool).await;
+    let AskOutcome::RunStarted { run_id, .. } =
+        start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Focused, None)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    let v = wait_done(&pool, uid, run_id).await;
+    wait_idle(&st, run_id).await;
+    assert_eq!(v.summary.status, RunStatus::Failed);
+    let reqs = llm.requests();
+    assert!(
+        reqs[0]
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("You frame clinical questions"),
+        "classic Full starts with Frame"
+    );
+    assert!(
+        reqs.iter().all(|r| r.tools.is_empty()),
+        "no researcher turn"
+    );
+}
+
 /// Nothing valid selected after a complete search: done, "No relevant
 /// evidence found.", and no writer call.
 #[tokio::test]
@@ -1110,7 +1195,7 @@ async fn the_writer_is_always_reached_under_a_tight_budget() {
     }];
     let turn1 = call
         .turn_estimate(
-            &incisive_app::agent::researcher::system_prompt(8),
+            &incisive_app::agent::researcher::system_prompt(8, false),
             &first,
             &tools,
             None,

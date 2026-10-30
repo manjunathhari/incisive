@@ -410,7 +410,7 @@ fn AskPage() -> impl IntoView {
     }
 }
 
-/// Quick or Focused: two radio buttons drawn as a segmented control, each
+/// Quick or Full (stored as `focused`): two radio buttons drawn as a segmented control, each
 /// with its cost limit from config. The choice is remembered in this browser.
 #[component]
 fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
@@ -452,7 +452,7 @@ fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
             <legend>"Depth"</legend>
             <div class="seg">{option(RunMode::Quick)} {option(RunMode::Focused)}</div>
             <p class="hint" id="depth-hint">
-                "Quick reads abstracts only. Focused reads more papers, with free full text where available. The amount is each run's cost limit."
+                "Quick reads abstracts only. Full reads more papers, with free full text where available, and checks the evidence more deeply. The amount is each run's cost limit."
             </p>
         </fieldset>
     }
@@ -971,7 +971,9 @@ fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
 fn written_v3_view(
     w: WrittenAnswer,
     refs: &std::collections::HashMap<String, u16>,
+    evidence: &std::collections::HashMap<String, String>,
 ) -> impl IntoView {
+    let full = !evidence.is_empty();
     let c = w.bottom_line.certainty;
     view! {
         <h3>"Bottom line"</h3>
@@ -1031,6 +1033,7 @@ fn written_v3_view(
                                 <th>"Comparison"</th>
                                 <th>"Key results"</th>
                                 <th>"Appraisal"</th>
+                                {full.then(|| view! { <th>"Evidence checked"</th> })}
                             </tr>
                         </thead>
                         <tbody>
@@ -1038,6 +1041,12 @@ fn written_v3_view(
                                 .into_iter()
                                 .map(|s| {
                                     let n = refs.get(&s.pmid).copied();
+                                    let checked = full.then(|| {
+                                        evidence
+                                            .get(s.pmid.trim())
+                                            .cloned()
+                                            .unwrap_or_else(|| "not extracted".to_string())
+                                    });
                                     let design = match s.n {
                                         Some(n) => format!("{} \u{b7} n = {n} \u{b7} {}", s.design, s.setting),
                                         None => format!("{} \u{b7} {}", s.design, s.setting),
@@ -1052,6 +1061,7 @@ fn written_v3_view(
                                             <td>{cited(&s.comparison, refs)}</td>
                                             <td>{cited(&s.key_results, refs)}</td>
                                             <td>{cited(&s.appraisal, refs)}</td>
+                                            {checked.map(|c| view! { <td>{c}</td> })}
                                         </tr>
                                     }
                                 })
@@ -1095,6 +1105,80 @@ fn written_v3_view(
     }
 }
 
+/// The skeptic's review (Full): verdict, caveats, overlaps, missed trials,
+/// contradictions and guidelines, as escaped text with numbered citations.
+fn skeptic_v3_view(
+    k: crate::agent::answer_v3::SkepticV3,
+    refs: &std::collections::HashMap<String, u16>,
+) -> AnyView {
+    // Each line: the skeptic's text (citations linked) and the studies it
+    // names: a numbered reference when there is one, otherwise a PubMed
+    // link (re-review 3: a study whose record could not be fetched is not
+    // dropped). Only PMIDs of 1 to 9 digits are linked.
+    let line = |text: String, pmids: Vec<String>| (text, pmids);
+    let quoted = |i: &crate::agent::answer_v3::SkepticItem| match &i.quote {
+        Some(q) => line(
+            format!("{} \u{2014} \u{201c}{q}\u{201d}", i.text),
+            vec![i.pmid.clone()],
+        ),
+        None => line(i.text.clone(), vec![i.pmid.clone()]),
+    };
+    let caveats: Vec<(String, Vec<String>)> = k
+        .must_mention
+        .iter()
+        .map(|m| line(m.clone(), vec![]))
+        .collect();
+    let overlaps: Vec<(String, Vec<String>)> = k
+        .overlaps
+        .iter()
+        .map(|o| line(o.note.clone(), o.pmids.clone()))
+        .collect();
+    let missed: Vec<(String, Vec<String>)> = k.missed_rcts.iter().map(quoted).collect();
+    // Each with its verified quote (review 2).
+    let against: Vec<(String, Vec<String>)> = k
+        .contradicting
+        .iter()
+        .chain(&k.guidelines)
+        .map(quoted)
+        .collect();
+    let study = |p: String| -> AnyView {
+        if let Some(n) = refs.get(&p) {
+            view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
+                .into_any()
+        } else if (1..=9).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
+            let href = format!("https://pubmed.ncbi.nlm.nih.gov/{p}/");
+            view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
+                .into_any()
+        } else {
+            ().into_any()
+        }
+    };
+    let list = |title: &'static str, xs: Vec<(String, Vec<String>)>| {
+        (!xs.is_empty()).then(|| {
+            view! {
+                <p><strong>{title}</strong></p>
+                <ul>
+                    {xs
+                        .into_iter()
+                        .map(|(t, ps)| view! { <li>{cited(&t, refs)} {ps.into_iter().map(study).collect_view()}</li> })
+                        .collect_view()}
+                </ul>
+            }
+        })
+    };
+    view! {
+        <section class="box" aria-label="Challenged by the skeptic">
+            <h3>"Challenged by the skeptic"</h3>
+            <p>{format!("Verdict: the conclusion {}.", k.verdict)}</p>
+            {list("Caveats", caveats)}
+            {list("Not independent", overlaps)}
+            {list("Trials the search missed", missed)}
+            {list("Evidence against, and guidelines", against)}
+        </section>
+    }
+    .into_any()
+}
+
 /// A Phase 3 answer (AnswerV3), in the spec §2 order, as escaped text and
 /// links only. The polished layout is Stage 4.
 fn answer_v3_view(a: AnswerV3) -> impl IntoView {
@@ -1131,7 +1215,32 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         ));
     }
     let n_searches = a.searches.len();
-    let written = a.answer.map(|w| written_v3_view(w, &refs));
+    // Full: per study, what the extractor read and how many quotes it
+    // verified.
+    let evidence: std::collections::HashMap<String, String> = a
+        .evidence
+        .iter()
+        .map(|e| {
+            let line = if e.text == "not extracted" {
+                "not extracted (abstract)".to_string()
+            } else {
+                format!(
+                    "{} \u{b7} {} verified {}",
+                    e.text,
+                    e.verified_quotes,
+                    if e.verified_quotes == 1 {
+                        "quote"
+                    } else {
+                        "quotes"
+                    }
+                )
+            };
+            (e.pmid.clone(), line)
+        })
+        .collect();
+    let written = a.answer.map(|w| written_v3_view(w, &refs, &evidence));
+    let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
+    let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
     view! {
         <section class="answer" aria-label="Answer">
@@ -1147,6 +1256,12 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
                 }
                     .into_any(),
             }}
+
+            {skeptic}
+            {(!run_notes.is_empty())
+                .then(|| view! {
+                    <ul class="hint">{run_notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
+                })}
 
             <h3>"References"</h3>
             {if a.references.is_empty() {

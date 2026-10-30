@@ -16,6 +16,39 @@ pub struct MessagesRequest {
     /// Unset: omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
+    /// Prompt caching: indexes into `messages` whose **last** content block
+    /// is sent with `cache_control: {"type": "ephemeral"}` (the prefix up to
+    /// it, tools and system included, is written to or read from the cache).
+    /// Not a field of the API: [`MessagesRequest::body`] places the marks.
+    /// Empty: the request is sent exactly as derived.
+    #[serde(skip)]
+    pub cache_breakpoints: Vec<usize>,
+}
+
+impl MessagesRequest {
+    /// The JSON body as sent: the derived serialisation, with
+    /// `cache_control` added to the last block of each message named in
+    /// [`MessagesRequest::cache_breakpoints`] (out-of-range indexes and
+    /// empty messages are ignored).
+    pub fn body(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).expect("request types serialize to JSON");
+        for &i in &self.cache_breakpoints {
+            if let Some(block) = v
+                .get_mut("messages")
+                .and_then(|m| m.get_mut(i))
+                .and_then(|m| m.get_mut("content"))
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|c| c.last_mut())
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                block.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({"type": "ephemeral"}),
+                );
+            }
+        }
+        v
+    }
 }
 
 /// The Messages API `output_config`.
@@ -148,8 +181,22 @@ pub enum StopReason {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Tokens billed. With prompt caching, `input_tokens` are the input tokens
+/// after the last cache breakpoint (full input price); the cached prefix is
+/// counted as `cache_creation_input_tokens` (written, at the cache-write
+/// price) or `cache_read_input_tokens` (read, at the cache-read price).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Absent or null: 0.
+    #[serde(default, deserialize_with = "zero_if_null")]
+    pub cache_creation_input_tokens: u32,
+    /// Absent or null: 0.
+    #[serde(default, deserialize_with = "zero_if_null")]
+    pub cache_read_input_tokens: u32,
+}
+
+fn zero_if_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(Option::<u32>::deserialize(d)?.unwrap_or(0))
 }

@@ -114,7 +114,7 @@ impl Client {
             .base_url
             .join("v1/messages")
             .expect("static path joins onto a base URL");
-        let body = serde_json::to_vec(req).expect("request types serialize to JSON");
+        let body = serde_json::to_vec(&req.body()).expect("request types serialize to JSON");
         let resp = self
             .http
             .post(url)

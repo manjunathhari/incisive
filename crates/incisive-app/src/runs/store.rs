@@ -106,16 +106,29 @@ pub async fn add_step(
     kind: StepKind,
     line: &str,
 ) -> sqlx::Result<i32> {
-    sqlx::query_scalar(
-        "INSERT INTO incisive.run_steps (run_id, seq, kind, line) \
-         SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM incisive.run_steps WHERE run_id = $1 \
-         RETURNING seq",
-    )
-    .bind(run_id)
-    .bind(kind.as_str())
-    .bind(line)
-    .fetch_one(pool)
-    .await
+    // Phase 3 Full writes lines from two roles at once (extractor and
+    // skeptic): two inserts can read the same MAX(seq) and one then hits
+    // the (run_id, seq) key. Take the next number again; a few tries
+    // suffice for two or three writers.
+    let mut attempt = 0;
+    loop {
+        let r = sqlx::query_scalar(
+            "INSERT INTO incisive.run_steps (run_id, seq, kind, line) \
+             SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM incisive.run_steps WHERE run_id = $1 \
+             RETURNING seq",
+        )
+        .bind(run_id)
+        .bind(kind.as_str())
+        .bind(line)
+        .fetch_one(pool)
+        .await;
+        match r {
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() && attempt < 20 => {
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Add real spend to the run's running cost.

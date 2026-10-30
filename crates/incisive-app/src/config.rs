@@ -4,7 +4,7 @@ use secrecy::SecretString;
 use std::fmt;
 
 use crate::agent::llm::AgentModels;
-use crate::runs::{QuickEngine, RunsConfig};
+use crate::runs::{Engine, QuickEngine, RunsConfig};
 use crate::spend::Prices;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,9 @@ pub struct Config {
     /// Engine for Quick runs (`QUICK_ENGINE`: `team`, the default, or
     /// `classic`, the Phase 2 pipeline). The owner's rollback switch.
     pub quick_engine: QuickEngine,
+    /// Engine for Full runs (`FULL_ENGINE`: `team`, the default, or
+    /// `classic`, the Phase 2 Focused pipeline). The owner's rollback switch.
+    pub full_engine: Engine,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -198,6 +201,14 @@ impl Config {
             })?,
         };
 
+        let full_engine = match lookup("FULL_ENGINE") {
+            None => Engine::default(),
+            Some(v) => Engine::parse(&v).ok_or_else(|| ConfigError::Invalid {
+                var: "FULL_ENGINE",
+                reason: "expected `team` or `classic`".to_string(),
+            })?,
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -272,6 +283,7 @@ impl Config {
             unpaywall_email,
             agent_models,
             quick_engine,
+            full_engine,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -574,6 +586,8 @@ mod tests {
                 extractor_max_tokens: 4000,
                 writer_max_tokens: 16000,
                 writer_time_allowance_s: 150,
+                review_time_allowance_s: 0,
+                extractor_concurrency: 3,
             }
         );
         assert_eq!(
@@ -585,8 +599,9 @@ mod tests {
                 full_text: true,
                 limit_paise: 4000,
                 time_limit_s: 300,
-                agent_limit_paise: 20000,
-                agent_time_limit_s: 480,
+                // Owner ruling R-S3a: ₹300, 10 minutes, 180 s for the review.
+                agent_limit_paise: 30000,
+                agent_time_limit_s: 600,
                 researcher_turns: 15,
                 skeptic_turns: 8,
                 researcher_max_tokens: 4000,
@@ -594,6 +609,9 @@ mod tests {
                 extractor_max_tokens: 4000,
                 writer_max_tokens: 16000,
                 writer_time_allowance_s: 150,
+                // Stage 3: the Full review phase (extractor ∥ skeptic).
+                review_time_allowance_s: 180,
+                extractor_concurrency: 3,
             }
         );
 
@@ -655,6 +673,11 @@ mod tests {
             // The writer's time must leave research some time.
             r#"{"quick": {"writer_time_allowance_s": 360}}"#,
             r#"{"focused": {"writer_time_allowance_s": 900}}"#,
+            // Stage 3: the writer's and the review's time together must
+            // leave research some time; the extractor runs 1 to 8 at once.
+            r#"{"focused": {"review_time_allowance_s": 450}}"#,
+            r#"{"focused": {"extractor_concurrency": 0}}"#,
+            r#"{"focused": {"extractor_concurrency": 9}}"#,
         ] {
             let mut pairs = full();
             pairs.push(("RUN_LIMITS", bad));
@@ -776,6 +799,110 @@ mod tests {
         assert_eq!(
             Config::from_lookup(lookup(&prod)).unwrap().quick_engine,
             QuickEngine::Classic
+        );
+    }
+
+    /// Stage 3 §0: `FULL_ENGINE` is `team` (default) or `classic`, checked
+    /// like `QUICK_ENGINE`, and independent of it.
+    #[test]
+    fn full_engine_switch() {
+        use crate::runs::{Engine, QuickEngine};
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.full_engine, Engine::Team);
+        for (v, want) in [
+            ("team", Engine::Team),
+            ("classic", Engine::Classic),
+            (" classic ", Engine::Classic),
+            ("   ", Engine::Team),
+        ] {
+            let mut pairs = full();
+            pairs.push(("FULL_ENGINE", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.full_engine, want, "{v:?}");
+            assert_eq!(c.quick_engine, QuickEngine::Team, "Quick is its own switch");
+        }
+        for bad in ["Team", "CLASSIC", "phase2", "team,classic", "1"] {
+            let mut pairs = full();
+            pairs.push(("FULL_ENGINE", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "FULL_ENGINE",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(!msg.contains(bad), "the value is not echoed: {msg}");
+        }
+        let mut prod = prod_with(PROD_PRICES);
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
+        prod.push(("FULL_ENGINE", "classic"));
+        prod.push(("QUICK_ENGINE", "team"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(
+            (c.quick_engine, c.full_engine),
+            (Engine::Team, Engine::Classic)
+        );
+    }
+
+    /// The CI container smoke's exact prod environment (`.github/workflows/
+    /// ci.yml`) parses: every default role priced, the engines defaulted.
+    /// Stage 2's merge was once blocked by a CI env missing a price.
+    #[test]
+    fn the_ci_smoke_env_parses_in_prod() {
+        let env = [
+            ("APP_ENV", "prod"),
+            ("ANTHROPIC_API_KEY", "sk-ant-FAKE-smoke-test-not-a-real-key"),
+            ("CLAUDE_MODEL", "claude-sonnet-5-5"),
+            ("GATE_MODEL", "claude-haiku-5-5"),
+            ("OWNER_EMAIL", "owner@example.com"),
+            ("UNPAYWALL_EMAIL", "ci@example.invalid"),
+            (
+                "MODEL_PRICES",
+                r#"{"claude-haiku-5-5":{"input":0.1,"output":0.5},"claude-sonnet-5-5":{"input":2,"output":10},"claude-opus-5-5":{"input":4,"output":20}}"#,
+            ),
+            ("USD_INR", "88"),
+            ("GLOBAL_MONTHLY_CAP_INR", "10000"),
+            (
+                "IAP_AUDIENCE",
+                "/projects/0/locations/asia-south1/services/test",
+            ),
+            ("DATABASE_URL", "postgres://u:p@127.0.0.1:1/x"),
+        ];
+        let ci = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/workflows/ci.yml"
+        ))
+        .unwrap();
+        for (k, v) in &env {
+            if *k != "DATABASE_URL" {
+                assert!(
+                    ci.contains(v),
+                    "ci.yml no longer sets {k} as this test does"
+                );
+            }
+        }
+        let c = Config::from_lookup(lookup(&env)).unwrap();
+        assert_eq!(c.full_engine, crate::runs::Engine::Team);
+        // §X: the cache rates default from the input price.
+        let opus = c.model_prices.get("claude-opus-5-5").unwrap();
+        assert_eq!(opus.cache_write_usd_per_mtok, 5.0);
+        // Per-model overrides parse in prod too.
+        let mut prod = prod_with(
+            r#"{"claude-haiku-5-5": {"input": 1, "output": 5}, "claude-sonnet-5-5": {"input": 3, "output": 15, "cache_write": 3.75, "cache_read": 0.3}, "claude-opus-5-5": {"input": 4, "output": 20}, "claude-test": {"input": 3, "output": 15}}"#,
+        );
+        prod.push(("UNPAYWALL_EMAIL", "ops@example.org"));
+        let c = Config::from_lookup(lookup(&prod)).unwrap();
+        assert_eq!(
+            c.model_prices
+                .get("claude-sonnet-5-5")
+                .unwrap()
+                .cache_read_usd_per_mtok,
+            0.3
         );
     }
 

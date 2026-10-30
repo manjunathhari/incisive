@@ -257,17 +257,35 @@ gcloud iap web add-iam-policy-binding --region=asia-south1 \
 
 | Role | `daily_cap_paise` | `monthly_cap_paise` |
 |---|---|---|
-| `surgeon` | 30000 | 300000 |
-| `fellow` | 15000 | 150000 |
+| `surgeon` | 80000 | 300000 |
+| `fellow` | 40000 | 150000 |
 
 ```sql
 INSERT INTO incisive.users (email, display_name, role, daily_cap_paise, monthly_cap_paise)
-VALUES ('colleague@example.com', 'Dr Colleague', 'surgeon', 30000, 300000);
--- fellow: 'fellow', 15000, 150000
+VALUES ('colleague@example.com', 'Dr Colleague', 'surgeon', 80000, 300000);
+-- fellow: 'fellow', 40000, 150000
+```
+
+The daily caps were raised on 30 Oct 2026 (owner ruling R-S3b: fellow ₹400, surgeon
+₹800, so a Full run's ₹300 reservation fits). Caps are stored on each user's row, so
+users added earlier keep their old caps until updated:
+
+```sql
+UPDATE incisive.users SET daily_cap_paise = 80000 WHERE role = 'surgeon' AND daily_cap_paise = 30000;
+UPDATE incisive.users SET daily_cap_paise = 40000 WHERE role = 'fellow' AND daily_cap_paise = 15000;
 ```
 
 Without the `incisive.users` row they can sign in through IAP but the app refuses them.
 To suspend someone, `UPDATE incisive.users SET active = false WHERE email = '...';`.
+
+
+**Prompt caching (Phase 3 Stage 3).** The evidence team's tool turns use Anthropic
+prompt caching. Each model's entry may also set `cache_write` and `cache_read`
+(USD per million tokens); when they are absent the app uses 1.25 × and 0.1 × the
+`input` price, the published rates (Opus 5.5: 5 and 0.40; Sonnet 5.5: 2.50 and 0.20).
+Existing `MODEL_PRICES` values keep working unchanged. Holds never assume a cache
+hit; charges use the real cache counts, which the spend ledger records (migration
+0011, two nullable columns).
 
 ## 11. Phase 2 settings: evidence agent, NCBI key, CPU always on
 
@@ -320,8 +338,8 @@ The global, daily and monthly caps apply as before.
 
 | Field | Quick | Focused (Full) | Meaning |
 |---|---|---|---|
-| `agent_limit_paise` | 10000 (₹100) | 20000 (₹200) | Phase 3 cost limit |
-| `agent_time_limit_s` | 360 | 480 | Phase 3 time limit in seconds (hard stop at it plus 60 s) |
+| `agent_limit_paise` | 10000 (₹100) | 30000 (₹300) | Phase 3 cost limit |
+| `agent_time_limit_s` | 360 | 600 | Phase 3 time limit in seconds (hard stop at it plus 60 s) |
 | `researcher_turns` | 8 | 15 | researcher tool-use turns at most (1 to 50) |
 | `skeptic_turns` | 0 | 8 | skeptic tool-use turns at most (0 = no skeptic; up to 50) |
 | `researcher_max_tokens` | 4000 | 4000 | output tokens per researcher turn (1 to 64000) |
@@ -329,6 +347,8 @@ The global, daily and monthly caps apply as before.
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
 | `writer_max_tokens` | 16000 | 16000 | output tokens of the writer's call (its cost is reserved before research starts) |
 | `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
+| `review_time_allowance_s` | 0 | 180 | seconds kept for the Full review (extractor ∥ skeptic): research wraps up this much earlier again; with `writer_time_allowance_s` it must be below `agent_time_limit_s` |
+| `extractor_concurrency` | 3 | 3 | extractor calls in flight at once (1 to 8) |
 
 Each call's full `max_tokens` is held against the cost limit before it is made,
 so raising these makes each turn harder to fit, not more expensive in itself.
@@ -483,9 +503,29 @@ default or set; the Deploy workflow checks the defaults too.
 | `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
 | `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |
 
-**Rolling back.** Prefer `QUICK_ENGINE=classic` to rolling back the image: it needs
+**Full (Stage 3).** **Full** (shown as Full; the stored mode and the `RUN_LIMITS`
+key stay `focused`) runs the whole team: the researcher (Opus, abstracts and full
+text, up to `researcher_turns` 15), then the extractor and appraiser (Sonnet, one call
+per study, `extractor_concurrency` 3 at once) beside the skeptic (Sonnet, up to
+`skeptic_turns` 8), then the writer. A second optional variable switches it:
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `FULL_ENGINE` | no | `team` (the evidence team) or `classic` (the Phase 2 Focused pipeline) | `team` |
+
+It is checked like `QUICK_ENGINE`. Under `team` a Full run reserves
+`agent_limit_paise` (₹300, owner ruling of 30 Oct 2026) and runs under
+`agent_time_limit_s` (600 s, hard stop at 660 s): research wraps up
+`writer_time_allowance_s + review_time_allowance_s` (150 + 180 s) before the time limit, the extractor and skeptic `writer_time_allowance_s`
+before it. Under `classic` it reserves `limit_paise` (₹40) and uses `time_limit_s`.
+
+**Rolling back.** Prefer `QUICK_ENGINE=classic` / `FULL_ENGINE=classic` to rolling back the image: it needs
 no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an
-`answer_version` column on `run_answers`); an older image refuses a database that
-has it and its readiness stays down, as described for Phase 2 in section 11. Phase 3
+`answer_version` column on `run_answers`) and Stage 3 migration 0011 (two cache-token
+columns on `spend`). From Stage 3 on, an image ignores applied migrations it does not
+know (`ignore_missing`), so rolling back to an image built from Stage 3 or later
+starts normally against the newer schema; images built before Stage 3 still refuse
+it, as described for Phase 2 in section 11. This works only because every migration
+is additive (new tables, nullable or defaulted columns, indexes); keep it so. Phase 3
 answers are stored with `answer_version = 3` and are shown by the Phase 3 answer
 view; Phase 2 answers keep `answer_version = 2` and their own view.

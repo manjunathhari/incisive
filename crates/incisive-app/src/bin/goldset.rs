@@ -1070,8 +1070,10 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         dev_mode: false,
         runs: config.runs,
         // The runner scores Phase 2 answers until T12 (gold-set runner v3),
-        // so Quick runs here use the classic pipeline whatever QUICK_ENGINE says.
+        // so both modes use the classic pipeline whatever QUICK_ENGINE and
+        // FULL_ENGINE say.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
+        full_engine: incisive_app::runs::Engine::Classic,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,

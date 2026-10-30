@@ -69,6 +69,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -412,6 +413,7 @@ fn the_hold_counts_the_whole_conversation() {
         tools: vec![],
         tool_choice: None,
         output_config: None,
+        cache_breakpoints: vec![],
     };
     let one = request_prompt_bytes(&req);
     assert_eq!(one, 5, "a single text request counts as before");

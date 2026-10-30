@@ -33,6 +33,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -941,6 +942,7 @@ fn app_state(pool: PgPool) -> AppState {
         runs: RunsConfig::default(),
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
+        full_engine: incisive_app::runs::Engine::Classic,
         worker: WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

@@ -21,8 +21,17 @@ pub fn lazy_pool(url: &SecretString) -> Result<PgPool, sqlx::Error> {
 }
 
 /// Apply the migrations in the repo-root `migrations/` directory.
+///
+/// Migrations already applied by a **newer** image are ignored
+/// (`ignore_missing`), so an older image still starts against the newer
+/// schema and an image rollback works (Stage 3 review). That is only safe
+/// because every migration is **additive**: new tables, new nullable or
+/// defaulted columns, new indexes. Never rename, drop or tighten anything an
+/// older image reads or writes; such a change needs its own rollout plan.
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("../../migrations").run(pool).await
+    let mut migrator = sqlx::migrate!("../../migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(pool).await
 }
 
 /// Retry `migrate` with exponential backoff (`base`, doubling, capped at `cap`)

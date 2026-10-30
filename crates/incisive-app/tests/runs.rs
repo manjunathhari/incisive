@@ -629,6 +629,7 @@ fn usage(i: u32, o: u32) -> Usage {
     Usage {
         input_tokens: i,
         output_tokens: o,
+        ..Usage::default()
     }
 }
 
@@ -961,6 +962,7 @@ fn app_state(pool: PgPool) -> AppState {
         runs: RunsConfig::default(),
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
+        full_engine: incisive_app::runs::Engine::Classic,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
@@ -2395,6 +2397,7 @@ async fn finish_keeps_headroom_for_calls_in_flight() {
             Usage {
                 input_tokens: 100,
                 output_tokens: 20,
+                ..Usage::default()
             },
         ),
         gate: gate.clone(),
@@ -2828,7 +2831,7 @@ fn mode_hint_text() {
     );
     assert_eq!(
         mode_hint(RunMode::Focused, 4000),
-        "Focused \u{b7} up to \u{20b9}40"
+        "Full \u{b7} up to \u{20b9}40"
     );
     // Not whole rupees: shown with paise.
     assert_eq!(
@@ -2853,7 +2856,8 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
     assert!(body.contains(r#"value="quick""#), "{body}");
     assert!(body.contains(r#"value="focused""#), "{body}");
     assert!(body.contains("Quick \u{b7} up to \u{20b9}12"), "{body}");
-    assert!(body.contains("Focused \u{b7} up to \u{20b9}40"), "{body}");
+    // Stage 3: shown as Full; the stored value is still `focused`.
+    assert!(body.contains("Full \u{b7} up to \u{20b9}40"), "{body}");
     // Focused is the one checked before the browser applies a saved choice.
     let focused = body.find(r#"value="focused""#).unwrap();
     let tag_start = body[..focused].rfind('<').unwrap();
@@ -2923,7 +2927,7 @@ async fn ssr_run_page_shows_mode_badge() {
     let (s, body) = send(router(st), api("GET", &format!("/runs/{focused}"), &email)).await;
     assert_eq!(s, StatusCode::OK);
     assert!(
-        body.contains(r#"<span class="badge mode">Focused</span>"#),
+        body.contains(r#"<span class="badge mode">Full</span>"#),
         "{body}"
     );
     assert!(!body.contains(r#"<span class="badge mode">Quick</span>"#));
@@ -3161,7 +3165,7 @@ fn deploy_workflow_wires_phase3_settings() {
         .expect("deploy step")
         .1;
     assert!(
-        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE"]"#),
+        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE"]"#),
         "QUICK_ENGINE must be an optional env var"
     );
     assert_eq!(
@@ -3355,6 +3359,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 year: Some(2025),
                 doi: Some("10.1001/jamasurg.2025.4071".into()),
                 retracted: false,
+                found_by_skeptic: false,
             },
             ReferenceV3 {
                 n: 2,
@@ -3364,6 +3369,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 year: Some(2025),
                 doi: None,
                 retracted,
+                found_by_skeptic: false,
             },
         ],
         searches: vec![SearchEntry {
@@ -3378,6 +3384,9 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         stopped_early: None,
         cost_paise: 2345,
         elapsed_s: 125,
+        skeptic: None,
+        evidence: vec![],
+        notes: vec![],
     };
     serde_json::to_value(a).unwrap()
 }
@@ -3513,4 +3522,150 @@ async fn ssr_empty_v3_answer_and_phase2_answers_still_render() {
     let html = markup_of(&html);
     assert!(html.contains("How I read your question"), "Phase 2 view");
     assert!(!html.contains("Outcome by outcome"));
+}
+
+/// The deploy check's FULL_ENGINE lines (from the trim to its `esac`).
+fn full_engine_check(check: &str) -> String {
+    let start = check.find("fe=").expect("FULL_ENGINE trim");
+    let end = start + check[start..].find("esac").expect("esac") + "esac".len();
+    check[start..end].to_string()
+}
+
+/// Stage 3 §0: the Full engine switch reaches the deploy like QUICK_ENGINE:
+/// optional, checked against team|classic with only the ends trimmed, and
+/// written to the env-vars file only when set.
+#[test]
+fn deploy_workflow_wires_the_full_engine() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    assert!(check.contains("FULL_ENGINE"), "check misses FULL_ENGINE");
+    assert!(
+        !check.contains("${FULL_ENGINE//[[:space:]]/}"),
+        "inner spaces must not be removed"
+    );
+    for (value, ok) in [
+        ("team", true),
+        ("  classic ", true),
+        ("", true),
+        ("tea m", false),
+        ("Classic", false),
+        ("focused", false),
+    ] {
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}\nexit 0", full_engine_check(check)))
+            .env("FULL_ENGINE", value)
+            .status()
+            .expect("bash");
+        assert_eq!(status.success(), ok, "FULL_ENGINE={value:?}");
+    }
+    assert_eq!(
+        deploy
+            .matches("FULL_ENGINE: ${{ vars.FULL_ENGINE }}")
+            .count(),
+        2,
+        "FULL_ENGINE must reach both the check and the deploy step"
+    );
+}
+
+// ---------- Phase 3 Stage 3: the Full additions to the AnswerV3 page ----------
+
+/// A v3 answer stored before Stage 3 (no `skeptic`, `evidence`, `notes` or
+/// `found_by_skeptic`) still loads and renders.
+#[tokio::test]
+async fn ssr_v3_answers_stored_before_stage3_still_render() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    let o = body.as_object_mut().unwrap();
+    for k in ["skeptic", "evidence", "notes"] {
+        assert!(o.remove(k).is_some(), "{k}");
+    }
+    for r in o["references"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("found_by_skeptic");
+    }
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    assert!(a.skeptic.is_none() && a.evidence.is_empty() && a.notes.is_empty());
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("The trials"));
+    assert!(!m.contains("Challenged by the skeptic"));
+    assert!(!m.contains("Evidence checked"));
+}
+
+/// Full: the skeptic box (verdict, caveats, overlaps, missed trials) and the
+/// trials table's evidence column, escaped, with citations linked.
+#[tokio::test]
+async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![
+            "Two trials share <script>alert(3)</script> one group [41060645].".into(),
+        ],
+        contradicting: vec![SkepticItem {
+            pmid: "41060645".into(),
+            text: "faster with experience".into(),
+            quote: Some("Operative time fell to 38 <b>min</b>.".into()),
+        }],
+        missed_rcts: vec![SkepticItem {
+            pmid: "39979619".into(),
+            text: "a newer trial".into(),
+            quote: None,
+        }],
+        guidelines: vec![],
+        overlaps: vec![SkepticOverlap {
+            // 12345678 has no reference (its record could not be fetched).
+            pmids: vec!["41060645".into(), "39979619".into(), "12345678".into()],
+            note: "same group".into(),
+        }],
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "full text".into(),
+        verified_quotes: 3,
+        numbers_dropped: 1,
+        unverified_outcomes: vec![],
+    }];
+    a.notes = vec![
+        "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
+            .into(),
+    ];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("Challenged by the skeptic"), "{m}");
+    assert!(m.contains("Verdict: the conclusion holds with caveats."));
+    assert!(!m.contains("<script>alert(3)"), "escaped");
+    assert!(m.contains("&lt;script&gt;alert(3)"));
+    assert!(m.contains("Not independent"));
+    assert!(m.contains("Trials the search missed"));
+    // Re-review 3: a named study without a reference is linked to PubMed.
+    assert!(
+        m.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/12345678/""#),
+        "{m}"
+    );
+    // Review 2: the verified quote is shown, escaped.
+    assert!(
+        m.contains("faster with experience \u{2014} \u{201c}Operative time fell to 38 &lt;b&gt;min&lt;/b&gt;.\u{201d}"),
+        "{m}"
+    );
+    assert!(m.contains("#ref-1"), "citations link to references");
+    assert!(m.contains("Evidence checked"));
+    assert!(m.contains("full text \u{b7} 3 verified quotes"));
+    assert!(m.contains("Extraction stopped at the Full limit"));
+    // The box comes before the references.
+    assert!(m.find("Challenged by the skeptic").unwrap() < m.find(">References<").unwrap());
 }
