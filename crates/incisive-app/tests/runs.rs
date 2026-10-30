@@ -3924,3 +3924,118 @@ async fn ssr_v3_answers_stored_before_stage4_still_render() {
     assert!(!m.contains("Funding:"), "old rows never looked for funding");
     assert!(!m.contains("Guidelines and consensus"));
 }
+
+/// Stage 4 items 8-10 and 12: the at-a-glance box at the top, clinical
+/// practice after the bottom line, the intervention arm first from the
+/// structured arms, the notable findings (code's then the writer's), and the
+/// Copy-as-text button with its plain-text fallback, all escaped.
+#[tokio::test]
+async fn ssr_readability_sections_arms_and_copy_text() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.at_a_glance = Some(AtAGlance {
+        verdict: "No patient benefit <script>alert(5)</script>.".into(),
+        key_numbers: vec![KeyNumber {
+            label: "Chronic pain".into(),
+            value_text: "RR 0.53 (0.20 to 1.39)".into(),
+            pmid: "41060645".into(),
+        }],
+        main_caveat: "Two small trials.".into(),
+    });
+    w.clinical_practice = Some(ClinicalPractice {
+        default_choice: "Either mesh <b>is</b> reasonable.".into(),
+        who_may_benefit: "Not shown.".into(),
+        counselling: "Pain is similar.".into(),
+        cost_per_case: "not known".into(),
+    });
+    w.studies[0].comparison = "Self-fixating vs tacked".into();
+    w.outcomes[0].numbers = vec![
+        Number {
+            label: "Pain score".into(),
+            value: 2.4,
+            unit: None,
+            arm: Some("tacked".into()),
+            ci_low: None,
+            ci_high: None,
+            p: None,
+            pmid: "39979619".into(),
+        },
+        Number {
+            label: "Pain score".into(),
+            value: 2.1,
+            unit: None,
+            arm: Some("self-fixating".into()),
+            ci_low: None,
+            ci_high: None,
+            p: None,
+            pmid: "39979619".into(),
+        },
+    ];
+    w.notable_findings = vec![NotableFinding {
+        text: "Withdrawals were lopsided, 2 vs 9 <i>x</i> [39979619].".into(),
+        pmids: vec!["39979619".into()],
+        spans: vec![],
+    }];
+    a.notable_code = vec![NotableFinding {
+        text: "Not independent evidence (the skeptic): same centre.".into(),
+        pmids: vec!["41060645".into(), "39979619".into()],
+        spans: vec![],
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(!m.contains("<script>alert(5)"));
+    assert!(!m.contains("<b>is</b>") && !m.contains("<i>x</i>"));
+    // Order: at a glance, bottom line, clinical practice, outcomes.
+    let at = |x: &str| m.find(x).unwrap_or_else(|| panic!("{x} missing: {m}"));
+    assert!(at("At a glance: ") < at(">Bottom line<"));
+    assert!(at(">Bottom line<") < at("What this means for clinical practice"));
+    assert!(at("What this means for clinical practice") < at("Outcome by outcome"));
+    assert!(m.contains("No patient benefit &lt;script&gt;alert(5)&lt;/script&gt;."));
+    assert!(m.contains("Chronic pain: RR 0.53 (0.20 to 1.39)"));
+    assert!(m.contains("Either mesh &lt;b&gt;is&lt;/b&gt; reasonable."));
+    assert!(m.contains("Cost per case"));
+    // Item 10: the intervention arm (self-fixating) first.
+    assert!(
+        m.contains("Pain score: 2.1 (self-fixating) vs 2.4 (tacked)"),
+        "{m}"
+    );
+    // Item 12: code's items, then the writer's, with their references.
+    let n = at("Other notable findings from this run");
+    assert!(n > at("Outcome by outcome") && n < at(">References<"));
+    assert!(at("Not independent evidence (the skeptic)") < at("Withdrawals were lopsided"));
+    assert!(m.contains("2 vs 9 &lt;i&gt;x&lt;/i&gt;"));
+    // Copy as text: the button, and the fallback textarea, which is empty
+    // in the markup (a textarea's children are not escaped; its value is
+    // set in the click handler).
+    assert!(m.contains("Copy as text"));
+    let area = &m[at(r#"id="answer-plain-text""#)..];
+    let area = &area[..area.find("</textarea>").unwrap()];
+    assert!(area.ends_with('>'), "empty: {area}");
+    // What it copies (the same function the handler uses).
+    let t = a.plain_text();
+    assert!(t.contains("AT A GLANCE") && t.contains("WHAT THIS MEANS FOR CLINICAL PRACTICE"));
+    assert!(t.contains("[1] Biological vs Synthetic Mesh. JAMA Surg, 2025. PMID 41060645."));
+    assert!(!t.contains("[41060645"), "citations as reference numbers");
+}
+
+/// Stage 4: model text reaches the page only as escaped text: the page code
+/// never sets `inner_html`, and the copy fallback's textarea has no
+/// children (a textarea's children are not escaped by Leptos).
+#[test]
+fn the_page_never_writes_model_text_as_html() {
+    let src = include_str!("../src/app.rs");
+    assert!(!src.contains("inner_html="), "inner_html used");
+    assert!(!src.contains("inner_html ="), "inner_html used");
+    let area = &src[src.find("id=COPY_AREA").expect("copy textarea")..];
+    let close = area.find("</textarea>").expect("close");
+    assert!(
+        area[..close].trim_end().ends_with('>'),
+        "the textarea must be empty"
+    );
+}

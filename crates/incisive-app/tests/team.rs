@@ -705,7 +705,8 @@ async fn quick_team_run_end_to_end_through_the_worker() {
         "the writer runs at the model's default effort"
     );
     let sys = wr.system.as_deref().unwrap();
-    assert!(sys.contains("Bengaluru") && sys.contains("Indian cost context"));
+    // Stage 4 item 9: written for any clinician; India context kept.
+    assert!(!sys.contains("Bengaluru") && sys.contains("Indian cost context"));
     let text = request_user_text(wr);
     assert!(text.contains(&format!("<source id=\"pmid-{SEEN_A}\">")));
     assert!(text.contains(&format!("<source id=\"pmid-{SEEN_B}\">")));

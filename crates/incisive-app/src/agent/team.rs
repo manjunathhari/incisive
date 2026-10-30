@@ -93,8 +93,8 @@ use chrono::Utc;
 
 use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
 use super::answer_v3::{
-    ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, ReferenceV3, SkepticItem, SkepticOverlap,
-    SkepticV3, UnverifiedOutcomeV3,
+    ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, NotableFinding, ReferenceV3, SkepticItem,
+    SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
 };
 use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
@@ -404,6 +404,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         integrity.outcomes_unverified = reviewed.extraction.outcomes_unverified();
         answer.integrity = integrity;
         answer.skeptic = reviewed.review.as_ref().map(skeptic_summary);
+        answer.notable_code = notable_code(reviewed.review.as_ref(), &reviewed.extraction);
         answer.notes = reviewed.notes.clone();
     }
 
@@ -828,6 +829,83 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
         .collect()
 }
 
+/// "Other notable findings from this run", the part built by code (Stage 4
+/// item 12; no AI call, no search): non-independent trials, trials the
+/// search missed and what meta-analyses pooled (from the skeptic, its text
+/// unchanged, its unverified numbers still marked), and how many extracted
+/// outcomes and numbers could not be verified. Second-hand appraisal claims
+/// are not structured in the evidence rows, so they are not listed here.
+pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<NotableFinding> {
+    let mut out = Vec::new();
+    let item = |prefix: &str, text: &str, field: &str, pmids: Vec<String>, spans: &[Span]| {
+        let shift = prefix.len();
+        NotableFinding {
+            text: format!("{prefix}{text}"),
+            pmids,
+            spans: spans
+                .iter()
+                .filter(|s| s.field == field)
+                .map(|s| Span {
+                    field: "text".into(),
+                    start: s
+                        .start
+                        .saturating_add(u32::try_from(shift).unwrap_or(u32::MAX)),
+                    len: s.len,
+                })
+                .collect(),
+        }
+    };
+    if let Some(r) = review {
+        for (i, o) in r.overlaps.iter().enumerate() {
+            out.push(item(
+                "Not independent evidence (the skeptic): ",
+                &o.note,
+                &format!("overlaps.{i}.note"),
+                o.pmids.clone(),
+                &r.spans,
+            ));
+        }
+        for (i, m) in r.missed_rcts.iter().enumerate() {
+            out.push(item(
+                "A randomised trial the researcher's search missed (the skeptic): ",
+                &m.why,
+                &format!("missed_rcts.{i}.text"),
+                vec![m.pmid.clone()],
+                &r.spans,
+            ));
+        }
+        for (i, m) in r.ma_notes.iter().enumerate() {
+            out.push(item(
+                "What a meta-analysis pooled (the skeptic): ",
+                &m.note,
+                &format!("ma_notes.{i}.text"),
+                vec![m.pmid.clone()],
+                &r.spans,
+            ));
+        }
+    }
+    let outcomes = x.outcomes_unverified();
+    let numbers = x.numbers_unverified();
+    if outcomes + numbers > 0 {
+        let pmids: Vec<String> = x
+            .rows
+            .iter()
+            .filter(|r| r.numbers_unverified > 0 || !r.unverified_outcomes.is_empty())
+            .map(|r| r.pmid.clone())
+            .collect();
+        out.push(NotableFinding {
+            text: format!(
+                "The extractor could not match {} and {} to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
+                plural(outcomes as usize, "outcome", "outcomes"),
+                plural(numbers as usize, "number", "numbers")
+            ),
+            pmids,
+            spans: Vec::new(),
+        });
+    }
+    out
+}
+
 /// The skeptic's review as the page shows it.
 fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
     SkepticV3 {
@@ -879,5 +957,81 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
             .collect(),
         // The paths are the page's (the review's spans use them).
         spans: r.spans.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::extractor::EvidenceRow;
+    use crate::agent::skeptic::{MaNote, MissedRct, Overlap, Verdict};
+
+    fn row(pmid: &str, unverified: &[&str], numbers: u32) -> EvidenceRow {
+        serde_json::from_value(serde_json::json!({
+            "pmid": pmid, "text": "abstract", "design": "RCT", "n_randomised": null,
+            "n_analysed": null, "setting": "", "centres": "single", "country": "", "population": "",
+            "intervention": "", "comparator": "", "follow_up": "", "blinding": "",
+            "primary_endpoint": "", "powered_for_primary": null, "surgeon_experience": "",
+            "outcomes": [], "appraisal": {"bias": "", "power": "", "learning_curve": "", "applicability": ""},
+            "independence": {"trial_registration": null, "group_or_centre": "", "note": ""},
+            "unverified_outcomes": unverified, "outcomes_verified": 0,
+            "numbers_unverified": numbers, "corrections": 0
+        }))
+        .unwrap()
+    }
+
+    /// Stage 4 item 12: the code-built notable findings come from the
+    /// skeptic's overlaps, missed trials and meta-analysis notes (text
+    /// unchanged, its unverified numbers still marked) and the extractor's
+    /// unverified counts. No AI call; nothing when there is nothing.
+    #[test]
+    fn notable_findings_are_built_by_code_from_the_checks() {
+        let review = SkepticReview {
+            verdict: Verdict::HoldsWithCaveats,
+            must_mention: vec![],
+            contradicting: vec![],
+            missed_rcts: vec![MissedRct {
+                pmid: "333".into(),
+                why: "a 2026 trial".into(),
+            }],
+            guidelines: vec![],
+            overlaps: vec![Overlap {
+                pmids: vec!["111".into(), "222".into()],
+                note: "DIRECT and ROLAIS share one centre (Aabenraa).".into(),
+            }],
+            ma_notes: vec![MaNote {
+                pmid: "444".into(),
+                note: "Its 7-RCT pool counts an observational study.".into(),
+            }],
+            searches: vec![],
+            dropped_unseen: 0,
+            dropped_quotes: 0,
+            numbers_flagged: 1,
+            spans: vec![Span::new("missed_rcts.0.text", 2, 6)],
+        };
+        let x = Extraction {
+            rows: vec![row("111", &["Recurrence"], 3), row("222", &[], 0)],
+            ..Extraction::default()
+        };
+        let items = notable_code(Some(&review), &x);
+        let texts: Vec<&str> = items.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Not independent evidence (the skeptic): DIRECT and ROLAIS share one centre (Aabenraa).",
+                "A randomised trial the researcher's search missed (the skeptic): a 2026 trial",
+                "What a meta-analysis pooled (the skeptic): Its 7-RCT pool counts an observational study.",
+                "The extractor could not match 1 outcome and 3 numbers to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
+            ]
+        );
+        assert_eq!(items[0].pmids, ["111", "222"]);
+        assert_eq!(items[3].pmids, ["111"]);
+        // The skeptic's mark moves with its text.
+        let s = &items[1].spans[0];
+        assert_eq!(
+            &items[1].text[s.start as usize..(s.start + s.len) as usize],
+            "2026"
+        );
+        assert!(notable_code(None, &Extraction::default()).is_empty());
     }
 }

@@ -25,8 +25,8 @@ use crate::agent::answer::{
     unavailable_text,
 };
 use crate::agent::answer_v3::{
-    AnswerV3, EvidenceV3, ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer, marked_runs,
-    split_citations, whole_marked,
+    AnswerV3, EvidenceV3, NotableFinding, ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer,
+    arm_line_text, arm_lines, marked_runs, split_citations, whole_marked,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
@@ -99,6 +99,10 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .answer .retracted { color:var(--red); font-weight:600; }
 .answer details summary { cursor:pointer; font-weight:600; margin:18px 0 6px; }
 .answer .etype { display:inline-block; margin-top:2px; padding:0 6px; border-radius:8px; font-size:.72rem; background:#e6edf5; color:var(--accent); }
+.answer .glance { margin-top:12px; } .answer .glance ul { margin:4px 0 6px; }
+.answer ul.arms { list-style:none; padding-left:0; margin:6px 0 0; font-size:.8rem; color:var(--muted); }
+.answer textarea.copy-area { position:absolute; left:-9999px; width:1px; height:1px; opacity:0; }
+.answer textarea.copy-area.shown { position:static; width:100%; height:12rem; opacity:1; margin-top:8px; font-size:.8rem; }
 .answer sup.flag { font-size:.68rem; color:var(--amber); margin-left:2px; white-space:nowrap; cursor:help; }
 .answer .flag-label { font-size:.75rem; color:var(--amber); font-weight:600; }
 .answer ul.unverified { padding-left:16px; margin:4px 0 0; font-size:.8rem; }
@@ -1077,13 +1081,84 @@ fn written_v3_view(
         let n = refs.get(&g.pmid).copied();
         guidelines.push(view! { <li>{cited(&text, refs)} {n.map(ref_link)}</li> }.into_any());
     }
+    // At a glance (Stage 4 item 8): about five lines, at the top.
+    let glance = w.at_a_glance.as_ref().map(|g| {
+        view! {
+            <section class="box glance" aria-label="At a glance">
+                <p><strong>"At a glance: "</strong> {mk.t(&g.verdict, "at_a_glance.verdict")}</p>
+                {(!g.key_numbers.is_empty()).then(|| view! {
+                    <ul>
+                        {g.key_numbers
+                            .iter()
+                            .enumerate()
+                            .map(|(i, k)| view! {
+                                <li>
+                                    {mk.t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))} ": "
+                                    {mk.t(&k.value_text, &format!("at_a_glance.key_numbers.{i}.value_text"))}
+                                    {refs.get(&k.pmid).copied().map(ref_link)}
+                                </li>
+                            })
+                            .collect_view()}
+                    </ul>
+                })}
+                <p><strong>"Main caveat: "</strong> {mk.t(&g.main_caveat, "at_a_glance.main_caveat")}</p>
+            </section>
+        }
+    });
+    // What this means for clinical practice (Stage 4 item 9).
+    let practice = w.clinical_practice.as_ref().map(|p| {
+        view! {
+            <h3>"What this means for clinical practice"</h3>
+            <dl>
+                <dt>"Default choice"</dt><dd>{mk.t(&p.default_choice, "clinical_practice.default_choice")}</dd>
+                <dt>"Who may benefit"</dt><dd>{mk.t(&p.who_may_benefit, "clinical_practice.who_may_benefit")}</dd>
+                <dt>"Counselling"</dt><dd>{mk.t(&p.counselling, "clinical_practice.counselling")}</dd>
+                <dt>"Cost per case"</dt><dd>{mk.t(&p.cost_per_case, "clinical_practice.cost_per_case")}</dd>
+            </dl>
+        }
+    });
+    // Each outcome's structured numbers, by label and study, the
+    // intervention arm first (Stage 4 item 10).
+    let comparison = |p: &str| {
+        w.studies
+            .iter()
+            .find(|s| s.pmid == p)
+            .map(|s| s.comparison.as_str())
+    };
+    let arms: Vec<Vec<AnyView>> = w
+        .outcomes
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            arm_lines(o, comparison)
+                .into_iter()
+                .map(|l| {
+                    let flagged = l
+                        .numbers
+                        .iter()
+                        .any(|j| whole_marked(&format!("outcomes.{i}.numbers.{j}"), untraced));
+                    view! {
+                        <li>
+                            {arm_line_text(o, &l)}
+                            {flagged.then(|| mark_view(Mark::NotTraced))}
+                            {refs.get(&l.pmid).copied().map(ref_link)}
+                        </li>
+                    }
+                    .into_any()
+                })
+                .collect()
+        })
+        .collect();
+    let mut arms = arms.into_iter();
     view! {
+        {glance}
         <h3>"Bottom line"</h3>
         <p>{mk.t(&w.bottom_line.text, "bottom_line.text")}</p>
         <p>
             <span class=c.class()>{format!("Certainty: {}", c.as_str())}</span>
             " " <span class="conf">{mk.t(&w.bottom_line.certainty_reason, "bottom_line.certainty_reason")}</span>
         </p>
+        {practice}
 
         <h3>"Outcome by outcome"</h3>
         {if w.outcomes.is_empty() {
@@ -1112,7 +1187,10 @@ fn written_v3_view(
                                             <br /><span class="etype">{o.evidence_type.label()}</span>
                                         </td>
                                         <td>{mk.t(&o.rct_evidence, &format!("outcomes.{i}.rct_evidence"))}</td>
-                                        <td>{mk.t(&o.effect_text, &format!("outcomes.{i}.effect_text"))}</td>
+                                        <td>
+                                            {mk.t(&o.effect_text, &format!("outcomes.{i}.effect_text"))}
+                                            {arms.next().filter(|a| !a.is_empty()).map(|a| view! { <ul class="arms">{a}</ul> })}
+                                        </td>
                                         <td><span class=o.certainty.class()>{o.certainty.as_str()}</span></td>
                                         <td>{mk.t(&o.why, &format!("outcomes.{i}.why"))}</td>
                                     </tr>
@@ -1471,6 +1549,16 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         ));
     }
     let untraced = a.untraced.clone();
+    // Copy as text (Stage 4 item 10): the whole answer as plain text.
+    let text = a.plain_text();
+    let copy = RwSignal::new(CopyState::Ready);
+    // Other notable findings (Stage 4 item 12): code's, then the writer's.
+    let notable_writer: Vec<NotableFinding> = a
+        .answer
+        .as_ref()
+        .map(|w| w.notable_findings.clone())
+        .unwrap_or_default();
+    let notable = notable_view(&a.notable_code, &notable_writer, &refs, &untraced);
     let n_searches = a.searches.len();
     // Full: per study, what the extractor read and checked.
     let evidence: std::collections::HashMap<String, EvidenceV3> = a
@@ -1505,6 +1593,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             }}
 
             {skeptic}
+            {notable}
             {(!run_notes.is_empty())
                 .then(|| view! {
                     <ul class="hint">{run_notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
@@ -1535,8 +1624,165 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 
             <h3>"Cost and time"</h3>
             <p>{cost}</p>
+
+            <button
+                class="secondary small"
+                on:click=move |_| copy_answer(&text, copy)
+            >
+                {move || match copy.get() {
+                    CopyState::Ready => "Copy as text",
+                    CopyState::Copied => "Copied",
+                    CopyState::Manual => "Select the text below and copy it",
+                }}
+            </button>
+            // The fallback (shown only when the clipboard refused). It is
+            // empty in the markup: Leptos does not escape a textarea's
+            // children, so the text is set as its value in the click
+            // handler, never written as HTML.
+            <textarea
+                id=COPY_AREA
+                class=move || if copy.get() == CopyState::Manual { "copy-area shown" } else { "copy-area" }
+                readonly=true
+                aria-hidden=move || (copy.get() != CopyState::Manual).to_string()
+                tabindex="-1"
+            ></textarea>
         </section>
     }
+}
+
+/// The id of the hidden textarea holding the plain-text answer.
+const COPY_AREA: &str = "answer-plain-text";
+
+/// What the Copy button has done (set only in the browser).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+enum CopyState {
+    Ready,
+    Copied,
+    /// The clipboard refused: the textarea is shown, its text selected.
+    Manual,
+}
+
+/// Copy `text` (Stage 4 item 10). In the click handler: the text is set as
+/// the hidden textarea's value (a property, never HTML), then
+/// `navigator.clipboard.writeText` is called; if the Clipboard API is missing or refuses, the selected
+/// textarea is copied with `execCommand("copy")`, and if that fails too the
+/// textarea is shown with its text selected so it can be copied by hand
+/// (phones). Browser only.
+fn copy_answer(text: &str, state: RwSignal<CopyState>) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::prelude::Closure;
+        use web_sys::js_sys::Reflect;
+        let area = || {
+            web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id(COPY_AREA))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlTextAreaElement>().ok())
+        };
+        if let Some(a) = area() {
+            a.set_value(text);
+        }
+        let select = move || -> bool {
+            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                return false;
+            };
+            let Some(area) = area() else {
+                return false;
+            };
+            let _ = area.focus();
+            area.select();
+            let _ = area.set_selection_range(0, area.value().len() as u32);
+            doc.dyn_into::<web_sys::HtmlDocument>()
+                .ok()
+                .and_then(|d| d.exec_command("copy").ok())
+                .unwrap_or(false)
+        };
+        let Some(w) = web_sys::window() else {
+            return;
+        };
+        let nav = w.navigator();
+        let has_clipboard = Reflect::get(&nav, &"clipboard".into())
+            .map(|c| !c.is_undefined() && !c.is_null())
+            .unwrap_or(false);
+        if !has_clipboard {
+            state.set(if select() {
+                CopyState::Copied
+            } else {
+                CopyState::Manual
+            });
+            return;
+        }
+        let ok = Closure::once(move |_: wasm_bindgen::JsValue| state.set(CopyState::Copied));
+        let failed = Closure::once(move |_: wasm_bindgen::JsValue| {
+            state.set(if select() {
+                CopyState::Copied
+            } else {
+                CopyState::Manual
+            });
+        });
+        let _ = nav.clipboard().write_text(text).then2(&ok, &failed);
+        ok.forget();
+        failed.forget();
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (text, state);
+    }
+}
+
+/// "Other notable findings from this run" (Stage 4 item 12): the items code
+/// built from the team's checks, then the writer's, each with its studies.
+fn notable_view(
+    code: &[NotableFinding],
+    writer: &[NotableFinding],
+    refs: &std::collections::HashMap<String, u16>,
+    untraced: &[Span],
+) -> Option<AnyView> {
+    if code.is_empty() && writer.is_empty() {
+        return None;
+    }
+    let studies = |pmids: &[String]| -> AnyView {
+        let mut n: Vec<u16> = pmids
+            .iter()
+            .filter_map(|p| refs.get(p.trim()).copied())
+            .collect();
+        n.sort_unstable();
+        n.dedup();
+        n.into_iter().map(ref_link).collect_view().into_any()
+    };
+    let wk = Marks {
+        refs,
+        spans: untraced,
+        mark: Mark::NotTraced,
+    };
+    Some(
+        view! {
+            <h3>"Other notable findings from this run"</h3>
+            <ul class="notable">
+                {code
+                    .iter()
+                    .map(|n| {
+                        let mk = Marks {
+                            refs,
+                            spans: &n.spans,
+                            mark: Mark::NotVerified,
+                        };
+                        view! { <li>{mk.t(&n.text, "text")} {studies(&n.pmids)}</li> }
+                    })
+                    .collect_view()}
+                {writer
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| view! {
+                        <li>{wk.t(&n.text, &format!("notable_findings.{i}.text"))} {studies(&n.pmids)}</li>
+                    })
+                    .collect_view()}
+            </ul>
+        }
+        .into_any(),
+    )
 }
 
 #[component]
