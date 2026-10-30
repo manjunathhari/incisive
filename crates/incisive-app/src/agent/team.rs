@@ -94,7 +94,7 @@ use chrono::Utc;
 use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
 use super::answer_v3::{
     ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, NotableFinding, ReferenceV3, SkepticItem,
-    SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
+    SkepticLead, SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
 };
 use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
@@ -806,6 +806,7 @@ pub fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV
                     .collect(),
                 funding: r.funding.clone(),
                 funding_checked: true,
+                trial_registration_unverified: r.trial_registration_unverified.clone(),
                 spans: r
                     .spans
                     .iter()
@@ -824,6 +825,7 @@ pub fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV
                 funding: None,
                 funding_checked: false,
                 spans: Vec::new(),
+                trial_registration_unverified: None,
             },
         })
         .collect()
@@ -957,6 +959,16 @@ pub fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
             .collect(),
         // The paths are the page's (the review's spans use them).
         spans: r.spans.clone(),
+        leads: r
+            .leads
+            .iter()
+            .map(|l| SkepticLead {
+                pmid: l.pmid.clone(),
+                kind: l.kind.clone(),
+            })
+            .collect(),
+        dropped_unseen: r.dropped_unseen,
+        dropped_quotes: r.dropped_quotes,
     }
 }
 
@@ -1004,6 +1016,7 @@ mod tests {
                 note: "Its 7-RCT pool counts an observational study.".into(),
             }],
             searches: vec![],
+            leads: vec![],
             dropped_unseen: 0,
             dropped_quotes: 0,
             numbers_flagged: 1,

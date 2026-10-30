@@ -145,7 +145,16 @@ pub struct GuidelineV3 {
     pub body: String,
     pub year: Option<i32>,
     pub statement: String,
+    /// Stage 4 review 2: the writer cited a study outside the selection and
+    /// the citation check removed it. Not in the writer's schema. With no
+    /// PMID either way, the page says "no source among the studies; not
+    /// verified".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pmid_removed: bool,
 }
+
+/// The label of a guideline with no source among the studies.
+pub const NO_GUIDELINE_SOURCE: &str = "no source among the studies; not verified";
 
 /// One key number of the at-a-glance box.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +354,10 @@ pub struct EvidenceV3 {
     /// Stage 4 (additive): numbers in `funding` the source does not have.
     #[serde(default)]
     pub spans: Vec<Span>,
+    /// Stage 4 review 6: a trial registration the extractor gave that the
+    /// source does not contain, shown labelled "not in the source".
+    #[serde(default)]
+    pub trial_registration_unverified: Option<String>,
 }
 
 /// An extracted outcome whose quote was not found in the paper (Stage 4
@@ -375,6 +388,48 @@ pub struct SkepticV3 {
     /// `contradicting.1.text`, `overlaps.0.note`).
     #[serde(default)]
     pub spans: Vec<Span>,
+    /// Stage 4 review 6: studies offered as contradicting evidence or a
+    /// guideline whose quote was not found: PMID and kind only.
+    #[serde(default)]
+    pub leads: Vec<SkepticLead>,
+    /// Stage 4 review 5: entries not shown (a study its searches did not
+    /// return; before the review, also an unfound quote).
+    #[serde(default)]
+    pub dropped_unseen: u32,
+    #[serde(default)]
+    pub dropped_quotes: u32,
+}
+
+/// An unverified lead of the skeptic (Stage 4 review 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkepticLead {
+    pub pmid: String,
+    /// "contradicting study" or "guideline".
+    pub kind: String,
+}
+
+impl SkepticLead {
+    /// What the page and the copy say: no claim, no quote, no numbers.
+    pub fn text(&self) -> String {
+        format!(
+            "Possible {}: quote not found in the abstract, check the paper",
+            self.kind
+        )
+    }
+}
+
+impl SkepticV3 {
+    /// "The skeptic gave N entries whose quote or study could not be found;
+    /// not shown." (Stage 4 review 5), when there were any.
+    pub fn dropped_note(&self) -> Option<String> {
+        let n = self.dropped_unseen + self.dropped_quotes;
+        (n > 0).then(|| {
+            format!(
+                "The skeptic gave {n} {} whose quote or study could not be found; not shown.",
+                if n == 1 { "entry" } else { "entries" }
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -769,6 +824,59 @@ fn plain(
 }
 
 impl AnswerV3 {
+    /// The search trail's notes (what the checks found), shared by the page
+    /// and Copy as text (Stage 4 review 7).
+    pub fn trail_notes(&self) -> Vec<String> {
+        let i = self.integrity;
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(r) = &self.stopped_early {
+            notes.push(format!(
+                "Research stopped early ({r}); the answer uses what was found by then."
+            ));
+        }
+        if i.dropped_unseen > 0 {
+            notes.push(format!(
+                "{} selected by the researcher but not returned by this run's searches: left out.",
+                i.dropped_unseen
+            ));
+        }
+        if i.dropped_unfetched > 0 {
+            notes.push(format!(
+                "{} selected but could not be fetched: left out.",
+                i.dropped_unfetched
+            ));
+        }
+        if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
+            notes.push(format!(
+            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
+            i.removed_citations, i.dropped_numbers, i.dropped_studies
+        ));
+        }
+        if i.numbers_checked > 0 {
+            notes.push(if i.numbers_untraced == 0 {
+            format!(
+                "Number check: all {} numbers in the answer traced to a verified quote, structured number or abstract.",
+                i.numbers_checked
+            )
+        } else {
+            format!(
+                "Number check: {} of {} numbers in the answer not traced to a verified quote, structured number or abstract; each is marked \u{201c}not traced\u{201d}. Nothing was removed.",
+                i.numbers_untraced, i.numbers_checked
+            )
+        });
+        }
+        if i.outcomes_unverified + i.numbers_unverified > 0 {
+            notes.push(format!(
+            "Extraction: {} outcomes and {} numbers could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}.",
+            i.outcomes_unverified, i.numbers_unverified
+        ));
+        }
+        if let Some(n) = self.skeptic.as_ref().and_then(SkepticV3::dropped_note) {
+            notes.push(n);
+        }
+        notes
+    }
+
     /// The answer as plain text, for "Copy as text" (Stage 4 item 10): the
     /// page's sections in its order, citations as reference numbers, marks
     /// as words, and the numbered references. Nothing is left out.
@@ -904,6 +1012,14 @@ impl AnswerV3 {
                             );
                             o.push_str(&format!("  Funding: {f}\n"));
                         }
+                        if e.numbers_unverified > 0 {
+                            let n = e.numbers_unverified;
+                            let what = if n == 1 { "number" } else { "numbers" };
+                            o.push_str(&format!("  {n} {what} not verified\n"));
+                        }
+                        if let Some(r) = &e.trial_registration_unverified {
+                            o.push_str(&format!("  Registration {r} (not in the source)\n"));
+                        }
                         for x in &e.unverified_details {
                             o.push_str(&format!(
                                 "  Not verified against the paper's wording: {}: {}\n",
@@ -922,11 +1038,13 @@ impl AnswerV3 {
                         t(&c.text, &format!("conflicts.{i}.text"))
                     ));
                 }
-                let skeptic_g: Vec<&SkepticItem> = self
+                let no_spans: Vec<Span> = Vec::new();
+                let sk_spans = self.skeptic.as_ref().map_or(&no_spans, |k| &k.spans);
+                let skeptic_g: Vec<(usize, &SkepticItem)> = self
                     .skeptic
                     .iter()
-                    .flat_map(|k| &k.guidelines)
-                    .filter(|g| {
+                    .flat_map(|k| k.guidelines.iter().enumerate())
+                    .filter(|(_, g)| {
                         !w.guidelines
                             .iter()
                             .any(|x| x.pmid.as_deref() == Some(g.pmid.as_str()))
@@ -942,13 +1060,19 @@ impl AnswerV3 {
                             .map(|n| format!(" [{n}]"))
                             .unwrap_or_default();
                         let year = g.year.map(|y| format!(" ({y})")).unwrap_or_default();
+                        // Stage 4 review 2: no source, said in words.
+                        let flag = if g.pmid.is_none() {
+                            format!(" ({NO_GUIDELINE_SOURCE})")
+                        } else {
+                            String::new()
+                        };
                         o.push_str(&format!(
-                            "- {}{year}: {}{cite}\n",
+                            "- {}{year}: {}{cite}{flag}\n",
                             t(&g.body, &format!("guidelines.{i}.body")),
                             t(&g.statement, &format!("guidelines.{i}.statement"))
                         ));
                     }
-                    for g in skeptic_g {
+                    for (i, g) in skeptic_g {
                         let cite = refs
                             .get(&g.pmid)
                             .map(|n| format!(" [{n}]"))
@@ -958,7 +1082,15 @@ impl AnswerV3 {
                             .as_deref()
                             .map(|q| format!(" \u{2014} \u{201c}{q}\u{201d}"))
                             .unwrap_or_default();
-                        o.push_str(&format!("- {}{q}{cite}\n", g.text));
+                        // Review 3: the skeptic's marks carried over.
+                        let body = plain(
+                            &g.text,
+                            &refs,
+                            &format!("guidelines.{i}.text"),
+                            sk_spans,
+                            "not verified",
+                        );
+                        o.push_str(&format!("- {body}{q}{cite}\n"));
                     }
                 }
                 h(&mut o, "Applicability");
@@ -1037,9 +1169,24 @@ impl AnswerV3 {
                 }
             }
         }
-        if !self.notes.is_empty() {
+        if let Some(k) = &self.skeptic {
+            // Unverified leads (review 6): PMID and kind only.
+            for l in &k.leads {
+                o.push_str(&format!(
+                    "- {}{}\n",
+                    l.text(),
+                    cites(std::slice::from_ref(&l.pmid), &refs)
+                ));
+                if !refs.contains_key(&l.pmid) {
+                    o.push_str(&format!("  PubMed {}\n", l.pmid));
+                }
+            }
+        }
+        // The run's notes and the search trail's (review 7).
+        let trail = self.trail_notes();
+        if !self.notes.is_empty() || !trail.is_empty() {
             o.push('\n');
-            for n in &self.notes {
+            for n in self.notes.iter().chain(&trail) {
                 o.push_str(&format!("Note: {n}\n"));
             }
         }
@@ -1410,6 +1557,9 @@ mod tests {
                 overlaps: vec![],
                 ma_notes: vec![],
                 spans: vec![Span::new("must_mention.0", 11, 13)],
+                leads: vec![],
+                dropped_unseen: 0,
+                dropped_quotes: 0,
             }),
             evidence: vec![],
             notes: vec![],
@@ -1463,6 +1613,63 @@ mod tests {
         }
         assert!(!t.contains("[41060645"), "{t}");
         assert!(!t.contains("99999999"));
+    }
+
+    /// Stage 4 review 2, 3, 5, 6 and 7 in Copy as text: a guideline with no
+    /// source is flagged in words; a skeptic guideline keeps its mark; the
+    /// trail notes, per-study unverified counts, the unverified
+    /// registration and the leads (no claim, no quote) are all there.
+    #[test]
+    fn plain_text_carries_the_review_flags_and_notes() {
+        let mut a = sample();
+        let w = a.answer.as_mut().unwrap();
+        w.guidelines = vec![GuidelineV3 {
+            pmid: None,
+            body: "A society".into(),
+            year: Some(2020),
+            statement: "Use either.".into(),
+            pmid_removed: true,
+        }];
+        let k = a.skeptic.as_mut().unwrap();
+        k.guidelines = vec![SkepticItem {
+            pmid: A.into(),
+            text: "ACG 2020 guideline".into(),
+            quote: Some("We recommend POEM or LHM.".into()),
+        }];
+        k.spans.push(Span::new("guidelines.0.text", 4, 8));
+        k.leads = vec![SkepticLead {
+            pmid: "39999999".into(),
+            kind: "contradicting study".into(),
+        }];
+        k.dropped_unseen = 2;
+        a.evidence = vec![EvidenceV3 {
+            pmid: A.into(),
+            text: "abstract only".into(),
+            verified_quotes: 3,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 3,
+            unverified_details: vec![],
+            funding: None,
+            funding_checked: true,
+            spans: vec![],
+            trial_registration_unverified: Some("NCT9999".into()),
+        }];
+        a.integrity.numbers_checked = 40;
+        a.integrity.numbers_untraced = 1;
+        let t = a.plain_text();
+        for want in [
+            "- A society (2020): Use either. (no source among the studies; not verified)",
+            "- ACG 2020 (not verified) guideline \u{2014} \u{201c}We recommend POEM or LHM.\u{201d} [1]",
+            "  3 numbers not verified",
+            "  Registration NCT9999 (not in the source)",
+            "- Possible contradicting study: quote not found in the abstract, check the paper",
+            "  PubMed 39999999",
+            "Note: Number check: 1 of 40 numbers in the answer not traced",
+            "Note: The skeptic gave 2 entries whose quote or study could not be found; not shown.",
+        ] {
+            assert!(t.contains(want), "{want:?} missing in:\n{t}");
+        }
     }
 
     #[test]

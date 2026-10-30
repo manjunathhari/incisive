@@ -20,9 +20,11 @@
 //!   seen-PMID rule, [`seen_pmids`]); others are dropped and counted;
 //! * every `quote` / `statement_quote` must be found (the Phase 2 verbatim
 //!   rule) in the title or abstract that the skeptic's tools returned **for
-//!   that PMID**; an entry whose quote is not found is dropped and counted
-//!   (its claim was written beside a quote the paper does not contain, so it
-//!   may carry numbers nothing supports);
+//!   that PMID**; an entry whose quote is not found is kept as a flagged
+//!   lead (Stage 4 review 6): its PMID and kind only, because its claim was
+//!   written beside a quote the paper does not contain and may carry
+//!   numbers nothing supports. An entry naming an unseen PMID is dropped
+//!   and counted (`dropped_unseen`), and the page says how many;
 //! * overlap PMIDs must be in the researcher's selection or seen; others
 //!   are removed, and an overlap left with fewer than two is dropped;
 //! * missed RCTs: seen, not already selected, de-duplicated, at most
@@ -173,6 +175,30 @@ pub struct Overlap {
     pub note: String,
 }
 
+/// "contradicting study" or "guideline": what a [`Lead`] was offered as.
+pub const LEAD_CONTRADICTING: &str = "contradicting study";
+pub const LEAD_GUIDELINE: &str = "guideline";
+
+/// A study the skeptic offered as contradicting evidence or a guideline,
+/// returned by its searches, whose quote was not found in what they
+/// returned (Stage 4 review 6). Only the PMID and the kind are kept: the
+/// claim and the quote may hold numbers nothing supports, so they never
+/// reach the writer or the page. The page says "check the paper".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lead {
+    pub pmid: String,
+    pub kind: String,
+}
+
+fn push_lead(leads: &mut Vec<Lead>, pmid: &str, kind: &str) {
+    if !leads.iter().any(|l| l.pmid == pmid && l.kind == kind) {
+        leads.push(Lead {
+            pmid: pmid.to_string(),
+            kind: kind.to_string(),
+        });
+    }
+}
+
 /// What a meta-analysis actually pooled (Stage 4 item 4): a note only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaNote {
@@ -196,7 +222,12 @@ pub struct SkepticReview {
     pub searches: Vec<SearchEntry>,
     /// Entries naming a PMID no skeptic tool returned (or not a PMID).
     pub dropped_unseen: u32,
-    /// Entries whose quote was not found in that PMID's returned text.
+    /// Stage 4 review 6: entries for a seen study whose quote was not found
+    /// in its returned text, kept as flagged leads (PMID and kind only).
+    #[serde(default)]
+    pub leads: Vec<Lead>,
+    /// Before the Stage 4 review: entries dropped because their quote was
+    /// not found. Such entries are now `leads`, so this stays 0.
     pub dropped_quotes: u32,
     /// Numbers in the skeptic's free text (caveats, reasons, notes, claims)
     /// that no text its tools returned (for a claim: its quote) has; marked
@@ -280,7 +311,8 @@ pub fn validate(
     let seen = seen_pmids(results);
     let texts = texts_by_pmid(results);
     let mut dropped_unseen = 0u32;
-    let mut dropped_quotes = 0u32;
+    let dropped_quotes = 0u32;
+    let mut leads: Vec<Lead> = Vec::new();
     // Numbers the skeptic may write in free text: those in the titles and
     // abstracts its tools returned (never their counts, years or other
     // record fields: re-review 2), plus PMIDs as identifiers, only real
@@ -313,7 +345,9 @@ pub fn validate(
             continue;
         };
         let Some(quote) = verify_quote(texts.get(&pmid), &c.quote) else {
-            dropped_quotes += 1;
+            // Stage 4 review 6: a seen study whose quote is not found is a
+            // flagged lead (its PMID only: no claim, no quote, no numbers).
+            push_lead(&mut leads, &pmid, LEAD_CONTRADICTING);
             continue;
         };
         // The claim's numbers must be its quote's: one its quote lacks is
@@ -349,7 +383,7 @@ pub fn validate(
                     pmid,
                 })
             }
-            None => dropped_quotes += 1,
+            None => push_lead(&mut leads, &pmid, LEAD_GUIDELINE),
         }
     }
     let mut missed_rcts: Vec<MissedRct> = Vec::new();
@@ -423,6 +457,7 @@ pub fn validate(
         overlaps,
         ma_notes,
         searches,
+        leads,
         dropped_unseen,
         dropped_quotes,
         numbers_flagged: u32::try_from(spans.len()).unwrap_or(u32::MAX),
@@ -695,13 +730,24 @@ pub async fn review(
         ),
     )
     .await;
-    if r.dropped_unseen + r.dropped_quotes > 0 {
+    if r.dropped_unseen > 0 {
         add_line(
             ctx,
             StepKind::Note,
             &format!(
-                "Skeptic: dropped {} entries naming studies its searches did not return and {} whose quote was not found",
-                r.dropped_unseen, r.dropped_quotes
+                "Skeptic: {} entries naming studies its searches did not return; not shown",
+                r.dropped_unseen
+            ),
+        )
+        .await;
+    }
+    if !r.leads.is_empty() {
+        add_line(
+            ctx,
+            StepKind::Note,
+            &format!(
+                "Skeptic: {} studies whose quote was not found kept as unverified leads (PMID only)",
+                r.leads.len()
             ),
         )
         .await;
@@ -798,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn unseen_pmids_and_unverified_quotes_are_dropped_and_counted() {
+    fn unseen_pmids_are_dropped_and_unfound_quotes_kept_as_leads() {
         let selected = vec!["111".to_string(), "555".to_string()];
         let mut r = results();
         // 111 is in the selection but not in the skeptic's own results.
@@ -806,7 +852,17 @@ mod tests {
         let v = validate(report(), &r, &selected, vec![]);
         assert_eq!(v.contradicting.len(), 1);
         assert_eq!(v.contradicting[0].pmid, "222");
-        assert_eq!(v.dropped_quotes, 1);
+        // Stage 4 review 6: the seen study with an unfound quote is a lead,
+        // its PMID only; nothing is counted as a quote drop.
+        assert_eq!(
+            v.leads,
+            vec![Lead {
+                pmid: "222".into(),
+                kind: LEAD_CONTRADICTING.into()
+            }]
+        );
+        assert!(!serde_json::to_string(&v.leads).unwrap().contains("halves"));
+        assert_eq!(v.dropped_quotes, 0);
         // 444 (contradicting) and 999 (missed).
         assert_eq!(v.dropped_unseen, 2);
         assert_eq!(v.guidelines.len(), 1);

@@ -615,7 +615,11 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
     assert_eq!(r.verdict, Verdict::HoldsWithCaveats);
     assert_eq!(r.contradicting.len(), 1);
     assert_eq!(r.contradicting[0].quote, c_quote);
-    assert_eq!((r.dropped_unseen, r.dropped_quotes), (1, 1));
+    // Stage 4 review 6: the seen study's unfound quote is a lead (PMID
+    // only); the unseen PMID is dropped and counted.
+    assert_eq!((r.dropped_unseen, r.dropped_quotes), (1, 0));
+    assert_eq!(r.leads.len(), 1);
+    assert_eq!(r.leads[0].pmid, SEEN_C);
     assert_eq!(r.missed_rcts.len(), 1);
     assert_eq!(r.missed_rcts[0].pmid, SEEN_C);
     assert_eq!(r.overlaps[0].pmids, [SEEN_A, SEEN_B]);
@@ -659,7 +663,8 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
     for want in [
         "Skeptic: 1 search so far (turn 1 of 8)",
         "Skeptic: verdict holds with caveats, 2 caveats",
-        "Skeptic: dropped 1 entries naming studies its searches did not return and 1 whose quote was not found",
+        "Skeptic: 1 entries naming studies its searches did not return; not shown",
+        "Skeptic: 1 studies whose quote was not found kept as unverified leads (PMID only)",
     ] {
         assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
     }
@@ -1368,9 +1373,13 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
         DepthSettings::FOCUSED,
     )
     .await;
-    let writer =
-        incisive_app::agent::writer_v3::reserve_full(&ctx.llm, &ctx.budget, QUESTION, 16000)
-            .unwrap();
+    let writer = incisive_app::agent::writer_v3::reserve_full(
+        &ctx.llm,
+        &ctx.budget,
+        QUESTION,
+        DepthSettings::FOCUSED.writer_max_tokens,
+    )
+    .unwrap();
     let review = incisive_app::agent::team::review_reserve(&ctx).unwrap();
     eprintln!(
         "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; review reserve {review}"

@@ -124,7 +124,7 @@ pub struct DepthSettings {
     pub skeptic_max_tokens: u32,
     /// `max_tokens` per extractor + appraiser call.
     pub extractor_max_tokens: u32,
-    /// `max_tokens` of the writer's call (16,000; its finish reserve is
+    /// `max_tokens` of the writer's call (20,000; its finish reserve is
     /// sized on it).
     pub writer_max_tokens: u32,
     /// Seconds of the Phase 3 time limit kept for the writer: research
@@ -151,7 +151,9 @@ pub const MAX_ROLE_TOKENS: u32 = 64_000;
 /// prices a 4,000-token turn holds about ₹9 of output before input.
 const AGENT_MAX_TOKENS: u32 = 4_000;
 /// Review fix: 8,000 could truncate a full answer (thinking counts too).
-const WRITER_MAX_TOKENS: u32 = 16_000;
+/// Stage 4 review: 20,000, for the at-a-glance, clinical-practice and
+/// notable-findings fields (about 1–1.5k more output tokens).
+const WRITER_MAX_TOKENS: u32 = 20_000;
 /// Seconds kept for the writer at the end of a Phase 3 run.
 const WRITER_TIME_ALLOWANCE_S: u32 = 150;
 /// Seconds kept for the Full review phase (extractor ∥ skeptic): 180

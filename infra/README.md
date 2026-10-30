@@ -345,7 +345,7 @@ The global, daily and monthly caps apply as before.
 | `researcher_max_tokens` | 4000 | 4000 | output tokens per researcher turn (1 to 64000) |
 | `skeptic_max_tokens` | 4000 | 4000 | output tokens per skeptic turn |
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
-| `writer_max_tokens` | 16000 | 16000 | output tokens of the writer's call (its cost is reserved before research starts) |
+| `writer_max_tokens` | 20000 | 20000 | output tokens of the writer's call (its cost is reserved before research starts) |
 | `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
 | `review_time_allowance_s` | 0 | 180 | seconds kept for the Full review (extractor ∥ skeptic): research wraps up this much earlier again; with `writer_time_allowance_s` it must be below `agent_time_limit_s` |
 | `extractor_concurrency` | 3 | 3 | extractor calls in flight at once (1 to 8) |

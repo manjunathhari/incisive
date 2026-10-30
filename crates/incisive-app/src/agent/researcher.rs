@@ -781,4 +781,20 @@ mod tests {
         }
         assert!(FINAL_SYSTEM.contains("its trial's primary report"));
     }
+
+    /// Stage 4 review 9: the guideline example the prompts and tool
+    /// descriptions give is a query the PubMed tool accepts.
+    #[test]
+    fn the_guideline_query_example_passes_validate_query() {
+        let example = r#"("practice guideline"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])"#;
+        for p in [
+            system_prompt(8, true),
+            crate::agent::skeptic::system_prompt(8),
+        ] {
+            assert!(p.contains(example), "{p}");
+        }
+        assert_eq!(crate::agent::search::validate_query(example), Ok(()));
+        let full = format!("achalasia[tiab] AND {example}");
+        assert_eq!(crate::agent::search::validate_query(&full), Ok(()));
+    }
 }

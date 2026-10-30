@@ -584,7 +584,7 @@ mod tests {
                 researcher_max_tokens: 4000,
                 skeptic_max_tokens: 4000,
                 extractor_max_tokens: 4000,
-                writer_max_tokens: 16000,
+                writer_max_tokens: 20000,
                 writer_time_allowance_s: 150,
                 review_time_allowance_s: 0,
                 extractor_concurrency: 3,
@@ -607,7 +607,7 @@ mod tests {
                 researcher_max_tokens: 4000,
                 skeptic_max_tokens: 4000,
                 extractor_max_tokens: 4000,
-                writer_max_tokens: 16000,
+                writer_max_tokens: 20000,
                 writer_time_allowance_s: 150,
                 // Stage 3: the Full review phase (extractor ∥ skeptic).
                 review_time_allowance_s: 180,

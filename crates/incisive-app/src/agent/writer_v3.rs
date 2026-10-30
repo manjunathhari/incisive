@@ -2,7 +2,7 @@
 //!
 //! **One structured call** on the `writer` model, step `write` (a finishing
 //! step: its hold may use the finish reserve, Ruling R-13c), with
-//! `max_tokens` from [`DepthSettings::writer_max_tokens`] (default 8,000) at
+//! `max_tokens` from [`DepthSettings::writer_max_tokens`] (default 20,000) at
 //! the model's default effort, and the [`writer_schema`] (structured outputs:
 //! every object `additionalProperties: false`, every property required,
 //! nullable as `["type","null"]`, no `minimum`/`maximum`). The reply is a
@@ -435,6 +435,8 @@ a numbers entry. If one matters, mention it in words, labelled \"not verified ag
 Cite only the PMIDs provided.
 - Grade certainty honestly, GRADE-style: High, Moderate, Low or Very low, with the reason in a few words (risk of bias, \
 inconsistency, imprecision, indirectness, small or single-centre trials, short follow-up).
+- The skeptic's unverified leads are PMIDs whose quote was not found: never cite them or draw on them. A trial \
+registration marked NOT in the source must not be the basis of any overlap or independence judgement.
 - Treat non-independent trials (the same group, centre, registry or population, as the rows' independence notes or the \
 skeptic's overlaps say) as ONE body of evidence, and say so; never count them as separate confirmations.
 - Include every one of the skeptic's must-mention caveats somewhere in the answer. The skeptic's caveats, claims, \
@@ -663,9 +665,14 @@ Independence: registration: {}; group or centre: {}; note: {}",
         fm(&a.power, "appraisal.power", k.text),
         fm(&a.learning_curve, "appraisal.learning_curve", k.text),
         fm(&a.applicability, "appraisal.applicability", k.text),
-        i.trial_registration
-            .as_deref()
-            .map_or("none given".into(), |x| capped(&flatten(x), 80)),
+        match (&i.trial_registration, &r.trial_registration_unverified) {
+            (Some(x), _) => capped(&flatten(x), 80),
+            (None, Some(x)) => format!(
+                "none in the source (the extractor gave {}, NOT in the source: do not base overlap or independence judgements on it)",
+                capped(&flatten(x), 80)
+            ),
+            (None, None) => "none given".into(),
+        },
         f(&i.group_or_centre, "independence.group_or_centre"),
         fm(&i.note, "independence.note", k.text),
     ));
@@ -757,6 +764,15 @@ fn skeptic_block(r: &SkepticReview) -> String {
             "- [{}] {}\n",
             m.pmid,
             c(&m.note, format!("ma_notes.{i}.text"))
+        ));
+    }
+    // Stage 4 review 6: PMID and kind only; never evidence.
+    t.push_str("Unverified leads (quote not found; not evidence, do not cite or draw on them):\n");
+    for l in r.leads.iter().take(2 * super::skeptic::MAX_ITEMS) {
+        t.push_str(&format!(
+            "- PMID {}: possible {}, unverified lead\n",
+            l.pmid,
+            capped(&l.kind, 40)
         ));
     }
     wrap_source("skeptic", &t)
@@ -908,6 +924,7 @@ pub fn worst_case_full_user(question: &str) -> String {
                 note: x(k.text),
             },
             funding: Some(x(k.text)),
+            trial_registration_unverified: Some(x(80)),
             unverified_outcomes: vec![x(k.field); MAX_OUTCOMES],
             outcomes_verified: 0,
             numbers_unverified: 0,
@@ -956,6 +973,12 @@ pub fn worst_case_full_user(question: &str) -> String {
             })
             .collect(),
         searches: vec![],
+        leads: (0..2 * super::skeptic::MAX_ITEMS)
+            .map(|i| super::skeptic::Lead {
+                pmid: id(i),
+                kind: x(40),
+            })
+            .collect(),
         dropped_unseen: 0,
         dropped_quotes: 0,
         numbers_flagged: 0,
@@ -1399,7 +1422,8 @@ pub fn check_citations(a: &mut WrittenAnswer, selected: &[String], integrity: &m
             }
         }
     }
-    // A guideline citing an unknown study keeps its text; only the id goes.
+    // A guideline citing an unknown study keeps its text; only the id goes,
+    // and the page flags it (Stage 4 review 2).
     for g in &mut a.guidelines {
         if let Some(p) = g.pmid.take() {
             let p = p.trim().to_string();
@@ -1407,6 +1431,7 @@ pub fn check_citations(a: &mut WrittenAnswer, selected: &[String], integrity: &m
                 g.pmid = Some(p);
             } else if !p.is_empty() {
                 removed += 1;
+                g.pmid_removed = true;
             }
         }
     }
@@ -1489,6 +1514,7 @@ mod tests {
                 body: "A society [66666666]".into(),
                 year: Some(2020),
                 statement: "Use either [11111111].".into(),
+                pmid_removed: false,
             }],
             notable_findings: vec![],
         }
@@ -1523,6 +1549,7 @@ mod tests {
         // Stage 4 item 1: a guideline citing an unknown study keeps its
         // text; its id and marker go (2 more).
         assert_eq!(a.guidelines[0].pmid, None);
+        assert!(a.guidelines[0].pmid_removed, "flagged for the page");
         assert_eq!(a.guidelines[0].body, "A society");
         assert_eq!(a.guidelines[0].statement, "Use either [11111111].");
         assert_eq!(i.removed_citations, 10);
@@ -1922,6 +1949,7 @@ mod tests {
             spans: vec![],
             n_randomised_unverified: None,
             n_analysed_unverified: None,
+            trial_registration_unverified: None,
             corrections: 1,
         }
     }
@@ -1950,6 +1978,7 @@ mod tests {
                 note: "its RCT pool includes an observational study".into(),
             }],
             searches: vec![],
+            leads: vec![],
             dropped_unseen: 0,
             dropped_quotes: 0,
             numbers_flagged: 0,
@@ -2325,6 +2354,8 @@ mod tests {
             "verified quote, a structured number of an evidence row, a skeptic quote",
             "Outcomes and numbers labelled NOT VERIFIED",
             "never put them in a numbers entry",
+            "unverified leads are PMIDs whose quote was not found: never cite them",
+            "must not be the basis of any overlap or independence judgement",
             "are caveats, NOT sources of numbers",
         ] {
             assert!(SYSTEM_FULL.contains(must), "{must}");

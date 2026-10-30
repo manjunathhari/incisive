@@ -3641,6 +3641,9 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         }],
         ma_notes: vec![],
         spans: vec![],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3653,6 +3656,7 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         funding: None,
         funding_checked: false,
         spans: vec![],
+        trial_registration_unverified: None,
     }];
     a.notes = vec![
         "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
@@ -3704,6 +3708,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
         body: "European <b>Hernia</b> Society".into(),
         year: Some(2023),
         statement: "Either approach is acceptable [41060645].".into(),
+        pmid_removed: false,
     }];
     let mut second = w.studies[0].clone();
     second.pmid = "41060645".into();
@@ -3732,6 +3737,9 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
             quote: None,
         }],
         spans: vec![],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
     });
     a.evidence = vec![
         EvidenceV3 {
@@ -3745,6 +3753,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
             funding: None,
             funding_checked: true,
             spans: vec![],
+            trial_registration_unverified: None,
         },
         EvidenceV3 {
             pmid: "41060645".into(),
@@ -3757,6 +3766,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
             funding: Some("Intuitive <script>x</script> Surgical".into()),
             funding_checked: true,
             spans: vec![],
+            trial_registration_unverified: None,
         },
     ];
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
@@ -3820,6 +3830,9 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
         overlaps: vec![],
         ma_notes: vec![],
         spans: vec![Span::new("must_mention.0", 15, 17)],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3835,6 +3848,7 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
         funding: Some("Grant 4471".into()),
         funding_checked: true,
         spans: vec![Span::new("funding", 6, 10)],
+        trial_registration_unverified: None,
     }];
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
@@ -4038,4 +4052,96 @@ fn the_page_never_writes_model_text_as_html() {
         area[..close].trim_end().ends_with('>'),
         "the textarea must be empty"
     );
+}
+
+/// Stage 4 review 2, 3, 5, 6 and 8 on the page: a guideline with no source
+/// is flagged; a skeptic guideline body keeps its "not verified" mark in the
+/// Guidelines section; leads show only "Possible …: quote not found …" and a
+/// PubMed link (no claim, no quote); the unverified registration is
+/// labelled; the trail says how many skeptic entries were not shown; the
+/// copy textarea is out of the tab order until it is needed.
+#[tokio::test]
+async fn ssr_review_flags_guidelines_leads_and_registration() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    a.answer.as_mut().unwrap().guidelines = vec![GuidelineV3 {
+        pmid: None,
+        body: "A society".into(),
+        year: Some(2020),
+        statement: "Use either.".into(),
+        pmid_removed: true,
+    }];
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![SkepticItem {
+            pmid: "41060645".into(),
+            text: "EHS 2023 statement".into(),
+            quote: Some("Either approach is acceptable.".into()),
+        }],
+        overlaps: vec![],
+        ma_notes: vec![],
+        spans: vec![Span::new("guidelines.0.text", 4, 8)],
+        leads: vec![SkepticLead {
+            pmid: "39999999".into(),
+            kind: "contradicting study".into(),
+        }],
+        dropped_unseen: 2,
+        dropped_quotes: 0,
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "abstract only".into(),
+        verified_quotes: 2,
+        numbers_dropped: 0,
+        unverified_outcomes: vec![],
+        numbers_unverified: 0,
+        unverified_details: vec![],
+        funding: None,
+        funding_checked: true,
+        spans: vec![],
+        trial_registration_unverified: Some("NCT9999".into()),
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    let section =
+        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    assert!(
+        section.contains("A society (2020): Use either."),
+        "{section}"
+    );
+    assert!(
+        section.contains(
+            r#"<span class="flag-label">no source among the studies; not verified</span>"#
+        ),
+        "{section}"
+    );
+    // Review 3: the skeptic's mark carried into the Guidelines section.
+    assert!(section.contains("EHS 2023<sup title="), "{section}");
+    assert!(section.contains(">not verified</sup> statement"));
+    // Review 6: the lead, PMID only, linked to PubMed.
+    assert!(m.contains("Unverified leads"));
+    assert!(m.contains(
+        "Possible contradicting study: quote not found in the abstract, check the paper"
+    ));
+    assert!(m.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/39999999/""#));
+    assert!(
+        m.contains("registration NCT9999 <span class=\"flag-label\">not in the source</span>"),
+        "{m}"
+    );
+    // Review 5.
+    assert!(m.contains(
+        "The skeptic gave 2 entries whose quote or study could not be found; not shown."
+    ));
+    // Review 8: out of the tab order until shown.
+    let area = &m[m.find(r#"id="answer-plain-text""#).unwrap()..];
+    let area = &area[..area.find('>').unwrap()];
+    assert!(area.contains(r#"tabindex="-1""#), "{area}");
 }

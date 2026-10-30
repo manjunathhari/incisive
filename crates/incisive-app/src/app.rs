@@ -25,8 +25,8 @@ use crate::agent::answer::{
     unavailable_text,
 };
 use crate::agent::answer_v3::{
-    AnswerV3, EvidenceV3, NotableFinding, ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer,
-    arm_line_text, arm_lines, marked_runs, split_citations, whole_marked,
+    AnswerV3, EvidenceV3, NO_GUIDELINE_SOURCE, NotableFinding, ReferenceV3, Segment, SkepticItem,
+    Span, WrittenAnswer, arm_line_text, arm_lines, marked_runs, split_citations, whole_marked,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
@@ -1039,7 +1039,8 @@ fn written_v3_view(
     refs: &std::collections::HashMap<String, u16>,
     untraced: &[Span],
     evidence: &std::collections::HashMap<String, EvidenceV3>,
-    skeptic_guidelines: Vec<SkepticItem>,
+    skeptic_guidelines: Vec<(usize, SkepticItem)>,
+    skeptic_spans: &[Span],
 ) -> impl IntoView {
     let full = !evidence.is_empty();
     let mk = Marks {
@@ -1056,30 +1057,45 @@ fn written_v3_view(
         .enumerate()
         .map(|(i, g)| {
             let n = g.pmid.as_ref().and_then(|p| refs.get(p).copied());
+            // Stage 4 review 2: no PMID (none given, or removed by the
+            // citation check): flagged, never presented as sourced.
+            let unsourced = g.pmid.is_none();
             view! {
                 <li>
                     {mk.t(&g.body, &format!("guidelines.{i}.body"))}
                     {g.year.map(|y| format!(" ({y})"))}
                     ": " {mk.t(&g.statement, &format!("guidelines.{i}.statement"))}
                     {n.map(ref_link)}
+                    {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
                 </li>
             }
             .into_any()
         })
         .collect();
-    for g in skeptic_guidelines {
+    // The skeptic's bodies keep their "not verified" marks (review 3).
+    let sk = Marks {
+        refs,
+        spans: skeptic_spans,
+        mark: Mark::NotVerified,
+    };
+    for (i, g) in skeptic_guidelines {
         if w.guidelines
             .iter()
             .any(|x| x.pmid.as_deref() == Some(g.pmid.as_str()))
         {
             continue;
         }
-        let text = match &g.quote {
-            Some(q) => format!("{} \u{2014} \u{201c}{q}\u{201d}", g.text),
-            None => g.text.clone(),
-        };
         let n = refs.get(&g.pmid).copied();
-        guidelines.push(view! { <li>{cited(&text, refs)} {n.map(ref_link)}</li> }.into_any());
+        guidelines.push(
+            view! {
+                <li>
+                    {sk.t(&g.text, &format!("guidelines.{i}.text"))}
+                    {g.quote.map(|q| view! { " \u{2014} " {cited(&format!("\u{201c}{q}\u{201d}"), refs)} })}
+                    {n.map(ref_link)}
+                </li>
+            }
+            .into_any(),
+        );
     }
     // At a glance (Stage 4 item 8): about five lines, at the top.
     let glance = w.at_a_glance.as_ref().map(|g| {
@@ -1325,9 +1341,14 @@ fn evidence_cell(e: Option<&EvidenceV3>) -> AnyView {
             }
         )
     });
+    let registration = e
+        .trial_registration_unverified
+        .as_ref()
+        .map(|r| view! { " \u{b7} registration " {r.clone()} " " <span class="flag-label">"not in the source"</span> });
     view! {
         {evidence_line(e)}
         {numbers}
+        {registration}
         {(!unverified.is_empty()).then(|| view! {
             <ul class="unverified">
                 {unverified
@@ -1450,6 +1471,12 @@ fn skeptic_v3_view(
                 .map(|(i, x)| item(format!("guidelines.{i}.text"), x)),
         )
         .collect();
+    // Unverified leads (review 6): PMID and kind only, no quote or claim.
+    let leads: Vec<Line> = k
+        .leads
+        .iter()
+        .map(|l| (String::new(), l.text(), None, vec![l.pmid.clone()]))
+        .collect();
     let study = |p: String| -> AnyView {
         if let Some(n) = refs.get(&p) {
             ref_link(*n)
@@ -1489,6 +1516,7 @@ fn skeptic_v3_view(
             {list("Trials the search missed", missed)}
             {list("What the meta-analyses pooled", pooled)}
             {list("Evidence against, and guidelines", against)}
+            {list("Unverified leads", leads)}
         </section>
     }
     .into_any()
@@ -1504,50 +1532,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         rupees(a.cost_paise),
         duration_text(a.elapsed_s)
     );
-    let i = a.integrity;
-    let mut notes: Vec<String> = Vec::new();
-    if let Some(r) = &a.stopped_early {
-        notes.push(format!(
-            "Research stopped early ({r}); the answer uses what was found by then."
-        ));
-    }
-    if i.dropped_unseen > 0 {
-        notes.push(format!(
-            "{} selected by the researcher but not returned by this run's searches: left out.",
-            i.dropped_unseen
-        ));
-    }
-    if i.dropped_unfetched > 0 {
-        notes.push(format!(
-            "{} selected but could not be fetched: left out.",
-            i.dropped_unfetched
-        ));
-    }
-    if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
-        notes.push(format!(
-            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
-            i.removed_citations, i.dropped_numbers, i.dropped_studies
-        ));
-    }
-    if i.numbers_checked > 0 {
-        notes.push(if i.numbers_untraced == 0 {
-            format!(
-                "Number check: all {} numbers in the answer traced to a verified quote, structured number or abstract.",
-                i.numbers_checked
-            )
-        } else {
-            format!(
-                "Number check: {} of {} numbers in the answer not traced to a verified quote, structured number or abstract; each is marked \u{201c}not traced\u{201d}. Nothing was removed.",
-                i.numbers_untraced, i.numbers_checked
-            )
-        });
-    }
-    if i.outcomes_unverified + i.numbers_unverified > 0 {
-        notes.push(format!(
-            "Extraction: {} outcomes and {} numbers could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}.",
-            i.outcomes_unverified, i.numbers_unverified
-        ));
-    }
+    let notes = a.trail_notes();
     let untraced = a.untraced.clone();
     // Copy as text (Stage 4 item 10): the whole answer as plain text.
     let text = a.plain_text();
@@ -1566,14 +1551,26 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         .iter()
         .map(|e| (e.pmid.clone(), e.clone()))
         .collect();
-    let skeptic_guidelines = a
+    let skeptic_guidelines: Vec<(usize, SkepticItem)> = a
         .skeptic
         .as_ref()
-        .map(|k| k.guidelines.clone())
+        .map(|k| k.guidelines.iter().cloned().enumerate().collect())
         .unwrap_or_default();
-    let written = a
-        .answer
-        .map(|w| written_v3_view(w, &refs, &untraced, &evidence, skeptic_guidelines));
+    let skeptic_spans: Vec<Span> = a
+        .skeptic
+        .as_ref()
+        .map(|k| k.spans.clone())
+        .unwrap_or_default();
+    let written = a.answer.map(|w| {
+        written_v3_view(
+            w,
+            &refs,
+            &untraced,
+            &evidence,
+            skeptic_guidelines,
+            &skeptic_spans,
+        )
+    });
     let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
     let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
@@ -1644,7 +1641,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
                 class=move || if copy.get() == CopyState::Manual { "copy-area shown" } else { "copy-area" }
                 readonly=true
                 aria-hidden=move || (copy.get() != CopyState::Manual).to_string()
-                tabindex="-1"
+                tabindex=move || if copy.get() == CopyState::Manual { "0" } else { "-1" }
             ></textarea>
         </section>
     }
@@ -1699,6 +1696,9 @@ fn copy_answer(text: &str, state: RwSignal<CopyState>) {
             let Some(area) = area() else {
                 return false;
             };
+            // iOS will not select inside a readonly textarea (review 8).
+            area.set_read_only(false);
+            area.set_tab_index(0);
             let _ = area.focus();
             area.select();
             let _ = area.set_selection_range(0, area.value().len() as u32);

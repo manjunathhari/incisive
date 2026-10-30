@@ -21,16 +21,21 @@ use claude_client::Usage;
 use incisive_app::agent::answer_v3::{
     ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3, SearchEntry,
 };
-use incisive_app::agent::extractor::{EvidenceRow, Extraction, MAX_OUTCOMES};
+use incisive_app::agent::extractor::{
+    self, EvidenceRow, Extraction, MAX_OUTCOMES, ReportedRow, SourceText, source_text,
+};
 use incisive_app::agent::llm::ScriptedLlm;
+use incisive_app::agent::llm::wrap_source;
 use incisive_app::agent::researcher::Contradiction;
 use incisive_app::agent::skeptic::SkepticReview;
+use incisive_app::agent::skeptic::{self, SkepticReport};
 use incisive_app::agent::writer_v3::{self, FullInput, StudyInput};
 use incisive_app::agent::{RunContext, team};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{IapVerifier, JwkSource};
 use incisive_app::lit::europepmc::EuropePmc;
+use incisive_app::lit::europepmc::FullText;
 use incisive_app::lit::http::{AllowlistedClient, OaPolicy};
 use incisive_app::lit::pubmed::PubMed;
 use incisive_app::runs::budget::RunBudget;
@@ -252,6 +257,95 @@ fn scripted_answer(rows: &[EvidenceRow], studies: &[StudyInput], skeptic: &Skept
     })
 }
 
+/// Each prototype study's source text, rebuilt from its verbatim quotes:
+/// the abstract quotes as the record's abstract, the full-text quotes as a
+/// full-text results section (the prototype read both).
+fn source_of(x: &Value) -> SourceText {
+    let mut abs: Vec<String> = Vec::new();
+    let mut full: Vec<String> = Vec::new();
+    for o in x["outcomes"].as_array().unwrap() {
+        let q = s(&o["quote"]);
+        let into = if o["source"] == "abstract" {
+            &mut abs
+        } else {
+            &mut full
+        };
+        if !into.contains(&q) {
+            into.push(q);
+        }
+    }
+    let paper = incisive_app::lit::Paper {
+        pmid: Some(s(&x["pmid"])),
+        pmcid: None,
+        doi: None,
+        title: s(&x["short_name"]),
+        authors: vec![],
+        journal: None,
+        year: None,
+        pub_types: vec![],
+        abstract_text: (!abs.is_empty()).then(|| abs.join(" ")),
+        oa_url: None,
+        oa_is_pdf: false,
+        retracted: false,
+        source: incisive_app::lit::PaperSource::PubMed,
+    };
+    let ft = (!full.is_empty()).then(|| FullText {
+        sections: vec![("results".into(), full.join(" "))],
+    });
+    source_text(&paper, ft.as_ref()).expect("a source")
+}
+
+/// The prototype's rows pushed through the extractor's own checks
+/// (`first_pass` and `finish_row`) against their rebuilt source texts.
+fn checked_rows() -> Vec<EvidenceRow> {
+    let f = fixture("evidence.json");
+    f["studies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(rows())
+        .map(|(x, mut v)| {
+            let o = v.as_object_mut().unwrap();
+            for k in [
+                "pmid",
+                "text",
+                "unverified_outcomes",
+                "outcomes_verified",
+                "numbers_dropped",
+                "numbers_unverified",
+                "texts_cleaned",
+                "corrections",
+            ] {
+                o.remove(k);
+            }
+            o.insert("funding".into(), Value::Null);
+            let reported: ReportedRow = serde_json::from_value(v).unwrap();
+            extractor::check_reply(&s(&x["pmid"]), &source_of(x), &reported, None)
+        })
+        .collect()
+}
+
+/// The prototype skeptic's report pushed through `skeptic::validate`, its
+/// tool results being each quoted study's record (title and abstract) as
+/// the app wraps them.
+fn validated_review(selected: &[String]) -> SkepticReview {
+    let f = fixture("skeptic.json");
+    let papers: Vec<Value> = f["contradicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| json!({"pmid": c["pmid"], "title": "A study (replay)", "abstract": c["quote"]}))
+        .collect();
+    let results = vec![wrap_source(
+        "t1-1",
+        &json!({"papers": papers, "not_found": []}).to_string(),
+    )];
+    let mut report = review();
+    report["missed_rcts"] = json!([]);
+    let report: SkepticReport = serde_json::from_value(report).unwrap();
+    skeptic::validate(report, &results, selected, vec![])
+}
+
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
         eprintln!("SKIP: TEST_DATABASE_URL not set");
@@ -351,6 +445,12 @@ fn page_text(html: &str) -> String {
             .map_or("", |j| &rest[i + j + "</script>".len()..]);
     }
     out.push_str(rest);
+    // The "not traced" / "not verified" marks are not content: compare
+    // the text they follow.
+    let marks = regex::Regex::new(r#"<sup[^>]*class="flag"[^>]*>[^<]*</sup>"#).unwrap();
+    let out = marks.replace_all(&out, "").to_string();
+    let markers = out.replace("<!>", "");
+    let out = markers;
     let tags = regex::Regex::new(r"<[^>]*>").unwrap();
     tags.replace_all(&out, " ")
         .replace("&lt;", "<")
@@ -376,12 +476,46 @@ fn count_tokens(text: &str) -> BTreeMap<String, usize> {
 async fn the_prototype_payloads_replay_with_nothing_lost() {
     let Some(pool) = pool().await else { return };
     let (studies, contradictions, searches) = studies();
-    let rows: Vec<EvidenceRow> = rows()
-        .into_iter()
-        .map(|v| serde_json::from_value(v).unwrap())
-        .collect();
-    let review: SkepticReview = serde_json::from_value(review()).unwrap();
+    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
+    // Review 1: through the paths Stage 4 changed (the extractor's checks
+    // and the skeptic's validation), not around them.
+    let rows = checked_rows();
+    let review = validated_review(&selected);
     assert_eq!((studies.len(), rows.len()), (10, 10));
+    // The Stage 3 baseline (51 outcomes, 174 structured numbers, 6
+    // contradictions) is kept: nothing is dropped, everything verified.
+    let outcomes: usize = rows.iter().map(|r| r.outcomes.len()).sum();
+    let numbers: usize = rows
+        .iter()
+        .flat_map(|r| &r.outcomes)
+        .map(|o| o.numbers.len())
+        .sum();
+    assert!(outcomes >= 51, "{outcomes} outcomes");
+    assert!(numbers >= 174, "{numbers} structured numbers");
+    assert!(
+        rows.iter().flat_map(|r| &r.outcomes).all(|o| o.verified),
+        "every quote found"
+    );
+    assert!(
+        review.contradicting.len() >= 6,
+        "{:?}",
+        review.contradicting.len()
+    );
+    assert!(review.leads.is_empty() && review.dropped_unseen == 0);
+    // The prototype claim "… gap is 17 min" survives, its 17 marked.
+    let (i, c) = review
+        .contradicting
+        .iter()
+        .enumerate()
+        .find(|(_, c)| c.claim.contains("17 min"))
+        .expect("the 17 min claim is kept");
+    let marked: Vec<&str> = review
+        .spans
+        .iter()
+        .filter(|sp| sp.field == format!("contradicting.{i}.text"))
+        .map(|sp| &c.claim[sp.start as usize..(sp.start + sp.len) as usize])
+        .collect();
+    assert_eq!(marked, ["17"], "not verified, not removed");
 
     // ---- the writer's input ----
     let full = FullInput {
@@ -391,7 +525,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         missed: &[],
     };
     let user = writer_v3::writer_user_full(QUESTION, &studies, &full, &contradictions, &searches);
-    let flat_user = flat(&user);
+    let flat_user = flat(&user.replace(writer_v3::NOT_VERIFIED_MARK, ""));
     let mut expected_outcomes = 0;
     let mut expected_numbers = 0;
     for s in &studies {
@@ -433,9 +567,15 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     }
     assert!(!user.contains("[?]"));
     assert!(
-        !user.contains("NOT VERIFIED"),
-        "the prototype rows are all verified"
+        user.contains("17 (not verified) min"),
+        "the mark reaches the writer"
     );
+    // Pinned: what the writer is given from the prototype payloads.
+    assert_eq!(expected_outcomes, 51);
+    assert_eq!(expected_numbers, 174);
+    assert_eq!(review.must_mention.len(), 8);
+    assert_eq!(review.contradicting.len(), 6);
+    assert_eq!(number_tokens(&user).len(), WRITER_INPUT_NUMBER_TOKENS);
 
     // ---- the writer (scripted), and the post-writer checks ----
     let reply = scripted_answer(&rows, &studies, &review);
@@ -457,7 +597,6 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         .unwrap_or_else(|_| panic!("the scripted writer reply reads"));
     let req = &llm.requests()[0];
     assert_eq!(req.max_tokens, DepthSettings::FOCUSED.writer_max_tokens);
-    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
     let mut integrity = IntegrityV3::default();
     writer_v3::check_citations(&mut written, &selected, &mut integrity);
     let allowed = writer_v3::allowed_numbers(&studies, Some(&full));
@@ -534,18 +673,21 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         let head: String = flat(m).chars().take(80).collect();
         assert!(page.contains(&head), "caveat lost on the page: {head}");
     }
-    // Every number of every effect the writer wrote is on the page.
+    // Every number of every effect the writer wrote is on the page, as
+    // often as the effects write it (review 1: >= the expected count).
     let page_numbers = count_tokens(&page);
+    let mut expected: BTreeMap<String, usize> = BTreeMap::new();
     for o in &written.outcomes {
         for (t, n) in count_tokens(&o.effect_text) {
             if t.len() >= 5 && selected.contains(&t) {
                 continue; // a citation, drawn as a reference number
             }
-            assert!(
-                page_numbers.get(&t).copied().unwrap_or(0) >= n.min(1),
-                "number {t} lost"
-            );
+            *expected.entry(t).or_default() += n;
         }
+    }
+    for (t, n) in &expected {
+        let got = page_numbers.get(t).copied().unwrap_or(0);
+        assert!(got >= *n, "number {t}: {got} on the page, {n} expected");
     }
     // The new sections appear.
     for want in [
@@ -581,7 +723,10 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         "numbers_checked": checked,
         "numbers_untraced": untraced.len(),
     });
-    eprintln!("REPLAY COUNTS {counts}");
+    assert_eq!(counts["page_trial_rows"], 10);
+    assert_eq!(counts["page_outcome_rows"], 51);
+    assert_eq!(counts["page_references"], 10);
+    assert_eq!(counts["page_caveats"], 8);
     // What the trace marked, as text, for the report.
     let fields = incisive_app::agent::answer_v3::text_fields(&written);
     let marked: Vec<String> = untraced
@@ -612,6 +757,10 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     }
 }
 
+/// Number tokens in the writer's input from the prototype payloads, pinned:
+/// the same 1,454 the Stage 3 code gives for the same payloads.
+const WRITER_INPUT_NUMBER_TOKENS: usize = 1_454;
+
 fn fmt(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         format!("{v:.0}")
@@ -630,19 +779,17 @@ fn fmt(v: f64) -> String {
 #[tokio::test]
 #[ignore = "writes the smoke payload; not a test"]
 async fn write_smoke_stage4_payload() {
-    use incisive_app::agent::extractor::{self, prompt, row_schema, source_text};
+    use incisive_app::agent::extractor::{prompt, row_schema};
     use incisive_app::agent::llm::SOURCE_RULE;
     use incisive_app::agent::researcher;
-    use incisive_app::agent::skeptic::{self, Picture};
+    use incisive_app::agent::skeptic::Picture;
     use incisive_app::agent::tools::lit::LitTools;
     let out = std::env::var("SMOKE_PAYLOAD_OUT").expect("SMOKE_PAYLOAD_OUT");
     let rule = |s: &str| format!("{s}\n\n{SOURCE_RULE}");
     let (studies, contradictions, searches) = studies();
-    let rows: Vec<EvidenceRow> = rows()
-        .into_iter()
-        .map(|v| serde_json::from_value(v).unwrap())
-        .collect();
-    let review: SkepticReview = serde_json::from_value(review()).unwrap();
+    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
+    let rows = checked_rows();
+    let review = validated_review(&selected);
     let full = FullInput {
         rows: &rows,
         skeptic: Some(&review),

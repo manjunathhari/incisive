@@ -261,6 +261,10 @@ pub struct EvidenceRow {
     pub n_randomised_unverified: Option<i64>,
     #[serde(default)]
     pub n_analysed_unverified: Option<i64>,
+    /// Stage 4 review 6: a trial registration the model gave that the sent
+    /// source does not contain (kept aside, labelled "not in the source").
+    #[serde(default)]
+    pub trial_registration_unverified: Option<String>,
     /// Correction requests made for this study (0 or 1).
     pub corrections: u32,
 }
@@ -781,10 +785,12 @@ fn finish_row(
         n.filter(|v| *v > 0)
             .filter(|v| src.values.iter().any(|x| same(*x, *v as f64)))
     };
-    let registration = clip_opt(&ind.trial_registration, MAX_LABEL).filter(|r| {
+    let given_registration = clip_opt(&ind.trial_registration, MAX_LABEL);
+    let registration = given_registration.clone().filter(|r| {
         src.folded
             .contains(&super::extract::normalise(r).to_lowercase())
     });
+    let trial_registration_unverified = given_registration.filter(|_| registration.is_none());
     let n_randomised = in_source(row.n_randomised);
     let n_analysed = in_source(row.n_analysed);
     let aside = |given: Option<i64>, kept: Option<i64>| given.filter(|v| *v > 0 && kept.is_none());
@@ -840,11 +846,26 @@ fn finish_row(
         spans: Vec::new(),
         n_randomised_unverified,
         n_analysed_unverified,
+        trial_registration_unverified,
         corrections: corrections_made,
     };
     e.texts_flagged = u32::try_from(spans.len()).unwrap_or(u32::MAX);
     e.spans = spans;
     e
+}
+
+/// The code checks of one reply, as `extract_rows` runs them: the first
+/// pass, then [`finish_row`] with `corrections` (if a correction was made).
+/// Public for the Stage 4 replay, which pushes real payloads through them.
+pub fn check_reply(
+    pmid: &str,
+    src: &SourceText,
+    row: &ReportedRow,
+    corrections: Option<&Corrections>,
+) -> EvidenceRow {
+    let pass = first_pass(src, row);
+    let made = u32::from(corrections.is_some());
+    finish_row(pmid, src, row, pass, corrections, made)
 }
 
 // ---------- prompts and schemas ----------
@@ -1513,6 +1534,8 @@ mod tests {
         r2.independence.trial_registration = Some("NCT9999".into());
         let e = finish_row("111", &src, &r2, first_pass(&src, &r2), None, 0);
         assert_eq!(e.independence.trial_registration, None, "not in the source");
+        // Stage 4 review 6: kept aside, labelled, not dropped.
+        assert_eq!(e.trial_registration_unverified.as_deref(), Some("NCT9999"));
     }
 
     /// The spans of `text` against `allowed`, as the marked substrings.
