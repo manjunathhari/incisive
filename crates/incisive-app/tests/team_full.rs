@@ -447,3 +447,191 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
     );
     let _ = (SEEN_C, UNSEEN, StopReason::EndTurn, Paper::clone);
 }
+
+// ---------- T8: the skeptic ----------
+
+use incisive_app::agent::researcher::Contradiction;
+use incisive_app::agent::skeptic::{self, Picture, Verdict};
+
+const FINAL_KEY: &str = "Research transcript";
+
+fn tool_call(id: &str, name: &str, input: Value) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: id.into(),
+        name: name.into(),
+        input,
+    }
+}
+
+fn turn(llm: ScriptedLlm, uses: Vec<ContentBlock>) -> ScriptedLlm {
+    let mut content = vec![ContentBlock::Text {
+        text: "Searching.".into(),
+    }];
+    content.extend(uses);
+    llm.reply_blocks(content, Some(StopReason::ToolUse), u())
+}
+
+fn end_turn(llm: ScriptedLlm) -> ScriptedLlm {
+    llm.reply_blocks(
+        vec![ContentBlock::Text {
+            text: "Done.".into(),
+        }],
+        Some(StopReason::EndTurn),
+        u(),
+    )
+}
+
+/// The skeptic's two turns: a PubMed search, then C's abstract.
+fn skeptic_turns(llm: ScriptedLlm) -> ScriptedLlm {
+    let llm = turn(
+        llm,
+        vec![tool_call(
+            "k1",
+            "search_pubmed",
+            json!({"query": "hernia[tiab] AND randomized controlled trial[pt] AND 2025:2026[dp]", "max_results": 20}),
+        )],
+    );
+    let llm = turn(
+        llm,
+        vec![tool_call("k2", "get_abstracts", json!({"pmids": [SEEN_C]}))],
+    );
+    end_turn(llm)
+}
+
+/// The skeptic's review: one contradiction quoting C's abstract (kept), one
+/// with an unverifiable quote and one naming an unseen PMID (both dropped),
+/// C as a missed RCT, an overlap of A and B.
+fn skeptic_json(c_quote: &str) -> Value {
+    json!({
+        "contradicting": [
+            {"pmid": SEEN_C, "claim": "TEP does well", "quote": c_quote, "strength_vs_rcts": "observational"},
+            {"pmid": SEEN_C, "claim": "invented", "quote": "Robotic repair halved recurrence in every subgroup studied.", "strength_vs_rcts": ""},
+            {"pmid": UNSEEN, "claim": "from memory", "quote": c_quote, "strength_vs_rcts": ""}
+        ],
+        "missed_rcts": [{"pmid": SEEN_C, "why": "a comparison the researcher missed"}],
+        "guidelines": [],
+        "overlaps": [{"pmids": [SEEN_A, SEEN_B], "note": "same Danish group"}],
+        "verdict": "holds_with_caveats",
+        "must_mention": ["A and B come from the same group: one body of evidence.", "Long-term pain is unknown."],
+        "searches": [{"query": "made up", "source": "pubmed", "hits": 1}]
+    })
+}
+
+fn picture() -> Vec<Picture> {
+    [SEEN_A, SEEN_B]
+        .iter()
+        .map(|p| Picture {
+            pmid: p.to_string(),
+            title: format!("Trial {p}"),
+            design: "RCT".into(),
+            why: "key trial".into(),
+        })
+        .collect()
+}
+
+async fn abstract_of(ctx: &RunContext, pmid: &str) -> String {
+    papers(ctx, &[pmid]).await[0]
+        .paper
+        .abstract_text
+        .clone()
+        .unwrap()
+}
+
+/// The first sentence of `text` (a clause start) of a usable length.
+fn first_sentence(text: &str) -> String {
+    let s = text.split(". ").find(|s| s.len() > 30).unwrap().trim();
+    format!("{}.", s.trim_end_matches('.'))
+}
+
+#[tokio::test]
+async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm0 = ScriptedLlm::new();
+    let (probe, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(Arc::new(ScriptedLlm::new()), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let c_quote = first_sentence(&abstract_of(&probe, SEEN_C).await);
+    let llm = Arc::new(
+        skeptic_turns(llm0)
+            .when(FINAL_KEY)
+            .reply_json(skeptic_json(&c_quote), u()),
+    );
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let r = skeptic::review(
+        &ctx,
+        &ctx.llm,
+        ctx.lit.clone(),
+        &picture(),
+        &[Contradiction {
+            pmid: SEEN_B.into(),
+            note: "self-fixating mesh differs".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.verdict, Verdict::HoldsWithCaveats);
+    assert_eq!(r.contradicting.len(), 1);
+    assert_eq!(r.contradicting[0].quote, c_quote);
+    assert_eq!((r.dropped_unseen, r.dropped_quotes), (1, 1));
+    assert_eq!(r.missed_rcts.len(), 1);
+    assert_eq!(r.missed_rcts[0].pmid, SEEN_C);
+    assert_eq!(r.overlaps[0].pmids, [SEEN_A, SEEN_B]);
+    assert_eq!(r.must_mention.len(), 2);
+    assert_eq!(r.searches.len(), 1, "recorded by code");
+    assert_eq!(r.searches[0].hits, 327);
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 4, "three turns and the final call");
+    for q in &reqs[..3] {
+        let names: Vec<&str> = q.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "search_pubmed",
+                "search_europepmc",
+                "get_abstracts",
+                "find_related"
+            ],
+            "no full text"
+        );
+        assert!(
+            q.system
+                .as_deref()
+                .unwrap()
+                .contains("at most 8 tool turns")
+        );
+        assert_eq!(q.max_tokens, DepthSettings::FOCUSED.skeptic_max_tokens);
+    }
+    let first = request_user_text(&reqs[0]);
+    assert!(first.contains("<source id=\"researcher-selection\">"));
+    assert!(first.contains(&format!("PMID {SEEN_A} | Trial {SEEN_A}")));
+    assert!(first.contains("self-fixating mesh differs"));
+    let fin = &reqs[3];
+    assert!(fin.tools.is_empty());
+    assert_eq!(
+        fin.output_config.as_ref().unwrap().effort,
+        Some(claude_client::Effort::Low)
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    for want in [
+        "Skeptic: 1 search so far (turn 1 of 8)",
+        "Skeptic: verdict holds with caveats, 2 caveats",
+        "Skeptic: dropped 1 entries naming studies its searches did not return and 1 whose quote was not found",
+    ] {
+        assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
+    }
+    assert_eq!(charges_settle(&pool, uid, 4).await.len(), 4);
+}

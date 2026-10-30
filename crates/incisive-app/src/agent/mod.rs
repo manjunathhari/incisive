@@ -24,6 +24,7 @@ pub mod researcher;
 pub mod retrieve;
 pub mod screen;
 pub mod search;
+pub mod skeptic;
 pub mod team;
 #[cfg(feature = "test-util")]
 pub mod testing;
