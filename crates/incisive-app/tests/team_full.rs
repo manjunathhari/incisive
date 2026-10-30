@@ -14,7 +14,6 @@ use incisive_app::agent::{AgentLlm, Literature, RunContext};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{IapVerifier, JwkSource};
-use incisive_app::lit::Paper;
 use incisive_app::lit::europepmc::{EuropePmc, full_text_from_xml};
 use incisive_app::lit::http::{AllowlistedClient, OaPolicy};
 use incisive_app::lit::pubmed::PubMed;
@@ -445,7 +444,6 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
         Some("Extractor: 2/2 studies (2 verified outcomes, 2 numbers dropped)"),
         "{l:?}"
     );
-    let _ = (SEEN_C, UNSEEN, StopReason::EndTurn, Paper::clone);
 }
 
 // ---------- T8: the skeptic ----------
@@ -634,4 +632,627 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
         assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
     }
     assert_eq!(charges_settle(&pool, uid, 4).await.len(), 4);
+}
+
+// ---------- T9: the Full pipeline ----------
+
+use incisive_app::agent::answer_v3::AnswerV3;
+use incisive_app::agent::llm::AgentModels;
+use incisive_app::agent::team::{SKEPTIC_FAILED, run_team};
+use incisive_app::agent::writer_v3::STUDIES_HEADING;
+use incisive_app::agent::PipelineOutcome;
+use incisive_app::ask::{AskOutcome, start_run};
+
+/// In every researcher message (its task), never in another role's.
+const RESEARCHER_KEY: &str = "Find and select the evidence for this question.";
+/// Only in the researcher's final call.
+const RESEARCHER_FINAL: &str =
+    "Find and select the evidence for this question.\n\n=== Research transcript";
+/// In every skeptic message (its task).
+const SKEPTIC_KEY: &str = "Challenge the conclusion these studies point to.";
+/// Only in the skeptic's final call.
+const SKEPTIC_FINAL: &str =
+    "Challenge the conclusion these studies point to.\n\n=== Research transcript";
+
+fn study_list(selected: &[(&str, &str)]) -> Value {
+    json!({
+        "searches": [],
+        "selected": selected.iter().map(|(p, d)| json!({"pmid": p, "design": d, "why": format!("key study {p}")})).collect::<Vec<_>>(),
+        "considered_not_selected": [],
+        "possible_contradictions": [{"pmid": SEEN_B, "note": "self-fixating mesh differs"}]
+    })
+}
+
+/// The writer's answer: cites A, B and the skeptic's missed trial C.
+fn writer_json() -> Value {
+    json!({
+        "bottom_line": {"text": format!("No difference [{SEEN_A}; {SEEN_B}]; a missed trial agrees [{SEEN_C}]."), "certainty": "Low", "certainty_reason": "one group"},
+        "outcomes": [{"outcome": "Pain", "rct_evidence": "Two RCTs, one group", "effect_text": format!("similar [{SEEN_A}]"),
+            "numbers": [{"label": "VAS", "value": 1.0, "unit": null, "arm": null, "ci_low": null, "ci_high": null, "p": null, "pmid": SEEN_C}],
+            "certainty": "Low", "why": "one group", "pmids": [SEEN_A, SEEN_C]}],
+        "studies": [
+            {"pmid": SEEN_A, "label": "A (2025)", "design": "RCT", "n": 100, "setting": "s", "comparison": "c", "key_results": "k", "appraisal": "same group as B"},
+            {"pmid": SEEN_B, "label": "B (2025)", "design": "RCT", "n": null, "setting": "s", "comparison": "c", "key_results": "k", "appraisal": "a"}
+        ],
+        "conflicts": [],
+        "applicability": {"case_mix": "primary", "india_cost_context": "not known", "training": "none"},
+        "would_change": ["an independent RCT"]
+    })
+}
+
+/// A whole Full run, every role keyed (the extractor and the skeptic run
+/// at the same time, so their requests can arrive in any order). Research
+/// turns are unkeyed: they come first, one at a time. `quotes` are the
+/// extractor's quotes for A and B (outcome-free rows when `None`).
+fn full_script(research_turns: usize, quotes: Option<(&str, &str)>) -> ScriptedLlm {
+    let mut llm = ScriptedLlm::new()
+        // Finals first: they also contain their role's task.
+        .when(RESEARCHER_FINAL)
+        .reply_json(study_list(&[(SEEN_A, "RCT"), (SEEN_B, "RCT")]), u())
+        .when(SKEPTIC_FINAL)
+        .reply_json(
+            json!({
+                "contradicting": [], "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
+                "guidelines": [], "overlaps": [{"pmids": [SEEN_A, SEEN_B], "note": "same group"}],
+                "verdict": "holds_with_caveats", "must_mention": ["A and B share a group."], "searches": []
+            }),
+            u(),
+        );
+    // The skeptic: a search, C's abstract, end of turn.
+    llm = llm
+        .when(SKEPTIC_KEY)
+        .reply_blocks(
+            vec![tool_call(
+                "k1",
+                "search_pubmed",
+                json!({"query": "hernia[tiab] AND 2026[dp]", "max_results": 10}),
+            )],
+            Some(StopReason::ToolUse),
+            u(),
+        )
+        .when(SKEPTIC_KEY)
+        .reply_blocks(
+            vec![tool_call("k2", "get_abstracts", json!({"pmids": [SEEN_C]}))],
+            Some(StopReason::ToolUse),
+            u(),
+        )
+        .when(SKEPTIC_KEY)
+        .reply_blocks(
+            vec![ContentBlock::Text {
+                text: "Done.".into(),
+            }],
+            Some(StopReason::EndTurn),
+            u(),
+        );
+    let (qa, qb) = quotes.unwrap_or(("", ""));
+    let outcomes = |q: &str| {
+        if q.is_empty() {
+            vec![]
+        } else {
+            vec![outcome("Main outcome", q, vec![])]
+        }
+    };
+    llm = llm
+        .when(&format!("Study PMID {SEEN_A}:"))
+        .reply_json(row(outcomes(qa)), u())
+        .when(&format!("Study PMID {SEEN_B}:"))
+        .reply_json(row(outcomes(qb)), u());
+    for _ in 0..2 {
+        llm = llm
+            .when(STUDIES_HEADING)
+            .reply_json(writer_json(), usage(3000, 2500));
+    }
+    // Research: each turn a search and A's and B's abstracts; then the end.
+    for i in 0..research_turns {
+        llm = llm.reply_blocks(
+            vec![
+                ContentBlock::Text {
+                    text: "Searching.".into(),
+                },
+                tool_call(
+                    &format!("s{i}"),
+                    "search_pubmed",
+                    json!({"query": format!("mesh[tiab] AND {i}[dp]"), "max_results": 20}),
+                ),
+                tool_call(
+                    &format!("a{i}"),
+                    "get_abstracts",
+                    json!({"pmids": [SEEN_A, SEEN_B]}),
+                ),
+            ],
+            Some(StopReason::ToolUse),
+            usage(1500, 1500),
+        );
+    }
+    llm.reply_blocks(
+        vec![ContentBlock::Text {
+            text: "Done searching.".into(),
+        }],
+        Some(StopReason::EndTurn),
+        u(),
+    )
+}
+
+fn by_key<'a>(reqs: &'a [MessagesRequest], key: &str) -> Vec<&'a MessagesRequest> {
+    reqs.iter()
+        .filter(|r| request_user_text(r).contains(key))
+        .collect()
+}
+
+async fn wait_done(pool: &PgPool, uid: i64, run: Uuid) -> incisive_app::runs::RunView {
+    for _ in 0..3000 {
+        let v = get_run_for_user(pool, uid, run).await.unwrap().unwrap();
+        if !v.summary.status.is_active() {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run} did not finish");
+}
+
+/// The extractor's quotes for A (its full text) and B (its abstract).
+async fn quotes_for(pool: &PgPool, server: &MockServer) -> (String, String) {
+    let ft = full_text_from_xml(&lit_fixture("epmc_fulltext.xml")).unwrap();
+    let results = ft
+        .sections
+        .iter()
+        .find(|(n, _)| n == "results")
+        .unwrap()
+        .1
+        .clone();
+    let (probe, _) = full_ctx(
+        pool,
+        literature(server),
+        agent_llm(Arc::new(ScriptedLlm::new()), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    (
+        sentence_with_digit(&results),
+        first_sentence(&abstract_of(&probe, SEEN_B).await),
+    )
+}
+
+/// End to end through `start_run` and the worker: researcher (with full
+/// text) → extractor ∥ skeptic → writer (rows, the skeptic's review, the
+/// missed trial's abstract) → stored AnswerV3 → the run view.
+#[tokio::test]
+async fn full_team_run_end_to_end_through_the_worker() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    let llm = Arc::new(full_script(2, Some((&qa, &qb))));
+    let mut st = app_state(pool.clone(), literature(&server));
+    st.llm = Some(agent_llm(llm.clone(), MODEL));
+    let (uid, user) = new_user(&pool).await;
+    let AskOutcome::RunStarted { run_id, .. } =
+        start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Focused, None)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    let v = wait_done(&pool, uid, run_id).await;
+    assert_eq!(v.summary.status, RunStatus::Done, "{:?}", v.steps);
+    let a: AnswerV3 = serde_json::from_value(v.answer.clone().unwrap()).unwrap();
+    assert_eq!(a.mode, RunMode::Focused);
+    // References: the selection, then the skeptic's missed trial.
+    let refs: Vec<(&str, bool)> = a
+        .references
+        .iter()
+        .map(|r| (r.pmid.as_str(), r.found_by_skeptic))
+        .collect();
+    assert_eq!(refs, [(SEEN_A, false), (SEEN_B, false), (SEEN_C, true)]);
+    // The missed trial is citable: its citation and number survive.
+    let w = a.answer.as_ref().unwrap();
+    assert!(w.bottom_line.text.contains(&format!("[{SEEN_C}]")));
+    assert_eq!(w.outcomes[0].numbers.len(), 1);
+    assert_eq!(a.integrity.removed_citations, 0);
+    // Evidence per study and the skeptic's review.
+    assert_eq!(a.evidence.len(), 2);
+    assert_eq!(
+        (a.evidence[0].text.as_str(), a.evidence[0].verified_quotes),
+        ("full text", 1)
+    );
+    assert_eq!(
+        (a.evidence[1].text.as_str(), a.evidence[1].verified_quotes),
+        ("abstract only", 1)
+    );
+    let k = a.skeptic.as_ref().unwrap();
+    assert_eq!(k.verdict, "holds with caveats");
+    assert_eq!(k.overlaps[0].pmids, [SEEN_A, SEEN_B]);
+    assert!(a.notes.is_empty());
+    // Every call charged.
+    let reqs = llm.requests();
+    let rows = charges_settle(&pool, uid, reqs.len()).await;
+    assert_eq!(rows.len(), reqs.len());
+    assert_eq!(a.cost_paise, rows.iter().sum::<i64>());
+
+    // The researcher was offered full text; the skeptic was not.
+    let research = by_key(&reqs, RESEARCHER_KEY);
+    let names: Vec<&str> = research[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"get_full_text"), "{names:?}");
+    let sk = by_key(&reqs, SKEPTIC_KEY);
+    assert!(
+        sk.iter()
+            .all(|r| r.tools.iter().all(|t| t.name != "get_full_text"))
+    );
+    // The writer: the Full prompt, the rows, the review, the missed trial.
+    let wr = by_key(&reqs, STUDIES_HEADING);
+    assert_eq!(wr.len(), 1);
+    let sys = wr[0].system.as_deref().unwrap();
+    assert!(sys.contains("ONE body of evidence"));
+    let t = request_user_text(wr[0]);
+    assert!(t.contains(&format!("<source id=\"row-{SEEN_A}\">")));
+    assert!(t.contains("Text read: full text"));
+    let head: Vec<&str> = qa.split_whitespace().take(5).collect();
+    assert!(
+        t.contains(&head.join(" ")),
+        "the verified quote reaches the writer"
+    );
+    assert!(t.contains("<source id=\"skeptic\">"));
+    assert!(t.contains("A and B share a group."));
+    assert!(t.contains(&format!("Found by the skeptic - PMID {SEEN_C}")));
+    assert!(t.contains(&format!("<source id=\"pmid-{SEEN_C}\">")));
+
+    let l = lines(&v.steps);
+    for want in [
+        "Extractor and skeptic: extracting 2 studies and challenging the conclusion",
+        "Extractor: 2/2 studies (2 verified outcomes, 0 numbers dropped)",
+        "Skeptic: verdict holds with caveats, 1 caveat",
+        "Writer: writing the answer from 2 studies (2 with an abstract)",
+        "Answer ready",
+    ] {
+        assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
+    }
+}
+
+/// The skeptic fails (its first turn errors): the writer proceeds without
+/// it, and the answer and the writer's input say so.
+#[tokio::test]
+async fn a_failed_skeptic_leaves_a_note_and_the_writer_proceeds() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = ScriptedLlm::new()
+        .when(SKEPTIC_KEY)
+        .fail(claude_client::ClaudeError::Api {
+            status: 400,
+            error_type: "invalid_request_error".into(),
+            message: "bad".into(),
+        });
+    // The rest of the run as usual (its skeptic replies go unused).
+    let llm = Arc::new(full_script_into(llm, 1));
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_some());
+    assert!(a.skeptic.is_none());
+    assert_eq!(a.notes, [SKEPTIC_FAILED]);
+    let wr = by_key(&llm.requests(), STUDIES_HEADING)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(request_user_text(&wr[0]).contains(SKEPTIC_FAILED));
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.iter()
+            .any(|x| x
+                == "Skeptic: the review could not be completed; the answer is written without it"),
+        "{l:?}"
+    );
+}
+
+/// `full_script` appended to `llm` (its earlier keyed replies win).
+fn full_script_into(llm: ScriptedLlm, research_turns: usize) -> ScriptedLlm {
+    // ScriptedLlm has no merge; rebuild the same script on top of `llm`.
+    let mut l = llm
+        .when(RESEARCHER_FINAL)
+        .reply_json(study_list(&[(SEEN_A, "RCT"), (SEEN_B, "RCT")]), u())
+        .when(&format!("Study PMID {SEEN_A}:"))
+        .reply_json(row(vec![]), u())
+        .when(&format!("Study PMID {SEEN_B}:"))
+        .reply_json(row(vec![]), u())
+        .when(STUDIES_HEADING)
+        .reply_json(writer_json(), usage(3000, 2500));
+    for i in 0..research_turns {
+        l = l.reply_blocks(
+            vec![tool_call(
+                &format!("s{i}"),
+                "get_abstracts",
+                json!({"pmids": [SEEN_A, SEEN_B]}),
+            )],
+            Some(StopReason::ToolUse),
+            u(),
+        );
+    }
+    l.reply_blocks(
+        vec![ContentBlock::Text {
+            text: "Done.".into(),
+        }],
+        Some(StopReason::EndTurn),
+        u(),
+    )
+}
+
+static EXTRACT_SEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Cancel while extraction calls are in flight: the run ends `cancelled`,
+/// nothing more is sent, and every call made is charged (in-flight ones
+/// included); nothing is left held.
+#[tokio::test]
+async fn cancel_mid_extraction_books_the_calls_in_flight() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let cancel = CancelFlag::default();
+    let c2 = cancel.clone();
+    let llm = Arc::new(full_script(1, None).until(
+        "Study PMID",
+        Arc::new(move || {
+            EXTRACT_SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            c2.cancel();
+            true
+        }),
+    ));
+    let (mut ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.cancel = cancel;
+    assert_eq!(run_team(&ctx).await, PipelineOutcome::Failed("cancelled"));
+    let reqs = llm.requests();
+    assert!(
+        !by_key(&reqs, "Study PMID").is_empty(),
+        "extraction was in flight"
+    );
+    assert!(by_key(&reqs, STUDIES_HEADING).is_empty(), "no writer");
+    let rows = charges_settle(&pool, uid, reqs.len()).await;
+    assert_eq!(rows.len(), reqs.len(), "every call made is charged");
+    for _ in 0..200 {
+        if ctx.budget.held() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(ctx.budget.held(), 0);
+}
+
+static HS_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The hard stop drops the pipeline mid-extraction (as the worker's
+/// timeout does): the extraction calls in flight still book their charges
+/// once they land, and nothing stays held.
+#[tokio::test]
+async fn the_hard_stop_mid_extraction_still_books_in_flight_calls() {
+    use std::sync::atomic::Ordering;
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        full_script(1, None).until("Study PMID", Arc::new(|| HS_GO.load(Ordering::SeqCst))),
+    );
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let dropped = tokio::time::timeout(Duration::from_millis(1500), run_team(&ctx)).await;
+    assert!(dropped.is_err(), "the pipeline was dropped mid-run");
+    let reqs = llm.requests();
+    assert!(
+        !by_key(&reqs, "Study PMID").is_empty(),
+        "extraction was in flight"
+    );
+    assert!(ctx.budget.held() > 0, "in-flight holds are kept");
+    HS_GO.store(true, Ordering::SeqCst);
+    let rows = charges_settle(&pool, uid, reqs.len()).await;
+    assert_eq!(rows.len(), llm.requests().len());
+    for _ in 0..300 {
+        if ctx.budget.held() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(ctx.budget.held(), 0, "nothing is left held");
+}
+
+// ---------- money with concurrency ----------
+
+/// A skeptic-like loop (two tool turns, an end of turn, the final call)
+/// run while `ext` paise of extraction holds are in flight, with a finish
+/// reserve for the writer. For every limit: if the loop ran a turn, its
+/// final call was made (always affordable beside the extraction in flight),
+/// and the writer's reserve was never taken.
+#[tokio::test]
+async fn the_skeptics_final_call_is_always_affordable_with_extraction_in_flight() {
+    use incisive_app::agent::agent_loop::{AgentSpec, ResultCaps, run_agent};
+    use incisive_app::agent::llm::OutputSchema;
+    use incisive_app::agent::tools::ToolRegistry;
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let schema = OutputSchema::new(
+        json!({"type": "object", "additionalProperties": false, "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}),
+    );
+    let mut finals = 0;
+    let mut cases = 0;
+    for ext in [0i64, 40, 120, 300] {
+        for limit in (200..=4000).step_by(60) {
+            let llm = ScriptedLlm::new()
+                .when("=== Research transcript")
+                .reply_json(json!({"ok": true}), usage(300, 50));
+            let llm = Arc::new(
+                llm.reply_blocks(
+                    vec![tool_call("x1", "nope", json!({}))],
+                    Some(StopReason::ToolUse),
+                    usage(300, 150),
+                )
+                .reply_blocks(
+                    vec![tool_call("x2", "nope", json!({}))],
+                    Some(StopReason::ToolUse),
+                    usage(400, 150),
+                )
+                .reply_blocks(
+                    vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                    Some(StopReason::EndTurn),
+                    usage(500, 100),
+                ),
+            );
+            let (ctx, uid) = full_ctx(
+                &pool,
+                literature(&server),
+                agent_llm(llm.clone(), MODEL),
+                limit,
+                DepthSettings::FOCUSED,
+            )
+            .await;
+            let reserve = 60;
+            ctx.budget.set_finish_reserve(reserve);
+            // Extraction calls in flight: a gathering hold that stays put.
+            let Some(h) = ctx.budget.try_hold_gathering(ext) else {
+                continue;
+            };
+            let call = ctx.llm.call(&ctx, MODEL, "skeptic");
+            let spec = AgentSpec {
+                system: "You are a skeptic.",
+                user: "Challenge it.",
+                max_turns: 8,
+                // A final call far larger than a turn (as the skeptic's
+                // review over a long transcript is): the case where
+                // counting in-flight holds twice for it would refuse it.
+                max_tokens: 150,
+                effort: None,
+                final_system: "Report.",
+                final_instruction: "Submit.",
+                final_schema: &schema,
+                final_max_tokens: 4000,
+                caps: ResultCaps::default(),
+            };
+            // The loop waits while other calls hold money and wrap-up is
+            // not due; let it see the end of the time instead of waiting.
+            ctx.budget.set_wrap_up_after(Duration::ZERO);
+            let r = run_agent::<Value>(&call, &ToolRegistry::new(), &spec).await;
+            let reqs = llm.requests();
+            let turns = reqs
+                .iter()
+                .filter(|q| !request_user_text(q).contains("=== Research transcript"))
+                .count();
+            let made_final = reqs.len() > turns;
+            if turns > 0 {
+                cases += 1;
+                assert!(
+                    made_final,
+                    "ext {ext} limit {limit}: {turns} turns but no final call: {r:?}"
+                );
+                assert!(r.is_ok(), "ext {ext} limit {limit}: {r:?}");
+                finals += 1;
+            }
+            let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
+            assert!(
+                spent + ext + reserve <= limit,
+                "ext {ext} limit {limit}: the writer's reserve was taken ({spent} spent)"
+            );
+            drop(h);
+            assert_eq!((ctx.budget.held(), ctx.budget.in_flight_reserve()), (0, 0));
+        }
+    }
+    assert!(
+        cases > 20 && finals == cases,
+        "{cases} cases, {finals} finals"
+    );
+}
+
+/// The prices of the default models (USD per Mtok: Opus 4/20, Sonnet 2/10).
+fn real_models(llm: Arc<dyn LlmClient>) -> Arc<AgentLlm> {
+    Arc::new(AgentLlm {
+        client: llm,
+        models: AgentModels::default(),
+    })
+}
+
+/// Real prices, a whole Full run per limit from far too small to ample:
+/// either nothing is sent (`over_budget`), or the writer is reached; never
+/// over the limit, nothing left held. Prints the minimal Full run and the
+/// default's reserves for the report.
+#[tokio::test]
+async fn full_runs_never_overspend_and_always_reach_the_writer() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let mut min_viable = None;
+    for limit in (4000..=24000).step_by(1000) {
+        let llm = Arc::new(full_script(15, None));
+        let (ctx, uid) = full_ctx(
+            &pool,
+            literature(&server),
+            real_models(llm.clone()),
+            limit,
+            DepthSettings::FOCUSED,
+        )
+        .await;
+        let out = run_team(&ctx).await;
+        let reqs = llm.requests();
+        let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
+        assert!(spent <= limit, "limit {limit}: spent {spent}");
+        assert_eq!(ctx.budget.held(), 0, "limit {limit}");
+        if reqs.is_empty() {
+            assert_eq!(out, PipelineOutcome::Failed("over_budget"), "limit {limit}");
+            assert!(
+                min_viable.is_none(),
+                "limit {limit}: refused after a smaller limit ran"
+            );
+            continue;
+        }
+        assert_eq!(
+            by_key(&reqs, STUDIES_HEADING).len(),
+            1,
+            "limit {limit}: writer not reached: {out:?}"
+        );
+        min_viable.get_or_insert(limit);
+        let rounds = reqs
+            .iter()
+            .filter(|r| request_user_text(r).contains(RESEARCHER_KEY) && !r.tools.is_empty())
+            .count();
+        let sk_turns = reqs
+            .iter()
+            .filter(|r| request_user_text(r).contains(SKEPTIC_KEY) && !r.tools.is_empty())
+            .count();
+        let rows = by_key(&reqs, "Study PMID").len();
+        eprintln!(
+            "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, charged {spent}"
+        );
+    }
+    let min_viable = min_viable.expect("a Full run fits under ₹240");
+    let (ctx, _) = full_ctx(
+        &pool,
+        literature(&server),
+        real_models(Arc::new(ScriptedLlm::new())),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let writer =
+        incisive_app::agent::writer_v3::reserve_full(&ctx.llm, &ctx.budget, QUESTION, 16000)
+            .unwrap();
+    let review = incisive_app::agent::team::review_reserve(&ctx).unwrap();
+    eprintln!(
+        "MEASURED Full: smallest limit tried that reaches the writer {min_viable} paise; writer reserve {writer}; review reserve {review}"
+    );
+    assert!(min_viable <= DepthSettings::FOCUSED.agent_limit_paise);
 }

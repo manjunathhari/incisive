@@ -60,7 +60,7 @@ use crate::runs::StepKind;
 /// Missed RCTs kept, at most.
 pub const MAX_MISSED: usize = 3;
 /// Entries kept per list (contradicting, guidelines, overlaps).
-pub const MAX_ITEMS: usize = 8;
+pub const MAX_ITEMS: usize = 6;
 /// `must_mention` items kept.
 pub const MAX_MUST_MENTION: usize = 10;
 /// Characters kept of a claim, note, reason or caveat.
@@ -461,6 +461,67 @@ pub fn task(question: &str, picture: &[Picture], contradictions: &[Contradiction
     )
 }
 
+/// The skeptic's spec for `ctx`, its tools and its first message.
+fn spec_parts(
+    ctx: &RunContext,
+    picture: &[Picture],
+    contradictions: &[Contradiction],
+) -> (String, String, OutputSchema) {
+    (
+        system_prompt(ctx.settings.skeptic_turns),
+        task(&ctx.question, picture, contradictions),
+        OutputSchema::new(report_schema()).with_effort(Effort::Low),
+    )
+}
+
+fn spec<'a>(
+    ctx: &RunContext,
+    system: &'a str,
+    user: &'a str,
+    schema: &'a OutputSchema,
+) -> AgentSpec<'a> {
+    let settings = ctx.settings;
+    AgentSpec {
+        system,
+        user,
+        max_turns: u32::from(settings.skeptic_turns),
+        max_tokens: settings.skeptic_max_tokens,
+        effort: None,
+        final_system: FINAL_SYSTEM,
+        final_instruction: FINAL_INSTRUCTION,
+        final_schema: schema,
+        final_max_tokens: settings.skeptic_max_tokens,
+        caps: ResultCaps::default(),
+    }
+}
+
+/// What the skeptic needs to start (its first turn's hold and its final
+/// call's kept share, [`super::agent_loop::first_turn_need`]) for the
+/// largest picture: ten studies, every field at its cap. `None`: unpriced.
+/// Reserved ahead of the review phase (Stage 3).
+pub fn min_need(ctx: &RunContext, llm: &AgentLlm, lit: Arc<Literature>) -> Option<i64> {
+    let x = |n: usize| "x".repeat(n);
+    let picture: Vec<Picture> = (0..super::researcher::MAX_SELECTED)
+        .map(|i| Picture {
+            pmid: format!("{:09}", 100_000_000 + i),
+            title: x(MAX_TITLE),
+            design: x(10),
+            why: x(MAX_TITLE),
+        })
+        .collect();
+    let notes: Vec<Contradiction> = (0..MAX_CONTRADICTIONS)
+        .map(|i| Contradiction {
+            pmid: format!("{:09}", 100_000_000 + i),
+            note: x(MAX_TITLE),
+        })
+        .collect();
+    let (system, user, schema) = spec_parts(ctx, &picture, &notes);
+    let call = llm.call(ctx, &llm.models.skeptic, "skeptic");
+    let tools = LitTools::new(lit, ctx.state.pool.clone(), ctx.run_id, &ctx.question)
+        .registry_of(&QUICK_TOOLS);
+    super::agent_loop::first_turn_need(&call, &tools, &spec(ctx, &system, &user, &schema))
+}
+
 // ---------- the step ----------
 
 struct Progress<'a> {
@@ -504,21 +565,8 @@ pub async fn review(
     let lit_tools = LitTools::new(lit, ctx.state.pool.clone(), ctx.run_id, &ctx.question);
     let rec = Arc::new(SearchRecorder::default());
     let tools = recording(&lit_tools.registry_of(&QUICK_TOOLS), &rec);
-    let system = system_prompt(settings.skeptic_turns);
-    let user = task(&ctx.question, picture, contradictions);
-    let schema = OutputSchema::new(report_schema()).with_effort(Effort::Low);
-    let spec = AgentSpec {
-        system: &system,
-        user: &user,
-        max_turns: u32::from(settings.skeptic_turns),
-        max_tokens: settings.skeptic_max_tokens,
-        effort: None,
-        final_system: FINAL_SYSTEM,
-        final_instruction: FINAL_INSTRUCTION,
-        final_schema: &schema,
-        final_max_tokens: settings.skeptic_max_tokens,
-        caps: ResultCaps::default(),
-    };
+    let (system, user, schema) = spec_parts(ctx, picture, contradictions);
+    let spec = spec(ctx, &system, &user, &schema);
     let progress = Progress {
         ctx,
         rec: rec.clone(),

@@ -35,6 +35,15 @@
 //!   bound; one that would push the final estimate (with the rest of the
 //!   turn's pad) past the headroom is cut (or withheld) until it fits.
 //!
+//! **Beside another step** (Stage 3: the skeptic runs while the extractor's
+//! calls are in flight). The final call is held from its share counting
+//! in-flight holds once, as [`Final`]'s check does
+//! ([`RunBudget::try_hold_releasing`]), so a share that fits is always a
+//! hold that fits. When the share's resize or a turn's hold does not fit
+//! while other calls hold money, the loop waits [`OTHERS_POLL`] and checks
+//! everything again (cancel, hard stop, wrap-up first) instead of stopping:
+//! their charges usually free part of their holds.
+//!
 //! **Between turns** (in this order): cancel → `Cancelled`; past the hard
 //! stop → `HardStop`; turn cap reached → final call; wrap-up due (70%
 //! spent, wrap-up time, no headroom above the finish reserve and the final
@@ -467,6 +476,33 @@ impl Final<'_> {
     }
 }
 
+/// What the loop must be able to hold before its first turn, in paise:
+/// the first turn's hold plus the final call's kept share with the turn's
+/// worst-case pad (the loop refuses to start below it). `None`: unpriced.
+/// Used to reserve a role's minimal run ahead of it (Stage 3: the skeptic).
+pub fn first_turn_need(call: &LlmCall, tools: &ToolRegistry, spec: &AgentSpec<'_>) -> Option<i64> {
+    let fin = Final {
+        call,
+        spec,
+        share: None,
+    };
+    let share = fin.estimate(&Transcript::default(), final_pad_bytes(spec.max_tokens))?;
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: spec.user.to_string(),
+        }],
+    }];
+    let turn = call.turn_estimate(
+        spec.system,
+        &messages,
+        &tools.defs(),
+        spec.effort,
+        spec.max_tokens,
+    )?;
+    Some(share + turn)
+}
+
 /// Run `spec` with `tools` through `call` (see the module docs).
 pub async fn run_agent<T: DeserializeOwned>(
     call: &LlmCall,
@@ -543,9 +579,19 @@ pub async fn run_agent_observed<T: DeserializeOwned>(
         // up to MAX_TOOLS_PER_TURN errored or withheld calls (successful
         // results are admitted only if they fit, in `run_tool`). If that
         // no longer fits, research stops here.
+        //
+        // Another step's calls in flight (Stage 3: the extractor beside the
+        // skeptic; this loop has none of its own here) can make the final
+        // share or the turn's hold not fit for a moment: then wait for them
+        // to settle and check everything again, while wrap-up is not due.
+        let others = budget.held() > 0 && !budget.should_wrap_up_settled(now);
         let pad = final_pad_bytes(spec.max_tokens);
         match fin.estimate(&transcript, pad) {
             Some(est) if fin.fits(est) => fin.resize(est),
+            Some(_) if others => {
+                wait_for_others().await;
+                continue;
+            }
             _ if done == 0 => return Err(StepError::OverBudget),
             _ => break LoopStop::WrapUp("cost limit"),
         }
@@ -553,6 +599,10 @@ pub async fn run_agent_observed<T: DeserializeOwned>(
         let started =
             match call.start_turn(spec.system, &messages, &defs, spec.effort, spec.max_tokens) {
                 Ok(s) => s,
+                Err(StepError::OverBudget) if others => {
+                    wait_for_others().await;
+                    continue;
+                }
                 Err(StepError::OverBudget) if done > 0 => break LoopStop::OverBudget,
                 Err(e) => return Err(e),
             };
@@ -704,6 +754,14 @@ pub async fn run_agent_observed<T: DeserializeOwned>(
         log,
         results: seen,
     })
+}
+
+/// How long the loop waits for another step's calls to settle before it
+/// checks again (Stage 3).
+pub const OTHERS_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+async fn wait_for_others() {
+    tokio::time::sleep(OTHERS_POLL).await;
 }
 
 fn log_turn(run_id: uuid::Uuid, step: &'static str, t: &TurnLog) {

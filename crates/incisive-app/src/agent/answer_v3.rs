@@ -152,6 +152,50 @@ pub struct ReferenceV3 {
     pub year: Option<i32>,
     pub doi: Option<String>,
     pub retracted: bool,
+    /// Full (Stage 3): a missed RCT the skeptic found; given to the writer
+    /// from its abstract, not extracted. Additive (old answers: false).
+    #[serde(default)]
+    pub found_by_skeptic: bool,
+}
+
+/// Full (Stage 3): what the extractor did for one selected study.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceV3 {
+    pub pmid: String,
+    /// "full text" or "abstract only" (what the row was read from), or
+    /// "not extracted" (the writer used the abstract).
+    pub text: String,
+    /// Outcomes whose quote was found in the source.
+    pub verified_quotes: u32,
+    pub numbers_dropped: u32,
+    /// Outcomes reported but not verifiable (dropped).
+    pub unverified_outcomes: Vec<String>,
+}
+
+/// Full (Stage 3): the skeptic's checked review, as the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkepticV3 {
+    /// "holds", "holds with caveats" or "does not hold".
+    pub verdict: String,
+    pub must_mention: Vec<String>,
+    /// (PMID, claim) of each contradiction with a verified quote.
+    pub contradicting: Vec<SkepticItem>,
+    pub missed_rcts: Vec<SkepticItem>,
+    /// (PMID, body: statement) of each guideline with a verified quote.
+    pub guidelines: Vec<SkepticItem>,
+    pub overlaps: Vec<SkepticOverlap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkepticItem {
+    pub pmid: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkepticOverlap {
+    pub pmids: Vec<String>,
+    pub note: String,
 }
 
 /// One search the researcher ran, as its tool returned it (recorded by
@@ -198,6 +242,17 @@ pub struct AnswerV3 {
     pub stopped_early: Option<String>,
     pub cost_paise: i64,
     pub elapsed_s: u64,
+    /// Full (Stage 3, additive): the skeptic's review; `None` in Quick, or
+    /// when the skeptic failed (`notes` says so).
+    #[serde(default)]
+    pub skeptic: Option<SkepticV3>,
+    /// Full (Stage 3, additive): per selected study, what was extracted.
+    #[serde(default)]
+    pub evidence: Vec<EvidenceV3>,
+    /// Full (Stage 3, additive): what went short (the skeptic failed, the
+    /// extractor stopped early), in plain words.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl AnswerV3 {

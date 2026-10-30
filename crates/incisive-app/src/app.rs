@@ -971,7 +971,9 @@ fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
 fn written_v3_view(
     w: WrittenAnswer,
     refs: &std::collections::HashMap<String, u16>,
+    evidence: &std::collections::HashMap<String, String>,
 ) -> impl IntoView {
+    let full = !evidence.is_empty();
     let c = w.bottom_line.certainty;
     view! {
         <h3>"Bottom line"</h3>
@@ -1031,6 +1033,7 @@ fn written_v3_view(
                                 <th>"Comparison"</th>
                                 <th>"Key results"</th>
                                 <th>"Appraisal"</th>
+                                {full.then(|| view! { <th>"Evidence checked"</th> })}
                             </tr>
                         </thead>
                         <tbody>
@@ -1038,6 +1041,12 @@ fn written_v3_view(
                                 .into_iter()
                                 .map(|s| {
                                     let n = refs.get(&s.pmid).copied();
+                                    let checked = full.then(|| {
+                                        evidence
+                                            .get(s.pmid.trim())
+                                            .cloned()
+                                            .unwrap_or_else(|| "not extracted".to_string())
+                                    });
                                     let design = match s.n {
                                         Some(n) => format!("{} \u{b7} n = {n} \u{b7} {}", s.design, s.setting),
                                         None => format!("{} \u{b7} {}", s.design, s.setting),
@@ -1052,6 +1061,7 @@ fn written_v3_view(
                                             <td>{cited(&s.comparison, refs)}</td>
                                             <td>{cited(&s.key_results, refs)}</td>
                                             <td>{cited(&s.appraisal, refs)}</td>
+                                            {checked.map(|c| view! { <td>{c}</td> })}
                                         </tr>
                                     }
                                 })
@@ -1095,6 +1105,50 @@ fn written_v3_view(
     }
 }
 
+/// The skeptic's review (Full): verdict, caveats, overlaps, missed trials,
+/// contradictions and guidelines, as escaped text with numbered citations.
+fn skeptic_v3_view(
+    k: crate::agent::answer_v3::SkepticV3,
+    refs: &std::collections::HashMap<String, u16>,
+) -> AnyView {
+    let item = |pmid: &str, text: &str| format!("{text} [{pmid}]");
+    let overlaps: Vec<String> = k
+        .overlaps
+        .iter()
+        .map(|o| format!("{} [{}]", o.note, o.pmids.join("; ")))
+        .collect();
+    let missed: Vec<String> = k
+        .missed_rcts
+        .iter()
+        .map(|m| item(&m.pmid, &m.text))
+        .collect();
+    let against: Vec<String> = k
+        .contradicting
+        .iter()
+        .chain(&k.guidelines)
+        .map(|c| item(&c.pmid, &c.text))
+        .collect();
+    let list = |title: &'static str, xs: Vec<String>| {
+        (!xs.is_empty()).then(|| {
+            view! {
+                <p><strong>{title}</strong></p>
+                <ul>{xs.into_iter().map(|x| view! { <li>{cited(&x, refs)}</li> }).collect_view()}</ul>
+            }
+        })
+    };
+    view! {
+        <section class="box" aria-label="Challenged by the skeptic">
+            <h3>"Challenged by the skeptic"</h3>
+            <p>{format!("Verdict: the conclusion {}.", k.verdict)}</p>
+            {list("Caveats", k.must_mention.clone())}
+            {list("Not independent", overlaps)}
+            {list("Trials the search missed", missed)}
+            {list("Evidence against, and guidelines", against)}
+        </section>
+    }
+    .into_any()
+}
+
 /// A Phase 3 answer (AnswerV3), in the spec §2 order, as escaped text and
 /// links only. The polished layout is Stage 4.
 fn answer_v3_view(a: AnswerV3) -> impl IntoView {
@@ -1131,7 +1185,32 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         ));
     }
     let n_searches = a.searches.len();
-    let written = a.answer.map(|w| written_v3_view(w, &refs));
+    // Full: per study, what the extractor read and how many quotes it
+    // verified.
+    let evidence: std::collections::HashMap<String, String> = a
+        .evidence
+        .iter()
+        .map(|e| {
+            let line = if e.text == "not extracted" {
+                "not extracted (abstract)".to_string()
+            } else {
+                format!(
+                    "{} \u{b7} {} verified {}",
+                    e.text,
+                    e.verified_quotes,
+                    if e.verified_quotes == 1 {
+                        "quote"
+                    } else {
+                        "quotes"
+                    }
+                )
+            };
+            (e.pmid.clone(), line)
+        })
+        .collect();
+    let written = a.answer.map(|w| written_v3_view(w, &refs, &evidence));
+    let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
+    let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
     view! {
         <section class="answer" aria-label="Answer">
@@ -1147,6 +1226,12 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
                 }
                     .into_any(),
             }}
+
+            {skeptic}
+            {(!run_notes.is_empty())
+                .then(|| view! {
+                    <ul class="hint">{run_notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
+                })}
 
             <h3>"References"</h3>
             {if a.references.is_empty() {

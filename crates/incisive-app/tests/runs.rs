@@ -3357,6 +3357,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 year: Some(2025),
                 doi: Some("10.1001/jamasurg.2025.4071".into()),
                 retracted: false,
+                found_by_skeptic: false,
             },
             ReferenceV3 {
                 n: 2,
@@ -3366,6 +3367,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 year: Some(2025),
                 doi: None,
                 retracted,
+                found_by_skeptic: false,
             },
         ],
         searches: vec![SearchEntry {
@@ -3380,6 +3382,9 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         stopped_early: None,
         cost_paise: 2345,
         elapsed_s: 125,
+        skeptic: None,
+        evidence: vec![],
+        notes: vec![],
     };
     serde_json::to_value(a).unwrap()
 }
@@ -3564,4 +3569,85 @@ fn deploy_workflow_wires_the_full_engine() {
         2,
         "FULL_ENGINE must reach both the check and the deploy step"
     );
+}
+
+// ---------- Phase 3 Stage 3: the Full additions to the AnswerV3 page ----------
+
+/// A v3 answer stored before Stage 3 (no `skeptic`, `evidence`, `notes` or
+/// `found_by_skeptic`) still loads and renders.
+#[tokio::test]
+async fn ssr_v3_answers_stored_before_stage3_still_render() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    let o = body.as_object_mut().unwrap();
+    for k in ["skeptic", "evidence", "notes"] {
+        assert!(o.remove(k).is_some(), "{k}");
+    }
+    for r in o["references"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("found_by_skeptic");
+    }
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    assert!(a.skeptic.is_none() && a.evidence.is_empty() && a.notes.is_empty());
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("The trials"));
+    assert!(!m.contains("Challenged by the skeptic"));
+    assert!(!m.contains("Evidence checked"));
+}
+
+/// Full: the skeptic box (verdict, caveats, overlaps, missed trials) and the
+/// trials table's evidence column, escaped, with citations linked.
+#[tokio::test]
+async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![
+            "Two trials share <script>alert(3)</script> one group [41060645].".into(),
+        ],
+        contradicting: vec![],
+        missed_rcts: vec![SkepticItem {
+            pmid: "39979619".into(),
+            text: "a newer trial".into(),
+        }],
+        guidelines: vec![],
+        overlaps: vec![SkepticOverlap {
+            pmids: vec!["41060645".into(), "39979619".into()],
+            note: "same group".into(),
+        }],
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "full text".into(),
+        verified_quotes: 3,
+        numbers_dropped: 1,
+        unverified_outcomes: vec![],
+    }];
+    a.notes = vec![
+        "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
+            .into(),
+    ];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("Challenged by the skeptic"), "{m}");
+    assert!(m.contains("Verdict: the conclusion holds with caveats."));
+    assert!(!m.contains("<script>alert(3)"), "escaped");
+    assert!(m.contains("&lt;script&gt;alert(3)"));
+    assert!(m.contains("Not independent"));
+    assert!(m.contains("Trials the search missed"));
+    assert!(m.contains("#ref-1"), "citations link to references");
+    assert!(m.contains("Evidence checked"));
+    assert!(m.contains("full text \u{b7} 3 verified quotes"));
+    assert!(m.contains("Extraction stopped at the Full limit"));
+    // The box comes before the references.
+    assert!(m.find("Challenged by the skeptic").unwrap() < m.find(">References<").unwrap());
 }

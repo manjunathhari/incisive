@@ -68,9 +68,9 @@ use crate::runs::StepKind;
 /// Characters of source text sent per study (as `get_full_text`, Stage 1).
 pub const SOURCE_CHARS: usize = 28_000;
 /// Outcomes read per row; any beyond are ignored.
-pub const MAX_OUTCOMES: usize = 8;
+pub const MAX_OUTCOMES: usize = 6;
 /// Numbers read per outcome; any beyond are ignored.
-pub const MAX_NUMBERS: usize = 8;
+pub const MAX_NUMBERS: usize = 6;
 /// Characters kept of a short field (design, setting, PICO, …).
 pub const MAX_FIELD: usize = 300;
 /// Characters kept of an outcome's `effect_text` or an appraisal line.
@@ -529,7 +529,7 @@ Extract: design; n randomised and n analysed (integers, or null when the text do
 comparator, as the study names them); follow-up; blinding; the primary endpoint and whether the study was powered for it (true, false, or \
 null when not stated); surgeon experience (as stated, or say it is not reported).
 
-OUTCOMES: up to 8 outcomes relevant to the question, most important first (benefits and harms; operative time and cost \
+OUTCOMES: up to 6 outcomes relevant to the question, most important first (benefits and harms; operative time and cost \
 when reported). For each give: outcome; effect_text (the effect in words with its numbers); numbers (each number as a \
 structured entry: label, value, unit, arm or null, ci_low and ci_high when a confidence interval is given else null, p as \
 written or null); quote; source (abstract when the quote is from the [abstract] section, otherwise full_text).
@@ -639,6 +639,43 @@ pub fn correction_prompt(study_prompt: &str, row: &ReportedRow, failed: &[usize]
     )
 }
 
+/// The hold of one extraction call at its largest likely prompt: a study
+/// with [`SOURCE_CHARS`] of ASCII text and a 500-character title, priced on
+/// the extractor model at `max_tokens` (`None`: unpriced). An estimate for
+/// reserving ahead (Stage 3), not a bound: token-dense text holds more.
+pub fn typical_max_hold(
+    llm: &AgentLlm,
+    budget: &crate::runs::budget::RunBudget,
+    question: &str,
+    max_tokens: u32,
+) -> Option<i64> {
+    let mut paper = Paper {
+        pmid: Some("123456789".into()),
+        pmcid: None,
+        doi: None,
+        title: "x".repeat(MAX_TITLE),
+        authors: vec![],
+        journal: None,
+        year: None,
+        pub_types: vec![],
+        abstract_text: None,
+        oa_url: None,
+        oa_is_pdf: false,
+        retracted: false,
+        source: crate::lit::PaperSource::PubMed,
+    };
+    paper.abstract_text = Some("xxxxxxx ".repeat(SOURCE_CHARS / 8 + 10));
+    let src = source_text(&paper, None)?;
+    super::llm::hold_estimate(
+        budget,
+        &llm.models.extractor,
+        SYSTEM,
+        &prompt(question, "123456789", &src),
+        Some(&SCHEMA),
+        max_tokens,
+    )
+}
+
 // ---------- the step ----------
 
 /// What the extractor produced.
@@ -674,32 +711,30 @@ pub async fn fetch_full_texts(
     lit: &Literature,
     studies: &[StudyRef],
 ) -> Result<Vec<Option<FullText>>, StepError> {
-    use futures_util::stream::{self, StreamExt};
-    let cancel = ctx.cancel.clone();
-    let out: Vec<Result<Option<FullText>, StepError>> = stream::iter(studies.iter())
-        .map(|s| {
-            let cancel = cancel.clone();
-            async move {
-                if cancel.is_cancelled() {
-                    return Err(StepError::Cancelled);
-                }
-                let Some(id) = s.paper.pmcid.as_deref() else {
-                    return Ok(None);
-                };
-                match lit.epmc.full_text(id).await {
-                    Ok(ft) if !ft.sections.is_empty() => Ok(Some(ft)),
-                    Ok(_) => Ok(None),
-                    Err(e) => {
-                        tracing::info!(run_id = %ctx.run_id, step = "extractor", error_kind = super::search::lit_kind(&e), "full text unavailable; using the abstract");
-                        Ok(None)
-                    }
-                }
-            }
-        })
-        .buffered(3)
-        .collect()
-        .await;
-    out.into_iter().collect()
+    let mut out = Vec::with_capacity(studies.len());
+    for chunk in studies.chunks(3) {
+        if ctx.cancel.is_cancelled() {
+            return Err(StepError::Cancelled);
+        }
+        let mut futs = Vec::with_capacity(chunk.len());
+        for s in chunk {
+            futs.push(fetch_one(ctx, lit, s));
+        }
+        out.extend(futures_util::future::join_all(futs).await);
+    }
+    Ok(out)
+}
+
+async fn fetch_one(ctx: &RunContext, lit: &Literature, s: &StudyRef) -> Option<FullText> {
+    let id = s.paper.pmcid.as_deref()?;
+    match lit.epmc.full_text(id).await {
+        Ok(ft) if !ft.sections.is_empty() => Some(ft),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::info!(run_id = %ctx.run_id, step = "extractor", error_kind = super::search::lit_kind(&e), "full text unavailable; using the abstract");
+            None
+        }
+    }
 }
 
 /// Extract every study (see the module docs). Only `Cancelled` and fatal

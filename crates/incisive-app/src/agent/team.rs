@@ -1,10 +1,42 @@
-//! The evidence team's Quick pipeline (Phase 3, T5): researcher → writer →
-//! citation check → [`AnswerV3`]. Server only.
+//! The evidence team's pipelines (Phase 3). Server only.
 //!
-//! The worker runs it for Quick runs when `QUICK_ENGINE` is `team` (the
-//! default; [`super::run_engine`]); the run then reserves and is limited by
-//! `agent_limit_paise` and `agent_time_limit_s` (`RunsConfig::limits`).
-//! Focused runs keep the Phase 2 pipeline.
+//! * **Quick** (T5): researcher → writer → citation check → [`AnswerV3`].
+//! * **Full** (Stage 3, T9): researcher (Full settings: full text, 15
+//!   turns) → [extractor ∥ skeptic] → writer (from the verified evidence
+//!   rows, the skeptic's review and its missed trials) → citation check →
+//!   [`AnswerV3`] with its additive `evidence`, `skeptic` and `notes`.
+//!
+//! The worker runs it when the mode's engine (`QUICK_ENGINE`, `FULL_ENGINE`)
+//! is `team` (the default; [`super::run_engine`]); the run then reserves and
+//! is limited by `agent_limit_paise` and `agent_time_limit_s`.
+//!
+//! **Full: money with concurrency.** Before research the finish reserve is
+//! the Full writer's worst case ([`writer_v3::reserve_full`]) **plus** the
+//! review phase's share ([`review_reserve`]: ten extractions at the
+//! extractor's largest likely hold and the skeptic's first turn with its
+//! final call's kept share), so research can never use the money the review
+//! phase needs to start. When research ends, the reserve drops back to the
+//! writer's. The skeptic and the extractor then run at once (`tokio::join!`,
+//! the skeptic polled first so its first turn's hold is taken before any
+//! extraction launches). Every call of both is a gathering call: it leaves
+//! the writer's reserve **and** the skeptic's kept final-call share free,
+//! and with others in flight counts every in-flight hold twice (R-FB3). The
+//! skeptic's final call is held from its share counting in-flight holds
+//! once, exactly as its affordability check counts them (the deferred
+//! Stage 1 issue, `RunBudget::try_hold_releasing`), so it is always
+//! affordable while extraction calls are in flight. A refusal beside the
+//! other step's calls waits for them (`bounded::OTHERS_POLL`,
+//! `agent_loop::OTHERS_POLL`) instead of ending the step. So the extractor's
+//! calls, the skeptic's turns and its kept share never together take the
+//! writer's reserve; global, daily and monthly caps are unchanged.
+//!
+//! **Full: wrap-up.** Research wraps up at the time limit less the writer's
+//! and the review's allowances (the worker); the review phase at the time
+//! limit less the writer's. An extractor stopped by money or time leaves the
+//! studies it did not read to the writer as abstracts, labelled; a skeptic
+//! that fails (anything but cancel, hard stop or unrecorded money) leaves
+//! the answer without its review, with a note. The trail line says "the
+//! Full limit".
 //!
 //! **Money (Ruling R-13c, reused).** Before the researcher starts, the
 //! **finish reserve** is set to the writer's hold for the largest prompt this
@@ -60,14 +92,22 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
-use super::answer_v3::{ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3};
+use super::answer_v3::{
+    ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, ReferenceV3, SkepticItem, SkepticOverlap,
+    SkepticV3,
+};
+use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
 use super::pipeline::gate;
 use super::researcher::{self, Research};
+use super::skeptic::{self, Picture, SkepticReview};
 use super::tools::lit::LitTools;
-use super::writer_v3::{self, StudyInput, WriteFailure, check_citations, writer_user};
+use super::writer_v3::{
+    self, FullInput, StudyInput, WriteFailure, check_citations, writer_user, writer_user_full,
+};
 use super::{PipelineOutcome, RunContext, add_line};
-use crate::runs::StepKind;
+use crate::lit::Paper;
+use crate::runs::{RunMode, StepKind};
 
 /// Bottom line when none of the selected studies' records could be read.
 pub const UNFETCHED: &str =
@@ -138,6 +178,9 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         stopped_early: research.stopped_early().map(str::to_string),
         cost_paise: 0,
         elapsed_s: 0,
+        skeptic: None,
+        evidence: Vec::new(),
+        notes: Vec::new(),
     }
 }
 
@@ -170,19 +213,41 @@ async fn unwritten(
 
 async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     gate(ctx).await?;
+    let full = ctx.mode == RunMode::Focused;
     // The writer is reserved for before any research (see the module docs);
     // an unpriced writer could never be paid for, so nothing starts.
-    let Some(reserve) = writer_v3::reserve_for(
-        &ctx.llm,
-        &ctx.budget,
-        &ctx.question,
-        ctx.settings.writer_max_tokens,
-    ) else {
+    let writer_reserve = if full {
+        writer_v3::reserve_full(
+            &ctx.llm,
+            &ctx.budget,
+            &ctx.question,
+            ctx.settings.writer_max_tokens,
+        )
+    } else {
+        writer_v3::reserve_for(
+            &ctx.llm,
+            &ctx.budget,
+            &ctx.question,
+            ctx.settings.writer_max_tokens,
+        )
+    };
+    let Some(reserve) = writer_reserve else {
         tracing::error!(run_id = %ctx.run_id, model = %ctx.llm.models.writer, "no price for the writer model; run not started");
         return Err("llm");
     };
-    ctx.budget.set_finish_reserve(reserve);
-    tracing::info!(run_id = %ctx.run_id, writer_reserve = reserve, limit = ctx.budget.limit_paise(), "team: writer reserved");
+    // Full: research also leaves the review phase its share (see the module
+    // docs); unpriced extractor or skeptic models fail the run up front.
+    let review = if full {
+        let Some(r) = review_reserve(ctx) else {
+            tracing::error!(run_id = %ctx.run_id, "no price for the extractor or skeptic model; run not started");
+            return Err("llm");
+        };
+        r
+    } else {
+        0
+    };
+    ctx.budget.set_finish_reserve(reserve + review);
+    tracing::info!(run_id = %ctx.run_id, writer_reserve = reserve, review_reserve = review, limit = ctx.budget.limit_paise(), "team: writer reserved");
     add_line(
         ctx,
         StepKind::Search,
@@ -251,20 +316,27 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .await
         .map_err(|_| "lit")?;
     let mut studies: Vec<StudyInput> = Vec::new();
+    let mut fetched: Vec<StudyRef> = Vec::new();
     for s in &research.selected {
         match papers.iter().find(|p| p.pmid.as_deref() == Some(&s.pmid)) {
-            Some(p) => studies.push(StudyInput {
-                pmid: s.pmid.clone(),
-                title: p.title.clone(),
-                journal: p.journal.clone(),
-                year: p.year,
-                pub_types: p.pub_types.clone(),
-                doi: p.doi.clone(),
-                retracted: p.retracted,
-                abstract_text: p.abstract_text.clone(),
-                design: s.design.as_str().to_string(),
-                why: s.why.clone(),
-            }),
+            Some(p) => {
+                fetched.push(StudyRef {
+                    pmid: s.pmid.clone(),
+                    paper: p.clone(),
+                });
+                studies.push(StudyInput {
+                    pmid: s.pmid.clone(),
+                    title: p.title.clone(),
+                    journal: p.journal.clone(),
+                    year: p.year,
+                    pub_types: p.pub_types.clone(),
+                    doi: p.doi.clone(),
+                    retracted: p.retracted,
+                    abstract_text: p.abstract_text.clone(),
+                    design: s.design.as_str().to_string(),
+                    why: s.why.clone(),
+                })
+            }
             None => integrity.dropped_unfetched += 1,
         }
     }
@@ -301,11 +373,33 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             year: s.year,
             doi: s.doi.clone(),
             retracted: s.retracted,
+            found_by_skeptic: false,
         })
         .collect();
     if studies.is_empty() {
         answer.empty_reason = Some(UNFETCHED.to_string());
         return Ok(finish(ctx, answer, Status::Partial).await);
+    }
+
+    // Full: the extractor and the skeptic, side by side.
+    let mut reviewed = Reviewed::default();
+    if full {
+        reviewed = review_phase(ctx, &research, &fetched, &studies, reserve).await?;
+        for (k, m) in reviewed.missed.iter().enumerate() {
+            answer.references.push(ReferenceV3 {
+                n: u16::try_from(studies.len() + k + 1).unwrap_or(u16::MAX),
+                pmid: m.pmid.clone(),
+                title: m.title.clone(),
+                journal: m.journal.clone(),
+                year: m.year,
+                doi: m.doi.clone(),
+                retracted: m.retracted,
+                found_by_skeptic: true,
+            });
+        }
+        answer.evidence = evidence_summary(&studies, &reviewed.extraction);
+        answer.skeptic = reviewed.review.as_ref().map(skeptic_summary);
+        answer.notes = reviewed.notes.clone();
     }
 
     // The writer: only with time for it before the hard stop.
@@ -339,14 +433,39 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         ),
     )
     .await;
-    let user = writer_user(
-        &ctx.question,
-        &studies,
-        &research.contradictions,
-        &research.searches,
-    );
-    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
-    match writer_v3::write(ctx, &ctx.llm, &user).await {
+    let (system, user) = if full {
+        (
+            writer_v3::SYSTEM_FULL,
+            writer_user_full(
+                &ctx.question,
+                &studies,
+                &FullInput {
+                    rows: &reviewed.extraction.rows,
+                    skeptic: reviewed.review.as_ref(),
+                    skeptic_note: reviewed.skeptic_note,
+                    missed: &reviewed.missed,
+                },
+                &research.contradictions,
+                &research.searches,
+            ),
+        )
+    } else {
+        (
+            writer_v3::SYSTEM,
+            writer_user(
+                &ctx.question,
+                &studies,
+                &research.contradictions,
+                &research.searches,
+            ),
+        )
+    };
+    let selected: Vec<String> = studies
+        .iter()
+        .chain(&reviewed.missed)
+        .map(|s| s.pmid.clone())
+        .collect();
+    match writer_v3::write_with(ctx, &ctx.llm, system, &user).await {
         Ok(mut written) => {
             check_citations(&mut written, &selected, &mut integrity);
             answer.integrity = integrity;
@@ -409,5 +528,252 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             Ok(unwritten(ctx, answer, WRITE_REFUSED, "write_refused").await)
         }
         Err(WriteFailure::Step(e)) => Err(e.kind()),
+    }
+}
+
+// ---------- Full: the review phase (Stage 3) ----------
+
+/// Bottom-line note when the skeptic's review failed.
+pub const SKEPTIC_FAILED: &str =
+    "The skeptic's review could not be completed, so this answer was written without it.";
+
+/// What the review phase produced.
+#[derive(Default)]
+struct Reviewed {
+    extraction: Extraction,
+    review: Option<SkepticReview>,
+    skeptic_note: Option<&'static str>,
+    /// The skeptic's missed RCTs, fetched.
+    missed: Vec<StudyInput>,
+    notes: Vec<String>,
+}
+
+/// What research leaves free for the review phase in a Full run: every
+/// selected study (at most ten) extracted once at the extractor's largest
+/// likely hold, plus what the skeptic needs to start (its first turn and its
+/// final call's kept share). Corrections and JSON retries are not reserved
+/// for, as in Phase 2. `None`: an unpriced extractor or skeptic model.
+pub fn review_reserve(ctx: &RunContext) -> Option<i64> {
+    let per_study = extractor::typical_max_hold(
+        &ctx.llm,
+        &ctx.budget,
+        &ctx.question,
+        ctx.settings.extractor_max_tokens,
+    )?;
+    let skeptic = skeptic::min_need(ctx, &ctx.llm, ctx.lit.clone())?;
+    let n = i64::try_from(super::researcher::MAX_SELECTED).unwrap_or(10);
+    Some(per_study.saturating_mul(n).saturating_add(skeptic))
+}
+
+/// The extractor and the skeptic, concurrently (see the module docs).
+async fn review_phase(
+    ctx: &RunContext,
+    research: &Research,
+    fetched: &[StudyRef],
+    studies: &[StudyInput],
+    writer_reserve: i64,
+) -> Result<Reviewed, Stop> {
+    gate(ctx).await?;
+    // Research is over: the review phase may use what research had to
+    // leave for it; only the writer stays reserved. Its wrap-up point is
+    // the time limit less the writer's allowance.
+    ctx.budget.set_finish_reserve(writer_reserve);
+    let s = ctx.settings;
+    ctx.budget.set_wrap_up_after(Duration::from_secs(u64::from(
+        s.agent_time_limit_s
+            .saturating_sub(s.writer_time_allowance_s),
+    )));
+    add_line(
+        ctx,
+        StepKind::Extract,
+        &format!(
+            "Extractor and skeptic: extracting {} and challenging the conclusion",
+            plural(fetched.len(), "study", "studies")
+        ),
+    )
+    .await;
+    let picture: Vec<Picture> = studies
+        .iter()
+        .map(|s| Picture {
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            design: s.design.clone(),
+            why: s.why.clone(),
+        })
+        .collect();
+    // The skeptic first: its first turn's hold is taken on the first poll,
+    // before the extractor launches anything (see the module docs).
+    let skeptic_fut = skeptic::review(
+        ctx,
+        &ctx.llm,
+        ctx.lit.clone(),
+        &picture,
+        &research.contradictions,
+    );
+    let extract_fut = async {
+        let texts = extractor::fetch_full_texts(ctx, &ctx.lit, fetched).await?;
+        extractor::extract_rows(ctx, &ctx.llm, fetched, &texts).await
+    };
+    let (sk, ex) = tokio::join!(skeptic_fut, extract_fut);
+    let extraction = ex.map_err(StepError::kind)?;
+    let mut out = Reviewed {
+        extraction,
+        ..Reviewed::default()
+    };
+    match sk {
+        Ok(r) => out.review = Some(r),
+        Err(e @ (StepError::Cancelled | StepError::Unrecorded | StepError::HardStop)) => {
+            return Err(e.kind());
+        }
+        Err(e) => {
+            tracing::warn!(run_id = %ctx.run_id, error_kind = e.kind(), "skeptic failed; writing without it");
+            add_line(
+                ctx,
+                StepKind::Note,
+                "Skeptic: the review could not be completed; the answer is written without it",
+            )
+            .await;
+            out.skeptic_note = Some(SKEPTIC_FAILED);
+            out.notes.push(SKEPTIC_FAILED.to_string());
+        }
+    }
+    let x = &out.extraction;
+    tracing::info!(
+        run_id = %ctx.run_id, rows = x.rows.len(), not_extracted = x.not_extracted.len(),
+        stopped = x.stopped, failed = x.failed, "review phase done"
+    );
+    if x.stopped > 0 {
+        let line = format!(
+            "Extraction stopped at the Full limit; {} the abstract only",
+            if x.stopped == 1 {
+                "1 study uses".to_string()
+            } else {
+                format!("{} studies use", x.stopped)
+            }
+        );
+        add_line(ctx, StepKind::Note, &line).await;
+        out.notes.push(format!("{line}, labelled as such."));
+    }
+    if x.failed > 0 {
+        let line = format!(
+            "Extraction failed for {}; the abstract is used instead",
+            plural(x.failed, "study", "studies")
+        );
+        add_line(ctx, StepKind::Note, &line).await;
+        out.notes.push(format!("{line}."));
+    }
+    // The skeptic's missed RCTs: records and abstracts, cited and
+    // referenced, never extracted.
+    let missed_ids: Vec<String> = out
+        .review
+        .as_ref()
+        .map(|r| r.missed_rcts.iter().map(|m| m.pmid.clone()).collect())
+        .unwrap_or_default();
+    if !missed_ids.is_empty() {
+        gate(ctx).await?;
+        let lit = LitTools::new(
+            ctx.lit.clone(),
+            ctx.state.pool.clone(),
+            ctx.run_id,
+            &ctx.question,
+        );
+        match lit.fetch_papers(&missed_ids, "skeptic_missed").await {
+            Ok((papers, _)) => {
+                let why = |id: &str| {
+                    out.review
+                        .as_ref()
+                        .and_then(|r| r.missed_rcts.iter().find(|m| m.pmid == id))
+                        .map(|m| m.why.clone())
+                        .unwrap_or_default()
+                };
+                for id in &missed_ids {
+                    if let Some(p) = papers.iter().find(|p| p.pmid.as_deref() == Some(id)) {
+                        out.missed.push(missed_input(id, p, why(id)));
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!(run_id = %ctx.run_id, "skeptic's missed trials could not be fetched");
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn missed_input(pmid: &str, p: &Paper, why: String) -> StudyInput {
+    StudyInput {
+        pmid: pmid.to_string(),
+        title: p.title.clone(),
+        journal: p.journal.clone(),
+        year: p.year,
+        pub_types: p.pub_types.clone(),
+        doi: p.doi.clone(),
+        retracted: p.retracted,
+        abstract_text: p.abstract_text.clone(),
+        design: "found by the skeptic; not extracted".into(),
+        why,
+    }
+}
+
+/// Per selected study, what the extractor did (for the page).
+fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
+    studies
+        .iter()
+        .map(|s| match x.rows.iter().find(|r| r.pmid == s.pmid) {
+            Some(r) => EvidenceV3 {
+                pmid: s.pmid.clone(),
+                text: r.text.as_str().to_string(),
+                verified_quotes: r.outcomes_verified,
+                numbers_dropped: r.numbers_dropped,
+                unverified_outcomes: r.unverified_outcomes.clone(),
+            },
+            None => EvidenceV3 {
+                pmid: s.pmid.clone(),
+                text: "not extracted".to_string(),
+                verified_quotes: 0,
+                numbers_dropped: 0,
+                unverified_outcomes: Vec::new(),
+            },
+        })
+        .collect()
+}
+
+/// The skeptic's review as the page shows it.
+fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
+    SkepticV3 {
+        verdict: r.verdict.as_str().to_string(),
+        must_mention: r.must_mention.clone(),
+        contradicting: r
+            .contradicting
+            .iter()
+            .map(|c| SkepticItem {
+                pmid: c.pmid.clone(),
+                text: c.claim.clone(),
+            })
+            .collect(),
+        missed_rcts: r
+            .missed_rcts
+            .iter()
+            .map(|m| SkepticItem {
+                pmid: m.pmid.clone(),
+                text: m.why.clone(),
+            })
+            .collect(),
+        guidelines: r
+            .guidelines
+            .iter()
+            .map(|g| SkepticItem {
+                pmid: g.pmid.clone(),
+                text: format!("{}: {}", g.body, g.statement_quote),
+            })
+            .collect(),
+        overlaps: r
+            .overlaps
+            .iter()
+            .map(|o| SkepticOverlap {
+                pmids: o.pmids.clone(),
+                note: o.note.clone(),
+            })
+            .collect(),
     }
 }
