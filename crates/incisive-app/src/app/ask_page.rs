@@ -283,9 +283,13 @@ pub fn AskPage() -> impl IntoView {
     };
 
     let today = move || {
-        overview.get().map(|r| {
-            let t = r.map(|o| o.today).unwrap_or_default();
-            today_view(t)
+        overview.get().map(|r| match r {
+            Ok(o) => today_view(o.today).into_any(),
+            // A short error, never zeros that look like real counts.
+            Err(_) => today_card(view! {
+                <p class="iv-today-line">"Today\u{2019}s counts couldn\u{2019}t load."</p>
+            })
+            .into_any(),
         })
     };
 
@@ -373,7 +377,7 @@ pub fn AskPage() -> impl IntoView {
                                 type="button"
                                 class="iv-ghost"
                                 aria-expanded=move || pico_open.get().to_string()
-                                aria-controls="pico-panel"
+                                aria-controls=move || pico_open.get().then_some("pico-panel")
                                 on:click=move |_| pico_open.update(|o| *o = !*o)
                             >
                                 {move || if pico_open.get() { "Hide PICO" } else { "Shape with PICO" }}
@@ -438,8 +442,10 @@ pub fn AskPage() -> impl IntoView {
     }
     .into_any();
     let aside = view! {
-            <aside class="iv-side" aria-label="Today and question check">
-                <Suspense fallback=|| today_view(TodayCounts::default())>{today}</Suspense>
+            <section class="iv-side" aria-label="Today and question check">
+                <Suspense fallback=|| {
+                    today_card(view! { <p class="iv-today-line">"Loading today\u{2019}s counts\u{2026}"</p> })
+                }>{today}</Suspense>
                 <div class="iv-card iv-check">
                     {check_view}
                     <p class="iv-advisory">
@@ -449,7 +455,7 @@ pub fn AskPage() -> impl IntoView {
                 <p class="iv-foot">
                     "Decision support \u{2014} the clinician decides. Answers are kept for 12 months and only you can see them."
                 </p>
-            </aside>
+            </section>
     }
     .into_any();
     view! {
@@ -484,14 +490,21 @@ fn today_view(t: TodayCounts) -> impl IntoView {
             )
         },
     );
+    today_card(view! {
+        <div class="iv-today-big">
+            <b>{plural(t.answers, "answer", "answers")}</b>
+            <span>{plural(t.questions, "question", "questions")}</span>
+        </div>
+        <p class="iv-today-line">{longest}</p>
+    })
+}
+
+/// The Today card around `body` (counts, a loading line or an error).
+fn today_card(body: impl IntoView) -> impl IntoView {
     view! {
         <div class="iv-card iv-today">
             <h2 class="iv-kicker">"Today"</h2>
-            <div class="iv-today-big">
-                <b>{plural(t.answers, "answer", "answers")}</b>
-                <span>{plural(t.questions, "question", "questions")}</span>
-            </div>
-            <p class="iv-today-line">{longest}</p>
+            {body}
         </div>
     }
 }

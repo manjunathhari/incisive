@@ -106,26 +106,63 @@ impl Starter {
 }
 
 static HAS_P: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"patients?|adults?|children|infants?|elderly|women|men\b|y/o|year[- ]old|\bwith\b")
+    Regex::new(r"\b(?:patients?|adults?|children|child|infants?|neonates?|elderly|women|men|y/o|years?[- ]old)\b")
         .expect("valid")
 });
 static HAS_C: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bvs\.?\b|versus|compared (?:with|to)|\bthan\b|\bor\b").expect("valid")
+    Regex::new(r"\bvs\.?\b|\bversus\b|\bcompared (?:with|to)\b|\bthan\b|\bor\b").expect("valid")
 });
 static HAS_I: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"robotic|laparoscopic|endoscopic|open|icg|therapy|surgery|repair|myotomy|resection|stent|drug|dose")
+    Regex::new(r"\b(?:robotic|laparoscop\w*|endoscop\w*|open|icg|therap\w*|surgery|surgeries|surgical|repairs?|myotomy|resections?|stents?|stenting|drugs?|doses?|dosing)\b")
         .expect("valid")
 });
 static HAS_O: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"leak|pain|recurrence|complication|mortality|survival|margin|conversion|cost|quality of life|qol|outcome|time|stay|readmission|infection|reflux|function")
+    Regex::new(r"\b(?:leaks?|pain|recurrences?|complications?|mortality|survival|margins?|conversions?|costs?|quality of life|qol|outcomes?|time|stay|readmissions?|infections?|reflux|function)\b")
         .expect("valid")
 });
-/// Possible identifiers: a 10-digit number (phone), a full date, MRN /
-/// UHID / IP no / hospital id, or Mr/Mrs/Ms and a name.
-static ID_HIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b\d{10}\b|\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\b|\bmrn\b|\buhid\b|\bip ?no\b|hospital id|\b(?:mr|mrs|ms)\.? [a-z]{3,}")
+
+// Possible identifiers (advice only; the server's Phase 1 check decides).
+// Matched on the text as typed: the honorific rules need a capital.
+
+/// Mr/Mrs/Ms/Dr, a space, then a capitalised name-like word ("MR
+/// enterography" and "MS patients" are not names).
+static ID_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:Mr|Mrs|Ms|Dr)\.? [A-Z][a-z]{2,}").expect("valid"));
+/// A numeric date dd/mm/yy(yy) or dd-mm-yy(yy) with a plausible day and
+/// month (not decimals such as "2.5-3.75").
+static ID_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^\d.])(?:0?[1-9]|[12]\d|3[01])([/-])(?:0?[1-9]|1[0-2])([/-])(?:\d{4}|\d{2})(?:$|[^\d.])")
         .expect("valid")
 });
+/// A written date with a year: "12 March 2026", "March 12, 2026".
+static ID_DATE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
+    let m = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+    Regex::new(&format!(
+        r"(?i)\b(?:(?:0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)? {m}\.?,? \d{{4}}|{m}\.? (?:0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?,? \d{{4}})\b"
+    ))
+    .expect("valid")
+});
+/// A phone number: 10 digits, together or spaced 5+5, 3+3+4 or 4+3+3,
+/// optionally after +91.
+static ID_PHONE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:\+91[\s-]?)?\b(?:\d{10}|\d{5}[\s-]\d{5}|\d{3}[\s-]\d{3}[\s-]\d{4}|\d{4}[\s-]\d{3}[\s-]\d{3})\b")
+        .expect("valid")
+});
+/// Hospital record numbers by name.
+static ID_RECORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:mrn|uhid|ip ?(?:no|number)|hospital (?:id|number|no))\b").expect("valid")
+});
+
+/// Whether the text holds a possible identifier (advice only).
+pub fn possible_identifier(text: &str) -> bool {
+    ID_NAME.is_match(text)
+        || ID_DATE
+            .captures_iter(text)
+            .any(|c| c.get(1).map(|m| m.as_str()) == c.get(2).map(|m| m.as_str()))
+        || ID_DATE_WORDS.is_match(text)
+        || ID_PHONE.is_match(text)
+        || ID_RECORD.is_match(text)
+}
 
 /// One line of the check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +193,7 @@ pub fn check(question: &str, pico: &Pico) -> Check {
     let has_c = set(&pico.c) || HAS_C.is_match(&q);
     let has_i = set(&pico.i) || HAS_I.is_match(&q);
     let has_o = set(&pico.o) || HAS_O.is_match(&q);
-    let id_hit = ID_HIT.is_match(&q);
+    let id_hit = possible_identifier(question);
     let items = vec![
         CheckItem {
             ok: has_p,
@@ -256,11 +293,23 @@ mod tests {
     fn identifiers_are_flagged_but_only_advised() {
         for q in [
             "Patient Mr. Sharma, robotic LAR leak?",
+            "Mrs Lakshmi had a leak",
+            "Dr. Rao operated; leak rate?",
+            "seen by Dr Menon for pain",
             "call 9876543210 about the leak",
+            "call +91 98765 43210 about the leak",
+            "phone 98765-43210",
+            "ph 987 654 3210",
             "operated on 12/03/2026, leak?",
+            "operated on 1-3-26, leak?",
+            "operated on 12 March 2026, leak?",
+            "operated on March 12, 2026, leak?",
+            "admitted 3rd Jan 2026",
             "MRN 445 robotic repair pain",
             "UHID 12 pain",
             "ip no 55 pain",
+            "IP number 55 pain",
+            "hospital number 77",
         ] {
             let c = check(q, &Pico::default());
             assert!(c.identifier, "{q}");
@@ -268,12 +317,54 @@ mod tests {
             assert_eq!(c.items[5].label, "Possible identifier");
             assert_eq!(c.tip, "Take out the identifier before sending.");
         }
-        // Ages, sex and post-op day are fine.
-        let c = check(
+    }
+
+    #[test]
+    fn clinical_text_is_not_an_identifier() {
+        for q in [
+            // Ages, sex and post-op day are fine.
             "52 y/o M, robotic LAR on post-op day 3: does ICG reduce leak?",
-            &Pico::default(),
+            "Does MR enterography change surgery in Crohn's disease?",
+            "MS patients undergoing robotic surgery: outcomes?",
+            "dose 2.5-3.75 mg/kg of bupivacaine",
+            "ratio 3/4 vs 1/2 of patients",
+            "HR 0.82 (0.70-0.95) at 12/24 months",
+            "n = 120 vs 1340 patients in 2 trials",
+            "follow-up in March 2026 trials",
+            "doctor-led versus nurse-led follow-up",
+            "the IP joint after repair",
+            "drain removal on day 12/13",
+        ] {
+            let c = check(q, &Pico::default());
+            assert!(!c.identifier, "{q}");
+        }
+    }
+
+    #[test]
+    fn pico_words_need_whole_words() {
+        let p = |q: &str| check(q, &Pico::default()).items[0].ok;
+        let i = |q: &str| check(q, &Pico::default()).items[1].ok;
+        let o = |q: &str| check(q, &Pico::default()).items[3].ok;
+        assert!(p("in men over 50"));
+        assert!(p("adults after TME"));
+        assert!(!p("abdomen pain"));
+        assert!(!p("regimen choice"));
+        assert!(!p("specimen extraction"));
+        assert!(
+            !p("hernia with mesh"),
+            "`with` alone is not a patient group"
         );
-        assert!(!c.identifier, "{c:?}");
+        assert!(i("open repair"));
+        assert!(
+            !i("reopened wound"),
+            "{:?}",
+            check("reopened wound", &Pico::default())
+        );
+        assert!(i("laparoscopic surgery"));
+        assert!(o("operative time"));
+        assert!(!o("sometimes"));
+        assert!(!o("timeline"));
+        assert!(o("anastomotic leak"));
     }
 
     #[test]

@@ -78,13 +78,6 @@ pub fn initials(display_name: &str) -> String {
     if out.is_empty() { "?".to_string() } else { out }
 }
 
-/// What a card counts under its meta line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CountKind {
-    References,
-    Studies,
-}
-
 /// One run as the latest answers and the Library draw it. Built on the
 /// server from the run row and its stored answer (read-only); the user's
 /// own runs only.
@@ -104,8 +97,8 @@ pub struct LibraryCard {
     pub verdict: Option<String>,
     /// The bottom-line certainty: 1 Very low … 4 High.
     pub certainty: Option<u8>,
-    /// The number of references (or studies) the answer cites.
-    pub count: Option<(u32, CountKind)>,
+    /// The number of references the answer lists.
+    pub references: Option<u32>,
 }
 
 /// The parts of a stored answer a card reads (read from the JSON on the
@@ -193,12 +186,11 @@ pub fn card(
         .filter(|_| has_answer)
         .and_then(|p| p.certainty.as_deref())
         .and_then(certainty_level);
-    let count = stored
+    let references = stored
         .as_ref()
         .filter(|_| has_answer)
         .and_then(|p| p.references)
-        .filter(|n| *n > 0)
-        .map(|n| (n, CountKind::References));
+        .filter(|n| *n > 0);
     LibraryCard {
         id,
         mode,
@@ -209,7 +201,7 @@ pub fn card(
         has_answer,
         verdict,
         certainty,
-        count,
+        references,
     }
 }
 
@@ -239,14 +231,11 @@ pub fn meta_line(c: &LibraryCard) -> String {
     if let Some(d) = c.duration_s {
         parts.push(short_duration(d));
     }
-    if let Some((n, kind)) = c.count {
-        let word = match (kind, n == 1) {
-            (CountKind::References, true) => "reference",
-            (CountKind::References, false) => "references",
-            (CountKind::Studies, true) => "study",
-            (CountKind::Studies, false) => "studies",
-        };
-        parts.push(format!("{n} {word}"));
+    if let Some(n) = c.references {
+        parts.push(format!(
+            "{n} {}",
+            if n == 1 { "reference" } else { "references" }
+        ));
     }
     parts.join(" \u{b7} ")
 }
@@ -388,8 +377,9 @@ pub struct AskOverview {
     pub today: TodayCounts,
 }
 
-/// How many recent runs the Ask page loads (grouped, then 4 shown).
-pub const ASK_RECENT: i64 = 24;
+/// How many recent runs the Ask page loads (grouped, then 4 shown): the
+/// Library's window, so "asked N times" counts the same runs on both.
+pub const ASK_RECENT: i64 = 100;
 /// How many latest answers the Ask page shows.
 pub const ASK_LATEST: usize = 4;
 
@@ -413,7 +403,7 @@ mod tests {
             has_answer: verdict.is_some(),
             verdict: verdict.map(str::to_string),
             certainty: level,
-            count: None,
+            references: None,
         }
     }
 
@@ -496,7 +486,7 @@ mod tests {
         );
         assert!(!empty.has_answer);
         assert_eq!(empty.certainty, None);
-        assert_eq!(empty.count, None);
+        assert_eq!(empty.references, None);
         assert_eq!(no_answer_text(RunStatus::Done), "Ended without an answer");
         assert_eq!(
             no_answer_text(RunStatus::Failed),
@@ -541,11 +531,11 @@ mod tests {
     fn meta_line_has_time_duration_and_count_but_no_price() {
         let mut x = c("q", at(10, 58), Some(3), Some("v"));
         x.duration_s = Some(7 * 60 + 10);
-        x.count = Some((17, CountKind::References));
+        x.references = Some(17);
         // 10:58 UTC is 16:28 IST.
         assert_eq!(meta_line(&x), "16:28 \u{b7} 7 min \u{b7} 17 references");
         x.duration_s = None;
-        x.count = None;
+        x.references = None;
         assert_eq!(meta_line(&x), "16:28");
         assert!(!meta_line(&x).contains('\u{20b9}'));
         assert_eq!(short_duration(41), "41 s");
