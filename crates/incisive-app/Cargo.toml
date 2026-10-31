@@ -113,6 +113,9 @@ output-name = "incisive-app"
 bin-target = "incisive-app"
 site-root = "target/site"
 site-pkg-dir = "pkg"
+# Static files copied into the site root (served by the app's file route):
+# the self-hosted Figtree font (OFL, from @fontsource/figtree) and its licence.
+assets-dir = "public"
 site-addr = "127.0.0.1:8080"
 reload-port = 3001
 bin-features = ["ssr"]
