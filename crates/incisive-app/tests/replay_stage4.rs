@@ -1755,6 +1755,7 @@ fn part_a_every_mark_is_still_drawn() {
 /// view with only its ids prefixed; the page has no duplicate ids.
 #[test]
 fn part_a_original_run_view_is_todays_page_closed_and_last() {
+    let ids = regex::Regex::new(r#"\sid="([^"]+)""#).unwrap();
     for (name, a) in part_a_answers() {
         let html = incisive_app::app::render_answer_v3(a.clone());
         let (_, original) = split_page(&html);
@@ -1789,7 +1790,6 @@ fn part_a_original_run_view_is_todays_page_closed_and_last() {
             "{o} outcomes \u{b7} {n} numbers \u{b7} {st} studies \u{b7} {r} references \u{b7} {u} untraced spans ({cu} in the completeness review)"
         )));
         // No id appears twice on the page.
-        let ids = regex::Regex::new(r#"\sid="([^"]+)""#).unwrap();
         let mut seen = std::collections::HashSet::new();
         for c in ids.captures_iter(&html) {
             assert!(
