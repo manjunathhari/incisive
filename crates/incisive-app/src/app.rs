@@ -294,19 +294,22 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .run-fold > summary { list-style:none; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:44px; }
 .run-fold > summary::-webkit-details-marker { display:none; }
 .run-fold > summary h3 { margin:0; font-size:1rem; }
-.run-fold .ap-more { flex:none; }
+.run-fold > summary .ap-more { flex:none; font-size:.82rem; font-weight:600; color:#1d5fd1; }
+.run-fold > summary .ap-more::after { content:'Show all \25BE'; }
+.run-fold[open] > summary .ap-more::after { content:'Show less \25B4'; }
 .ap-main details.ap-fold > summary { list-style:none; cursor:pointer; display:block; }
 .ap-main details.ap-fold > summary::-webkit-details-marker { display:none; }
+.ap-main details.ap-fold > summary .ap-sec-head { display:flex; }
 .ap-main details.ap-fold:not([open]) .ap-sec-head { border-bottom:0; }
-.ap-preview { padding:0 14px; margin-top:-4px; font-size:.88rem; line-height:1.5; color:var(--ink2); display:-webkit-box; -webkit-line-clamp:3; line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
-.ap-main details.ap-fold > summary .ap-more { display:inline-flex; align-items:center; min-height:44px; padding:0 14px 4px; }
-.ap-more { font-size:.82rem; font-weight:600; color:#1d5fd1; }
-.ap-more::after { content:'Show all \25BE'; }
-details[open] > summary .ap-more::after { content:'Show less \25B4'; }
-details[open] > summary .ap-preview { display:none; }
+.ap-main .ap-sec-h { font-size:.98rem; font-weight:600; line-height:1.3; color:var(--ink); }
+.ap-main details.ap-fold > summary .ap-preview { padding:0 14px; margin-top:-4px; font-size:.88rem; line-height:1.5; color:var(--ink2); display:-webkit-box; -webkit-line-clamp:3; line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+.ap-main details.ap-fold > summary .ap-more { display:flex; align-items:center; min-height:44px; padding:0 14px 4px; font-size:.82rem; font-weight:600; color:#1d5fd1; }
+.ap-main details.ap-fold > summary .ap-more::after { content:'Show all \25BE'; }
+.ap-main details.ap-fold[open] > summary .ap-more::after { content:'Show less \25B4'; }
+.ap-main details.ap-fold[open] > summary .ap-preview { display:none; }
 .ap-main details.ap-fold[open] > summary .ap-more { padding:4px 14px; }
-.ap-copy { padding:4px 2px; }
-.ap-copy button.secondary { margin-left:0; }
+.ap-main .ap-copy { padding:4px 2px; }
+.ap-main .ap-copy button.secondary { margin-left:0; }
 @media (max-width:480px) { .ap-dl { grid-template-columns:1fr; } .ap-bar-row { grid-template-columns:minmax(0,96px) minmax(0,1fr) auto; } }
 "#;
 
@@ -886,7 +889,7 @@ fn run_view(v: RunView) -> impl IntoView {
             {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
             <span class="meta">{rupees(v.summary.cost_paise)}</span>
         </p>
-        {progress_view(status, v.steps)}
+        {progress_view(status, answer.is_some(), v.steps)}
         {answer
             .map(|a| match a {
                 Some(Body::V2(a)) => answer_view(a).into_any(),
@@ -907,12 +910,17 @@ fn run_view(v: RunView) -> impl IntoView {
     }
 }
 
-/// Progress. While the run is queued or running: the heading and the
-/// live steps, as before. Once it has ended (folding follow-up item 1):
+/// Progress. While the run is queued or running, or when it ended with no
+/// answer: the heading and the steps, as before. Once it has ended with an
+/// answer (folding follow-up item 1):
 /// the same heading and steps inside one native `<details>`, closed, its
 /// summary "Progress · N steps · <status>" with "Show all"/"Show less"
 /// (CSS); the steps' text is unchanged and opens with no script.
-fn progress_view(status: RunStatus, steps: Vec<crate::runs::StepLine>) -> AnyView {
+fn progress_view(
+    status: RunStatus,
+    has_answer: bool,
+    steps: Vec<crate::runs::StepLine>,
+) -> AnyView {
     let n = steps.len();
     let list = |steps: Vec<crate::runs::StepLine>| {
         view! {
@@ -921,7 +929,10 @@ fn progress_view(status: RunStatus, steps: Vec<crate::runs::StepLine>) -> AnyVie
             </ol>
         }
     };
-    if status.is_active() || steps.is_empty() {
+    // Open as before while running, on a failed or interrupted run, and on
+    // any run that ended with no answer: its steps say why.
+    let finished_with_answer = matches!(status, RunStatus::Done | RunStatus::Partial) && has_answer;
+    if !finished_with_answer || steps.is_empty() {
         return view! {
             <h3>"Progress"</h3>
             {if steps.is_empty() {

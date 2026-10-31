@@ -825,15 +825,16 @@ pub enum CheckLine {
 /// (folding follow-up item 3). Dropped, as duplicates:
 /// - "Number check: …": the same line is a Progress step, and every
 ///   untraced number carries its "not traced" mark on the page;
-/// - "Coverage: …": the same line is a Progress step;
 /// - "Completeness: … found; …": a Progress step, and the Completeness
 ///   review's first line (a skipped review is a warning: it moves);
 /// - "Extraction: …": only when Other notable findings has the extractor's
 ///   own count line.
 ///
-/// Everything else (stopped early, studies left out, citations removed,
-/// labels defaulted, the skeptic's dropped entries, any run note such as a
-/// skipped or failed step, the registration-ID count) moves.
+/// Everything else moves: stopped early, studies left out, citations
+/// removed, labels defaulted, the skeptic's dropped entries, any run note
+/// such as a skipped or failed step, the registration-ID count, and the
+/// "Coverage: …" line (its Progress step is written best-effort, so it may
+/// be missing there).
 pub fn check_lines(a: &AnswerV3) -> Vec<CheckLine> {
     let extractor_notable = a
         .notable_code
@@ -847,7 +848,6 @@ pub fn check_lines(a: &AnswerV3) -> Vec<CheckLine> {
     let mut out: Vec<CheckLine> = a.notes.iter().cloned().map(CheckLine::Moved).collect();
     for l in a.trail_notes() {
         let dup = l.starts_with("Number check: ")
-            || l.starts_with("Coverage: ")
             || completeness_line.as_deref() == Some(l.as_str())
             || (extractor_notable && l.starts_with("Extraction: "));
         out.push(if dup {
@@ -885,8 +885,26 @@ pub enum PreviewPart {
 /// About how long a preview is, in characters (CSS clamps it to 3 lines).
 pub const PREVIEW_MAX: usize = 300;
 
+/// A citation only: reference numbers or PMIDs, alone or in a list
+/// ("[1]", "[1, 3]", "[2–4]", "[12345678; 23456789]", "[41060645 as 10]").
+/// Other bracketed text ("[95% CI 0.55–0.94]", "[n = 45/120]") is content
+/// and stays in a preview.
+static PREVIEW_CITE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[\s*\d{1,9}(?:\s*(?:[,;\u{2013}-]|as)\s*\d{1,9})*\s*\]").expect("valid")
+});
+
+/// `text` without its citation brackets ([`PREVIEW_CITE`]), spaces before
+/// punctuation removed, whitespace squashed.
+fn strip_preview_citations(text: &str) -> String {
+    let t = PREVIEW_CITE.replace_all(text, "");
+    let t = SPACE_PUNCT.replace_all(&t, "$1");
+    SPACES.replace_all(&t, " ").trim().to_string()
+}
+
 /// A folded section's preview: plain text from its first content item
-/// on, labels skipped, citation brackets stripped, items joined with
+/// on, labels skipped, citation brackets stripped (other bracketed text,
+/// such as a CI, is kept), text kept as written (no case change: "pCR",
+/// "cT3"), items joined with
 /// single spaces (the stored text carries no mark words or flag labels:
 /// the page draws those as their own elements, and they are not passed
 /// here), cut at a word to about [`PREVIEW_MAX`] characters (an
@@ -896,7 +914,7 @@ pub fn preview(parts: &[PreviewPart]) -> String {
     let mut joined = String::new();
     for p in parts {
         let PreviewPart::Text(t) = p else { continue };
-        let t = strip_citations(t);
+        let t = strip_preview_citations(t);
         let t = t.trim();
         if t.is_empty() {
             continue;
@@ -908,12 +926,6 @@ pub fn preview(parts: &[PreviewPart]) -> String {
         if joined.chars().count() > PREVIEW_MAX {
             break;
         }
-    }
-    let mut chars = joined.chars();
-    if let Some(c) = chars.next()
-        && c.is_lowercase()
-    {
-        joined = c.to_uppercase().chain(chars).collect();
     }
     if joined.chars().count() <= PREVIEW_MAX {
         return joined;

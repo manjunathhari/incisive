@@ -26,17 +26,27 @@ use crate::answer_page::{self as ap, CitedIn, GuidelineSource, PreviewPart, Sect
 
 /// One Details section, folded: a closed `<details>` whose summary is the
 /// heading, the count, the preview of `parts` and "Show all" (CSS); the
-/// body is its content.
+/// body is its content. The summary holds phrasing content only (spans
+/// shown as blocks; the heading is a span with the heading role), and the
+/// preview is hidden from assistive technology, so the disclosure's name
+/// is the heading and the count.
 fn section(title: &'static str, count: String, parts: &[PreviewPart], body: AnyView) -> AnyView {
+    use leptos::tachys::html::attribute::custom::CustomAttribute;
     let preview = ap::preview(parts);
+    // A level-3 heading in phrasing content (`view!` has no aria-level).
+    let heading = leptos::html::span()
+        .attr("class", "ap-sec-h")
+        .attr("role", "heading")
+        .attr("aria-level", "3")
+        .child(title);
     view! {
         <details class="ap-sec ap-fold" aria-label=title>
             <summary>
-                <div class="ap-sec-head">
-                    <h3>{title}</h3>
+                <span class="ap-sec-head">
+                    {heading}
                     <span class="ap-count">{count}</span>
-                </div>
-                <div class="ap-preview">{preview}</div>
+                </span>
+                <span class="ap-preview" aria-hidden="true">{preview}</span>
                 <span class="ap-more" aria-hidden="true"></span>
             </summary>
             <div class="ap-sec-body">{body}</div>
@@ -411,7 +421,7 @@ fn skeptic(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                 .collect(),
         ),
     ];
-    let mut parts: Vec<PreviewPart> = vec![pt(format!("the conclusion {}.", k.verdict))];
+    let mut parts: Vec<PreviewPart> = vec![pt(format!("The conclusion {}.", k.verdict))];
     for (title, xs) in groups.iter().filter(|(_, xs)| !xs.is_empty()) {
         parts.push(pl(*title));
         parts.extend(xs.iter().map(|(_, t, _, _)| pt(t)));
@@ -555,15 +565,23 @@ fn trials(c: &Ctx) -> Option<AnyView> {
     let n = cards.len();
     let mut parts: Vec<PreviewPart> = vec![pl(TRIALS_HINT)];
     parts.extend(w.studies.iter().map(|s| {
-        let size =
-            s.n.map(|n| format!(" \u{b7} n = {}", ap::fmt_value(n as f64)))
-                .unwrap_or_default();
-        pt(format!(
-            "{}: {}{size} \u{b7} {}.",
-            s.label.trim(),
-            s.design.trim(),
-            s.comparison.trim().trim_end_matches('.')
-        ))
+        // "Label: design · n = N · comparison.", empty parts left out.
+        let size = s.n.map(|n| format!("n = {}", ap::fmt_value(n as f64)));
+        let line: Vec<String> = [
+            Some(s.design.trim().to_string()),
+            size,
+            Some(s.comparison.trim().trim_end_matches('.').to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|x| !x.is_empty())
+        .collect();
+        let label = s.label.trim();
+        pt(match (label.is_empty(), line.is_empty()) {
+            (_, true) => label.to_string(),
+            (true, false) => format!("{}.", line.join(" \u{b7} ")),
+            (false, false) => format!("{label}: {}.", line.join(" \u{b7} ")),
+        })
     }));
     Some(section(
         "The trials",
