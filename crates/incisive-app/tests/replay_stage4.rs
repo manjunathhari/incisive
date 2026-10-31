@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use claude_client::Usage;
 use incisive_app::agent::answer_v3::{
-    ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3, SearchEntry,
+    ADDED_LABEL, ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3, SearchEntry,
 };
 use incisive_app::agent::extractor::{
     self, EvidenceRow, Extraction, MAX_OUTCOMES, ReportedRow, SourceText, source_text,
@@ -30,7 +30,7 @@ use incisive_app::agent::researcher::Contradiction;
 use incisive_app::agent::skeptic::SkepticReview;
 use incisive_app::agent::skeptic::{self, SkepticReport};
 use incisive_app::agent::writer_v3::{self, FullInput, StudyInput};
-use incisive_app::agent::{RunContext, coverage, team};
+use incisive_app::agent::{RunContext, completeness, coverage, team};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{IapVerifier, JwkSource};
@@ -361,7 +361,7 @@ fn prices() -> Prices {
 }
 
 /// A running Full run for the writer's call (no literature calls are made).
-async fn ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
+async fn run_ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
     let oa = OaPolicy::default();
     let client = AllowlistedClient::new("Incisive/test", oa.clone())
         .with_base_override("http://127.0.0.1:9")
@@ -592,7 +592,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
                 },
             ),
     );
-    let ctx = ctx(&pool, llm.clone()).await;
+    let ctx = run_ctx(&pool, llm.clone()).await;
     let mut written = writer_v3::write_with(&ctx, &ctx.llm, writer_v3::SYSTEM_FULL, &user)
         .await
         .unwrap_or_else(|_| panic!("the scripted writer reply reads"));
@@ -864,6 +864,95 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         cov.line(),
         cov.gaps
     );
+
+    // ---- Stage 4b item 2: the completeness review on run 1 (scripted) ----
+    // The real prompt assembly and the real call path (`completeness::review`,
+    // a ScriptedLlm replying), the code checks, the store round trip and the
+    // page. Nothing the writer wrote changes; additions appear labelled.
+    let mut a1 = answer.clone();
+    a1.answer = Some(run1.clone());
+    a1.coverage = Some(cov.clone());
+    let full1 = FullInput {
+        rows: &rows,
+        skeptic: Some(&review),
+        skeptic_note: None,
+        missed: &[],
+    };
+    let comp_user = completeness::user(
+        QUESTION,
+        &a1.plain_text(),
+        &cov,
+        &writer_v3::full_blocks(&studies, &full1),
+    );
+    assert!(
+        comp_user.contains("NASA raw TLX"),
+        "the gap reaches the review"
+    );
+    assert!(comp_user.contains("<source id=\"row-41511872\">"));
+    assert!(comp_user.len() <= completeness::worst_case_user(QUESTION).len());
+    let first_row = run1.outcomes[0].outcome.clone();
+    let comp_llm = Arc::new(ScriptedLlm::new().when("GAPS FOUND BY CODE").reply_json(
+        json!({
+            "added_outcomes": [{"outcome": "Surgeon workload (NASA raw TLX)",
+                "effect_text": "Mean 18.4 with robotic TAPP vs 34.0 with TEP (lower = less workload) [41511872]",
+                "pmids": ["41511872"], "certainty": "Low", "why": "one trial"},
+                {"outcome": "Rescue analgesia", "effect_text": "20.6% vs 17.9%; ARD 2.7% (95% CI -13.7% to 19.1%) [42527734]",
+                "pmids": ["42527734"], "certainty": "Low", "why": "one small trial"}],
+            "outcome_additions": [{"outcome": first_row, "text": "Pain at 6 h: mean difference 0.28 [42527734].", "pmids": ["42527734"]}],
+            "added_conflicts": [],
+            "not_added": [{"gap": "AIIMS 12 h CI bound", "reason": "already covered by the 6 h estimate"}],
+            "notes": [{"text": "Certainty for workload rests on one trial."}]
+        }),
+        Usage { input_tokens: 25_000, output_tokens: 1_800, ..Usage::default() },
+    ));
+    let cctx = run_ctx(&pool, comp_llm.clone()).await;
+    let allowed1 = writer_v3::allowed_numbers(&studies, Some(&full1));
+    let cx = completeness::Context {
+        selected: &selected,
+        allowed: &allowed1,
+        outcomes: &run1.outcomes,
+        gaps_found: cov.gaps.len() as u32,
+    };
+    let c = completeness::review(&cctx, &cctx.llm, &comp_user, &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped, None);
+    assert_eq!(c.added(), 3);
+    assert_eq!(c.outcome_additions[0].row, 0);
+    assert_eq!(c.removed_citations, 0);
+    assert!(
+        c.untraced.is_empty(),
+        "every added number traces: {:?}",
+        c.untraced
+    );
+    let written_before = serde_json::to_string(&a1.answer).unwrap();
+    a1.completeness = Some(c);
+    let stored1: AnswerV3 = serde_json::from_value(serde_json::to_value(&a1).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&stored1.answer).unwrap(),
+        written_before,
+        "add-only"
+    );
+    let html1 = incisive_app::app::render_answer_v3(stored1.clone());
+    let page1 = flat(&page_text(&html1));
+    assert!(page1.contains("Mean 18.4 with robotic TAPP vs 34.0 with TEP"));
+    assert!(page1.contains("Pain at 6 h: mean difference 0.28"));
+    assert!(page1.matches(ADDED_LABEL).count() >= 3);
+    assert!(page1.contains("Judged not relevant (1)"));
+    let text1 = stored1.plain_text();
+    assert!(
+        text1.matches(ADDED_LABEL).count() >= 4,
+        "rows, sentence and note"
+    );
+    // Everything the writer wrote is still on the page.
+    for o in &run1.outcomes {
+        let name: String = flat(&o.outcome).chars().take(60).collect();
+        assert!(page1.contains(&name), "{name}");
+    }
+    eprintln!(
+        "COMPLETENESS replay: {}",
+        stored1.completeness.as_ref().unwrap().line()
+    );
 }
 
 /// Number tokens in the writer's input from the prototype payloads, pinned:
@@ -1017,5 +1106,186 @@ async fn write_probe_writer_schema_payload() {
         "variants": variants,
         "skipped": "Only B (the Stage 3 control) and S (live) are sent (owner ruling R-S4a)."
     });
+    std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+}
+
+/// The reconstructed 31 Oct run 1 without a database: the prototype rows
+/// (ROGER's workload among its six), the validated review, the scripted
+/// answer with the workload, the AIIMS 6 h / 12 h pain and rescue analgesia
+/// left out, its coverage, and the completeness review's real user message.
+fn run1_review_user() -> (String, usize) {
+    let (studies, _, searches) = studies();
+    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
+    let mut f1 = fixture("evidence.json");
+    for x in f1["studies"].as_array_mut().unwrap() {
+        if x["pmid"] == "41511872" {
+            let o = x["outcomes"].as_array_mut().unwrap();
+            let i = o
+                .iter()
+                .position(|o| s(&o["outcome"]).contains("NASA raw TLX"))
+                .unwrap();
+            let nasa = o.remove(i);
+            o.insert(0, nasa);
+        }
+    }
+    let rows = checked_rows_of(&f1);
+    let review = validated_review(&selected);
+    let mut run1 =
+        serde_json::from_value::<writer_v3::WireAnswer>(scripted_answer(&rows, &studies, &review))
+            .unwrap()
+            .into_answer()
+            .0;
+    run1.outcomes.retain(|o| {
+        !(o.outcome.contains("NASA raw TLX")
+            || o.outcome.starts_with("Acute pain (primary), VAS")
+            || o.outcome.starts_with("Rescue analgesia"))
+    });
+    let known = |p: &str| selected.iter().any(|s| s == p);
+    let is_meta = |p: &str| studies.iter().any(|s| s.pmid == p && s.design == "SR/MA");
+    let cov = coverage::check(&run1, &rows, is_meta, Some(&review), known);
+    let references: Vec<ReferenceV3> = studies
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ReferenceV3 {
+            n: i as u16 + 1,
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            journal: s.journal.clone(),
+            year: s.year,
+            doi: s.doi.clone(),
+            retracted: false,
+            found_by_skeptic: false,
+        })
+        .collect();
+    let a = AnswerV3 {
+        version: ANSWER_VERSION,
+        question: QUESTION.into(),
+        mode: RunMode::Focused,
+        created_at: chrono::Utc::now(),
+        answer: Some(run1),
+        empty_reason: None,
+        references,
+        searches,
+        integrity: IntegrityV3::default(),
+        stopped_early: None,
+        cost_paise: 0,
+        elapsed_s: 0,
+        skeptic: Some(team::skeptic_summary(&review)),
+        evidence: vec![],
+        notes: vec![],
+        untraced: vec![],
+        notable_code: vec![],
+        coverage: Some(cov.clone()),
+        completeness: None,
+    };
+    let full = FullInput {
+        rows: &rows,
+        skeptic: Some(&review),
+        skeptic_note: None,
+        missed: &[],
+    };
+    (
+        completeness::user(
+            QUESTION,
+            &a.plain_text(),
+            &cov,
+            &writer_v3::full_blocks(&studies, &full),
+        ),
+        cov.gaps.len(),
+    )
+}
+
+/// Writes the payload of `.superpowers/phase3/smoke-stage4b.sh` (not a
+/// test): the completeness review's real prompt, schema and user message on
+/// the reconstructed run 1 (gaps present), and the skeptic's first turn
+/// with its Stage 4b prompt over the prototype's selection.
+///   SMOKE_PAYLOAD_OUT=payload.json cargo test -p incisive-app \
+///     --test replay_stage4 write_smoke_stage4b_payload -- --ignored
+#[tokio::test]
+#[ignore = "writes the smoke payload; not a test"]
+async fn write_smoke_stage4b_payload() {
+    use incisive_app::agent::llm::SOURCE_RULE;
+    use incisive_app::agent::researcher;
+    use incisive_app::agent::skeptic::Picture;
+    use incisive_app::agent::tools::lit::LitTools;
+    let out = std::env::var("SMOKE_PAYLOAD_OUT").expect("SMOKE_PAYLOAD_OUT");
+    let rule = |s: &str| format!("{s}\n\n{SOURCE_RULE}");
+    let (user, gaps) = run1_review_user();
+    let (studies, contradictions, _) = studies();
+    let pool = lazy_pool(&SecretString::from(
+        "postgres://u:p@127.0.0.1:1/x".to_string(),
+    ))
+    .unwrap();
+    let lit = LitTools::new(
+        incisive_app::agent::testing::offline_literature(),
+        pool,
+        Uuid::nil(),
+        QUESTION,
+    );
+    let picture: Vec<Picture> = studies
+        .iter()
+        .map(|s| Picture {
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            design: s.design.clone(),
+            why: s.why.clone(),
+        })
+        .collect();
+    let payload = json!({
+        "question": QUESTION,
+        "completeness": {
+            "model": incisive_app::agent::llm::AgentModels::default().completeness,
+            "system": rule(completeness::SYSTEM),
+            "schema": completeness::schema(),
+            "user": user,
+            "gaps": gaps,
+            "max_tokens": completeness::MAX_TOKENS,
+            "effort": "low",
+        },
+        "skeptic": {
+            "system": rule(&skeptic::system_prompt(8)),
+            "tools": lit.registry_of(&researcher::QUICK_TOOLS).defs(),
+            "task": skeptic::task(QUESTION, &picture, &contradictions),
+            "max_tokens": DepthSettings::FOCUSED.skeptic_max_tokens,
+        }
+    });
+    std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+}
+
+/// Writes the payload of `.superpowers/phase3/probe-stage4b-schemas.sh`
+/// (not a test): the completeness review's schema with its real system
+/// prompt, the skeptic's changed final schema (`extract_next` added) with
+/// its real final prompt, and the writer's live schema (unchanged, the
+/// control), each with a tiny user message.
+///   SMOKE_PAYLOAD_OUT=probe.json cargo test -p incisive-app \
+///     --test replay_stage4 write_probe_stage4b_payload -- --ignored
+#[tokio::test]
+#[ignore = "writes the probe payload; not a test"]
+async fn write_probe_stage4b_payload() {
+    use incisive_app::agent::llm::SOURCE_RULE;
+    use incisive_app::agent::writer_v3::schema_complexity;
+    let out = std::env::var("SMOKE_PAYLOAD_OUT").expect("SMOKE_PAYLOAD_OUT");
+    let rule = |s: &str| format!("{s}\n\n{SOURCE_RULE}");
+    let cx = |v: &Value| {
+        let c = schema_complexity(v);
+        json!({"bytes": c.bytes, "enum_values": c.enum_values, "nullable_unions": c.nullable_unions,
+            "depth": c.depth, "properties": c.properties, "objects": c.objects})
+    };
+    let models = incisive_app::agent::llm::AgentModels::default();
+    let probes = vec![
+        json!({"name": "C", "what": "completeness review schema (Stage 4b, new)", "model": models.completeness,
+            "effort": "low", "system": rule(completeness::SYSTEM), "schema": completeness::schema(),
+            "complexity": cx(&completeness::schema()), "live": true,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nReview the answer for completeness now, as JSON matching the schema."}),
+        json!({"name": "K", "what": "skeptic final schema with extract_next (Stage 4b, changed)", "model": models.skeptic,
+            "effort": "low", "system": rule(skeptic::FINAL_SYSTEM), "schema": skeptic::report_schema(),
+            "complexity": cx(&skeptic::report_schema()), "live": true,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nSubmit your review now, as JSON matching the schema."}),
+        json!({"name": "S", "what": "writer live schema (unchanged; the control)", "model": models.writer,
+            "effort": null, "system": rule(writer_v3::SYSTEM_FULL), "schema": writer_v3::writer_schema(),
+            "complexity": cx(&writer_v3::writer_schema()), "live": false,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nSTUDIES SELECTED BY THE RESEARCHER (0):\n\nWrite the answer now, as JSON matching the schema."}),
+    ];
+    let payload = json!({"max_tokens": 32, "probes": probes});
     std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
 }
