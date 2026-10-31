@@ -374,7 +374,10 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
             }
             Block::Outcomes => vis.outcomes.then(|| outcomes_view(&c)),
             Block::Compare => vis.compare.then(|| compare_view(&c)),
-            Block::Details => None,
+            Block::Details => Some(
+                view! { {super::details::details_view(&c)} {super::details::sheets_view(&c)} }
+                    .into_any(),
+            ),
             Block::Original => None,
         })
         .collect();

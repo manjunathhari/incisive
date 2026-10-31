@@ -31,6 +31,7 @@ use crate::agent::answer_v3::{
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 // Part A: the interactive answer page (Phase 3 answers).
+mod details;
 mod page;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
