@@ -4098,11 +4098,19 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         must_mention: vec![],
         contradicting: vec![],
         missed_rcts: vec![],
-        guidelines: vec![SkepticItem {
-            pmid: "41060645".into(),
-            text: "EHS 2023 statement".into(),
-            quote: Some("Either approach is acceptable.".into()),
-        }],
+        guidelines: vec![
+            SkepticItem {
+                pmid: "41060645".into(),
+                text: "EHS 2023 statement".into(),
+                quote: Some("Either approach is acceptable.".into()),
+            },
+            // Its record could not be fetched: no reference, PubMed instead.
+            SkepticItem {
+                pmid: "37777777".into(),
+                text: "ACG guideline".into(),
+                quote: Some("We recommend POEM or LHM.".into()),
+            },
+        ],
         overlaps: vec![],
         ma_notes: vec![],
         spans: vec![Span::new("guidelines.0.text", 4, 8)],
@@ -4154,6 +4162,11 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         "{section}"
     );
     assert!(section.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/38888888/""#));
+    // Final review 3: a skeptic guideline without a reference links to PubMed.
+    assert!(
+        section.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/37777777/""#),
+        "{section}"
+    );
     // Review 3: the skeptic's mark carried into the Guidelines section.
     assert!(section.contains("EHS 2023<sup title="), "{section}");
     assert!(section.contains(">not verified</sup> statement"));

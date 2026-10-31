@@ -101,6 +101,10 @@ pub enum EvidenceType {
     NetworkMetaAnalysis,
     /// Meta-analyses (what they pooled is in the skeptic's notes).
     MetaAnalysis,
+    /// RCTs and meta-analyses together (Stage 4 final review).
+    RctsAndMetaAnalyses,
+    /// Studies the researcher labelled `other`: not randomised.
+    Other,
     Observational,
     Mixed,
     #[default]
@@ -115,6 +119,8 @@ impl EvidenceType {
             EvidenceType::RctMetaAnalysis => Some("RCT meta-analysis"),
             EvidenceType::NetworkMetaAnalysis => Some("network meta-analysis"),
             EvidenceType::MetaAnalysis => Some("meta-analysis"),
+            EvidenceType::RctsAndMetaAnalyses => Some("RCTs and meta-analyses"),
+            EvidenceType::Other => Some("other / non-randomised"),
             EvidenceType::Observational => Some("observational"),
             EvidenceType::Mixed => Some("mixed evidence"),
             EvidenceType::Unknown => None,

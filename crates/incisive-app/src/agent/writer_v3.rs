@@ -543,9 +543,10 @@ fn notable_line(line: &str) -> Option<NotableFinding> {
 
 /// The evidence type of each outcome row (R-S4a), derived in code from the
 /// designs of the studies it cites (its `pmids` and the citation markers
-/// of its evidence and effect text): all RCTs → RCT; all meta-analyses →
-/// meta-analysis; all observational → observational; any mix → mixed. A
-/// row citing no study of known design gets no label. A label only; it
+/// of its evidence and effect text): all RCTs → "RCTs"; all meta-analyses →
+/// "meta-analysis"; RCTs with meta-analyses → "RCTs and meta-analyses"; all
+/// `other` → "other / non-randomised"; any mix with `other` → "mixed
+/// evidence". A row citing no study of known design gets no label. A label only; it
 /// blocks nothing. `design_of` gives a PMID's class ([`design_class`]).
 pub fn evidence_types(a: &mut WrittenAnswer, design_of: impl Fn(&str) -> Option<&'static str>) {
     for o in &mut a.outcomes {
@@ -558,12 +559,14 @@ pub fn evidence_types(a: &mut WrittenAnswer, design_of: impl Fn(&str) -> Option<
         o.evidence_type = match (
             kinds.contains("rct"),
             kinds.contains("ma"),
-            kinds.contains("obs"),
+            kinds.contains("other"),
         ) {
             (false, false, false) => EvidenceType::Unknown,
             (true, false, false) => EvidenceType::Rct,
             (false, true, false) => EvidenceType::MetaAnalysis,
-            (false, false, true) => EvidenceType::Observational,
+            (true, true, false) => EvidenceType::RctsAndMetaAnalyses,
+            (false, false, true) => EvidenceType::Other,
+            // A genuine mix with non-randomised designs.
             _ => EvidenceType::Mixed,
         };
     }
@@ -571,7 +574,7 @@ pub fn evidence_types(a: &mut WrittenAnswer, design_of: impl Fn(&str) -> Option<
 
 /// The design class of a study's researcher label (`RCT`, `SR_MA`,
 /// `other`; a trial the skeptic found missing is an RCT): "rct", "ma" or
-/// "obs". `None` for anything else (e.g. a study only quoted by the
+/// "other". `None` for anything else (e.g. a study only quoted by the
 /// skeptic).
 pub fn design_class(label: &str) -> Option<&'static str> {
     let l = label.trim().to_ascii_lowercase();
@@ -580,7 +583,7 @@ pub fn design_class(label: &str) -> Option<&'static str> {
     } else if l == "sr_ma" {
         Some("ma")
     } else if l == "other" {
-        Some("obs")
+        Some("other")
     } else {
         None
     }
@@ -2349,6 +2352,10 @@ mod tests {
             row(&["44444444"], ""),
             row(&["99999999"], ""),
             row(&["55555555"], ""),
+            // RCT + other: a genuine mix.
+            row(&["11111111", "44444444"], ""),
+            // RCT + meta-analysis + other: mixed too.
+            row(&["11111111"], "pooled [33333333] and a cohort [44444444]"),
         ];
         let design = |p: &str| match p {
             "11111111" => design_class("RCT"),
@@ -2364,12 +2371,22 @@ mod tests {
             [
                 EvidenceType::Rct,
                 EvidenceType::MetaAnalysis,
-                EvidenceType::Mixed,
-                EvidenceType::Observational,
+                EvidenceType::RctsAndMetaAnalyses,
+                EvidenceType::Other,
                 EvidenceType::Unknown,
                 EvidenceType::Rct,
+                EvidenceType::Mixed,
+                EvidenceType::Mixed,
             ]
         );
+        // Stage 4 final review: the labels as drawn.
+        let label = |t: EvidenceType| t.label();
+        assert_eq!(
+            label(EvidenceType::RctsAndMetaAnalyses),
+            Some("RCTs and meta-analyses")
+        );
+        assert_eq!(label(EvidenceType::Other), Some("other / non-randomised"));
+        assert_eq!(label(EvidenceType::Mixed), Some("mixed evidence"));
         assert_eq!(EvidenceType::Unknown.label(), None, "no label drawn");
     }
 

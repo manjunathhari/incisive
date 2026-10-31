@@ -154,8 +154,13 @@ const AGENT_MAX_TOKENS: u32 = 4_000;
 /// Stage 4 review: 20,000, for the at-a-glance, clinical-practice and
 /// notable-findings fields (about 1–1.5k more output tokens).
 const WRITER_MAX_TOKENS: u32 = 20_000;
-/// Seconds kept for the writer at the end of a Phase 3 run.
+/// Seconds kept for the writer at the end of a Phase 3 run (Quick).
 const WRITER_TIME_ALLOWANCE_S: u32 = 150;
+/// Full: 180 s (Stage 4 final review). The live Full writer took 109 s for
+/// about 13,500 tokens, so about 160 s at its 20,000-token ceiling; the
+/// review phase then stops launching 60 s before the writer's start gate
+/// (`team::WRITER_MIN_TIME_FULL`, 180 s before the hard stop).
+const FULL_WRITER_TIME_ALLOWANCE_S: u32 = 180;
 /// Seconds kept for the Full review phase (extractor ∥ skeptic): 180
 /// (owner ruling R-S3a).
 const REVIEW_TIME_ALLOWANCE_S: u32 = 180;
@@ -206,7 +211,7 @@ impl DepthSettings {
         skeptic_max_tokens: AGENT_MAX_TOKENS,
         extractor_max_tokens: AGENT_MAX_TOKENS,
         writer_max_tokens: WRITER_MAX_TOKENS,
-        writer_time_allowance_s: WRITER_TIME_ALLOWANCE_S,
+        writer_time_allowance_s: FULL_WRITER_TIME_ALLOWANCE_S,
         review_time_allowance_s: REVIEW_TIME_ALLOWANCE_S,
         extractor_concurrency: EXTRACTOR_CONCURRENCY,
     };

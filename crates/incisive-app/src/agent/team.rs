@@ -60,8 +60,9 @@
 //!
 //! **Time.** Research wraps up at the time limit less the writer's
 //! allowance (`writer_time_allowance_s`, set by the worker). The writer is
-//! not started with less than [`WRITER_MIN_TIME`] left before the hard
-//! stop: the run ends `partial` (`writer_time`) with the references.
+//! not started with less than [`writer_min_time`] (Quick 150 s, Full 180 s)
+//! left before the hard stop: the run ends `partial` (`writer_time`) with the
+//! references.
 //!
 //! **Outcomes** (`partial` runs with a kind store it as `error_kind`):
 //! * an unpriced writer model: `failed` (`llm`) before any research;
@@ -119,10 +120,22 @@ pub const WRITER_UNREADABLE: &str =
     "The writer's answer could not be read. The studies found are listed below; please ask again.";
 /// Bottom line when too little time was left to write.
 pub const WRITER_NO_TIME: &str = "Not enough of the time limit was left to write the answer. The studies found are listed below; please ask again.";
-/// The writer is not started with less time than this before the hard stop.
-// 120 s: the live smoke (30 Oct) had the Opus writer take 44 s for 3 studies
-// (4,768 output tokens); 10 studies is roughly double.
-pub const WRITER_MIN_TIME: Duration = Duration::from_secs(120);
+/// The writer is not started with less time than this before the hard stop:
+/// a writer that could not finish ends the run `partial` (`writer_time`) with
+/// its references, instead of losing everything at the hard stop. The live
+/// Full writer (31 Oct) took 109 s for about 13,500 output tokens, so a reply
+/// at the 20,000-token ceiling takes about 160 s: Full keeps 180 s. A Quick
+/// reply has the same ceiling but fewer, shorter inputs: Quick keeps 150 s.
+pub const WRITER_MIN_TIME_QUICK: Duration = Duration::from_secs(150);
+pub const WRITER_MIN_TIME_FULL: Duration = Duration::from_secs(180);
+
+/// [`WRITER_MIN_TIME_QUICK`] or [`WRITER_MIN_TIME_FULL`] for `mode`.
+pub fn writer_min_time(mode: RunMode) -> Duration {
+    match mode {
+        RunMode::Quick => WRITER_MIN_TIME_QUICK,
+        RunMode::Focused => WRITER_MIN_TIME_FULL,
+    }
+}
 
 type Stop = &'static str;
 
@@ -411,7 +424,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     // The writer: only with time for it before the hard stop.
     gate(ctx).await?;
     let left = ctx.budget.until_hard_stop(Instant::now());
-    if left < WRITER_MIN_TIME {
+    if left < writer_min_time(ctx.mode) {
         tracing::info!(run_id = %ctx.run_id, left_s = left.as_secs(), "too little time left for the writer");
         add_line(
             ctx,

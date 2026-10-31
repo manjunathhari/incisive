@@ -1087,14 +1087,23 @@ fn written_v3_view(
         {
             continue;
         }
-        let n = refs.get(&g.pmid).copied();
+        // A reference when there is one, otherwise PubMed (as the leads).
+        let link = match refs.get(&g.pmid) {
+            Some(n) => ref_link(*n),
+            None => pubmed_link(&g.pmid)
+                .map(|href| {
+                    view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", g.pmid)}</a> }
+                        .into_any()
+                })
+                .unwrap_or_else(|| ().into_any()),
+        };
         let unsourced = g.pmid.trim().is_empty();
         guidelines.push(
             view! {
                 <li>
                     {sk.t(&g.text, &format!("guidelines.{i}.text"))}
                     {g.quote.map(|q| view! { " \u{2014} " {cited(&format!("\u{201c}{q}\u{201d}"), refs)} })}
-                    {n.map(ref_link)}
+                    {link}
                     {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
                 </li>
             }

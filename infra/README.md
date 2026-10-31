@@ -346,7 +346,7 @@ The global, daily and monthly caps apply as before.
 | `skeptic_max_tokens` | 4000 | 4000 | output tokens per skeptic turn |
 | `extractor_max_tokens` | 4000 | 4000 | output tokens per extraction call |
 | `writer_max_tokens` | 20000 | 20000 | output tokens of the writer's call (its cost is reserved before research starts) |
-| `writer_time_allowance_s` | 150 | 150 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
+| `writer_time_allowance_s` | 150 | 180 | seconds kept for the writer: research wraps up at `agent_time_limit_s` minus this; must be below `agent_time_limit_s` |
 | `review_time_allowance_s` | 0 | 180 | seconds kept for the Full review (extractor ∥ skeptic): research wraps up this much earlier again; with `writer_time_allowance_s` it must be below `agent_time_limit_s` |
 | `extractor_concurrency` | 3 | 3 | extractor calls in flight at once (1 to 8) |
 
@@ -490,7 +490,8 @@ Under `team`, a Quick run reserves `agent_limit_paise` (default ₹100, owner ru
 29 Oct 2026) and runs under `agent_time_limit_s` (default 360 s, hard stop at 420 s)
 from `RUN_LIMITS` (section 11); research wraps up `writer_time_allowance_s` (150 s)
 before the time limit so the writer has time, and the writer is not started with less
-than 60 s left. The question box shows the limit next to Quick. Under `classic` it reserves
+than 150 s left before the hard stop (the run then ends partial, `writer_time`, with its
+references). The question box shows the limit next to Quick. Under `classic` it reserves
 `limit_paise` (₹15) and uses `time_limit_s`, as before.
 
 **New `AGENT_MODELS` keys.** Each must be priced in `MODEL_PRICES` (section 10),
@@ -516,8 +517,9 @@ per study, `extractor_concurrency` 3 at once) beside the skeptic (Sonnet, up to
 It is checked like `QUICK_ENGINE`. Under `team` a Full run reserves
 `agent_limit_paise` (₹300, owner ruling of 30 Oct 2026) and runs under
 `agent_time_limit_s` (600 s, hard stop at 660 s): research wraps up
-`writer_time_allowance_s + review_time_allowance_s` (150 + 180 s) before the time limit, the extractor and skeptic `writer_time_allowance_s`
-before it. Under `classic` it reserves `limit_paise` (₹40) and uses `time_limit_s`.
+`writer_time_allowance_s + review_time_allowance_s` (180 + 180 s) before the time limit (at 240 s), the extractor and skeptic `writer_time_allowance_s`
+before it (at 420 s), and the writer is not started with less than 180 s left before the hard stop (at 480 s; the run then ends partial,
+`writer_time`, with its references). The live Full writer took 109 s for about 13,500 output tokens, so about 160 s at its 20,000-token ceiling. Under `classic` it reserves `limit_paise` (₹40) and uses `time_limit_s`.
 
 **Rolling back.** Prefer `QUICK_ENGINE=classic` / `FULL_ENGINE=classic` to rolling back the image: it needs
 no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an
