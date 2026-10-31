@@ -204,6 +204,25 @@ pub struct NotableFinding {
     pub spans: Vec<Span>,
 }
 
+/// The prefixes of the code-built notable findings that repeat the
+/// skeptic's box (Stage 4 item 12). Stage 4b item 5: they are drawn in the
+/// skeptic's box only; the notable findings keep the writer's items and the
+/// extractor's counts line. Stored answers keep them (display only).
+pub const NOTABLE_OVERLAP: &str = "Not independent evidence (the skeptic): ";
+pub const NOTABLE_MISSED: &str =
+    "A randomised trial the researcher's search missed (the skeptic): ";
+pub const NOTABLE_POOLED: &str = "What a meta-analysis pooled (the skeptic): ";
+
+impl NotableFinding {
+    /// A code-built item that repeats the skeptic's box (not drawn among
+    /// the notable findings, Stage 4b item 5).
+    pub fn repeats_skeptic(&self) -> bool {
+        [NOTABLE_OVERLAP, NOTABLE_MISSED, NOTABLE_POOLED]
+            .iter()
+            .any(|p| self.text.starts_with(p))
+    }
+}
+
 /// A marked run of stored text (Stage 4 items 5 and 7): `len` bytes from
 /// byte `start` of the text at `field` (a path such as
 /// `outcomes.2.effect_text`). The text itself is never changed; the page
@@ -583,6 +602,19 @@ pub struct CoverageV3 {
     pub counts: CoverageCounts,
 }
 
+/// "2 outcomes and 5 numbers", "5 numbers" or "1 outcome" (Stage 4b item
+/// 5: number agreement, zero parts left out); `None` when both are zero.
+pub fn unverified_counts(outcomes: u32, numbers: u32) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if outcomes > 0 {
+        parts.push(count_noun(outcomes, "outcome", "outcomes"));
+    }
+    if numbers > 0 {
+        parts.push(count_noun(numbers, "number", "numbers"));
+    }
+    (!parts.is_empty()).then(|| join_counts(&parts))
+}
+
 /// "1 number" / "2 numbers".
 pub fn count_noun(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -829,6 +861,30 @@ pub struct AnswerV3 {
 }
 
 impl AnswerV3 {
+    /// Stage 4b item 5: whether the skeptic's lead on `pmid` is shown on its
+    /// study's trial row: the study was selected or extracted (it has
+    /// evidence) and the writer gave it a row. Otherwise the lead stays in
+    /// the leads list.
+    pub fn lead_on_row(&self, pmid: &str) -> bool {
+        self.evidence.iter().any(|e| e.pmid == pmid)
+            && self
+                .answer
+                .as_ref()
+                .is_some_and(|w| w.studies.iter().any(|s| s.pmid.trim() == pmid))
+    }
+
+    /// The skeptic's leads drawn on the trial row of `pmid`.
+    pub fn leads_on_row(&self, pmid: &str) -> Vec<&SkepticLead> {
+        if !self.lead_on_row(pmid) {
+            return Vec::new();
+        }
+        self.skeptic
+            .iter()
+            .flat_map(|k| &k.leads)
+            .filter(|l| l.pmid == pmid)
+            .collect()
+    }
+
     /// Reference number per PMID.
     pub fn ref_numbers(&self) -> HashMap<String, u16> {
         self.references
@@ -1167,20 +1223,37 @@ impl AnswerV3 {
         if i.dropped_unseen > 0 {
             notes.push(format!(
                 "{} selected by the researcher but not returned by this run's searches: left out.",
-                i.dropped_unseen
+                count_noun(i.dropped_unseen, "study", "studies")
             ));
         }
         if i.dropped_unfetched > 0 {
             notes.push(format!(
                 "{} selected but could not be fetched: left out.",
-                i.dropped_unfetched
+                count_noun(i.dropped_unfetched, "study", "studies")
             ));
         }
-        if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
-            notes.push(format!(
-            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
-            i.removed_citations, i.dropped_numbers, i.dropped_studies
-        ));
+        // Stage 4b item 5: number agreement, and no "0 …" parts.
+        let mut parts: Vec<String> = Vec::new();
+        if i.removed_citations > 0 {
+            parts.push(format!(
+                "{} removed",
+                count_noun(i.removed_citations, "unknown citation", "unknown citations")
+            ));
+        }
+        if i.dropped_numbers > 0 {
+            parts.push(format!(
+                "{} dropped",
+                count_noun(i.dropped_numbers, "number", "numbers")
+            ));
+        }
+        if i.dropped_studies > 0 {
+            parts.push(format!(
+                "{} dropped",
+                count_noun(i.dropped_studies, "trial row", "trial rows")
+            ));
+        }
+        if !parts.is_empty() {
+            notes.push(format!("Citation check: {}.", join_counts(&parts)));
         }
         if i.numbers_checked > 0 {
             notes.push(if i.numbers_untraced == 0 {
@@ -1195,16 +1268,20 @@ impl AnswerV3 {
             )
         });
         }
-        if i.outcomes_unverified + i.numbers_unverified > 0 {
+        if let Some(what) = unverified_counts(i.outcomes_unverified, i.numbers_unverified) {
             notes.push(format!(
-            "Extraction: {} outcomes and {} numbers could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}.",
-            i.outcomes_unverified, i.numbers_unverified
-        ));
+                "Extraction: {what} could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}."
+            ));
         }
         if i.labels_defaulted > 0 {
             notes.push(format!(
-                "{} certainty or evidence labels from the writer were not recognised; set to \u{201c}Very low\u{201d} or \u{201c}mixed evidence\u{201d}.",
-                i.labels_defaulted
+                "{} from the writer {} not recognised; set to \u{201c}Very low\u{201d} or \u{201c}mixed evidence\u{201d}.",
+                count_noun(
+                    i.labels_defaulted,
+                    "certainty or evidence label",
+                    "certainty or evidence labels"
+                ),
+                if i.labels_defaulted == 1 { "was" } else { "were" }
             ));
         }
         if let Some(n) = self.skeptic.as_ref().and_then(SkepticV3::dropped_note) {
@@ -1393,6 +1470,9 @@ impl AnswerV3 {
                         t(&s.key_results, &format!("studies.{i}.key_results")),
                         t(&s.appraisal, &format!("studies.{i}.appraisal")),
                     ));
+                    for l in self.leads_on_row(&s.pmid) {
+                        o.push_str(&format!("  Skeptic: {}\n", l.text()));
+                    }
                     if let Some(e) = self.evidence.iter().find(|e| e.pmid == s.pmid) {
                         if e.found_by_skeptic {
                             o.push_str(&format!(
@@ -1529,20 +1609,27 @@ impl AnswerV3 {
             .as_ref()
             .map(|w| w.notable_findings.as_slice())
             .unwrap_or(&[]);
-        if !self.notable_code.is_empty() || !writer_notable.is_empty() {
+        // Stage 4b item 5: the skeptic's items are in its own section only;
+        // a citation the text already ends with is not appended again.
+        let code_notable: Vec<&NotableFinding> = self
+            .notable_code
+            .iter()
+            .filter(|n| !n.repeats_skeptic())
+            .collect();
+        if !code_notable.is_empty() || !writer_notable.is_empty() {
             h(&mut o, "Other notable findings from this run");
-            for n in &self.notable_code {
+            for n in code_notable {
                 o.push_str(&format!(
                     "- {}{}\n",
                     plain(&n.text, &refs, "text", &n.spans, "not verified"),
-                    cites(&n.pmids, &refs)
+                    cites(&not_cited_at_end(&n.text, &n.pmids), &refs)
                 ));
             }
             for (i, n) in writer_notable.iter().enumerate() {
                 o.push_str(&format!(
                     "- {}{}\n",
                     t(&n.text, &format!("notable_findings.{i}.text")),
-                    cites(&n.pmids, &refs)
+                    cites(&not_cited_at_end(&n.text, &n.pmids), &refs)
                 ));
             }
         }
@@ -1586,8 +1673,9 @@ impl AnswerV3 {
             }
         }
         if let Some(k) = &self.skeptic {
-            // Unverified leads (review 6): PMID and kind only.
-            for l in &k.leads {
+            // Unverified leads (review 6): PMID and kind only. Stage 4b
+            // item 5: a lead on a study with a trial row is noted there.
+            for l in k.leads.iter().filter(|l| !self.lead_on_row(&l.pmid)) {
                 o.push_str(&format!(
                     "- {}{}\n",
                     l.text(),
@@ -2039,6 +2127,80 @@ mod tests {
         assert_eq!(c.added(), 0);
     }
 
+    /// Stage 4b item 5: counts agree in number and zero parts are left out
+    /// ("1 number", not "1 numbers"; not "0 outcomes and 5 numbers").
+    #[test]
+    fn counts_agree_and_drop_zero_parts() {
+        assert_eq!(unverified_counts(0, 5).as_deref(), Some("5 numbers"));
+        assert_eq!(unverified_counts(1, 0).as_deref(), Some("1 outcome"));
+        assert_eq!(
+            unverified_counts(2, 1).as_deref(),
+            Some("2 outcomes and 1 number")
+        );
+        assert_eq!(unverified_counts(0, 0), None);
+        let mut a = sample();
+        a.integrity = IntegrityV3 {
+            dropped_unseen: 1,
+            removed_citations: 1,
+            numbers_unverified: 1,
+            labels_defaulted: 1,
+            ..IntegrityV3::default()
+        };
+        let n = a.trail_notes().join("\n");
+        for want in [
+            "1 study selected by the researcher but not returned",
+            "Citation check: 1 unknown citation removed.",
+            "Extraction: 1 number could not be matched",
+            "1 certainty or evidence label from the writer was not recognised",
+        ] {
+            assert!(n.contains(want), "{want:?} in {n}");
+        }
+        assert!(!n.contains(" 0 "), "{n}");
+    }
+
+    /// Stage 4b item 5: a lead on a selected study that has a trial row is
+    /// noted on that row, not listed as a PMID; other leads stay listed.
+    #[test]
+    fn leads_on_selected_studies_go_to_their_row() {
+        let mut a = sample();
+        a.evidence = vec![EvidenceV3 {
+            pmid: A.into(),
+            text: "abstract only".into(),
+            verified_quotes: 1,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: None,
+            funding_checked: false,
+            spans: vec![],
+            trial_registration_unverified: None,
+            found_by_skeptic: false,
+        }];
+        let k = a.skeptic.as_mut().unwrap();
+        k.leads = vec![
+            SkepticLead {
+                pmid: A.into(),
+                kind: "contradicting study".into(),
+            },
+            SkepticLead {
+                pmid: "55555555".into(),
+                kind: "guideline".into(),
+            },
+        ];
+        assert!(a.lead_on_row(A) && !a.lead_on_row("55555555"));
+        let t = a.plain_text();
+        assert!(t.contains(
+            "  Skeptic: Possible contradicting study: quote not found in the abstract, check the paper\n"
+        ), "{t}");
+        assert!(
+            t.contains("- Possible guideline: quote not found in the abstract, check the paper")
+        );
+        assert!(t.contains("PubMed 55555555"));
+        assert!(!t.contains(&format!("PubMed {A}")));
+        assert_eq!(t.matches("Possible contradicting study").count(), 1, "{t}");
+    }
+
     /// Stage 4b item 5: a text that already ends with a citation gets no
     /// second one; other PMIDs are still appended.
     #[test]
@@ -2084,8 +2246,8 @@ mod tests {
             "APPLICABILITY",
             "WHAT WOULD CHANGE THIS ANSWER",
             "OTHER NOTABLE FINDINGS FROM THIS RUN",
-            "- Not independent evidence (the skeptic): same centre. [1]",
-            "- Withdrawals 2 vs 9 [1]. [1]",
+            // Stage 4b item 5: the citation is not appended twice.
+            "- Withdrawals 2 vs 9 [1].\n",
             "CHALLENGED BY THE SKEPTIC",
             "- Caveat: Recurrence 7% (not verified) in 2019.",
             "REFERENCES",
@@ -2098,6 +2260,9 @@ mod tests {
         }
         assert!(!t.contains("[41060645"), "{t}");
         assert!(!t.contains("99999999"));
+        // Stage 4b item 5: the skeptic's items are in its section only.
+        assert!(!t.contains("[1]. [1]"), "{t}");
+        assert!(!t.contains("Not independent evidence (the skeptic)"), "{t}");
     }
 
     /// Stage 4 review 2, 3, 5, 6 and 7 in Copy as text: a guideline with no

@@ -97,6 +97,7 @@ use super::answer_v3::{
     ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, NotableFinding, ReferenceV3, SkepticItem,
     SkepticLead, SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
 };
+use super::answer_v3::{NOTABLE_MISSED, NOTABLE_OVERLAP, NOTABLE_POOLED, unverified_counts};
 use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
 use super::pipeline::gate;
@@ -1189,7 +1190,7 @@ pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<Notab
     if let Some(r) = review {
         for (i, o) in r.overlaps.iter().enumerate() {
             out.push(item(
-                "Not independent evidence (the skeptic): ",
+                NOTABLE_OVERLAP,
                 &o.note,
                 &format!("overlaps.{i}.note"),
                 o.pmids.clone(),
@@ -1198,7 +1199,7 @@ pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<Notab
         }
         for (i, m) in r.missed_rcts.iter().enumerate() {
             out.push(item(
-                "A randomised trial the researcher's search missed (the skeptic): ",
+                NOTABLE_MISSED,
                 &m.why,
                 &format!("missed_rcts.{i}.text"),
                 vec![m.pmid.clone()],
@@ -1207,7 +1208,7 @@ pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<Notab
         }
         for (i, m) in r.ma_notes.iter().enumerate() {
             out.push(item(
-                "What a meta-analysis pooled (the skeptic): ",
+                NOTABLE_POOLED,
                 &m.note,
                 &format!("ma_notes.{i}.text"),
                 vec![m.pmid.clone()],
@@ -1225,10 +1226,10 @@ pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<Notab
             .map(|r| r.pmid.clone())
             .collect();
         out.push(NotableFinding {
+            // Stage 4b item 5: no "0 outcomes and …" part.
             text: format!(
-                "The extractor could not match {} and {} to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
-                plural(outcomes as usize, "outcome", "outcomes"),
-                plural(numbers as usize, "number", "numbers")
+                "The extractor could not match {} to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
+                unverified_counts(outcomes, numbers).unwrap_or_default()
             ),
             pmids,
             spans: Vec::new(),
@@ -1385,5 +1386,17 @@ mod tests {
             "2026"
         );
         assert!(notable_code(None, &Extraction::default()).is_empty());
+        // Stage 4b item 5: no "0 outcomes and" part.
+        let x = Extraction {
+            rows: vec![row("111", &[], 5)],
+            ..Extraction::default()
+        };
+        assert_eq!(
+            notable_code(None, &x)[0].text,
+            "The extractor could not match 5 numbers to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table."
+        );
+        // The skeptic's items are recognised as repeats of its box.
+        assert!(items[..3].iter().all(NotableFinding::repeats_skeptic));
+        assert!(!items[3].repeats_skeptic());
     }
 }

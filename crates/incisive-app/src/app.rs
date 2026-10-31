@@ -1049,6 +1049,7 @@ fn written_v3_view(
     skeptic_spans: &[Span],
     guideline_leads: Vec<crate::agent::answer_v3::SkepticLead>,
     completeness: Option<&CompletenessV3>,
+    row_leads: &std::collections::HashMap<String, Vec<String>>,
 ) -> impl IntoView {
     let full = !evidence.is_empty();
     // Stage 4b: the completeness review's additions, drawn in place, each
@@ -1348,6 +1349,12 @@ fn written_v3_view(
                                                 {e.filter(|e| e.found_by_skeptic).map(|_| view! {
                                                     <br /><span class="flag-label added">{FOUND_BY_SKEPTIC}</span>
                                                 })}
+                                                {row_leads
+                                                    .get(s.pmid.trim())
+                                                    .into_iter()
+                                                    .flatten()
+                                                    .map(|t| view! { <br /><span class="flag-label">{format!("Skeptic: {t}")}</span> })
+                                                    .collect_view()}
                                             </td>
                                             <td>
                                                 {mk.t(&s.design, &format!("studies.{i}.design"))}
@@ -1583,6 +1590,7 @@ fn funding_view(e: &EvidenceV3, refs: &std::collections::HashMap<String, u16>) -
 fn skeptic_v3_view(
     k: crate::agent::answer_v3::SkepticV3,
     refs: &std::collections::HashMap<String, u16>,
+    on_rows: &std::collections::HashSet<String>,
 ) -> AnyView {
     let mk = Marks {
         refs,
@@ -1649,9 +1657,11 @@ fn skeptic_v3_view(
         )
         .collect();
     // Unverified leads (review 6): PMID and kind only, no quote or claim.
+    // Stage 4b item 5: a lead on a study with a trial row is drawn there.
     let leads: Vec<Line> = k
         .leads
         .iter()
+        .filter(|l| !on_rows.contains(&l.pmid))
         .map(|l| (String::new(), l.text(), None, vec![l.pmid.clone()]))
         .collect();
     let study = |p: String| -> AnyView {
@@ -1721,7 +1731,14 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         .as_ref()
         .map(|w| w.notable_findings.clone())
         .unwrap_or_default();
-    let notable = notable_view(&a.notable_code, &notable_writer, &refs, &untraced);
+    // Stage 4b item 5: the skeptic's items are in its box only.
+    let notable_code: Vec<NotableFinding> = a
+        .notable_code
+        .iter()
+        .filter(|n| !n.repeats_skeptic())
+        .cloned()
+        .collect();
+    let notable = notable_view(&notable_code, &notable_writer, &refs, &untraced);
     let n_searches = a.searches.len();
     // Full: per study, what the extractor read and checked.
     let evidence: std::collections::HashMap<String, EvidenceV3> = a
@@ -1729,13 +1746,29 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         .iter()
         .map(|e| (e.pmid.clone(), e.clone()))
         .collect();
+    // Stage 4b item 5: leads on studies with a trial row are drawn on it.
+    let on_rows: std::collections::HashSet<String> = a
+        .skeptic
+        .iter()
+        .flat_map(|k| &k.leads)
+        .filter(|l| a.lead_on_row(&l.pmid))
+        .map(|l| l.pmid.clone())
+        .collect();
+    let mut row_leads: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for p in &on_rows {
+        row_leads.insert(
+            p.clone(),
+            a.leads_on_row(p).into_iter().map(|l| l.text()).collect(),
+        );
+    }
     let guideline_leads: Vec<crate::agent::answer_v3::SkepticLead> = a
         .skeptic
         .as_ref()
         .map(|k| {
             k.leads
                 .iter()
-                .filter(|l| l.kind == "guideline")
+                .filter(|l| l.kind == "guideline" && !on_rows.contains(&l.pmid))
                 .cloned()
                 .collect()
         })
@@ -1761,10 +1794,11 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             &skeptic_spans,
             guideline_leads,
             completeness.as_ref(),
+            &row_leads,
         )
     });
     let checks = completeness_view(completeness.clone(), &refs);
-    let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
+    let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs, &on_rows));
     let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
     view! {
@@ -1971,14 +2005,17 @@ fn notable_view(
                             spans: &n.spans,
                             mark: Mark::NotVerified,
                         };
-                        view! { <li>{mk.t(&n.text, "text")} {studies(&n.pmids)}</li> }
+                        view! { <li>{mk.t(&n.text, "text")} {studies(&not_cited_at_end(&n.text, &n.pmids))}</li> }
                     })
                     .collect_view()}
                 {writer
                     .iter()
                     .enumerate()
                     .map(|(i, n)| view! {
-                        <li>{wk.t(&n.text, &format!("notable_findings.{i}.text"))} {studies(&n.pmids)}</li>
+                        <li>
+                            {wk.t(&n.text, &format!("notable_findings.{i}.text"))}
+                            {studies(&not_cited_at_end(&n.text, &n.pmids))}
+                        </li>
                     })
                     .collect_view()}
             </ul>

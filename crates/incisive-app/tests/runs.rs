@@ -3948,7 +3948,8 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
         m.contains(r#"<span class="etype">RCT meta-analysis</span>"#),
         "{m}"
     );
-    assert!(m.contains("1 outcomes and 2 numbers could not be matched"));
+    // Stage 4b item 5: number agreement.
+    assert!(m.contains("1 outcome and 2 numbers could not be matched"));
 }
 
 /// Stage 4: a v3 answer stored before Stage 4 (none of the new fields)
@@ -4098,7 +4099,9 @@ async fn ssr_readability_sections_arms_and_copy_text() {
     // Item 12: code's items, then the writer's, with their references.
     let n = at("Other notable findings from this run");
     assert!(n > at("Outcome by outcome") && n < at(">References<"));
-    assert!(at("Not independent evidence (the skeptic)") < at("Withdrawals were lopsided"));
+    // Stage 4b item 5: the skeptic's repeat is drawn in its box only.
+    assert!(!m.contains("Not independent evidence (the skeptic)"));
+    assert!(at("Other notable findings from this run") < at("Withdrawals were lopsided"));
     assert!(m.contains("2 vs 9 &lt;i&gt;x&lt;/i&gt;"));
     // Copy as text: the button, and the fallback textarea, which is empty
     // in the markup (a textarea's children are not escaped; its value is
@@ -4199,6 +4202,50 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
     let (_, html) = v3_page(&pool, answer_v3_json(false)).await;
     let m = markup_of(&html);
     assert!(!m.contains("Completeness") && !m.contains("Coverage:"));
+}
+
+/// Stage 4b item 5 on the page: the code-built items that repeat the
+/// skeptic's box are drawn in the box only (the counts line stays among the
+/// notable findings); a writer item ending with its citation gets no second
+/// one; a lead on a selected study with a trial row is noted on that row,
+/// not listed as a PMID.
+#[tokio::test]
+async fn ssr_small_fixes_notable_citations_and_leads() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    body["skeptic"] = json!({
+        "verdict": "holds with caveats", "must_mention": [], "contradicting": [], "missed_rcts": [],
+        "guidelines": [], "overlaps": [{"pmids": ["41060645", "39979619"], "note": "same centre"}],
+        "leads": [{"pmid": "39979619", "kind": "contradicting study"}]
+    });
+    body["evidence"] = json!([{"pmid": "39979619", "text": "abstract only", "verified_quotes": 1,
+        "numbers_dropped": 0, "unverified_outcomes": []}]);
+    body["notable_code"] = json!([
+        {"text": "Not independent evidence (the skeptic): same centre", "pmids": ["41060645"]},
+        {"text": "The extractor could not match 2 numbers to the papers' wording.", "pmids": []}
+    ]);
+    body["answer"]["notable_findings"] =
+        json!([{"text": "Withdrawals 2 vs 9 [41060645].", "pmids": ["41060645"]}]);
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    let notable = &m[m.find("Other notable findings").expect("notable")..];
+    let notable = &notable[..notable.find("</ul>").unwrap()];
+    assert!(!notable.contains("Not independent evidence"), "{notable}");
+    assert!(notable.contains("could not match 2 numbers"));
+    assert_eq!(
+        notable.matches("#ref-1").count(),
+        1,
+        "one citation: {notable}"
+    );
+    assert!(m.contains("same centre"), "still in the skeptic box");
+    assert!(
+        m.contains("Skeptic: Possible contradicting study"),
+        "on the trial row"
+    );
+    assert!(!m.contains("Unverified leads"), "not listed as a PMID");
 }
 
 /// Stage 4: model text reaches the page only as escaped text: the page code

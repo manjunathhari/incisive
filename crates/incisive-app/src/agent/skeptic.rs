@@ -558,6 +558,8 @@ author).
 answer should read in full (for example a missed RCT, a cost-effectiveness analysis, the newest RCT-only meta-analysis, a \
 primary report), most important first. They are extracted and checked like the researcher's studies.
 
+WRITE in the third person, as the team's skeptic: \"the skeptic's searches found none\", never \"I\", \"my\" or \"we\".
+
 Do 4 to 8 searches, then end your turn with a short summary. You will then be asked for your review."
     )
 }
@@ -575,7 +577,8 @@ one-sentence note; empty when there is nothing to note. extract_next: up to 3 st
 researcher did not select and that the answer should read in full (a missed RCT, the newest RCT-only meta-analysis, a \
 cost-effectiveness analysis, the primary report of a selected follow-up), most important first, each with why; empty when \
 none. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
-must state, each one sentence or two. searches: each search you ran.";
+must state, each one sentence or two. searches: each search you ran. Write every text in the third person \
+(\"the skeptic's searches found none\"), never \"I\", \"my\" or \"we\".";
 
 pub const FINAL_INSTRUCTION: &str = "Submit your review now, as JSON matching the schema.";
 
@@ -1254,6 +1257,12 @@ mod tests {
             Ok(())
         );
         assert!(FINAL_SYSTEM.contains("extract_next: up to 3 studies from YOUR search results"));
+        // Stage 4b item 5: third person, never "my searches".
+        assert!(p.contains("WRITE in the third person"));
+        assert!(
+            FINAL_SYSTEM.contains("third person")
+                && FINAL_SYSTEM.contains("never \"I\", \"my\" or \"we\"")
+        );
         let s = report_schema();
         assert!(
             s["properties"]["extract_next"]["items"]["required"]
