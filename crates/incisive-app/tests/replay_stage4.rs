@@ -1943,6 +1943,68 @@ fn part_a_stage3_quick_and_empty_answers_render() {
     assert!(page.contains("id=\"ref-1\"") && original.contains("No relevant evidence found."));
 }
 
+/// Review: the study details are readable with no script. Every "not
+/// traced" mark on a study field (key results, appraisal, setting, n, ...)
+/// is drawn on the new page outside the closed study-sheet `<dialog>`s (in
+/// the trial card's "Study details"), as often as the field is marked.
+#[test]
+fn part_a_study_marks_are_readable_without_script() {
+    use incisive_app::agent::answer_v3::{marked_runs, text_fields};
+    use incisive_app::answer_page::{Piece, pieces};
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, _) = split_page(&html);
+        let mut open = String::new();
+        let mut rest = page;
+        while let Some(i) = rest.find("<dialog") {
+            open.push_str(&rest[..i]);
+            rest = rest[i..]
+                .find("</dialog>")
+                .map_or("", |j| &rest[i + j + "</dialog>".len()..]);
+        }
+        open.push_str(rest);
+        assert!(open.contains("<summary>Study details</summary>"), "{name}");
+        let refs = a.ref_numbers();
+        let w = a.answer.as_ref().unwrap();
+        let mut checked = 0;
+        for (f, t) in text_fields(w)
+            .into_iter()
+            .filter(|(f, _)| f.starts_with("studies."))
+        {
+            let marks = pieces(t, &f, &a.untraced, |p| refs.contains_key(p), true)
+                .iter()
+                .filter(|p| **p == Piece::Mark)
+                .count();
+            let runs = marked_runs(t, &f, &a.untraced)
+                .iter()
+                .filter(|(_, m)| *m)
+                .count();
+            checked += runs;
+            let drawn = open.matches(&format!("data-mark=\"w:{f}\"")).count();
+            assert!(
+                drawn >= marks,
+                "{name}: {f}: {drawn} outside dialogs, {marks} expected"
+            );
+        }
+        for sp in a
+            .untraced
+            .iter()
+            .filter(|s| s.len == 0 && s.field.starts_with("studies."))
+        {
+            assert!(
+                open.contains(&format!("data-mark=\"w:{}\"", sp.field)),
+                "{name}: {}",
+                sp.field
+            );
+            checked += 1;
+        }
+        eprintln!("PART A study marks outside dialogs {name}: {checked} marked runs checked");
+        if name == "replay" {
+            assert!(checked >= 6, "the replay's key-results marks are covered");
+        }
+    }
+}
+
 /// No `inner_html` anywhere in the page's code.
 #[test]
 fn part_a_uses_no_inner_html() {
