@@ -7,6 +7,8 @@ pub mod agent {
     pub mod answer;
     pub mod answer_v3;
 }
+/// Part A: the interactive answer page's rules (no Leptos).
+pub mod answer_page;
 pub mod app;
 pub mod ask;
 #[cfg(feature = "ssr")]

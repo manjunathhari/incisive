@@ -3431,6 +3431,36 @@ fn markup_of(html: &str) -> String {
     markup.replace("<!>", "")
 }
 
+/// Part A: the interactive page, and the original run view after it
+/// (today's answer view) with its `orig-` id prefix taken off, so the
+/// earlier page's markup can be checked as it was.
+fn views(m: &str) -> (&str, String) {
+    let i = m
+        .find("<details class=\"ap-original\">")
+        .expect("the original run view");
+    (
+        &m[..i],
+        m[i..]
+            .replace("\"#orig-ref-", "\"#ref-")
+            .replace("id=\"orig-", "id=\""),
+    )
+}
+
+/// `html` without its `<dialog>` elements (the study sheets, closed until
+/// the browser opens them): what is readable with no script.
+fn outside_dialogs(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<dialog") {
+        out.push_str(&rest[..i]);
+        rest = rest[i..]
+            .find("</dialog>")
+            .map_or("", |j| &rest[i + j + "</dialog>".len()..]);
+    }
+    out.push_str(rest);
+    out
+}
+
 async fn v3_page(pool: &PgPool, body: serde_json::Value) -> (StatusCode, String) {
     let st = app_state(pool.clone());
     let uid = new_user(pool).await;
@@ -3488,8 +3518,45 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
     assert!(html.contains("https://pubmed.ncbi.nlm.nih.gov/41060645/"));
     assert!(html.contains("https://doi.org/10.1001/jamasurg.2025.4071"));
     // Retraction warning on the retracted reference only.
-    assert_eq!(html.matches("RETRACTED").count(), 1);
-    // Sections in order.
+    // Part A: once in the original run view; on the new page, on the
+    // retracted reference and its study sheet only.
+    let (page, orig) = views(&markup);
+    assert_eq!(orig.matches("RETRACTED").count(), 1);
+    // On the new page: the reference, its study sheet and the trial card's
+    // study details (the same study), nowhere else.
+    assert_eq!(page.matches("RETRACTED").count(), 3);
+    let card = &page[page.find("<summary>Study details</summary>").unwrap()..];
+    assert!(card[..card.find("</details>").unwrap()].contains("RETRACTED"));
+    let ref2 = &page[page.find(r#"id="ref-2""#).unwrap()..];
+    assert!(ref2[..ref2.find("</li>").unwrap()].contains("RETRACTED"));
+    let sheet2 = &page[page.find(r#"id="sheet-2""#).unwrap()..];
+    assert!(sheet2[..sheet2.find("</dialog>").unwrap()].contains("RETRACTED"));
+    // Part A review: the same checks on the new page itself (escaped, no
+    // raw markers, numbered links, PubMed/DOI links), not only on the
+    // original run view below it.
+    assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!page.contains("<script>alert(1)") && !page.contains("<img src=x"));
+    assert!(!page.contains("<b>only</b>"));
+    assert!(page.contains("Self-fixated &lt;img src=x onerror=alert(2)&gt; (2025)"));
+    assert!(page.contains("hernia[tiab] AND &lt;mesh&gt;"));
+    assert!(
+        !page.contains("[41060645") && !page.contains("[39979619"),
+        "raw markers are replaced"
+    );
+    assert!(page.contains(
+        r##"No benefit &lt;script&gt;alert(1)&lt;/script&gt; <span class="cite">[<a href="#ref-1" rel="external">1</a>, <a href="#ref-2" rel="external">2</a>"##
+    ));
+    assert!(page.contains(r#"id="ref-1""#) && page.contains(r#"id="ref-2""#));
+    assert!(page.contains("https://pubmed.ncbi.nlm.nih.gov/41060645/"));
+    assert!(page.contains("https://doi.org/10.1001/jamasurg.2025.4071"));
+    // And on the original run view (its prefix taken off).
+    assert!(orig.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!orig.contains("<script>alert(1)") && !orig.contains("<img src=x"));
+    assert!(!orig.contains("[41060645"), "raw markers are replaced");
+    assert!(orig.contains(
+        r##"No benefit &lt;script&gt;alert(1)&lt;/script&gt; <span class="cite">[<a href="#ref-1" rel="external">1</a>, <a href="#ref-2" rel="external">2</a>"##
+    ));
+    // Sections in order: the earlier layout, in the original run view.
     let mut at = 0;
     for h in [
         "Bottom line",
@@ -3506,19 +3573,43 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
         "Cost and time",
         "₹23.45",
     ] {
-        let i = html[at..]
+        let i = orig[at..]
             .find(h)
-            .unwrap_or_else(|| panic!("{h} missing or out of order"));
+            .unwrap_or_else(|| panic!("original view: {h} missing or out of order"));
         at += i + h.len();
     }
-    // Tables scroll sideways on a phone.
+    // The new page's order (Part A items 1 and 10).
+    let mut at = 0;
+    for h in [
+        ">Bottom line<",
+        "Certainty: Low",
+        "Outcome by outcome",
+        ">Details<",
+        ">Conflicting evidence<",
+        ">Applicability<",
+        "India and cost",
+        ">What would change this answer<",
+        ">The trials<",
+        ">References<",
+        ">Search trail<",
+        ">Cost and time<",
+        "₹23.45",
+    ] {
+        let i = page[at..]
+            .find(h)
+            .unwrap_or_else(|| panic!("new page: {h} missing or out of order"));
+        at += i + h.len();
+    }
+    // Tables scroll sideways on a phone (the earlier layout only).
     assert_eq!(
-        html.matches(r#"<div class="scroll"><table class="wide">"#)
+        orig.matches(r#"<div class="scroll"><table class="wide">"#)
             .count(),
         2
     );
-    // The trail notes what the checks dropped.
-    assert!(html.contains("not returned by this run"));
+    assert!(!page.contains("<table"));
+    // The trail notes what the checks dropped (the new page's Checks too).
+    assert!(orig.contains("not returned by this run"));
+    assert!(page.contains("not returned by this run"));
     // The Phase 2 sections are not used for a v3 answer.
     assert!(!html.contains("How I read your question"));
 }
@@ -3844,8 +3935,10 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
     assert!(m.contains(
         "European &lt;b&gt;Hernia&lt;/b&gt; Society (2023): Either approach is acceptable"
     ));
-    let section =
-        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    // The earlier layout (the original run view).
+    let (page, orig) = views(&m);
+    let section = &orig
+        [orig.find("Guidelines and consensus").unwrap()..orig.find(">Applicability<").unwrap()];
     assert!(
         section
             .contains("ACG \u{2014} \u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"),
@@ -3861,9 +3954,38 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
     assert!(m.contains("What the meta-analyses pooled"));
     assert!(m.contains("Its 7-RCT pool counts one observational study as an RCT."));
     // The guidelines come after the conflicts and before applicability.
-    let g = m.find("Guidelines and consensus statements").unwrap();
-    assert!(m.find("Conflicting evidence").unwrap() < g);
-    assert!(g < m.find(">Applicability<").unwrap());
+    let g = orig.find("Guidelines and consensus statements").unwrap();
+    assert!(orig.find("Conflicting evidence").unwrap() < g);
+    assert!(g < orig.find(">Applicability<").unwrap());
+    // Part A: grouped by body, each guideline once; the skeptic's quote of
+    // the writer's guideline is drawn under the writer's line.
+    let gp = &page[page.find("Guidelines and consensus statements").unwrap()
+        ..page.find(">Applicability<").unwrap()];
+    assert!(
+        gp.contains("European &lt;b&gt;Hernia&lt;/b&gt; Society"),
+        "{gp}"
+    );
+    assert!(gp.contains("\u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"));
+    assert!(
+        gp.contains("\u{201c}already listed by the writer\u{201d}"),
+        "{gp}"
+    );
+    assert_eq!(
+        gp.matches("<li>").count(),
+        2,
+        "the writer's line and ACG: {gp}"
+    );
+    // Funding and the pool notes on the new page itself (sheet and the
+    // trial card's study details), escaped.
+    assert!(page.contains(">Funding<"));
+    assert!(page.contains("Intuitive &lt;script&gt;x&lt;/script&gt; Surgical"));
+    assert!(page.contains("Not stated in the abstract"));
+    assert!(!page.contains("<script>x"));
+    assert!(page.contains("What the meta-analyses pooled"));
+    assert!(page.contains("Its 7-RCT pool counts one observational study as an RCT."));
+    // And in the original run view.
+    assert!(orig.contains("Funding: Intuitive &lt;script&gt;x&lt;/script&gt; Surgical"));
+    assert!(orig.contains("Funding: not stated in the abstract"));
 }
 
 /// Stage 4 items 5 and 7: untraced numbers carry a "not traced" mark,
@@ -3950,6 +4072,35 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
     );
     // Stage 4b item 5: number agreement.
     assert!(m.contains("1 outcome and 2 numbers could not be matched"));
+    // Part A review: the same marks and labels on the new page itself, and
+    // readable with no script (outside the closed study-sheet dialogs).
+    let (page, _) = views(&m);
+    let open = outside_dialogs(page);
+    assert!(!page.contains("[?]"));
+    assert!(open.contains("Pain fell by 37%<sup title="), "{open}");
+    assert!(
+        open.contains(
+            r#"data-mark="w:bottom_line.text" class="flag">not traced</sup> &lt;b&gt;x&lt;/b&gt;"#
+        ),
+        "{open}"
+    );
+    assert!(open.contains(r#"data-mark="w:studies.0.n""#));
+    assert!(open.contains("n = 120<sup title="));
+    assert!(open.contains("Recurrence was 7%<sup title="));
+    assert!(
+        open.contains(r#"data-mark="s:must_mention.0" class="flag">not verified</sup> in 2019."#)
+    );
+    assert!(open.contains("Grant 4471<sup title="), "funding: {open}");
+    assert!(open.contains(r#"data-mark="e:39979619:funding""#));
+    assert!(open.contains("Recurrence &lt;i&gt;: 1 vs 1 at 2 years"));
+    assert!(
+        open.contains("not verified against the paper&#x27;s wording")
+            || open.contains("not verified against the paper's wording")
+    );
+    assert!(open.contains("2 numbers not verified"));
+    assert!(open.contains("Number check: 2 of 12 numbers in the answer not traced"));
+    assert!(open.contains(r#"<span class="ap-tag">RCT meta-analysis</span>"#));
+    assert!(open.contains("1 outcome and 2 numbers could not be matched"));
 }
 
 /// Stage 4: a v3 answer stored before Stage 4 (none of the new fields)
@@ -4082,20 +4233,46 @@ async fn ssr_readability_sections_arms_and_copy_text() {
     let m = markup_of(&html);
     assert!(!m.contains("<script>alert(5)"));
     assert!(!m.contains("<b>is</b>") && !m.contains("<i>x</i>"));
-    // Order: at a glance, bottom line, clinical practice, outcomes.
+    // Order: at a glance, bottom line, clinical practice, outcomes, in the
+    // earlier layout (the original run view) and on the new page.
+    let (page, orig) = views(&m);
+    let in_orig = |x: &str| {
+        orig.find(x)
+            .unwrap_or_else(|| panic!("{x} missing: {orig}"))
+    };
+    assert!(in_orig("At a glance: ") < in_orig(">Bottom line<"));
+    assert!(in_orig(">Bottom line<") < in_orig("What this means for clinical practice"));
+    assert!(in_orig("What this means for clinical practice") < in_orig("Outcome by outcome"));
+    let in_page = |x: &str| {
+        page.find(x)
+            .unwrap_or_else(|| panic!("{x} missing: {page}"))
+    };
+    assert!(in_page(">At a glance<") < in_page(">Bottom line<"));
+    assert!(in_page(">Bottom line<") < in_page("What this means for clinical practice"));
+    assert!(in_page("What this means for clinical practice") < in_page("Outcome by outcome"));
+    // The intervention arm first in the paired bars too.
+    assert!(in_page(">self-fixating<") < in_page(">tacked<"));
     let at = |x: &str| m.find(x).unwrap_or_else(|| panic!("{x} missing: {m}"));
-    assert!(at("At a glance: ") < at(">Bottom line<"));
-    assert!(at(">Bottom line<") < at("What this means for clinical practice"));
-    assert!(at("What this means for clinical practice") < at("Outcome by outcome"));
-    assert!(m.contains("No patient benefit &lt;script&gt;alert(5)&lt;/script&gt;."));
-    assert!(m.contains("Chronic pain: RR 0.53 (0.20 to 1.39)"));
-    assert!(m.contains("Either mesh &lt;b&gt;is&lt;/b&gt; reasonable."));
-    assert!(m.contains("Cost per case"));
-    // Item 10: the intervention arm (self-fixating) first.
+    // Escaped text and the parts, on the new page and in the original view.
+    assert!(orig.contains("Chronic pain: RR 0.53 (0.20 to 1.39)"));
+    // The new page draws the key number as a tile: label, then value.
+    let tile = &page[in_page(">Chronic pain<")..];
+    assert!(tile[..tile.find("</div>").unwrap()].contains("RR 0.53 (0.20 to 1.39)"));
+    for half in [page, orig.as_str()] {
+        assert!(half.contains("No patient benefit &lt;script&gt;alert(5)&lt;/script&gt;."));
+        assert!(half.contains("Either mesh &lt;b&gt;is&lt;/b&gt; reasonable."));
+        assert!(half.contains("Cost per case"));
+    }
+    assert!(!page.contains("<script>alert(5)") && !page.contains("<b>is</b>"));
+    // Item 10: the intervention arm (self-fixating) first: the earlier
+    // arm line, and on the new page the paired bars' values in that order.
     assert!(
-        m.contains("Pain score: 2.1 (self-fixating) vs 2.4 (tacked)"),
-        "{m}"
+        orig.contains("Pain score: 2.1 (self-fixating) vs 2.4 (tacked)"),
+        "{orig}"
     );
+    let bars = &page[in_page(">Pain score<")..];
+    let (v21, v24) = (bars.find(">2.1").unwrap(), bars.find(">2.4").unwrap());
+    assert!(v21 < v24, "2.1 (self-fixating) before 2.4 (tacked)");
     // Item 12: code's items, then the writer's, with their references.
     let n = at("Other notable findings from this run");
     assert!(n > at("Outcome by outcome") && n < at(">References<"));
@@ -4172,11 +4349,17 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
     assert!(!m.contains("[99999999]") && !m.contains("[41060645]"));
     assert!(m.contains("PMID 99999999"));
     // Review minor 3: an added row cites its study once.
-    let row = &m[m.find("<tr class=\"added\">").unwrap()..];
+    let (page, orig) = views(&m);
+    let row = &orig[orig.find("<tr class=\"added\">").unwrap()..];
     let row = &row[..row.find("</tr>").unwrap()];
     assert_eq!(row.matches("#ref-1").count(), 1, "{row}");
     // The untraced "5" is marked.
     assert!(m.contains("not traced"), "the mark");
+    // Part A: the new page labels each addition and links the not-relevant
+    // list's PMIDs too.
+    assert!(page.matches(ADDED_LABEL).count() >= 3);
+    assert!(page.contains("Judged not relevant (1)") && page.contains("PMID 99999999"));
+    assert!(page.contains(r#"data-mark="c:outcome_additions.0.text""#));
     // Stored as given: the writer's answer is not touched.
     let a: AnswerV3 = serde_json::from_value(body).unwrap();
     assert_eq!(
@@ -4268,15 +4451,32 @@ async fn ssr_small_fixes_notable_citations_and_leads() {
 /// children (a textarea's children are not escaped by Leptos).
 #[test]
 fn the_page_never_writes_model_text_as_html() {
-    let src = include_str!("../src/app.rs");
-    assert!(!src.contains("inner_html="), "inner_html used");
-    assert!(!src.contains("inner_html ="), "inner_html used");
-    let area = &src[src.find("id=COPY_AREA").expect("copy textarea")..];
-    let close = area.find("</textarea>").expect("close");
-    assert!(
-        area[..close].trim_end().ends_with('>'),
-        "the textarea must be empty"
-    );
+    // Part A: the page's code is in app.rs and its app/ submodules; each
+    // copy textarea (the page's and the original run view's) is empty.
+    let mut areas = 0;
+    for src in [
+        include_str!("../src/app.rs"),
+        include_str!("../src/app/page.rs"),
+        include_str!("../src/app/details.rs"),
+    ] {
+        assert!(!src.contains("inner_html="), "inner_html used");
+        assert!(!src.contains("inner_html ="), "inner_html used");
+        let mut rest = src;
+        while let Some(i) = rest.find("<textarea") {
+            let area = &rest[i..];
+            let close = area.find("</textarea>").expect("close");
+            // Every textarea (the question box too) is empty in the markup.
+            assert!(
+                area[..close].trim_end().ends_with('>'),
+                "the textarea must be empty"
+            );
+            if area[..close].contains("COPY_AREA") {
+                areas += 1;
+            }
+            rest = &area[close..];
+        }
+    }
+    assert_eq!(areas, 2, "the page's and the original run view's");
 }
 
 /// Stage 4 review 2, 3, 5, 6 and 8 on the page: a guideline with no source
@@ -4352,12 +4552,31 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
     let m = markup_of(&html);
-    let section =
-        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    // The earlier layout (the original run view).
+    let (page, orig) = views(&m);
+    let section = &orig
+        [orig.find("Guidelines and consensus").unwrap()..orig.find(">Applicability<").unwrap()];
     assert!(
         section.contains("A society (2020): Use either."),
         "{section}"
     );
+    // Part A: the same flags in the new page's Guidelines section.
+    let gp = &page[page.find("Guidelines and consensus statements").unwrap()
+        ..page.find(">Applicability<").unwrap()];
+    for want in [
+        ">A society<",
+        "(2020) Use either.",
+        r#"<span class="flag-label">no source among the studies; not verified</span>"#,
+        "Possible guideline: quote not found in the abstract, check the paper",
+        r#"href="https://pubmed.ncbi.nlm.nih.gov/38888888/""#,
+        r#"href="https://pubmed.ncbi.nlm.nih.gov/37777777/""#,
+        "EHS 2023<sup title=",
+    ] {
+        assert!(gp.contains(want), "{want}: {gp}");
+    }
+    assert!(page.contains(
+        r#"NCT9999 <span class="flag-label">named in the record; the source text does not repeat it</span>"#
+    ));
     assert!(
         section.contains(
             r#"<span class="flag-label">no source among the studies; not verified</span>"#
