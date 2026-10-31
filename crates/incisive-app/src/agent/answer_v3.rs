@@ -368,7 +368,14 @@ pub struct EvidenceV3 {
     /// source does not contain, shown labelled "not in the source".
     #[serde(default)]
     pub trial_registration_unverified: Option<String>,
+    /// Stage 4b item 3: a study the skeptic found and picked for
+    /// extraction (the second wave); labelled "found by the skeptic".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub found_by_skeptic: bool,
 }
+
+/// The label of a study the skeptic picked for extraction.
+pub const FOUND_BY_SKEPTIC: &str = "found by the skeptic";
 
 /// An extracted outcome whose quote was not found in the paper (Stage 4
 /// item 7): kept with its values, labelled "not verified".
@@ -408,6 +415,9 @@ pub struct SkepticV3 {
     pub dropped_unseen: u32,
     #[serde(default)]
     pub dropped_quotes: u32,
+    /// Stage 4b item 3: studies it picked for extraction (second wave).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extract_next: Vec<SkepticItem>,
 }
 
 /// An unverified lead of the skeptic (Stage 4 review 6).
@@ -1384,6 +1394,11 @@ impl AnswerV3 {
                         t(&s.appraisal, &format!("studies.{i}.appraisal")),
                     ));
                     if let Some(e) = self.evidence.iter().find(|e| e.pmid == s.pmid) {
+                        if e.found_by_skeptic {
+                            o.push_str(&format!(
+                                "  ({FOUND_BY_SKEPTIC}; extracted in a second wave)\n"
+                            ));
+                        }
                         if e.funding_checked {
                             let f = e.funding.as_deref().map_or_else(
                                 || {
@@ -1549,6 +1564,7 @@ impl AnswerV3 {
                 ));
             }
             let items = [
+                ("Picked for extraction", &k.extract_next, "extract_next"),
                 ("Missed trial", &k.missed_rcts, "missed_rcts"),
                 ("What a meta-analysis pooled", &k.ma_notes, "ma_notes"),
                 ("Evidence against", &k.contradicting, "contradicting"),
@@ -1985,6 +2001,7 @@ mod tests {
                 leads: vec![],
                 dropped_unseen: 0,
                 dropped_quotes: 0,
+                extract_next: vec![],
             }),
             evidence: vec![],
             notes: vec![],
@@ -2122,6 +2139,7 @@ mod tests {
             funding_checked: true,
             spans: vec![],
             trial_registration_unverified: Some("NCT9999".into()),
+            found_by_skeptic: false,
         }];
         a.integrity.numbers_checked = 40;
         a.integrity.numbers_untraced = 1;

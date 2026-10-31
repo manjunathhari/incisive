@@ -3707,6 +3707,7 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         leads: vec![],
         dropped_unseen: 0,
         dropped_quotes: 0,
+        extract_next: vec![],
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3720,6 +3721,7 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         funding_checked: false,
         spans: vec![],
         trial_registration_unverified: None,
+        found_by_skeptic: false,
     }];
     a.notes = vec![
         "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
@@ -3803,6 +3805,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
         leads: vec![],
         dropped_unseen: 0,
         dropped_quotes: 0,
+        extract_next: vec![],
     });
     a.evidence = vec![
         EvidenceV3 {
@@ -3817,6 +3820,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
             funding_checked: true,
             spans: vec![],
             trial_registration_unverified: None,
+            found_by_skeptic: false,
         },
         EvidenceV3 {
             pmid: "41060645".into(),
@@ -3830,6 +3834,7 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
             funding_checked: true,
             spans: vec![],
             trial_registration_unverified: None,
+            found_by_skeptic: false,
         },
     ];
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
@@ -3896,6 +3901,7 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
         leads: vec![],
         dropped_unseen: 0,
         dropped_quotes: 0,
+        extract_next: vec![],
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3912,6 +3918,7 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
         funding_checked: true,
         spans: vec![Span::new("funding", 6, 10)],
         trial_registration_unverified: None,
+        found_by_skeptic: false,
     }];
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
@@ -4264,6 +4271,7 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         ],
         dropped_unseen: 2,
         dropped_quotes: 0,
+        extract_next: vec![],
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -4277,6 +4285,7 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
         funding_checked: true,
         spans: vec![],
         trial_registration_unverified: Some("NCT9999".into()),
+        found_by_skeptic: false,
     }];
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
     assert_eq!(s, StatusCode::OK);

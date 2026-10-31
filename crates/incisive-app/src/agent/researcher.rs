@@ -18,7 +18,8 @@
 //!   wrapped; withheld or failed results do not count). Any other is
 //!   dropped and counted (`dropped_unseen`); so is an id that is not 1–9
 //!   digits;
-//! * duplicates are removed, then the list is cut to [`MAX_SELECTED`] (10);
+//! * duplicates are removed, then the list is cut to [`MAX_SELECTED`] (10;
+//!   Full: [`MAX_SELECTED_FULL`], 12, Stage 4b);
 //! * contradictions keep only notes on a PMID that was seen.
 //!
 //! An empty valid selection is not an error: the team pipeline then ends
@@ -70,8 +71,21 @@ pub const QUICK_TOOLS: [&str; 4] = [
     "get_abstracts",
     "find_related",
 ];
-/// Studies kept, at most.
+/// Studies kept, at most (Quick; and the Full default before Stage 4b).
 pub const MAX_SELECTED: usize = 10;
+/// Full (Stage 4b item 3): studies the researcher may select, at most. With
+/// the skeptic's picks ([`super::skeptic::MAX_PICKS`]) the writer gets up
+/// to 15 rows.
+pub const MAX_SELECTED_FULL: usize = 12;
+
+/// The selection cap of `mode` ([`MAX_SELECTED`] Quick, [`MAX_SELECTED_FULL`]
+/// Full).
+pub fn max_selected(mode: crate::runs::RunMode) -> usize {
+    match mode {
+        crate::runs::RunMode::Quick => MAX_SELECTED,
+        crate::runs::RunMode::Focused => MAX_SELECTED_FULL,
+    }
+}
 /// Characters kept of a `why` or a contradiction note.
 pub const MAX_NOTE: usize = 500;
 /// Characters of a query kept in the search trail.
@@ -214,8 +228,13 @@ fn clip_chars(s: &str, max: usize) -> String {
 }
 
 /// Check the study list against the PMIDs `seen` in tool results (see the
-/// module docs).
+/// module docs), capped at [`MAX_SELECTED`].
 pub fn validate(list: StudyList, seen: &HashSet<String>) -> Validated {
+    validate_capped(list, seen, MAX_SELECTED)
+}
+
+/// [`validate`] with the selection capped at `max` (Full: 12).
+pub fn validate_capped(list: StudyList, seen: &HashSet<String>, max: usize) -> Validated {
     let mut out = Validated {
         selected: Vec::new(),
         contradictions: Vec::new(),
@@ -232,7 +251,7 @@ pub fn validate(list: StudyList, seen: &HashSet<String>) -> Validated {
             out.duplicates += 1;
             continue;
         }
-        if out.selected.len() >= MAX_SELECTED {
+        if out.selected.len() >= max {
             out.over_cap += 1;
             continue;
         }
@@ -366,8 +385,32 @@ pub fn recording(tools: &ToolRegistry, rec: &Arc<SearchRecorder>) -> ToolRegistr
 // ---------- prompts ----------
 
 /// The researcher's system prompt for a loop of at most `turns` tool turns;
-/// with `full_text` (Full mode) it also offers `get_full_text`.
+/// with `full_text` (Full mode) it also offers `get_full_text`. Selects up
+/// to [`MAX_SELECTED`] (Quick; see [`system_prompt_full`]).
 pub fn system_prompt(turns: u8, full_text: bool) -> String {
+    system_prompt_with(turns, full_text, MAX_SELECTED)
+}
+
+/// The Full researcher's system prompt (Stage 4b item 3): up to
+/// [`MAX_SELECTED_FULL`] studies, only what matters, never padded.
+pub fn system_prompt_full(turns: u8, full_text: bool) -> String {
+    system_prompt_with(turns, full_text, MAX_SELECTED_FULL)
+}
+
+fn system_prompt_with(turns: u8, full_text: bool, max: usize) -> String {
+    let selection = if max == MAX_SELECTED {
+        format!(
+            "SELECTION: 6 to {max} studies that matter most: every relevant RCT (not protocols), plus the 2 to 4 best or most recent \
+meta-analyses. Add observational studies only when no RCT covers an outcome the question asks about. Fewer is fine when \
+less exists; never pad the list."
+        )
+    } else {
+        format!(
+            "SELECTION: up to {max} studies; select only what matters and do not pad the list (a rare topic may have 6 or fewer): \
+every relevant RCT (not protocols), plus the 2 to 4 best or most recent meta-analyses, preferring those that pool RCTs \
+only. Add observational studies only when no RCT covers an outcome the question asks about."
+        )
+    };
     let tools = if full_text {
         "search_pubmed, search_europepmc, get_abstracts, get_full_text and find_related"
     } else {
@@ -402,17 +445,14 @@ Never paste the question's wording into a query.
 3. Use find_related on the key trials to catch anything the searches missed.
 {reading}5. Stop when new searches stop turning up new relevant studies, or when your turns run out.
 
-SELECTION: 6 to {max} studies that matter most: every relevant RCT (not protocols), plus the 2 to 4 best or most recent \
-meta-analyses. Add observational studies only when no RCT covers an outcome the question asks about. Fewer is fine when \
-less exists; never pad the list.
+{selection}
 When you select a follow-up or secondary report of a trial (longer follow-up, a subgroup or cost analysis), also find and \
 select the trial's primary report if a search can find it (search the trial name, registration number or first author); \
 it counts toward the {max}, so leave out a less important study instead.
 
 Record any study that may CONTRADICT the majority view, and why.
 
-When you have finished, end your turn with a short summary of what you found. You will then be asked for the study list.",
-        max = MAX_SELECTED
+When you have finished, end your turn with a short summary of what you found. You will then be asked for the study list."
     )
 }
 
@@ -423,6 +463,16 @@ observational studies only when no RCT covers an outcome; with a follow-up or se
 when your searches found it); design is RCT, SR_MA (systematic review or meta-analysis) or other; \
 why is one line. searches: each search you ran with its database and hit count. considered_not_selected: notable studies you \
 left out, with the reason. possible_contradictions: studies that may contradict the majority view, with a one-line note.";
+
+/// The Full final call (Stage 4b item 3): at most 12, never padded.
+const FINAL_SYSTEM_FULL: &str = "You are the RESEARCHER on an evidence team. Report the result of your research as JSON matching the schema. \
+Use only PMIDs that appear in the tool results of the transcript; never add a study from memory. \
+selected: up to 12 studies, only the ones that matter (do not pad the list; a rare topic may have 6 or fewer): every relevant \
+RCT, plus the 2 to 4 best or most recent meta-analyses; observational studies only when no RCT covers an outcome; with a \
+follow-up or secondary report, its trial's primary report when your searches found it; design is RCT, SR_MA (systematic \
+review or meta-analysis) or other; why is one line. searches: each search you ran with its database and hit count. \
+considered_not_selected: notable studies you left out, with the reason. possible_contradictions: studies that may contradict \
+the majority view, with a one-line note.";
 
 const FINAL_INSTRUCTION: &str = "Submit the study list now, as JSON matching the schema.";
 
@@ -530,7 +580,12 @@ pub async fn research(
     let rec = Arc::new(SearchRecorder::default());
     let tools = recording(&tools_for(&lit_tools, &settings), &rec);
 
-    let system = system_prompt(settings.researcher_turns, settings.full_text);
+    let full = ctx.mode == crate::runs::RunMode::Focused;
+    let system = if full {
+        system_prompt_full(settings.researcher_turns, settings.full_text)
+    } else {
+        system_prompt(settings.researcher_turns, settings.full_text)
+    };
     let user = task(&ctx.question);
     let schema = OutputSchema::new(study_list_schema()).with_effort(Effort::Low);
     let spec = AgentSpec {
@@ -539,7 +594,11 @@ pub async fn research(
         max_turns: u32::from(settings.researcher_turns),
         max_tokens: settings.researcher_max_tokens,
         effort: None,
-        final_system: FINAL_SYSTEM,
+        final_system: if full {
+            FINAL_SYSTEM_FULL
+        } else {
+            FINAL_SYSTEM
+        },
         final_instruction: FINAL_INSTRUCTION,
         final_schema: &schema,
         final_max_tokens: settings.researcher_max_tokens,
@@ -587,7 +646,7 @@ pub async fn research(
     let seen = seen_pmids(&run.results);
     let reported = run.output.selected.len();
     let considered = run.output.considered_not_selected.len();
-    let v = validate(run.output, &seen);
+    let v = validate_capped(run.output, &seen, max_selected(ctx.mode));
     let rcts = v
         .selected
         .iter()
@@ -780,6 +839,37 @@ mod tests {
             assert!(p.contains(&format!("6 to {MAX_SELECTED} studies")));
         }
         assert!(FINAL_SYSTEM.contains("its trial's primary report"));
+        assert!(FINAL_SYSTEM_FULL.contains("its trial's primary report"));
+    }
+
+    /// Stage 4b item 3: Full selects up to 12, only what matters, never
+    /// padded; Quick's prompt and cap are unchanged.
+    #[test]
+    fn full_selects_up_to_twelve_without_padding() {
+        let full = system_prompt_full(15, true);
+        assert!(full.contains(
+            "SELECTION: up to 12 studies; select only what matters and do not pad the list"
+        ));
+        assert!(full.contains("a rare topic may have 6 or fewer"));
+        assert!(full.contains("it counts toward the 12"));
+        assert!(!full.contains("6 to 12"));
+        assert!(
+            FINAL_SYSTEM_FULL.contains("up to 12 studies")
+                && FINAL_SYSTEM_FULL.contains("do not pad")
+        );
+        assert!(FINAL_SYSTEM.contains("at most 10 studies"));
+        let quick = system_prompt(8, false);
+        assert!(quick.contains("SELECTION: 6 to 10 studies that matter most"));
+        assert_eq!(max_selected(crate::runs::RunMode::Quick), 10);
+        assert_eq!(max_selected(crate::runs::RunMode::Focused), 12);
+        let ids: Vec<String> = (100..115).map(|i| i.to_string()).collect();
+        let seen: HashSet<String> = ids.iter().cloned().collect();
+        let v = validate_capped(
+            list(ids.iter().map(|i| study(i, Design::Rct)).collect()),
+            &seen,
+            MAX_SELECTED_FULL,
+        );
+        assert_eq!((v.selected.len(), v.over_cap), (12, 3));
     }
 
     /// Stage 4 review 9: the guideline example the prompts and tool

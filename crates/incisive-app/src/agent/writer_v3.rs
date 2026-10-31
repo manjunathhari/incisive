@@ -46,7 +46,7 @@ use super::llm::{
     Effort, OutputSchema, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
     neutralise_source_tags, read_structured, wrap_source,
 };
-use super::researcher::{Contradiction, MAX_CONTRADICTIONS, MAX_SELECTED};
+use super::researcher::{Contradiction, MAX_CONTRADICTIONS, MAX_SELECTED, MAX_SELECTED_FULL};
 use super::skeptic::SkepticReview;
 use super::{AgentLlm, RunContext};
 use crate::gate::neutralise_close_tag;
@@ -999,6 +999,11 @@ there are none; never convert currencies, never estimate Indian prices, never in
 study that contradicts itself, lopsided withdrawals between arms, industry funding or conflicts, a design that is not \
 what its label says), each citing its study with a [PMID] marker, drawn only from the evidence rows, appraisals and skeptic review provided.";
 
+/// Studies the Full writer is shown, at most (Stage 4b item 3): the
+/// researcher's twelve and the skeptic's three picks. The writer's prompt,
+/// schema and `max_tokens` are unchanged; only its input has up to 15 rows.
+pub const MAX_WRITER_STUDIES: usize = MAX_SELECTED_FULL + super::skeptic::MAX_PICKS;
+
 /// Byte caps of the Full-mode row and review fields shown to the writer
 /// (after neutralising).
 pub struct FullCaps {
@@ -1336,7 +1341,7 @@ pub fn writer_user_full(
 pub fn full_blocks(studies: &[StudyInput], full: &FullInput<'_>) -> String {
     let c = STUDY_CAPS;
     let mut u = String::new();
-    for (i, s) in studies.iter().take(MAX_SELECTED).enumerate() {
+    for (i, s) in studies.iter().take(MAX_WRITER_STUDIES).enumerate() {
         let body = match full.rows.iter().find(|r| r.pmid == s.pmid) {
             Some(r) => format!("Verified evidence row:\n{}", row_block(s, r)),
             None => format!(
@@ -1380,7 +1385,8 @@ pub fn full_blocks(studies: &[StudyInput], full: &FullInput<'_>) -> String {
     u
 }
 
-/// The largest Full writer prompt `question` can produce: ten studies, each
+/// The largest Full writer prompt `question` can produce: fifteen studies
+/// (Stage 4b: twelve selected and three picked by the skeptic), each
 /// with a row at every cap (rows are larger than abstracts), a skeptic
 /// review at every cap and three missed trials at the abstract caps.
 pub fn worst_case_full_user(question: &str) -> String {
@@ -1402,7 +1408,7 @@ pub fn worst_case_full_user(question: &str) -> String {
         design: x(DESIGN_BYTES),
         why: x(STUDY_CAPS.why),
     };
-    let studies: Vec<StudyInput> = (0..MAX_SELECTED).map(worst_study).collect();
+    let studies: Vec<StudyInput> = (0..MAX_WRITER_STUDIES).map(worst_study).collect();
     let number = RowNumber {
         label: x(k.number),
         value: f64::MIN_POSITIVE,
@@ -1502,6 +1508,7 @@ pub fn worst_case_full_user(question: &str) -> String {
                 note: x(k.claim),
             })
             .collect(),
+        extract_next: vec![],
         searches: vec![],
         leads: (0..2 * super::skeptic::MAX_ITEMS)
             .map(|i| super::skeptic::Lead {
@@ -2766,6 +2773,7 @@ mod tests {
                 pmid: "22222222".into(),
                 note: "its RCT pool includes an observational study".into(),
             }],
+            extract_next: vec![],
             searches: vec![],
             leads: vec![],
             dropped_unseen: 0,

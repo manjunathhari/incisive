@@ -547,6 +547,7 @@ mod tests {
                 pmid: "22222222".into(),
                 note: "pools a cohort".into(),
             }],
+            extract_next: vec![],
             searches: vec![],
             leads: vec![],
             dropped_unseen: 0,

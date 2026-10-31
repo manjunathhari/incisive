@@ -62,6 +62,8 @@ use crate::runs::StepKind;
 
 /// Missed RCTs kept, at most.
 pub const MAX_MISSED: usize = 3;
+/// Stage 4b item 3: studies the skeptic may pick for extraction, at most.
+pub const MAX_PICKS: usize = 3;
 /// Entries kept per list (contradicting, guidelines, overlaps).
 pub const MAX_ITEMS: usize = 6;
 /// `must_mention` items kept.
@@ -126,6 +128,12 @@ pub struct ReportedMaNote {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ReportedPick {
+    pub pmid: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ReportedSearch {
     pub query: String,
     pub source: String,
@@ -145,6 +153,10 @@ pub struct SkepticReport {
     /// Stage 4 item 4 (default empty: a reply without it still reads).
     #[serde(default)]
     pub ma_notes: Vec<ReportedMaNote>,
+    /// Stage 4b item 3 (default empty): studies from its own searches to
+    /// extract next, most important first.
+    #[serde(default)]
+    pub extract_next: Vec<ReportedPick>,
 }
 
 /// A contradiction with its verified quote.
@@ -200,6 +212,14 @@ fn push_lead(leads: &mut Vec<Lead>, pmid: &str, kind: &str) {
     }
 }
 
+/// A study the skeptic picked for extraction (Stage 4b item 3): returned by
+/// its own searches, not selected by the researcher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pick {
+    pub pmid: String,
+    pub why: String,
+}
+
 /// What a meta-analysis actually pooled (Stage 4 item 4): a note only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaNote {
@@ -219,6 +239,10 @@ pub struct SkepticReview {
     /// Stage 4 item 4: meta-analysis pool notes (selected or seen PMIDs).
     #[serde(default)]
     pub ma_notes: Vec<MaNote>,
+    /// Stage 4b item 3: studies to extract next (seen, not selected, at most
+    /// [`MAX_PICKS`], in the skeptic's order of importance).
+    #[serde(default)]
+    pub extract_next: Vec<Pick>,
     /// Recorded by code as the tools ran.
     pub searches: Vec<SearchEntry>,
     /// Entries naming a PMID no skeptic tool returned (or not a PMID).
@@ -437,6 +461,28 @@ pub fn validate(
             None => dropped_unseen += 1,
         }
     }
+    // Stage 4b item 3: picks for extraction must come from its own results,
+    // not be selected already, and are kept in its order, at most three.
+    let mut extract_next: Vec<Pick> = Vec::new();
+    for p in report.extract_next {
+        let Some(pmid) = clean_pmid(&p.pmid) else {
+            dropped_unseen += 1;
+            continue;
+        };
+        if selected.contains(&pmid) || extract_next.iter().any(|x| x.pmid == pmid) {
+            continue;
+        }
+        if !seen.contains(&pmid) {
+            dropped_unseen += 1;
+            continue;
+        }
+        if extract_next.len() < MAX_PICKS {
+            extract_next.push(Pick {
+                pmid,
+                why: clip(&p.why, MAX_NOTE),
+            });
+        }
+    }
     let kept: Vec<&String> = report
         .must_mention
         .iter()
@@ -457,6 +503,7 @@ pub fn validate(
         guidelines,
         overlaps,
         ma_notes,
+        extract_next,
         searches,
         leads,
         dropped_unseen,
@@ -499,6 +546,18 @@ notes for the writer; nothing is excluded because of them.
 QUOTES: every quote you give must be copied exactly, character for character, from the title or abstract of that PMID as \
 get_abstracts returned it. Quotes are checked by code; an entry whose quote is not found is discarded.
 
+SEARCH CHECKLIST: run at least these searches, each its own search:
+a. guidelines (as in 3);
+b. COST-EFFECTIVENESS or economic evaluation, matching title and abstract words, not only the title, e.g. topic terms AND \
+(cost-effectiveness[tiab] OR cost-utility[tiab] OR \"cost effectiveness\"[tiab] OR \"economic evaluation\"[tiab] OR \
+cost*[ti]);
+c. the NEWEST meta-analysis that pools randomised trials only (sort by recent years);
+d. for any selected follow-up or secondary report, its trial's PRIMARY report (trial name, registration number or first \
+author).
+7. STUDIES TO EXTRACT NEXT: up to 3 studies from your own search results that the researcher did not select and that the \
+answer should read in full (for example a missed RCT, a cost-effectiveness analysis, the newest RCT-only meta-analysis, a \
+primary report), most important first. They are extracted and checked like the researcher's studies.
+
 Do 4 to 8 searches, then end your turn with a short summary. You will then be asked for your review."
     )
 }
@@ -512,7 +571,10 @@ guidelines: guideline or consensus statements, with the issuing body and an exac
 overlaps: groups of PMIDs (selected or found) that are not independent evidence (same group, centre, registry or \
 population), with a note. ma_notes: for a meta-analysis (selected or found), what its pool actually included when that \
 is not only randomised trials (observational studies, or a study labelled RCT that is not one), with its PMID and a \
-one-sentence note; empty when there is nothing to note. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
+one-sentence note; empty when there is nothing to note. extract_next: up to 3 studies from YOUR search results that the \
+researcher did not select and that the answer should read in full (a missed RCT, the newest RCT-only meta-analysis, a \
+cost-effectiveness analysis, the primary report of a selected follow-up), most important first, each with why; empty when \
+none. verdict: holds, holds_with_caveats or does_not_hold. must_mention: the caveats the final answer \
 must state, each one sentence or two. searches: each search you ran.";
 
 pub const FINAL_INSTRUCTION: &str = "Submit your review now, as JSON matching the schema.";
@@ -543,6 +605,7 @@ pub fn report_schema() -> Value {
             "pmids": {"type": "array", "items": {"type": "string"}}, "note": s
         }))},
         "ma_notes": {"type": "array", "items": obj(json!({"pmid": pmid, "note": s}))},
+        "extract_next": {"type": "array", "items": obj(json!({"pmid": pmid, "why": s}))},
         "verdict": {"type": "string", "enum": ["holds", "holds_with_caveats", "does_not_hold"]},
         "must_mention": {"type": "array", "items": s},
         "searches": {"type": "array", "items": obj(json!({
@@ -634,11 +697,11 @@ fn spec<'a>(
 
 /// What the skeptic needs to start (its first turn's hold and its final
 /// call's kept share, [`super::agent_loop::first_turn_need`]) for the
-/// largest picture: ten studies, every field at its cap. `None`: unpriced.
+/// largest picture: twelve studies (Full, Stage 4b), every field at its cap. `None`: unpriced.
 /// Reserved ahead of the review phase (Stage 3).
 pub fn min_need(ctx: &RunContext, llm: &AgentLlm, lit: Arc<Literature>) -> Option<i64> {
     let x = |n: usize| "x".repeat(n);
-    let picture: Vec<Picture> = (0..super::researcher::MAX_SELECTED)
+    let picture: Vec<Picture> = (0..super::researcher::MAX_SELECTED_FULL)
         .map(|i| Picture {
             pmid: format!("{:09}", 100_000_000 + i),
             title: x(MAX_TITLE),
@@ -841,6 +904,7 @@ mod tests {
             must_mention: vec!["Say it.".into(), "  ".into()],
             searches: vec![],
             ma_notes: vec![],
+            extract_next: vec![],
         }
     }
 
@@ -1108,5 +1172,94 @@ mod tests {
         assert_eq!(t.matches("</source>").count(), 2, "{t}");
         assert!(t.contains("why selected: key Study 2"));
         assert!(t.contains("< /question> x"));
+    }
+
+    /// Stage 4b item 3: picks for extraction come from the skeptic's own
+    /// results, are not already selected, keep its order and stop at three.
+    #[test]
+    fn picks_are_its_own_unselected_and_at_most_three() {
+        let results = vec![wrap_source(
+            "t1-1",
+            &json!({"papers": [
+                {"pmid": "501", "title": "a", "abstract": "x"}, {"pmid": "502", "title": "b", "abstract": "x"},
+                {"pmid": "503", "title": "c", "abstract": "x"}, {"pmid": "504", "title": "d", "abstract": "x"},
+                {"pmid": "111", "title": "selected", "abstract": "x"}
+            ], "not_found": []})
+            .to_string(),
+        )];
+        let mut r = report();
+        r.contradicting.clear();
+        r.missed_rcts.clear();
+        r.guidelines.clear();
+        r.overlaps.clear();
+        let pick = |p: &str| ReportedPick {
+            pmid: p.into(),
+            why: format!("why {p}"),
+        };
+        r.extract_next = vec![
+            pick("111"),
+            pick("777"),
+            pick("503"),
+            pick("501"),
+            pick("503"),
+            pick("502"),
+            pick("504"),
+        ];
+        let v = validate(r, &results, &["111".to_string()], vec![]);
+        let ids: Vec<&str> = v.extract_next.iter().map(|p| p.pmid.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["503", "501", "502"],
+            "own results, unselected, ranked, three"
+        );
+        assert_eq!(v.extract_next[0].why, "why 503");
+        assert_eq!(v.dropped_unseen, 1, "777 was never returned");
+        // A reply without the field still reads.
+        let old: SkepticReport = serde_json::from_value(json!({
+            "contradicting": [], "missed_rcts": [], "guidelines": [], "overlaps": [],
+            "verdict": "holds", "must_mention": [], "searches": []
+        }))
+        .unwrap();
+        assert!(old.extract_next.is_empty());
+        let stored: SkepticReview = serde_json::from_value(json!({
+            "verdict": "holds", "must_mention": [], "contradicting": [], "missed_rcts": [],
+            "guidelines": [], "overlaps": [], "searches": [], "dropped_unseen": 0, "dropped_quotes": 0
+        }))
+        .unwrap();
+        assert!(stored.extract_next.is_empty());
+    }
+
+    /// Stage 4b item 3: the checklist asks for a guideline search, a
+    /// cost-effectiveness search on title and abstract words (the 31 Oct
+    /// run 2 missed a cost-utility model with `cost[ti]`), the newest
+    /// RCT-only meta-analysis and primary reports; the example passes the
+    /// query check. The schema and final prompt carry `extract_next`.
+    #[test]
+    fn the_checklist_asks_for_cost_and_newest_meta_analysis() {
+        let p = system_prompt(8);
+        for want in [
+            "SEARCH CHECKLIST",
+            "COST-EFFECTIVENESS",
+            "cost-utility[tiab]",
+            "NEWEST meta-analysis that pools randomised trials only",
+            "PRIMARY report",
+            "STUDIES TO EXTRACT NEXT: up to 3",
+        ] {
+            assert!(p.contains(want), "{want}");
+        }
+        let example = r#"(cost-effectiveness[tiab] OR cost-utility[tiab] OR "cost effectiveness"[tiab] OR "economic evaluation"[tiab] OR cost*[ti])"#;
+        assert!(p.contains(example));
+        assert_eq!(
+            crate::agent::search::validate_query(&format!("hernia[tiab] AND {example}")),
+            Ok(())
+        );
+        assert!(FINAL_SYSTEM.contains("extract_next: up to 3 studies from YOUR search results"));
+        let s = report_schema();
+        assert!(
+            s["properties"]["extract_next"]["items"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("pmid"))
+        );
     }
 }

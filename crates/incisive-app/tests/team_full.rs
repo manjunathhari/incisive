@@ -1324,9 +1324,22 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let mut min_viable = None;
+    // Stage 4b: with the completeness review on (its own reserve) and the
+    // second wave's share reserved.
+    let script = || {
+        full_script_on(
+            ScriptedLlm::new()
+                .when(COMPLETENESS_KEY)
+                .reply_json(completeness_json(), usage(30_000, 2_500)),
+            15,
+            None,
+            None,
+            |_| usage(1500, 1500),
+        )
+    };
     for limit in (4000..=34000).step_by(1000) {
-        let llm = Arc::new(full_script(15, None));
-        let (ctx, uid) = full_ctx(
+        let llm = Arc::new(script());
+        let (mut ctx, uid) = full_ctx(
             &pool,
             literature(&server),
             real_models(llm.clone()),
@@ -1334,6 +1347,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             DepthSettings::FOCUSED,
         )
         .await;
+        ctx.state.completeness = true;
         let out = run_team(&ctx).await;
         let reqs = llm.requests();
         let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
@@ -1362,8 +1376,9 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             .filter(|r| request_user_text(r).contains(SKEPTIC_KEY) && !r.tools.is_empty())
             .count();
         let rows = by_key(&reqs, "Study PMID").len();
+        let comp = by_key(&reqs, COMPLETENESS_KEY).len();
         eprintln!(
-            "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, charged {spent}"
+            "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, completeness calls {comp}, charged {spent}"
         );
     }
     let mut hi = min_viable.expect("a Full run fits under ₹340");
@@ -1371,8 +1386,8 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     let mut lo = hi - 1000;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        let llm = Arc::new(full_script(15, None));
-        let (ctx, _) = full_ctx(
+        let llm = Arc::new(script());
+        let (mut ctx, _) = full_ctx(
             &pool,
             literature(&server),
             real_models(llm.clone()),
@@ -1380,6 +1395,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             DepthSettings::FOCUSED,
         )
         .await;
+        ctx.state.completeness = true;
         let _ = run_team(&ctx).await;
         if by_key(&llm.requests(), STUDIES_HEADING).len() == 1 {
             hi = mid;
@@ -1408,8 +1424,12 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     )
     .unwrap();
     let review = incisive_app::agent::team::review_reserve(&ctx).unwrap();
+    let picks = incisive_app::agent::team::pick_reserve(&ctx).unwrap();
+    let comp = completeness::reserve(&ctx.llm, &ctx.budget, QUESTION).unwrap();
+    let writer_prompt = incisive_app::agent::writer_v3::worst_case_full_user(QUESTION).len();
+    let comp_prompt = completeness::worst_case_user(QUESTION).len();
     eprintln!(
-        "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; review reserve {review}"
+        "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; completeness reserve {comp}; review reserve {review} (of which second wave {picks}); worst-case writer prompt {writer_prompt} bytes; worst-case completeness prompt {comp_prompt} bytes"
     );
     assert!(min_viable <= DepthSettings::FOCUSED.agent_limit_paise);
 }
@@ -2151,4 +2171,153 @@ async fn the_completeness_review_is_skipped_for_time_money_and_timeout() {
     assert_eq!(c.skipped.as_deref(), Some("time"));
     assert_eq!(slow.requests().len(), 1);
     assert_eq!(charges_settle(&pool, uid, 1).await.len(), 1, "charged");
+}
+
+// ---------- Stage 4b item 3: the skeptic's picks, a second extraction wave ----------
+
+use incisive_app::agent::answer_v3::FOUND_BY_SKEPTIC;
+
+/// The skeptic's final review, picking C for extraction.
+fn skeptic_final_picking(final_usage: Usage) -> impl FnOnce(ScriptedLlm) -> ScriptedLlm {
+    move |l: ScriptedLlm| {
+        l.when(SKEPTIC_FINAL).reply_json(
+            json!({
+                "contradicting": [], "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
+                "guidelines": [], "overlaps": [], "ma_notes": [],
+                "extract_next": [{"pmid": SEEN_C, "why": "a missed RCT"}, {"pmid": SEEN_A, "why": "selected already"}],
+                "verdict": "holds_with_caveats", "must_mention": ["A and B share a group."], "searches": []
+            }),
+            final_usage,
+        )
+        .when(&format!("Study PMID {SEEN_C}:"))
+        .reply_json(row(vec![]), u())
+    }
+}
+
+/// Stage 4b item 3: the skeptic's pick goes through the same extractor
+/// (a second wave after the skeptic), joins the writer's input as a row,
+/// is referenced and labelled "found by the skeptic" on the page and in
+/// Copy as text, and is not repeated as a missed trial's abstract. The
+/// pick already selected is ignored.
+#[tokio::test]
+async fn the_skeptics_pick_is_extracted_in_a_second_wave() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (a, l, llm, _, _) = full_run_with(&pool, &server, false, skeptic_final_picking(u())).await;
+    assert!(
+        l.iter()
+            .any(|x| x == "Extractor: second wave, extracting 1 study found by the skeptic"),
+        "{l:?}"
+    );
+    let reqs = llm.requests();
+    assert_eq!(by_key(&reqs, &format!("Study PMID {SEEN_C}:")).len(), 1);
+    let w = by_key(&reqs, STUDIES_HEADING);
+    let t = request_user_text(w[0]);
+    assert!(
+        t.contains("STUDIES SELECTED BY THE RESEARCHER (3)"),
+        "the pick joins the studies"
+    );
+    assert!(
+        t.contains(&format!("<source id=\"row-{SEEN_C}\">")),
+        "as an evidence row"
+    );
+    assert!(t.contains("Found by the skeptic: a missed RCT"));
+    assert!(
+        !t.contains(&format!("Found by the skeptic - PMID {SEEN_C}")),
+        "not repeated as a missed trial's abstract"
+    );
+    let e = a
+        .evidence
+        .iter()
+        .find(|e| e.pmid == SEEN_C)
+        .expect("evidence row");
+    assert!(e.found_by_skeptic);
+    assert!(a.evidence.iter().filter(|e| e.found_by_skeptic).count() == 1);
+    let r = a.references.iter().find(|r| r.pmid == SEEN_C).unwrap();
+    assert!(r.found_by_skeptic);
+    assert_eq!(r.n, 3, "after the selection");
+    assert_eq!(
+        a.skeptic.as_ref().unwrap().extract_next.len(),
+        1,
+        "the selected study is not a pick"
+    );
+    let html = incisive_app::app::render_answer_v3(a.clone());
+    assert!(html.contains("Picked for extraction (second wave)"));
+    let plain = a.plain_text();
+    assert!(plain.contains("Picked for extraction: a missed RCT"));
+    // The label is drawn on the trials table row when the writer has one.
+    let mut with_row = a.clone();
+    with_row.answer.as_mut().unwrap().studies[0].pmid = SEEN_C.into();
+    let html = incisive_app::app::render_answer_v3(with_row.clone());
+    assert!(html.contains(FOUND_BY_SKEPTIC));
+    assert!(
+        with_row
+            .plain_text()
+            .contains("(found by the skeptic; extracted in a second wave)")
+    );
+}
+
+/// Stage 4b item 3: the second wave is skipped, with a note, when the review
+/// phase is too close to its wrap-up point or the money is short; the pick
+/// still reaches the writer from its abstract. No new step fails the run.
+#[tokio::test]
+async fn the_second_wave_is_skipped_for_time_or_money() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    for (what, settings, final_usage) in [
+        (
+            "time",
+            // The review phase wraps up 10 s in: under WAVE2_MIN_TIME left.
+            DepthSettings {
+                writer_time_allowance_s: 590,
+                ..DepthSettings::FOCUSED
+            },
+            u(),
+        ),
+        (
+            "cost limit",
+            DepthSettings::FOCUSED,
+            // The skeptic's final call costs far more than its hold.
+            usage(2_100_000, 200),
+        ),
+    ] {
+        let llm = Arc::new(full_script_on(
+            skeptic_final_picking(final_usage)(ScriptedLlm::new()),
+            1,
+            Some((&qa, &qb)),
+            None,
+            |_| usage(1500, 1500),
+        ));
+        let (ctx, uid) = full_ctx(
+            &pool,
+            literature(&server),
+            agent_llm(llm.clone(), MODEL),
+            20000,
+            settings,
+        )
+        .await;
+        let out = run_team(&ctx).await;
+        let l = lines(&steps_of(&ctx, uid).await);
+        let note = format!(
+            "1 study picked by the skeptic was not extracted ({what}); the writer was given its abstract"
+        );
+        assert!(l.contains(&note), "{what}: {l:?}");
+        assert!(by_key(&llm.requests(), &format!("Study PMID {SEEN_C}:")).is_empty());
+        assert!(
+            !matches!(out, PipelineOutcome::Failed(_)),
+            "{what}: {out:?}"
+        );
+        if let PipelineOutcome::Done(body) = out {
+            let a: AnswerV3 = serde_json::from_value(body).unwrap();
+            assert!(a.notes.contains(&format!("{note}.")));
+            let reqs = llm.requests();
+            let w = by_key(&reqs, STUDIES_HEADING);
+            let t = request_user_text(w[0]);
+            assert!(
+                t.contains(&format!("<source id=\"pmid-{SEEN_C}\">")),
+                "its abstract"
+            );
+        }
+    }
 }

@@ -25,9 +25,9 @@ use crate::agent::answer::{
     unavailable_text,
 };
 use crate::agent::answer_v3::{
-    ADDED_LABEL, AnswerV3, CompletenessV3, EvidenceV3, NO_GUIDELINE_SOURCE, NotableFinding,
-    ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer, arm_line_text, arm_lines, marked_runs,
-    not_cited_at_end, split_citations, whole_marked,
+    ADDED_LABEL, AnswerV3, CompletenessV3, EvidenceV3, FOUND_BY_SKEPTIC, NO_GUIDELINE_SOURCE,
+    NotableFinding, ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer, arm_line_text,
+    arm_lines, marked_runs, not_cited_at_end, split_citations, whole_marked,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
@@ -1345,6 +1345,9 @@ fn written_v3_view(
                                             <td>
                                                 {mk.t(&s.label, &format!("studies.{i}.label"))}
                                                 {n.map(ref_link)}
+                                                {e.filter(|e| e.found_by_skeptic).map(|_| view! {
+                                                    <br /><span class="flag-label added">{FOUND_BY_SKEPTIC}</span>
+                                                })}
                                             </td>
                                             <td>
                                                 {mk.t(&s.design, &format!("studies.{i}.design"))}
@@ -1614,6 +1617,12 @@ fn skeptic_v3_view(
             )
         })
         .collect();
+    let picked: Vec<Line> = k
+        .extract_next
+        .iter()
+        .enumerate()
+        .map(|(i, x)| item(format!("extract_next.{i}.text"), x))
+        .collect();
     let missed: Vec<Line> = k
         .missed_rcts
         .iter()
@@ -1681,6 +1690,7 @@ fn skeptic_v3_view(
             <p>{format!("Verdict: the conclusion {}.", k.verdict)}</p>
             {list("Caveats", caveats)}
             {list("Not independent", overlaps)}
+            {list("Picked for extraction (second wave)", picked)}
             {list("Trials the search missed", missed)}
             {list("What the meta-analyses pooled", pooled)}
             {list("Evidence against, and guidelines", against)}
