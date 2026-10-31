@@ -1601,8 +1601,6 @@ fn part_a_replay_answers_render_their_blocks_in_order() {
             "Challenged by the skeptic",
             "The trials",
             "References",
-            "Search trail",
-            "Cost and time",
             "Copy as text",
         ]);
         let mut at = 0;
@@ -1846,8 +1844,10 @@ fn part_a_display_glitches_are_fixed_on_the_new_page_only() {
     assert!(pt.contains("Skeptic lead (unverified): Possible contradicting study"));
     assert!(!pt.contains("Skeptic: Possible"));
     assert!(ot.contains("Skeptic: Possible contradicting study"));
-    // Registration IDs: the mark is counted in Checks.
-    assert!(pt.contains(
+    // Registration IDs: the mark is counted, under Other notable findings
+    // (it was in Checks before the folding follow-up).
+    let notable = section_of(page, "Other notable findings from this run").unwrap();
+    assert!(flat(&page_text(notable)).contains(
         "1 \u{201c}not traced\u{201d} mark on a trial or review registration ID not drawn"
     ));
     // Copy as text: only the p values differ from the plain text.
@@ -2037,6 +2037,262 @@ fn part_a_page_sizes() {
             html.len(),
             page.len(),
             original.len()
+        );
+    }
+}
+
+// ---------- the folding follow-up (31 Oct) ----------
+
+/// The folded Details sections of a new page, in order: (title, the whole
+/// `<details>` element).
+fn folded_sections(page: &str) -> Vec<(String, &str)> {
+    let open = regex::Regex::new(r#"<details aria-label="([^"]+)" class="ap-sec ap-fold"([^>]*)>"#)
+        .unwrap();
+    open.captures_iter(page)
+        .map(|c| {
+            let m = c.get(0).unwrap();
+            // The section's end: its own </details>, past any nested ones.
+            let mut depth = 1usize;
+            let mut at = m.end();
+            let end = loop {
+                let close = page[at..].find("</details>").map(|k| k + at).unwrap();
+                match page[at..].find("<details").map(|k| k + at) {
+                    Some(o) if o < close => {
+                        depth += 1;
+                        at = o + 1;
+                    }
+                    _ => {
+                        depth -= 1;
+                        at = close + "</details>".len();
+                        if depth == 0 {
+                            break at;
+                        }
+                    }
+                }
+            };
+            assert!(
+                c[2].is_empty(),
+                "{}: closed by default, no attribute: {}",
+                &c[1],
+                &c[2]
+            );
+            (c[1].to_string(), &page[m.start()..end])
+        })
+        .collect()
+}
+
+/// The folded section titled `title`, if drawn.
+fn section_of<'a>(page: &'a str, title: &str) -> Option<&'a str> {
+    folded_sections(page)
+        .into_iter()
+        .find(|(t, _)| t == title)
+        .map(|(_, s)| s)
+}
+
+/// Item 2 and 4: every Details section is a closed `<details>` with its
+/// head and a non-empty, mark-free preview in the summary, in the frozen
+/// order; nothing in Details is left unfolded.
+#[test]
+fn folding_every_details_section_is_closed_with_a_preview() {
+    let order = [
+        "Conflicting evidence",
+        "Guidelines and consensus statements",
+        "Applicability",
+        "What would change this answer",
+        "Challenged by the skeptic",
+        "The trials",
+        "Other notable findings from this run",
+        "Completeness review",
+        "References",
+    ];
+    let preview = regex::Regex::new(r#"<div class="ap-preview">([^<]*)</div>"#).unwrap();
+    let cite = regex::Regex::new(r"\[\d").unwrap();
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, _) = split_page(&html);
+        let details = &page[page.find(r#"<div class="ap-details">"#).unwrap()..];
+        assert!(!details.contains("<section"), "{name}: an unfolded section");
+        let secs = folded_sections(page);
+        let titles: Vec<&str> = secs.iter().map(|(t, _)| t.as_str()).collect();
+        let want: Vec<&str> = order
+            .iter()
+            .copied()
+            .filter(|t| titles.contains(t))
+            .collect();
+        assert_eq!(titles, want, "{name}: the frozen order");
+        for t in ["Challenged by the skeptic", "The trials", "References"] {
+            assert!(titles.contains(&t), "{name}: {t}");
+        }
+        for (t, sec) in &secs {
+            let summary = &sec[..sec.find("</summary>").unwrap()];
+            assert!(summary.contains(&format!("<h3>{t}</h3>")), "{name}: {t}");
+            assert!(
+                summary.contains(r#"<span class="ap-count">"#),
+                "{name}: {t}"
+            );
+            assert!(summary.contains(r#"<span class="ap-more" aria-hidden="true"></span>"#));
+            assert!(
+                !summary.contains("data-mark"),
+                "{name}: {t}: the preview is plain"
+            );
+            let p = preview
+                .captures(summary)
+                .unwrap_or_else(|| panic!("{name}: {t}: no preview"));
+            let text = p[1].trim();
+            assert!(!text.is_empty(), "{name}: {t}: empty preview");
+            assert!(text.chars().count() <= 301, "{name}: {t}: {}", text.len());
+            assert!(!cite.is_match(text), "{name}: {t}: {text}");
+            // The body follows the summary, whole.
+            assert!(sec[summary.len()..].contains(r#"<div class="ap-sec-body">"#));
+        }
+        // The trials keep their own closed "Study details".
+        let trials = section_of(page, "The trials").unwrap();
+        assert!(
+            trials.contains("<details class=\"ap-study-details\"><summary>Study details</summary>")
+        );
+        // Labels are not in the previews: no "Case mix", "Verdict:", "Caveats".
+        if let Some(sec) = section_of(page, "Applicability") {
+            let p = preview.captures(sec).unwrap()[1].to_string();
+            assert!(!p.starts_with("Case mix"), "{name}: {p}");
+        }
+        let k = section_of(page, "Challenged by the skeptic").unwrap();
+        let p = preview.captures(k).unwrap()[1].to_string();
+        assert!(p.starts_with("The conclusion "), "{name}: {p}");
+        assert!(
+            !p.contains("Verdict:") && !p.contains("Caveats "),
+            "{name}: {p}"
+        );
+    }
+}
+
+/// Item 3: Search trail, Cost and time and Checks are gone from the new
+/// page and kept in the original run view; Copy as text stays on the new
+/// page with its id; every Checks line is moved to Other notable findings
+/// or dropped as a duplicate (listed for the report).
+#[test]
+fn folding_three_sections_leave_the_new_page_only() {
+    use incisive_app::answer_page::{CheckLine, check_lines};
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, original) = split_page(&html);
+        for gone in [
+            ">Search trail<",
+            ">Cost and time<",
+            ">Checks<",
+            "Search trail (",
+        ] {
+            assert!(!page.contains(gone), "{name}: {gone} on the new page");
+        }
+        assert!(original.contains("Search trail (") && original.contains("<h3>Cost and time</h3>"));
+        // The original view's checks line(s) are today's.
+        let today = incisive_app::app::render_original_v3(a.clone(), "");
+        assert!(original.contains(&incisive_app::app::render_original_v3(a.clone(), "orig-")));
+        assert!(today.contains("Cost and time"));
+        // Copy as text: one button, the textarea's id unchanged.
+        assert_eq!(page.matches(">Copy as text<").count(), 1, "{name}");
+        assert_eq!(
+            page.matches(r#"id="answer-plain-text""#).count(),
+            1,
+            "{name}"
+        );
+        // The cost and time in the header's meta line.
+        let meta = &page[page.find(r#"<p class="ap-meta">"#).unwrap()..];
+        let meta = &meta[..meta.find("</p>").unwrap()];
+        assert!(
+            meta.contains(&incisive_app::agent::answer::rupees(a.cost_paise)),
+            "{name}"
+        );
+        assert!(meta.contains(&incisive_app::agent::answer::duration_text(a.elapsed_s)));
+        // Every moved line is in Other notable findings, escaped, in full.
+        let lines = check_lines(&a);
+        let notable = section_of(page, "Other notable findings from this run");
+        let ptext = flat(&page_text(page));
+        for l in &lines {
+            match l {
+                CheckLine::Moved(t) => {
+                    let n = notable.unwrap_or_else(|| panic!("{name}: no notable findings"));
+                    assert!(flat(&page_text(n)).contains(t.as_str()), "{name}: {t}");
+                    eprintln!("FOLDING checks {name}: moved: {t}");
+                }
+                CheckLine::Dropped(t) => {
+                    eprintln!("FOLDING checks {name}: dropped: {t}");
+                    // Not drawn on the new page as a line of its own.
+                    assert!(!ptext.contains(t.as_str()) || t.starts_with("Completeness: "));
+                }
+            }
+        }
+        assert!(!lines.is_empty(), "{name}: the replay has checks lines");
+    }
+}
+
+/// Item 3: the registration-ID count is under Other notable findings when
+/// it is above 0, and nowhere when it is 0.
+#[test]
+fn folding_the_suppressed_mark_count_is_under_notable_findings() {
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, _) = split_page(&html);
+        let hidden = incisive_app::answer_page::suppressed_registration_marks(&a);
+        let line = "on a trial or review registration ID not drawn on this page";
+        if hidden > 0 {
+            let n = section_of(page, "Other notable findings from this run").unwrap();
+            assert!(page_text(n).contains(line), "{name}");
+            assert_eq!(page.matches(line).count(), 1, "{name}");
+        } else {
+            assert!(!page.contains(line), "{name}");
+        }
+    }
+}
+
+/// Flag, never delete, against the page before the folding (captured on
+/// main 938f908 into `tests/fixtures/part_a/before_folding.json`): every
+/// `data-mark` drawn before is drawn as often now, inside a folded section
+/// or the blocks above Details (the removed sections drew none). Copy as
+/// text is byte-identical.
+#[test]
+fn folding_keeps_every_mark_and_the_copy_text() {
+    let before: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/part_a/before_folding.json")).unwrap();
+    let re = regex::Regex::new(r#"data-mark="([^"]+)""#).unwrap();
+    for (name, a) in part_a_answers() {
+        let b = &before[name];
+        assert_eq!(
+            a.copy_text(),
+            b["copy_text"].as_str().unwrap(),
+            "{name}: Copy as text changed"
+        );
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, _) = split_page(&html);
+        let count = |h: &str, k: &str| re.captures_iter(h).filter(|c| &c[1] == k).count();
+        let details = &page[page.find(r#"<div class="ap-details">"#).unwrap()..];
+        let in_folds: String = folded_sections(page).into_iter().map(|(_, s)| s).collect();
+        let above = &page[..page.find(r#"<div class="ap-details">"#).unwrap()];
+        let mut total = 0;
+        for (k, n) in b["marks"].as_object().unwrap() {
+            let n = n.as_u64().unwrap() as usize;
+            assert_eq!(count(page, k), n, "{name}: {k}");
+            // Every mark below the Details heading is in a folded section
+            // (the study sheets' <dialog>s, after Details, aside).
+            let sheets = details.find("<dialog").map_or("", |i| &details[i..]);
+            assert_eq!(
+                count(details, k),
+                count(&in_folds, k) + count(sheets, k),
+                "{name}: {k}"
+            );
+            assert_eq!(count(above, k) + count(details, k), n);
+            total += n;
+        }
+        assert_eq!(
+            re.captures_iter(page).count(),
+            total,
+            "{name}: no new or lost marks"
+        );
+        eprintln!(
+            "FOLDING size {name}: before {} bytes (new page {}); after {} bytes (new page {})",
+            b["html_len"],
+            b["page_len"],
+            html.len(),
+            page.len()
         );
     }
 }

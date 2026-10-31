@@ -2934,6 +2934,64 @@ async fn ssr_run_page_shows_mode_badge() {
     assert!(!body.contains(r#"<span class="badge mode">Quick</span>"#));
 }
 
+/// Folding follow-up item 1: on a finished run, Progress is one closed
+/// `<details>` ("Progress · N steps · Done") holding the steps unchanged;
+/// while the run is running it is open and not folded, as before.
+#[tokio::test]
+async fn ssr_progress_folds_once_the_run_has_ended() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let uid = new_user(&pool).await;
+    let email = email_of(&pool, uid).await;
+    let run = create_run(&pool, uid, "fold question", RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for line in ["step <one>", "step two", "step three"] {
+        add_step(&pool, run, StepKind::Search, line).await.unwrap();
+    }
+    let page = |body: &str| markup_of(body);
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run}"), &email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let m = page(&body);
+    assert!(m.contains("<h3>Progress</h3>"), "{m}");
+    assert!(
+        !m.contains(r#"<details class="run-fold""#),
+        "running: not folded"
+    );
+    assert!(m.contains("<li>step &lt;one&gt;</li><li>step two</li><li>step three</li>"));
+    assert!(set_status(&pool, run, RunStatus::Done, None).await.unwrap());
+    let (s, body) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = page(&body);
+    let at = m
+        .find(r#"<details class="run-fold">"#)
+        .expect("folded, closed");
+    let fold = &m[at..];
+    let fold = &fold[..fold.find("</details>").unwrap()];
+    assert!(
+        fold.contains("<summary><h3>Progress \u{b7} 3 steps \u{b7} Done</h3>"),
+        "{fold}"
+    );
+    assert!(fold.contains(r#"<span class="ap-more" aria-hidden="true"></span></summary>"#));
+    assert!(fold.contains("<li>step &lt;one&gt;</li><li>step two</li><li>step three</li>"));
+    assert!(
+        !m.contains("<h3>Progress</h3>"),
+        "the heading is in the summary"
+    );
+}
+
 #[test]
 fn ncbi_key_optional_and_redacted_in_debug() {
     use secrecy::ExposeSecret;
@@ -3538,7 +3596,11 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
     assert!(!page.contains("<script>alert(1)") && !page.contains("<img src=x"));
     assert!(!page.contains("<b>only</b>"));
     assert!(page.contains("Self-fixated &lt;img src=x onerror=alert(2)&gt; (2025)"));
-    assert!(page.contains("hernia[tiab] AND &lt;mesh&gt;"));
+    // The search trail is in the original run view only (folding item 3),
+    // escaped there.
+    assert!(!page.contains("hernia[tiab]"));
+    assert!(orig.contains("hernia[tiab] AND &lt;mesh&gt;"));
+    assert!(!orig.contains("<mesh>"));
     assert!(
         !page.contains("[41060645") && !page.contains("[39979619"),
         "raw markers are replaced"
@@ -3591,15 +3653,21 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
         ">What would change this answer<",
         ">The trials<",
         ">References<",
-        ">Search trail<",
-        ">Cost and time<",
-        "₹23.45",
+        "Copy as text",
     ] {
         let i = page[at..]
             .find(h)
             .unwrap_or_else(|| panic!("new page: {h} missing or out of order"));
         at += i + h.len();
     }
+    // Folding follow-up item 3: Search trail, Cost and time and Checks are
+    // in the original run view only; the cost and time stay in the
+    // header's meta line.
+    for gone in [">Search trail<", ">Cost and time<", ">Checks<"] {
+        assert!(!page.contains(gone), "new page: {gone}");
+    }
+    assert!(orig.contains("Search trail (1 searches)") && orig.contains("Cost and time"));
+    assert!(page.find("₹23.45").unwrap() < page.find(">Bottom line<").unwrap());
     // Tables scroll sideways on a phone (the earlier layout only).
     assert_eq!(
         orig.matches(r#"<div class="scroll"><table class="wide">"#)
@@ -3607,9 +3675,12 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
         2
     );
     assert!(!page.contains("<table"));
-    // The trail notes what the checks dropped (the new page's Checks too).
+    // The trail notes what the checks dropped; on the new page, the line
+    // moved from Checks to Other notable findings (folding item 3).
     assert!(orig.contains("not returned by this run"));
-    assert!(page.contains("not returned by this run"));
+    let notable = &page[page.find(">Other notable findings from this run<").unwrap()..];
+    let notable = &notable[..notable.find("</details>").unwrap()];
+    assert!(notable.contains("not returned by this run"), "{notable}");
     // The Phase 2 sections are not used for a v3 answer.
     assert!(!html.contains("How I read your question"));
 }
@@ -4098,7 +4169,15 @@ async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
             || open.contains("not verified against the paper's wording")
     );
     assert!(open.contains("2 numbers not verified"));
-    assert!(open.contains("Number check: 2 of 12 numbers in the answer not traced"));
+    // The Number check line is a Progress step: on the new page it is
+    // dropped with Checks (folding item 3); every number it counts is
+    // marked above, and the original run view keeps the line.
+    assert!(!page.contains("Number check: 2 of 12 numbers in the answer not traced"));
+    assert!(
+        views(&m)
+            .1
+            .contains("Number check: 2 of 12 numbers in the answer not traced")
+    );
     assert!(open.contains(r#"<span class="ap-tag">RCT meta-analysis</span>"#));
     assert!(open.contains("1 outcome and 2 numbers could not be matched"));
 }

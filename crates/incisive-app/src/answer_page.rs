@@ -1931,4 +1931,174 @@ mod tests {
         assert!(v.forest && v.out_of_100 && v.compare && !v.no_numbers);
         assert_eq!(debug_counts(&answer_with(None)), (0, 0, 0, 0, 0, 0));
     }
+
+    // ---------- the folding follow-up (31 Oct) ----------
+
+    fn t(s: &str) -> PreviewPart {
+        PreviewPart::Text(s.into())
+    }
+
+    fn l(s: &str) -> PreviewPart {
+        PreviewPart::Label(s.into())
+    }
+
+    #[test]
+    fn a_preview_skips_labels_and_starts_at_the_first_content() {
+        assert_eq!(
+            preview(&[
+                l("Case mix"),
+                t("Mostly cT1-T3 [1, 2]."),
+                l("Training"),
+                t("High-volume centres.")
+            ]),
+            "Mostly cT1-T3. High-volume centres."
+        );
+        assert_eq!(
+            preview(&[
+                t("the conclusion holds with caveats."),
+                l("Caveats"),
+                t("No RCT after TNT.")
+            ]),
+            "The conclusion holds with caveats. No RCT after TNT.",
+            "no \"Verdict:\" or \"Caveats\", first letter up"
+        );
+        assert_eq!(
+            preview(&[l("Other"), t("EARCS Delphi consensus")]),
+            "EARCS Delphi consensus"
+        );
+    }
+
+    #[test]
+    fn a_preview_joins_items_with_single_spaces() {
+        let p = preview(&[
+            t("Case mix  "),
+            t("\nThe trials enrolled"),
+            t(" mostly  low  tumours "),
+        ]);
+        assert_eq!(p, "Case mix The trials enrolled mostly low tumours");
+        assert!(!p.contains("mixThe") && !p.contains("  "));
+    }
+
+    #[test]
+    fn a_preview_strips_citations() {
+        assert_eq!(
+            preview(&[
+                t(
+                    "REAL found lower recurrence [1]. COLRAR [12345678; 23456789] did not [3 as 4] ."
+                ),
+                t("[2] Title.")
+            ]),
+            "REAL found lower recurrence. COLRAR did not. Title."
+        );
+    }
+
+    #[test]
+    fn a_preview_is_cut_at_a_word_near_the_cap() {
+        let long = "word ".repeat(200);
+        let p = preview(&[t(&long)]);
+        assert!(p.ends_with("word\u{2026}"), "{p}");
+        assert!(p.chars().count() <= PREVIEW_MAX + 1);
+        assert!(p.chars().count() > PREVIEW_MAX - 10);
+        // Multi-byte text is cut on a character, never inside one.
+        let p = preview(&[t(&"é—".repeat(400))]);
+        assert_eq!(p.chars().count(), PREVIEW_MAX + 1);
+        // Short text is kept whole, with no ellipsis.
+        assert_eq!(preview(&[t("Short.")]), "Short.");
+    }
+
+    #[test]
+    fn an_empty_preview_is_empty() {
+        assert_eq!(preview(&[]), "");
+        assert_eq!(preview(&[l("Notes"), t("  "), t("[1]")]), "");
+    }
+
+    #[test]
+    fn checks_lines_move_unless_they_repeat_progress_or_the_page() {
+        use crate::agent::answer_v3::{CoverageV3, NotableFinding};
+        let mut a = answer_with(None);
+        a.notes = vec!["Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such.".into()];
+        a.stopped_early = Some("time limit".into());
+        a.integrity.removed_citations = 2;
+        a.integrity.numbers_checked = 10;
+        a.integrity.numbers_untraced = 1;
+        a.integrity.numbers_unverified = 3;
+        a.coverage = Some(CoverageV3::default());
+        a.completeness = Some(CompletenessV3 {
+            gaps_found: 4,
+            ..CompletenessV3::default()
+        });
+        let lines = check_lines(&a);
+        let moved = moved_check_lines(&a);
+        let dropped: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                CheckLine::Dropped(t) => Some(t.as_str()),
+                CheckLine::Moved(_) => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), moved.len() + dropped.len());
+        assert!(moved[0].starts_with("Extraction stopped at the Full limit"));
+        assert!(
+            moved
+                .iter()
+                .any(|m| m.starts_with("Research stopped early (time limit)"))
+        );
+        assert!(
+            moved
+                .iter()
+                .any(|m| m.starts_with("Citation check: 2 unknown citations removed"))
+        );
+        // No extractor line among the notable findings: "Extraction:" moves.
+        assert!(moved.iter().any(|m| m.starts_with("Extraction: 3 numbers")));
+        assert!(
+            dropped
+                .iter()
+                .any(|d| d.starts_with("Number check: 1 of 10"))
+        );
+        assert!(dropped.iter().any(|d| d.starts_with("Coverage: ")));
+        assert!(
+            dropped
+                .iter()
+                .any(|d| d.starts_with("Completeness: 4 gaps found"))
+        );
+        // With the extractor's own line under notable findings, it drops.
+        a.notable_code = vec![NotableFinding {
+            text: "The extractor could not match 3 numbers to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.".into(),
+            pmids: vec![],
+            spans: vec![],
+        }];
+        assert!(
+            !moved_check_lines(&a)
+                .iter()
+                .any(|m| m.starts_with("Extraction: "))
+        );
+        // A skipped completeness review warns: it moves.
+        a.completeness = Some(CompletenessV3::skipped("time", 4));
+        assert!(
+            moved_check_lines(&a)
+                .iter()
+                .any(|m| m.starts_with("Completeness review skipped: time"))
+        );
+        // Nothing to say: nothing moves.
+        assert!(check_lines(&answer_with(None)).is_empty());
+        assert_eq!(registration_note(&answer_with(None)), None);
+    }
+
+    #[test]
+    fn the_registration_count_moves_to_notable_findings() {
+        let mut w = written(vec![], vec![study("1", "RCT", "a vs b")]);
+        w.studies[0].appraisal = "Same cohort (NTR3593)".into();
+        let t = w.studies[0].appraisal.clone();
+        let mut a = answer_with(Some(w));
+        let s = t.find("3593").unwrap();
+        a.untraced = vec![Span::new("studies.0.appraisal", s, s + 4)];
+        let note = registration_note(&a).unwrap();
+        assert!(
+            note.starts_with(
+                "1 \u{201c}not traced\u{201d} mark on a trial or review registration ID"
+            )
+        );
+        assert!(note.ends_with("(the earlier layout below shows it)."));
+        assert_eq!(moved_check_lines(&a), vec![note]);
+    }
 }
