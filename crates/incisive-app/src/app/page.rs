@@ -125,7 +125,7 @@ pub(super) fn chips(ids: &[String], refs: &HashMap<String, u16>, links: Links) -
         ().into_any()
     } else if links == Links::No {
         let n: Vec<String> = nums.iter().map(u16::to_string).collect();
-        view! { <span class="cite">{format!("[{}]", n.join(", "))}</span> }.into_any()
+        view! { <span class="cite plain">{format!("[{}]", n.join(", "))}</span> }.into_any()
     } else {
         let last = nums.len() - 1;
         view! {
@@ -378,10 +378,20 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
                 view! { {super::details::details_view(&c)} {super::details::sheets_view(&c)} }
                     .into_any(),
             ),
-            Block::Original => Some(super::original_view(a.clone())),
+            Block::Original => None,
         })
         .collect();
-    view! { <div class="ap">{blocks}</div> }
+    // The new page's styles are scoped to `.ap-main`, so the original run
+    // view (drawn after it, outside it) looks exactly as it did.
+    let original = ap::PAGE_ORDER
+        .contains(&Block::Original)
+        .then(|| super::original_view(a.clone()));
+    view! {
+        <div class="ap">
+            <div class="ap-main">{blocks}</div>
+            {original}
+        </div>
+    }
 }
 
 // ---------- 1. title and subtitle ----------
