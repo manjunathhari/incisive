@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::deid::FindingKind;
 
 pub const RUN_STARTED_MESSAGE: &str =
-    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
+    "Working on it \u{2014} you can leave this page; the answer will be in your Library.";
 pub const RUN_IN_PROGRESS_MESSAGE: &str = "You already have a question running.";
 pub const BLOCKED_MESSAGE: &str = "Incisive found details that could identify a patient. Please remove them and resend your question.";
 pub const RECORD_FAILED_MESSAGE: &str = "Incisive couldn't record this request. Please try again.";
