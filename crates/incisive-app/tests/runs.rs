@@ -943,7 +943,7 @@ use std::sync::Arc;
 const RULE_QUESTION: &str =
     "52 y/o M, robotic LAR, ICG for leak? Evidence on anastomotic resection";
 const RUN_STARTED: &str =
-    "Working on it \u{2014} you can leave this page; the answer will be in your Library.";
+    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
 const RUN_IN_PROGRESS: &str = "You already have a question running.";
 
 fn app_state(pool: PgPool) -> AppState {
@@ -2308,10 +2308,10 @@ async fn ssr_history_page_renders() {
     finished_run(&pool, uid, "ICG <b>leak</b> evidence?", 10).await;
     let (s, body) = send(router(st.clone()), api("GET", "/history", &email)).await;
     assert_eq!(s, StatusCode::OK);
-    // Ivory redesign: My questions is the Library; no delete there yet
-    // (owner decision 4).
+    // Ivory redesign: My questions is the Library, with delete kept
+    // (owner decision, 1 Nov 01:49 IST).
     assert!(body.contains(r#"<h1 class="iv-h1">Library</h1>"#), "{body}");
-    assert!(!body.contains("Delete all my history"), "{body}");
+    assert!(body.contains("Delete all my history"), "{body}");
     assert!(
         body.contains("ICG &lt;b&gt;leak&lt;/b&gt; evidence?"),
         "{body}"
@@ -3414,9 +3414,10 @@ async fn ssr_run_page_header_is_the_full_question() {
     let (s, html) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
     assert_eq!(s, StatusCode::OK);
     let escaped = question.replace('<', "&lt;").replace('>', "&gt;");
-    let h2 = html.find("<h2 class=\"run-question\">").expect("header");
-    let end = h2 + html[h2..].find("</h2>").unwrap();
-    assert!(html[h2..end].contains(&escaped), "{}", &html[h2..end]);
+    // The run page's <h1> (ivory review: every page has one).
+    let h1 = html.find("<h1 class=\"run-question\">").expect("header");
+    let end = h1 + html[h1..].find("</h1>").unwrap();
+    assert!(html[h1..end].contains(&escaped), "{}", &html[h1..end]);
     assert!(!html.contains("<i>ICG</i>"));
 }
 
@@ -4751,8 +4752,8 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
 
 // ---------- ivory redesign: header, Ask, Library ----------
 
-/// A finished Full run with a stored AnswerV3 whose verdict and certainty
-/// are given (`verdict` None: no At a glance, so the card falls back to the
+/// A finished Full run (created today, IST; `age_s` orders the runs) with a
+/// stored AnswerV3 whose verdict and certainty are given (`verdict` None: no At a glance, so the card falls back to the
 /// bottom line's first sentence).
 async fn ivory_run(
     pool: &PgPool,
@@ -4781,8 +4782,25 @@ async fn ivory_run(
     }
     assert!(save_answer(pool, id, &a).await.unwrap());
     assert!(set_status(pool, id, RunStatus::Done, None).await.unwrap());
-    backdate(pool, id, "created_at", age_s).await;
+    at_ist_today(pool, id, age_s).await;
     id
+}
+
+/// Put a run's `created_at` early in today's IST day, `1000 - order_s`
+/// seconds after IST midnight: older runs (larger `order_s`) stay earlier,
+/// and no test straddles IST midnight by backdating (review: midnight flake).
+async fn at_ist_today(pool: &PgPool, run: Uuid, order_s: i64) {
+    assert!(order_s < 1000);
+    sqlx::query(
+        "UPDATE incisive.runs SET created_at = \
+         ((now() AT TIME ZONE 'Asia/Kolkata')::date + make_interval(secs => $2)) \
+         AT TIME ZONE 'Asia/Kolkata' WHERE id = $1",
+    )
+    .bind(run)
+    .bind((1000 - order_s) as f64)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// The links marked as the current page (the CSS mentions the attribute too).
@@ -4846,6 +4864,8 @@ async fn ivory_pages_render_with_the_shared_header() {
         // The avatar (streamed once sign-in is known).
         assert!(body.contains(">MH</span>"), "{path}");
         assert!(body.contains("Signed in as Manjunath Haridas"), "{path}");
+        // Every page has one <h1> (review: run page and Activity too).
+        assert_eq!(body.matches("<h1").count(), 1, "{path}");
         match current {
             Some(c) => {
                 assert!(body.contains(c), "{path}: {c}");
@@ -4932,6 +4952,7 @@ async fn ivory_library_and_latest_answers_read_stored_runs() {
             .await
             .unwrap()
     );
+    at_ist_today(&pool, failed, 50).await;
 
     let (s, body) = send(router(st.clone()), api("GET", "/history", &email)).await;
     assert_eq!(s, StatusCode::OK);
@@ -4953,9 +4974,17 @@ async fn ivory_library_and_latest_answers_read_stored_runs() {
             || body.contains("robotic HERNIA &lt;b&gt;repair&lt;/b&gt;?")
     );
     assert!(!body.contains("<b>repair</b>"));
-    // Edit & re-run is the existing fragment link; no delete.
+    // Edit & re-run is the existing fragment link. Delete: a bin per card
+    // that only asks first ("Delete?" appears after a tap; nothing is
+    // deleted by rendering), and "Delete all my history" below, whose
+    // "Yes, delete all" appears only after its own confirm.
     assert!(body.contains(r#"href="/#q="#), "{body}");
-    assert!(!body.contains("Delete"));
+    let bins = body.matches(r#"aria-label="Delete this answer""#).count();
+    assert_eq!(bins, 3, "one per card (3 questions)");
+    assert!(body.contains(r#"class="iv-del-icon""#));
+    assert!(!body.contains("Delete?"));
+    assert!(body.contains("Delete all my history"));
+    assert!(!body.contains("Yes, delete all"));
 
     let (s, body) = send(router(st), api("GET", "/", &email)).await;
     assert_eq!(s, StatusCode::OK);
@@ -5022,4 +5051,54 @@ async fn ivory_server_functions_are_scoped_to_the_signed_in_user() {
     let (_, body) = send(router(st.clone()), api("GET", "/history", &a_email)).await;
     assert!(body.contains("Alpha question?"));
     assert!(!body.contains("Bravo question?"));
+}
+
+/// Library delete (owner decision, 1 Nov 01:49 IST): the card's bin and
+/// "Delete all my history" call the existing server functions unchanged,
+/// so a deleted run leaves the Library, and only the user's own runs are
+/// ever deleted.
+#[tokio::test]
+async fn ivory_library_delete_uses_the_existing_scoped_functions() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (a, a_email) = owner_user(&pool).await;
+    let b = new_user(&pool).await;
+    let keep = ivory_run(&pool, a, "Keep this question?", Some("Kept."), "Low", 20).await;
+    let gone = ivory_run(&pool, a, "Delete this question?", Some("Gone."), "Low", 10).await;
+    let theirs = ivory_run(&pool, b, "Their question?", Some("Theirs."), "Low", 10).await;
+    let post = |path: &str, body: String| {
+        Request::post(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("x-dev-user-email", &a_email)
+            .body(Body::from(body))
+            .unwrap()
+    };
+    let (s, body) = send(
+        router(st.clone()),
+        post("/api/fn/delete_my_run", format!("run_id={gone}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (_, page) = send(router(st.clone()), api("GET", "/history", &a_email)).await;
+    assert!(!page.contains("Delete this question?"));
+    assert!(page.contains("Keep this question?"));
+    // Another user's run cannot be deleted from here.
+    let (s, _) = send(
+        router(st.clone()),
+        post("/api/fn/delete_my_run", format!("run_id={theirs}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, body) = send(
+        router(st.clone()),
+        post("/api/fn/delete_my_runs", String::new()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(get_run_for_user(&pool, a, keep).await.unwrap().is_none());
+    assert!(get_run_for_user(&pool, b, theirs).await.unwrap().is_some());
+    let (_, page) = send(router(st), api("GET", "/history", &a_email)).await;
+    assert!(page.contains("No questions yet."));
 }

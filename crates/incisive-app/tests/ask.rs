@@ -244,7 +244,7 @@ fn run_id_of(b: &Value) -> uuid::Uuid {
 }
 
 const RUN_STARTED: &str =
-    "Working on it \u{2014} you can leave this page; the answer will be in your Library.";
+    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
 
 fn one_request_id(rows: &[(String, Option<uuid::Uuid>, Value)]) {
     let first = rows[0].1.expect("request id");
