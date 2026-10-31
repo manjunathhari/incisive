@@ -30,6 +30,8 @@ use crate::agent::answer_v3::{
     arm_lines, marked_runs, not_cited_at_end, split_citations, whole_marked,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
+// Part A: the interactive answer page (Phase 3 answers).
+mod page;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
 
@@ -702,7 +704,7 @@ fn run_view(v: RunView) -> impl IntoView {
         {answer
             .map(|a| match a {
                 Some(Body::V2(a)) => answer_view(a).into_any(),
-                Some(Body::V3(a)) => answer_v3_view(a).into_any(),
+                Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
                 None => view! {
                     <p class="box amber" role="status">
                         "This answer can't be shown. Please ask the question again."
@@ -1905,11 +1907,11 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 }
 
 /// A stored Phase 3 answer as the run page draws it (server only; for
-/// tests and the Stage 4 replay).
+/// tests and the Stage 4 replay): the interactive page (Part A).
 #[cfg(feature = "ssr")]
 pub fn render_answer_v3(a: AnswerV3) -> String {
     use leptos::tachys::view::RenderHtml;
-    Owner::new().with(|| answer_v3_view(a).to_html())
+    Owner::new().with(|| page::answer_page_view(a).to_html())
 }
 
 /// The id of the hidden textarea holding the plain-text answer.
