@@ -39,8 +39,8 @@ use super::answer_v3::{
     WrittenAnswer, citation_ranges, clean_citations, marked_runs, split_citations, text_fields,
 };
 use super::extractor::{
-    Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind, all_allowed,
-    quote_values, written_numbers,
+    Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind,
+    all_allowed_unsigned, quote_values, written_numbers,
 };
 use super::llm::{
     Effort, OutputSchema, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
@@ -1812,7 +1812,9 @@ pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> 
 /// each structured number (value and CI bounds) and trial n, as spans of
 /// the stored text (a structured one marks its whole entry). The text is
 /// never changed. Returns the spans and how many numbers were checked. The
-/// tokeniser and matching are the extractor's (ranges, COVID-19, signs).
+/// tokeniser and matching are the extractor's (ranges, COVID-19, signs);
+/// since Stage 4b a sign difference still matches ("13.4 min shorter"
+/// traces to a quote's "−13.4").
 pub fn trace_numbers(
     a: &WrittenAnswer,
     allowed: &[f64],
@@ -1827,7 +1829,7 @@ pub fn trace_numbers(
                 continue;
             }
             checked += 1;
-            if !all_allowed(&v, allowed) {
+            if !all_allowed_unsigned(&v, allowed) {
                 spans.push(Span::new(field.clone(), s, e));
             }
         }
@@ -1839,7 +1841,7 @@ pub fn trace_numbers(
                 .into_iter()
                 .flatten()
                 .collect();
-            if !all_allowed(&v, allowed) {
+            if !all_allowed_unsigned(&v, allowed) {
                 spans.push(Span::new(format!("outcomes.{i}.numbers.{j}"), 0, 0));
             }
         }
@@ -1847,7 +1849,7 @@ pub fn trace_numbers(
     for (i, s) in a.studies.iter().enumerate() {
         if let Some(n) = s.n {
             checked += 1;
-            if !all_allowed(&[n as f64], allowed) {
+            if !all_allowed_unsigned(&[n as f64], allowed) {
                 spans.push(Span::new(format!("studies.{i}.n"), 0, 0));
             }
         }
@@ -3063,6 +3065,34 @@ mod tests {
         ok.guidelines.clear();
         let (spans, _) = trace_numbers(&ok, &allowed, known);
         assert!(spans.is_empty(), "{spans:?}");
+    }
+
+    /// Stage 4b item 1: a sign difference still traces. The 31 Oct run 2
+    /// marked "13.4" although the quote has "−13.4" (U+2212); "13.4 min
+    /// shorter", a hyphen-minus and a structured −13.4 all trace to it.
+    #[test]
+    fn a_sign_difference_still_traces() {
+        let mut a = answer();
+        a.bottom_line.text = "Operative time was 13.4 min shorter [11111111].".into();
+        a.outcomes[0].effect_text = "-13.4 min and \u{2212}2.3 points [11111111]".into();
+        a.outcomes[0].numbers.truncate(1);
+        a.outcomes[0].numbers[0].value = -13.4;
+        a.studies[0].n = None;
+        a.studies[1].n = None;
+        let allowed = quote_values("Mean difference \u{2212}13.4 min (p < 0.001); pain 2.3.");
+        assert!(allowed.contains(&-13.4), "U+2212 is a minus: {allowed:?}");
+        let known = |p: &str| p == "11111111" || p == "22222222";
+        let (spans, _) = trace_numbers(&a, &allowed, known);
+        assert!(
+            !spans.iter().any(|s| s.field == "bottom_line.text"
+                || s.field == "outcomes.0.effect_text"
+                || s.field == "outcomes.0.numbers.0"),
+            "{spans:?}"
+        );
+        // A different magnitude is still marked.
+        a.bottom_line.text = "Operative time was 13.5 min shorter [11111111].".into();
+        let (spans, _) = trace_numbers(&a, &allowed, known);
+        assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["13.5"]);
     }
 
     /// Stage 4 item 5: what the writer may use. A verified row gives its

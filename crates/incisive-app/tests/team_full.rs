@@ -1007,6 +1007,15 @@ async fn full_team_run_end_to_end_through_the_worker() {
     }
     // Stage 4 item 5: the number trace reports its counts (nothing removed).
     assert!(l.iter().any(|x| x.starts_with("Number check: ")), "{l:?}");
+    // Stage 4b item 1: the coverage check runs after the writer (code) and
+    // reports its counts; the writer's answer is unchanged by it.
+    let cov = a.coverage.as_ref().expect("coverage in Full");
+    assert_eq!(cov.counts.outcomes_checked, 2, "{cov:?}");
+    assert!(
+        l.iter().any(|x| x.starts_with("Coverage: ")),
+        "missing coverage line in {l:?}"
+    );
+    assert!(a.trail_notes().iter().any(|n| n.starts_with("Coverage: ")));
 }
 
 /// The skeptic fails (its first turn errors): the writer proceeds without

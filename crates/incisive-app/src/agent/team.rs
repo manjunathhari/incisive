@@ -196,6 +196,7 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         notes: Vec::new(),
         untraced: Vec::new(),
         notable_code: Vec::new(),
+        coverage: None,
     }
 }
 
@@ -512,6 +513,26 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             integrity.numbers_untraced = count(untraced.len());
             answer.untraced = untraced;
             answer.integrity = integrity;
+            // Stage 4b item 1 (Full): what the team verified that the
+            // answer does not say (code; the answer is unchanged).
+            if full {
+                let cov = super::coverage::check(
+                    &written,
+                    &reviewed.extraction.rows,
+                    |p| studies.iter().any(|s| s.pmid == p && s.design == "SR_MA"),
+                    reviewed.review.as_ref(),
+                    |p| selected.iter().any(|s| s == p),
+                );
+                let k = cov.counts;
+                tracing::info!(
+                    run_id = %ctx.run_id, numbers_checked = k.numbers_checked,
+                    numbers_missing = k.numbers_missing, pooled_missing = k.pooled_missing,
+                    outcomes_checked = k.outcomes_checked, outcomes_missing = k.outcomes_missing,
+                    skeptic_checked = k.skeptic_checked, skeptic_missing = k.skeptic_missing,
+                    "coverage checked"
+                );
+                answer.coverage = Some(cov);
+            }
             answer.answer = Some(written);
             let line = if integrity.removed_citations == 0
                 && integrity.dropped_numbers == 0
@@ -548,6 +569,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
                 )
             };
             add_line(ctx, StepKind::Check, &line).await;
+            if let Some(c) = &answer.coverage {
+                add_line(ctx, StepKind::Check, &c.line()).await;
+            }
             // R-S2b: an answer after research stopped by a limit is done; a
             // failed research turn still marks it partial.
             let status = if research.stop == super::agent_loop::LoopStop::TurnFailed {

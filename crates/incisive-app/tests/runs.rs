@@ -3406,6 +3406,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         notes: vec![],
         untraced: vec![],
         notable_code: vec![],
+        coverage: None,
     };
     serde_json::to_value(a).unwrap()
 }

@@ -15,6 +15,7 @@ pub mod answer;
 pub mod answer_v3;
 mod bounded;
 pub mod check;
+pub mod coverage;
 pub mod extract;
 pub mod extractor;
 pub mod frame;

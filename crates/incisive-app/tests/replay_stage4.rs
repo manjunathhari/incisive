@@ -30,7 +30,7 @@ use incisive_app::agent::researcher::Contradiction;
 use incisive_app::agent::skeptic::SkepticReview;
 use incisive_app::agent::skeptic::{self, SkepticReport};
 use incisive_app::agent::writer_v3::{self, FullInput, StudyInput};
-use incisive_app::agent::{RunContext, team};
+use incisive_app::agent::{RunContext, coverage, team};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{IapVerifier, JwkSource};
@@ -125,8 +125,7 @@ fn studies() -> (Vec<StudyInput>, Vec<Contradiction>, Vec<SearchEntry>) {
 /// given as a structured number. Field names of both the Stage 3 and Stage
 /// 4 rows are given (serde ignores the other), so the same replay runs on
 /// both.
-fn rows() -> Vec<Value> {
-    let f = fixture("evidence.json");
+fn rows_of(f: &Value) -> Vec<Value> {
     f["studies"]
         .as_array()
         .unwrap()
@@ -295,12 +294,16 @@ fn source_of(x: &Value) -> SourceText {
 /// The prototype's rows pushed through the extractor's own checks
 /// (`first_pass` and `finish_row`) against their rebuilt source texts.
 fn checked_rows() -> Vec<EvidenceRow> {
-    let f = fixture("evidence.json");
+    checked_rows_of(&fixture("evidence.json"))
+}
+
+/// [`checked_rows`] of an evidence payload.
+fn checked_rows_of(f: &Value) -> Vec<EvidenceRow> {
     f["studies"]
         .as_array()
         .unwrap()
         .iter()
-        .zip(rows())
+        .zip(rows_of(f))
         .map(|(x, mut v)| {
             let o = v.as_object_mut().unwrap();
             for k in [
@@ -646,6 +649,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         notes: vec![],
         untraced: untraced.clone(),
         notable_code: team::notable_code(Some(&review), &extraction),
+        coverage: None,
     };
     // Stored and read back as the run page does.
     let stored: AnswerV3 = serde_json::from_value(serde_json::to_value(&answer).unwrap()).unwrap();
@@ -731,10 +735,11 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     assert_eq!(counts["page_outcome_rows"], 51);
     assert_eq!(counts["page_references"], 10);
     assert_eq!(counts["page_caveats"], 8);
-    // Pinned: what the trace marks on the prototype payloads (22 of 523;
-    // see the stage report §8 for each).
+    // Pinned: what the trace marks on the prototype payloads (16 of 523;
+    // see the Stage 4 report §8 for each). Stage 4b: a sign difference
+    // still matches, so the 6 sign-only marks of Stage 4 (22) are gone.
     assert_eq!(counts["numbers_checked"], 523);
-    assert_eq!(counts["numbers_untraced"], 22);
+    assert_eq!(counts["numbers_untraced"], 16);
     // What the trace marked, as text, for the report.
     let fields = incisive_app::agent::answer_v3::text_fields(&written);
     let marked: Vec<String> = untraced
@@ -763,6 +768,100 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         )
         .unwrap();
     }
+
+    // ---- Stage 4b item 1: the coverage check on the full answer ----
+    let known = |p: &str| selected.iter().any(|s| s == p);
+    let is_meta = |p: &str| studies.iter().any(|s| s.pmid == p && s.design == "SR/MA");
+    let all = coverage::check(&written, &rows, is_meta, Some(&review), known);
+    // The scripted writer wrote every outcome of every row it was shown.
+    assert_eq!(all.counts.outcomes_missing, 0, "{:?}", all.gaps);
+    assert_eq!(all.counts.numbers_missing, 0, "{:?}", all.gaps);
+    assert_eq!(all.counts.outcomes_checked, 51);
+    // Every verified structured number is checked (the extractor's check
+    // flagged the rest of the 174).
+    let verified_numbers = rows
+        .iter()
+        .flat_map(|r| &r.outcomes)
+        .filter(|o| o.verified)
+        .flat_map(|o| &o.numbers)
+        .filter(|n| n.verified)
+        .count();
+    assert_eq!(all.counts.numbers_checked as usize, verified_numbers);
+    assert_eq!(verified_numbers, 136);
+    eprintln!("COVERAGE full answer: {:?}", all.counts);
+
+    // ---- Stage 4b item 1: a reconstructed 31 Oct run 1 ----
+    // Run 1's extractor had ROGER's workload among its six outcomes (the
+    // prototype's had it tenth, past the cap): move it first. Run 1 then
+    // left out the workload (NASA-TLX 18.4 vs 34.0), the AIIMS pain at 6 h
+    // and 12 h and rescue analgesia: the check reports them as gaps.
+    let mut f1 = fixture("evidence.json");
+    for x in f1["studies"].as_array_mut().unwrap() {
+        if x["pmid"] == "41511872" {
+            let o = x["outcomes"].as_array_mut().unwrap();
+            let i = o
+                .iter()
+                .position(|o| s(&o["outcome"]).contains("NASA raw TLX"))
+                .unwrap();
+            let nasa = o.remove(i);
+            o.insert(0, nasa);
+        }
+    }
+    let rows = checked_rows_of(&f1);
+    let full1 = scripted_answer(&rows, &studies, &review);
+    let mut run1 = serde_json::from_value::<writer_v3::WireAnswer>(full1)
+        .expect("the scripted run-1 answer reads")
+        .into_answer()
+        .0;
+    let before = run1.outcomes.len();
+    run1.outcomes.retain(|o| {
+        !(o.outcome.contains("NASA raw TLX")
+            || o.outcome.starts_with("Acute pain (primary), VAS")
+            || o.outcome.starts_with("Rescue analgesia"))
+    });
+    assert_eq!(run1.outcomes.len(), before - 3);
+    let cov = coverage::check(&run1, &rows, is_meta, Some(&review), known);
+    let gap_numbers = |pmid: &str| -> Vec<f64> {
+        cov.gaps
+            .iter()
+            .filter(|g| g.pmid == pmid)
+            .flat_map(|g| g.numbers.clone())
+            .collect()
+    };
+    let roger = gap_numbers("41511872");
+    assert!(roger.contains(&18.4), "ROGER NASA-TLX 18.4: {:?}", cov.gaps);
+    let aiims_row = rows.iter().find(|r| r.pmid == "42527734").unwrap();
+    let pain = aiims_row
+        .outcomes
+        .iter()
+        .find(|o| o.outcome.starts_with("Acute pain (primary), VAS"))
+        .unwrap();
+    let aiims = gap_numbers("42527734");
+    let pain_missing: Vec<f64> = pain
+        .numbers
+        .iter()
+        .map(|n| n.value)
+        .filter(|v| aiims.contains(v))
+        .collect();
+    assert!(
+        !pain_missing.is_empty(),
+        "AIIMS 6 h / 12 h pain: {:?} not in {:?}",
+        pain.numbers,
+        cov.gaps
+    );
+    assert!(
+        cov.gaps
+            .iter()
+            .any(|g| g.pmid == "42527734" && g.outcome.starts_with("Rescue analgesia")),
+        "rescue analgesia: {:?}",
+        cov.gaps
+    );
+    eprintln!(
+        "COVERAGE run 1: {:?}\n{}\n{:#?}",
+        cov.counts,
+        cov.line(),
+        cov.gaps
+    );
 }
 
 /// Number tokens in the writer's input from the prototype payloads, pinned:

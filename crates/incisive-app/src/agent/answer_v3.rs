@@ -498,6 +498,131 @@ pub struct IntegrityV3 {
     pub labels_defaulted: u32,
 }
 
+// ---------- Stage 4b item 1: the coverage check ----------
+
+/// What a coverage gap is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GapKind {
+    /// A verified structured number of an evidence row the answer does not
+    /// write.
+    Number,
+    /// A verified extracted outcome none of whose numbers (or, with none,
+    /// whose name) the answer has.
+    Outcome,
+    /// A verified number of a study the researcher labelled a meta-analysis.
+    Pooled,
+    /// A skeptic item (contradicting evidence, missed trial, meta-analysis
+    /// note, guideline, overlap) whose study the answer's main sections
+    /// never cite.
+    SkepticItem,
+}
+
+impl GapKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GapKind::Number => "number",
+            GapKind::Outcome => "outcome",
+            GapKind::Pooled => "pooled",
+            GapKind::SkepticItem => "skeptic_item",
+        }
+    }
+}
+
+/// One thing the team verified that the written answer does not say.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageGap {
+    pub kind: GapKind,
+    pub pmid: String,
+    /// The extracted outcome's name (empty for a skeptic item).
+    pub outcome: String,
+    /// What is missing, in words (the row's number line or effect, or the
+    /// skeptic's text).
+    pub text: String,
+    /// The missing values (empty for a skeptic item).
+    #[serde(default)]
+    pub numbers: Vec<f64>,
+}
+
+/// The coverage check's counts (all gaps, also those past the stored cap).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageCounts {
+    /// Verified structured numbers checked, and those the answer lacks
+    /// (pooled ones included; numbers of a missing outcome included).
+    pub numbers_checked: u32,
+    pub numbers_missing: u32,
+    /// Of `numbers_missing`, from studies labelled meta-analyses.
+    pub pooled_missing: u32,
+    pub outcomes_checked: u32,
+    pub outcomes_missing: u32,
+    pub skeptic_checked: u32,
+    pub skeptic_missing: u32,
+    /// Gaps not stored (past [`MAX_STORED_GAPS`]); counted above.
+    #[serde(default)]
+    pub gaps_cut: u32,
+}
+
+/// Gaps stored per answer, at most (the counts cover them all).
+pub const MAX_STORED_GAPS: usize = 80;
+
+/// Stage 4b item 1: what the team verified that the written answer does
+/// not say. Code only (no AI call); additive on [`AnswerV3`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoverageV3 {
+    pub gaps: Vec<CoverageGap>,
+    pub counts: CoverageCounts,
+}
+
+/// "1 number" / "2 numbers".
+pub fn count_noun(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The parts of a count list that are not zero, joined "a, b and c".
+pub fn join_counts(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [a] => a.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+impl CoverageV3 {
+    /// The step line and trail note: "Coverage: 14 verified numbers (2
+    /// pooled) and 3 outcomes not in the draft; 1 skeptic item not cited",
+    /// zero parts left out.
+    pub fn line(&self) -> String {
+        let c = self.counts;
+        let mut parts: Vec<String> = Vec::new();
+        if c.numbers_missing > 0 {
+            let mut p = count_noun(c.numbers_missing, "verified number", "verified numbers");
+            if c.pooled_missing > 0 {
+                p.push_str(&format!(" ({} pooled)", c.pooled_missing));
+            }
+            parts.push(p);
+        }
+        if c.outcomes_missing > 0 {
+            parts.push(count_noun(c.outcomes_missing, "outcome", "outcomes"));
+        }
+        let mut line = if parts.is_empty() {
+            format!(
+                "Coverage: all {} and {} are in the draft",
+                count_noun(c.numbers_checked, "verified number", "verified numbers"),
+                count_noun(c.outcomes_checked, "outcome", "outcomes")
+            )
+        } else {
+            format!("Coverage: {} not in the draft", join_counts(&parts))
+        };
+        if c.skeptic_missing > 0 {
+            line.push_str(&format!(
+                "; {} not cited",
+                count_noun(c.skeptic_missing, "skeptic item", "skeptic items")
+            ));
+        }
+        line
+    }
+}
+
 /// The stored Phase 3 answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnswerV3 {
@@ -536,6 +661,10 @@ pub struct AnswerV3 {
     /// skeptic's and extractor's output (no AI call).
     #[serde(default)]
     pub notable_code: Vec<NotableFinding>,
+    /// Stage 4b item 1 (additive): what the team verified that the written
+    /// answer does not say. `None`: Quick, or answers stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageV3>,
 }
 
 impl AnswerV3 {
@@ -894,6 +1023,9 @@ impl AnswerV3 {
         }
         if let Some(n) = self.skeptic.as_ref().and_then(SkepticV3::dropped_note) {
             notes.push(n);
+        }
+        if let Some(c) = &self.coverage {
+            notes.push(format!("{}.", c.line()));
         }
         notes
     }
@@ -1608,6 +1740,7 @@ mod tests {
                 pmids: vec![A.into()],
                 spans: vec![],
             }],
+            coverage: None,
         }
     }
 

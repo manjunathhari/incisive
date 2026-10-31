@@ -556,6 +556,24 @@ pub(crate) fn all_allowed(values: &[f64], allowed: &[f64]) -> bool {
     values.iter().all(|v| allowed.iter().any(|a| same(*a, *v)))
 }
 
+/// Whether `a` and `b` are the same number up to its sign (Stage 4b item
+/// 1): prose often drops a sign the source writes ("13.4 min shorter" for
+/// "−13.4"). U+2212 and the hyphen-minus are already one sign in the
+/// tokeniser ([`super::extract::numbers`] folds them).
+pub(crate) fn same_magnitude(a: f64, b: f64) -> bool {
+    same(a.abs(), b.abs())
+}
+
+/// [`all_allowed`] up to the sign (Stage 4b item 1): for checks of the
+/// answer against its sources (the writer's "not traced" marks and the
+/// coverage check), where a sign difference is wording, not a different
+/// finding. The extractor's own quote checks stay exact.
+pub(crate) fn all_allowed_unsigned(values: &[f64], allowed: &[f64]) -> bool {
+    values
+        .iter()
+        .all(|v| allowed.iter().any(|a| same_magnitude(*a, *v)))
+}
+
 /// The byte ranges of the numbers written in `text` that are not among
 /// `allowed` (Stage 4 item 7: the text is never changed; these are marked
 /// "not verified"). Ranges and hyphenated names keep their dash
