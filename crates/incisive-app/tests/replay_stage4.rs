@@ -961,6 +961,142 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     );
 }
 
+// ---------- Part A: the interactive answer page ----------
+
+/// The replay's stored answers, built without a database: the scripted
+/// writer reply read as the writer call reads it (`WireAnswer`), the same
+/// post-writer checks as above, and a fixed `created_at`. The first is the
+/// full Stage 4 answer; the second the reconstructed 31 Oct run 1 with its
+/// coverage check and the completeness review's additions (as the scripted
+/// review above returns them).
+fn replay_answers() -> (AnswerV3, AnswerV3) {
+    let (studies, _contradictions, searches) = studies();
+    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
+    let rows = checked_rows();
+    let review = validated_review(&selected);
+    let full = FullInput {
+        rows: &rows,
+        skeptic: Some(&review),
+        skeptic_note: None,
+        missed: &[],
+    };
+    let check = |w: writer_v3::WireAnswer| {
+        let (mut written, defaulted) = w.into_answer();
+        let mut integrity = IntegrityV3 {
+            labels_defaulted: defaulted,
+            ..IntegrityV3::default()
+        };
+        writer_v3::check_citations(&mut written, &selected, &mut integrity);
+        writer_v3::evidence_types(&mut written, |p| {
+            studies
+                .iter()
+                .find(|s| s.pmid == p)
+                .and_then(|s| writer_v3::design_class(&s.design))
+        });
+        let allowed = writer_v3::allowed_numbers(&studies, Some(&full));
+        let (untraced, checked) = writer_v3::trace_numbers(
+            &written,
+            &allowed,
+            |p| selected.iter().any(|s| s == p),
+            true,
+        );
+        integrity.numbers_checked = checked;
+        integrity.numbers_untraced = untraced.len() as u32;
+        (written, integrity, untraced)
+    };
+    let wire = serde_json::from_value(scripted_answer(&rows, &studies, &review)).unwrap();
+    let (written, integrity, untraced) = check(wire);
+    let extraction = Extraction {
+        rows: rows.clone(),
+        ..Extraction::default()
+    };
+    let references: Vec<ReferenceV3> = studies
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ReferenceV3 {
+            n: i as u16 + 1,
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            journal: s.journal.clone(),
+            year: s.year,
+            doi: s.doi.clone(),
+            retracted: false,
+            found_by_skeptic: false,
+        })
+        .collect();
+    let answer = AnswerV3 {
+        version: ANSWER_VERSION,
+        question: QUESTION.into(),
+        mode: RunMode::Focused,
+        created_at: "2026-10-31T09:00:00Z".parse().unwrap(),
+        answer: Some(written),
+        empty_reason: None,
+        references,
+        searches,
+        integrity,
+        stopped_early: None,
+        cost_paise: 13689,
+        elapsed_s: 400,
+        skeptic: Some(team::skeptic_summary(&review)),
+        evidence: team::evidence_summary(&studies, &extraction),
+        notes: vec![],
+        untraced,
+        notable_code: team::notable_code(Some(&review), &extraction),
+        coverage: None,
+        completeness: None,
+    };
+    // Run 1: three outcomes left out, then the review's additions.
+    let mut f1 = fixture("evidence.json");
+    for x in f1["studies"].as_array_mut().unwrap() {
+        if x["pmid"] == "41511872" {
+            let o = x["outcomes"].as_array_mut().unwrap();
+            let i = o
+                .iter()
+                .position(|o| s(&o["outcome"]).contains("NASA raw TLX"))
+                .unwrap();
+            let nasa = o.remove(i);
+            o.insert(0, nasa);
+        }
+    }
+    let rows1 = checked_rows_of(&f1);
+    let mut wire1: Value = scripted_answer(&rows1, &studies, &review);
+    wire1["outcomes"].as_array_mut().unwrap().retain(|o| {
+        let name = s(&o["outcome"]);
+        !(name.contains("NASA raw TLX")
+            || name.starts_with("Acute pain (primary), VAS")
+            || name.starts_with("Rescue analgesia"))
+    });
+    let (run1, integrity1, untraced1) = check(serde_json::from_value(wire1).unwrap());
+    let known = |p: &str| selected.iter().any(|s| s == p);
+    let is_meta = |p: &str| studies.iter().any(|s| s.pmid == p && s.design == "SR/MA");
+    let cov = coverage::check(&run1, &rows1, is_meta, Some(&review), known);
+    let first_row = run1.outcomes[0].outcome.clone();
+    let completeness: incisive_app::agent::answer_v3::CompletenessV3 =
+        serde_json::from_value(json!({
+            "skipped": null,
+            "gaps_found": cov.gaps.len(),
+            "added_outcomes": [{"outcome": "Surgeon workload (NASA raw TLX)",
+                "effect_text": "Mean 18.4 with robotic TAPP vs 34.0 with TEP (lower = less workload) [41511872]",
+                "pmids": ["41511872"], "certainty": "Low", "why": "one trial"},
+                {"outcome": "Rescue analgesia", "effect_text": "20.6% vs 17.9%; ARD 2.7% (95% CI -13.7% to 19.1%) [42527734]",
+                "pmids": ["42527734"], "certainty": "Low", "why": "one small trial"}],
+            "outcome_additions": [{"outcome": first_row, "row": 0,
+                "text": "Pain at 6 h: mean difference 0.28 [42527734].", "pmids": ["42527734"]}],
+            "added_conflicts": [],
+            "not_added": [{"gap": "AIIMS 12 h CI bound", "reason": "already covered by the 6 h estimate"}],
+            "notes": ["Certainty for workload rests on one trial."],
+            "untraced": []
+        }))
+        .unwrap();
+    let mut a1 = answer.clone();
+    a1.answer = Some(run1);
+    a1.integrity = integrity1;
+    a1.untraced = untraced1;
+    a1.coverage = Some(cov);
+    a1.completeness = Some(completeness);
+    (answer, a1)
+}
+
 /// Number tokens in the writer's input from the prototype payloads, pinned:
 /// the same 1,454 the Stage 3 code gives for the same payloads.
 const WRITER_INPUT_NUMBER_TOKENS: usize = 1_454;
@@ -1294,4 +1430,551 @@ async fn write_probe_stage4b_payload() {
     ];
     let payload = json!({"max_tokens": 32, "probes": probes});
     std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+}
+
+// ---------- Part A: render tests of the interactive answer page ----------
+
+/// The summary of the original run view (item 13).
+const ORIGINAL_SUMMARY: &str = "Original run view (for checking)";
+
+/// The new page's part of the HTML (before the original run view) and the
+/// original run view's part.
+fn split_page(html: &str) -> (&str, &str) {
+    let i = html
+        .find("<details class=\"ap-original\"")
+        .expect("the original run view is drawn");
+    (&html[..i], &html[i..])
+}
+
+/// A replay answer with what the 31 Oct runs had and the prototype payloads
+/// do not (test data only, no real question): percentages in two arms, a
+/// ratio and a difference with CIs, "P < .001", a registration ID marked
+/// "not traced", a guideline whose quote the skeptic also gave as evidence
+/// against, a skeptic lead on a trial row and a completeness addition
+/// citing `[<pmid> as <n>]`.
+fn enriched(mut a: AnswerV3) -> AnswerV3 {
+    use incisive_app::agent::answer_v3::{
+        AddedOutcome, Certainty, CompletenessV3, Number, SkepticItem, SkepticLead, Span,
+    };
+    let refs = a.ref_numbers();
+    let w = a.answer.as_mut().unwrap();
+    let p0 = w.studies[0].pmid.clone();
+    let p1 = w.studies[1].pmid.clone();
+    let p2 = w.studies[2].pmid.clone();
+    let n0 = refs[&p0];
+    let num = |label: &str,
+               value: f64,
+               unit: &str,
+               arm: Option<&str>,
+               ci: Option<(f64, f64)>,
+               p: Option<&str>| Number {
+        label: label.into(),
+        value,
+        unit: Some(unit.into()),
+        arm: arm.map(String::from),
+        ci_low: ci.map(|c| c.0),
+        ci_high: ci.map(|c| c.1),
+        p: p.map(String::from),
+        pmid: p0.clone(),
+    };
+    w.outcomes[0].numbers.extend([
+        num(
+            "Same-day discharge",
+            95.9,
+            "%",
+            Some("robotic"),
+            None,
+            Some("P=0.012"),
+        ),
+        num(
+            "Same-day discharge",
+            81.5,
+            "%",
+            Some("laparoscopic"),
+            None,
+            Some("P=0.012"),
+        ),
+        num("Seroma", 0.4, "RR", None, Some((0.08, 2.03)), None),
+        num(
+            "Length of stay, mean difference",
+            0.33,
+            "days",
+            Some("MD"),
+            Some((-0.03, 0.7)),
+            Some("P < .001"),
+        ),
+    ]);
+    let appraisal = &mut w.studies[1].appraisal;
+    appraisal.push_str(" Same cohort as an earlier report (NTR3593).");
+    let at = appraisal.rfind("3593").unwrap();
+    a.untraced
+        .push(Span::new("studies.1.appraisal", at, at + 4));
+    let quote = "Mesh repair is recommended for all adults with an inguinal hernia.";
+    let k = a.skeptic.as_mut().unwrap();
+    k.guidelines.push(SkepticItem {
+        pmid: p1.clone(),
+        text: "European Hernia Society: mesh repair for adults".into(),
+        quote: Some(quote.into()),
+    });
+    k.contradicting.push(SkepticItem {
+        pmid: p1,
+        text: "A guideline recommends mesh repair".into(),
+        quote: Some(quote.into()),
+    });
+    k.leads.push(SkepticLead {
+        pmid: p2,
+        kind: "contradicting study".into(),
+    });
+    a.completeness = Some(CompletenessV3 {
+        gaps_found: 1,
+        added_outcomes: vec![AddedOutcome {
+            outcome: "Specific complications".into(),
+            effect_text: format!(
+                "Seroma RR 0.40 (95% CI 0.08-2.03) [{p0} as {n0}]. Conversion was rare."
+            ),
+            pmids: vec![p0],
+            certainty: Some(Certainty::Low),
+            why: "sparse events".into(),
+            unsourced: false,
+        }],
+        ..CompletenessV3::default()
+    });
+    a
+}
+
+/// The replay answers: the two built from the payloads and the enriched one.
+fn part_a_answers() -> Vec<(&'static str, AnswerV3)> {
+    let (a, a1) = replay_answers();
+    let e = enriched(a.clone());
+    vec![
+        ("replay", a),
+        ("replay run 1 with review", a1),
+        ("enriched", e),
+    ]
+}
+
+/// The skeptic's text fields with their span paths.
+fn skeptic_fields(k: &incisive_app::agent::answer_v3::SkepticV3) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = Vec::new();
+    for (i, m) in k.must_mention.iter().enumerate() {
+        v.push((format!("must_mention.{i}"), m.clone()));
+    }
+    for (i, o) in k.overlaps.iter().enumerate() {
+        v.push((format!("overlaps.{i}.note"), o.note.clone()));
+    }
+    for (name, list) in [
+        ("missed_rcts", &k.missed_rcts),
+        ("extract_next", &k.extract_next),
+        ("ma_notes", &k.ma_notes),
+        ("contradicting", &k.contradicting),
+        ("guidelines", &k.guidelines),
+    ] {
+        for (i, x) in list.iter().enumerate() {
+            v.push((format!("{name}.{i}.text"), x.text.clone()));
+        }
+    }
+    v
+}
+
+/// Item 1 and the visibility rules: the replay answers render, in the fixed
+/// order, every block they have data for, the original run view last.
+#[test]
+fn part_a_replay_answers_render_their_blocks_in_order() {
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, original) = split_page(&html);
+        let v = incisive_app::answer_page::visible(&a);
+        let mut want: Vec<&str> = vec!["Decision support", "At a glance", "Bottom line"];
+        want.push("What this means for clinical practice");
+        if v.out_of_100 {
+            want.push("Out of 100 patients");
+        }
+        if v.forest {
+            want.push("Every estimate with a 95% CI");
+        }
+        want.push("Outcome by outcome");
+        if v.compare {
+            want.push("Compare the arms");
+        }
+        want.extend([
+            "Details",
+            "Challenged by the skeptic",
+            "The trials",
+            "References",
+            "Search trail",
+            "Cost and time",
+            "Copy as text",
+        ]);
+        let mut at = 0;
+        for h in want {
+            let i = page[at..]
+                .find(h)
+                .unwrap_or_else(|| panic!("{name}: {h} missing or out of order"));
+            at += i + h.len();
+        }
+        assert!(original.contains(ORIGINAL_SUMMARY), "{name}");
+        // The prototype payloads have no percentages or CIs; the enriched
+        // answer has every block.
+        if name == "enriched" {
+            assert!(v.out_of_100 && v.forest && v.compare && !v.no_numbers);
+            assert!(page.contains(r#"role="img" aria-label="96 of 100 people, robotic""#));
+            assert!(page.contains("Out of 100 people like those in the trials"));
+            assert!(page.contains("Same-day discharge: 95.9% robotic vs 81.5% laparoscopic (p 0.012). Certainty for this outcome: Low."));
+            assert!(page.contains("RR 0.4 (0.08\u{2013}2.03)"));
+            assert!(page.contains("0.33 days (\u{2212}0.03 to 0.7)"));
+            assert!(page.contains("Who these numbers apply to"));
+        } else {
+            assert!(!v.out_of_100 && !v.forest, "{name}");
+            assert!(!page.contains("Out of 100 patients"), "{name}");
+        }
+        // The replay's numbers have two arms per label in places: paired.
+        assert!(v.compare, "{name}");
+    }
+}
+
+/// Flag, never delete: every mark the earlier page draws is on the new
+/// page, by field, except the "not traced" marks on registration IDs
+/// (item 12), which are counted. The original run view keeps them all.
+#[test]
+fn part_a_every_mark_is_still_drawn() {
+    use incisive_app::agent::answer_v3::{marked_runs, text_fields, whole_marked};
+    use incisive_app::answer_page::{
+        Piece, completeness_fields, pieces, suppressed_registration_marks,
+    };
+    let drawn = |page: &str, key: &str| page.matches(&format!("data-mark=\"{key}\"")).count();
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (page, original) = split_page(&html);
+        let refs = a.ref_numbers();
+        let known = |p: &str| refs.contains_key(p);
+        let mut expected_hidden = 0;
+        let mut check = |ns: &str,
+                         field: &str,
+                         text: &str,
+                         spans: &[incisive_app::agent::answer_v3::Span],
+                         suppress: bool| {
+            let ps = pieces(text, field, spans, known, suppress);
+            let marks = ps.iter().filter(|p| **p == Piece::Mark).count();
+            expected_hidden += ps.iter().filter(|p| **p == Piece::Suppressed).count();
+            let runs = marked_runs(text, field, spans)
+                .iter()
+                .filter(|(_, m)| *m)
+                .count();
+            assert_eq!(
+                marks + ps.iter().filter(|p| **p == Piece::Suppressed).count(),
+                runs
+            );
+            assert!(
+                drawn(page, &format!("{ns}{field}")) >= marks,
+                "{name}: {ns}{field}: {} drawn, {marks} expected",
+                drawn(page, &format!("{ns}{field}"))
+            );
+        };
+        if let Some(w) = &a.answer {
+            for (f, t) in text_fields(w) {
+                check("w:", &f, t, &a.untraced, true);
+            }
+            // Whole-field marks: structured numbers and n.
+            for sp in a.untraced.iter().filter(|s| s.len == 0) {
+                assert!(whole_marked(&sp.field, &a.untraced));
+                assert!(
+                    drawn(page, &format!("w:{}", sp.field)) >= 1,
+                    "{name}: {}",
+                    sp.field
+                );
+            }
+        }
+        if let Some(c) = &a.completeness {
+            for (f, t) in completeness_fields(c) {
+                check("c:", &f, t, &c.untraced, true);
+            }
+        }
+        if let Some(k) = &a.skeptic {
+            let moved = incisive_app::answer_page::against_moved(&a);
+            for (f, t) in skeptic_fields(k) {
+                let i: usize = f
+                    .split('.')
+                    .nth(1)
+                    .and_then(|x| x.parse().ok())
+                    .unwrap_or(0);
+                if f.starts_with("contradicting.") && moved[i] {
+                    // Moved under Guidelines only when it carries no mark.
+                    assert!(marked_runs(&t, &f, &k.spans).iter().all(|(_, m)| !m));
+                    continue;
+                }
+                check("s:", &f, &t, &k.spans, false);
+            }
+        }
+        for (k, n) in a
+            .notable_code
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.repeats_skeptic())
+        {
+            check(&format!("n{k}:"), "text", &n.text, &n.spans, false);
+        }
+        for e in a.evidence.iter().filter(|e| e.funding_checked) {
+            if let Some(f) = &e.funding {
+                check(&format!("e:{}:", e.pmid), "funding", f, &e.spans, false);
+            }
+        }
+        assert_eq!(expected_hidden, suppressed_registration_marks(&a), "{name}");
+        // The original run view: today's marks, all of them.
+        let today = incisive_app::app::render_original_v3(a.clone(), "");
+        let not_traced = |h: &str| h.matches(">not traced</sup>").count();
+        let not_verified = |h: &str| h.matches(">not verified</sup>").count();
+        assert_eq!(not_traced(original), not_traced(&today), "{name}");
+        assert_eq!(not_verified(original), not_verified(&today), "{name}");
+        // The new page draws at least as many, less the suppressed ones.
+        assert!(
+            not_traced(page) + expected_hidden >= not_traced(&today),
+            "{name}"
+        );
+        eprintln!(
+            "PART A marks {name}: today {} not traced / {} not verified; new page {} / {}; suppressed {}",
+            not_traced(&today),
+            not_verified(&today),
+            not_traced(page),
+            not_verified(page),
+            expected_hidden
+        );
+        if name == "enriched" {
+            assert_eq!(expected_hidden, 1, "the NTR3593 mark");
+            assert!(
+                original.replace("<!>", "").contains("NTR3593<sup"),
+                "unsuppressed in the original view"
+            );
+        } else {
+            // The prototype payloads mark no registration ID.
+            assert_eq!(expected_hidden, 0, "{name}");
+        }
+    }
+}
+
+/// Item 13: the original run view is present, closed, last, and is today's
+/// view with only its ids prefixed; the page has no duplicate ids.
+#[test]
+fn part_a_original_run_view_is_todays_page_closed_and_last() {
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let (_, original) = split_page(&html);
+        assert!(
+            original.starts_with("<details class=\"ap-original\">"),
+            "{name}: closed by default (no open attribute)"
+        );
+        assert!(original.contains(ORIGINAL_SUMMARY));
+        assert!(original.contains("the answer as stored, in the earlier layout"));
+        // Last: nothing after it but the closing tags of the page.
+        let end = original.rfind("</details>").unwrap();
+        assert_eq!(
+            original[end..].replace("<!>", ""),
+            "</details></div>",
+            "{name}: last on the page"
+        );
+        // Today's view, ids prefixed: the same HTML once the prefix is taken off.
+        let prefixed = incisive_app::app::render_original_v3(a.clone(), "orig-");
+        assert!(
+            original.contains(&prefixed),
+            "{name}: the view is drawn as is"
+        );
+        let today = incisive_app::app::render_original_v3(a.clone(), "");
+        let unprefixed = prefixed
+            .replace("\"#orig-ref-", "\"#ref-")
+            .replace("id=\"orig-ref-", "id=\"ref-")
+            .replace("id=\"orig-answer-plain-text\"", "id=\"answer-plain-text\"");
+        assert_eq!(unprefixed, today, "{name}: only the ids differ");
+        // The debug line: counts only.
+        let (o, n, st, r, u, cu) = incisive_app::answer_page::debug_counts(&a);
+        assert!(original.contains(&format!(
+            "{o} outcomes \u{b7} {n} numbers \u{b7} {st} studies \u{b7} {r} references \u{b7} {u} untraced spans ({cu} in the completeness review)"
+        )));
+        // No id appears twice on the page.
+        let ids = regex::Regex::new(r#"\sid="([^"]+)""#).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for c in ids.captures_iter(&html) {
+            assert!(
+                seen.insert(c[1].to_string()),
+                "{name}: duplicate id {}",
+                &c[1]
+            );
+        }
+        assert!(seen.contains("ref-1") && seen.contains("orig-ref-1") && seen.contains("sheet-1"));
+    }
+}
+
+/// Item 12 on the enriched answer: p once, `[<pmid> as <n>]` as a chip,
+/// guidelines listed once, the skeptic lead in the sheet's neutral box.
+/// The original run view keeps today's text, glitches included.
+#[test]
+fn part_a_display_glitches_are_fixed_on_the_new_page_only() {
+    let (a, _) = replay_answers();
+    let e = enriched(a);
+    let html = incisive_app::app::render_answer_v3(e.clone());
+    // For a look at the page (written before the checks).
+    if let Ok(out) = std::env::var("PART_A_HTML_OUT") {
+        std::fs::write(out, &html).unwrap();
+    }
+    let (page, original) = split_page(&html);
+    let text = |h: &str| flat(&page_text(h));
+    let (pt, ot) = (text(page), text(original));
+    assert!(pt.contains("p < .001") && !pt.contains("p P <"));
+    assert!(ot.contains("p P < .001"), "the original keeps it");
+    let p0 = &e.answer.as_ref().unwrap().studies[0].pmid;
+    let n0 = e.ref_numbers()[p0];
+    let as_n = regex::Regex::new(r"\[\d{5,9} as \d+\]").unwrap();
+    assert!(!as_n.is_match(&pt), "no [pmid as n] left");
+    assert!(page.replace("<!>", "").contains(&format!(
+        "(95% CI 0.08-2.03) <span class=\"cite\">[<a href=\"#ref-{n0}\" rel=\"external\">{n0}</a>]</span>"
+    )));
+    assert!(ot.contains(&format!("[{p0} as {n0}]")));
+    let quote = "Mesh repair is recommended for all adults with an inguinal hernia.";
+    assert_eq!(
+        pt.matches(quote).count(),
+        1,
+        "listed once, under Guidelines"
+    );
+    let g = pt.find("Guidelines and consensus statements").unwrap();
+    let q = pt.find(quote).unwrap();
+    assert!(g < q && q < pt.find("What would change this answer").unwrap());
+    assert_eq!(
+        ot.matches(quote).count(),
+        3,
+        "today: guidelines, evidence against, guideline"
+    );
+    // The skeptic lead: a badge on the card, the words in the sheet.
+    assert!(pt.contains("skeptic lead"));
+    assert!(pt.contains("Skeptic lead (unverified): Possible contradicting study"));
+    assert!(!pt.contains("Skeptic: Possible"));
+    assert!(ot.contains("Skeptic: Possible contradicting study"));
+    // Registration IDs: the mark is counted in Checks.
+    assert!(pt.contains(
+        "1 \u{201c}not traced\u{201d} mark on a trial or review registration ID not drawn"
+    ));
+    // Copy as text: only the p values differ from the plain text.
+    let plain = e.plain_text();
+    assert_eq!(
+        plain
+            .replace("p P < .001", "p < .001")
+            .replace("p P=0.012", "p 0.012"),
+        e.copy_text()
+    );
+}
+
+/// Copy as text is byte-identical to today on the replay answers (they
+/// carry no p values, so the item 12 fix changes nothing there).
+#[test]
+fn part_a_copy_text_is_unchanged_on_the_replay() {
+    let (a, a1) = replay_answers();
+    for x in [a, a1] {
+        assert!(
+            x.answer
+                .as_ref()
+                .unwrap()
+                .outcomes
+                .iter()
+                .flat_map(|o| &o.numbers)
+                .all(|n| n.p.is_none())
+        );
+        assert_eq!(x.copy_text(), x.plain_text());
+    }
+}
+
+/// A Stage 3 shaped answer (no at-a-glance, no clinical practice, no
+/// numbers, no completeness), a Quick answer and an empty answer render,
+/// their missing blocks hidden, with no empty boxes.
+#[test]
+fn part_a_stage3_quick_and_empty_answers_render() {
+    let (a, _) = replay_answers();
+    // Stage 3 shaped.
+    let mut s3 = a.clone();
+    let w = s3.answer.as_mut().unwrap();
+    w.at_a_glance = None;
+    w.clinical_practice = None;
+    w.notable_findings.clear();
+    for o in &mut w.outcomes {
+        o.numbers.clear();
+    }
+    s3.untraced.retain(|sp| !sp.field.contains(".numbers."));
+    s3.completeness = None;
+    s3.coverage = None;
+    let html = incisive_app::app::render_answer_v3(s3);
+    let (page, _) = split_page(&html);
+    for gone in [
+        "At a glance",
+        "What this means for clinical practice",
+        "Out of 100",
+        "Every estimate with a 95% CI",
+        "Compare the arms",
+        "Completeness review",
+        ">Numbers<",
+    ] {
+        assert!(!page.contains(gone), "Stage 3: {gone} shown");
+    }
+    assert!(page.contains("This answer has no structured numbers"));
+    assert!(page.contains("Outcome by outcome") && page.contains("The trials"));
+    // Quick: no skeptic, no evidence rows.
+    let mut q = a.clone();
+    q.mode = RunMode::Quick;
+    q.skeptic = None;
+    q.evidence.clear();
+    q.notable_code.clear();
+    let html = incisive_app::app::render_answer_v3(q);
+    let (page, original) = split_page(&html);
+    assert!(page.contains(">Quick<"));
+    assert!(!page.contains("Challenged by the skeptic"));
+    assert!(!page.contains("verified quotes</span>") && !page.contains("verified quote</span>"));
+    assert!(original.contains(ORIGINAL_SUMMARY));
+    // Empty: its reason, as today.
+    let mut empty = a;
+    empty.answer = None;
+    empty.empty_reason = Some("No relevant evidence found.".into());
+    empty.completeness = None;
+    let html = incisive_app::app::render_answer_v3(empty);
+    let (page, original) = split_page(&html);
+    assert!(page.contains("No relevant evidence found."));
+    for gone in [
+        "Outcome by outcome",
+        "At a glance",
+        "The trials",
+        "This answer has no structured numbers",
+    ] {
+        assert!(!page.contains(gone), "empty: {gone} shown");
+    }
+    assert!(page.contains("id=\"ref-1\"") && original.contains("No relevant evidence found."));
+}
+
+/// No `inner_html` anywhere in the page's code.
+#[test]
+fn part_a_uses_no_inner_html() {
+    for f in [
+        "src/app.rs",
+        "src/app/page.rs",
+        "src/app/details.rs",
+        "src/answer_page.rs",
+    ] {
+        let src = std::fs::read_to_string(format!("{}/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!code.contains("inner_html"), "{f}");
+    }
+}
+
+/// The page sizes, for the report (not a check).
+#[test]
+fn part_a_page_sizes() {
+    for (name, a) in part_a_answers() {
+        let html = incisive_app::app::render_answer_v3(a.clone());
+        let today = incisive_app::app::render_original_v3(a, "");
+        let (page, original) = split_page(&html);
+        eprintln!(
+            "PART A size {name}: before {} bytes; after {} bytes (new page {}, original view {})",
+            today.len(),
+            html.len(),
+            page.len(),
+            original.len()
+        );
+    }
 }

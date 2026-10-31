@@ -3431,6 +3431,21 @@ fn markup_of(html: &str) -> String {
     markup.replace("<!>", "")
 }
 
+/// Part A: the interactive page, and the original run view after it
+/// (today's answer view) with its `orig-` id prefix taken off, so the
+/// earlier page's markup can be checked as it was.
+fn views(m: &str) -> (&str, String) {
+    let i = m
+        .find("<details class=\"ap-original\">")
+        .expect("the original run view");
+    (
+        &m[..i],
+        m[i..]
+            .replace("\"#orig-ref-", "\"#ref-")
+            .replace("id=\"orig-", "id=\""),
+    )
+}
+
 async fn v3_page(pool: &PgPool, body: serde_json::Value) -> (StatusCode, String) {
     let st = app_state(pool.clone());
     let uid = new_user(pool).await;
@@ -3488,7 +3503,15 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
     assert!(html.contains("https://pubmed.ncbi.nlm.nih.gov/41060645/"));
     assert!(html.contains("https://doi.org/10.1001/jamasurg.2025.4071"));
     // Retraction warning on the retracted reference only.
-    assert_eq!(html.matches("RETRACTED").count(), 1);
+    // Part A: once in the original run view; on the new page, on the
+    // retracted reference and its study sheet only.
+    let (page, orig) = views(&markup);
+    assert_eq!(orig.matches("RETRACTED").count(), 1);
+    assert_eq!(page.matches("RETRACTED").count(), 2);
+    let ref2 = &page[page.find(r#"id="ref-2""#).unwrap()..];
+    assert!(ref2[..ref2.find("</li>").unwrap()].contains("RETRACTED"));
+    let sheet2 = &page[page.find(r#"id="sheet-2""#).unwrap()..];
+    assert!(sheet2[..sheet2.find("</dialog>").unwrap()].contains("RETRACTED"));
     // Sections in order.
     let mut at = 0;
     for h in [
@@ -3844,8 +3867,10 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
     assert!(m.contains(
         "European &lt;b&gt;Hernia&lt;/b&gt; Society (2023): Either approach is acceptable"
     ));
-    let section =
-        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    // The earlier layout (the original run view).
+    let (page, orig) = views(&m);
+    let section = &orig
+        [orig.find("Guidelines and consensus").unwrap()..orig.find(">Applicability<").unwrap()];
     assert!(
         section
             .contains("ACG \u{2014} \u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"),
@@ -3861,9 +3886,31 @@ async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
     assert!(m.contains("What the meta-analyses pooled"));
     assert!(m.contains("Its 7-RCT pool counts one observational study as an RCT."));
     // The guidelines come after the conflicts and before applicability.
-    let g = m.find("Guidelines and consensus statements").unwrap();
-    assert!(m.find("Conflicting evidence").unwrap() < g);
-    assert!(g < m.find(">Applicability<").unwrap());
+    let g = orig.find("Guidelines and consensus statements").unwrap();
+    assert!(orig.find("Conflicting evidence").unwrap() < g);
+    assert!(g < orig.find(">Applicability<").unwrap());
+    // Part A: grouped by body, each guideline once; the skeptic's quote of
+    // the writer's guideline is drawn under the writer's line.
+    let gp = &page[page.find("Guidelines and consensus statements").unwrap()
+        ..page.find(">Applicability<").unwrap()];
+    assert!(
+        gp.contains("European &lt;b&gt;Hernia&lt;/b&gt; Society"),
+        "{gp}"
+    );
+    assert!(gp.contains("\u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"));
+    assert!(
+        gp.contains("\u{201c}already listed by the writer\u{201d}"),
+        "{gp}"
+    );
+    assert_eq!(
+        gp.matches("<li>").count(),
+        2,
+        "the writer's line and ACG: {gp}"
+    );
+    assert!(
+        page.contains("Funding")
+            && page.contains("Intuitive &lt;script&gt;x&lt;/script&gt; Surgical")
+    );
 }
 
 /// Stage 4 items 5 and 7: untraced numbers carry a "not traced" mark,
@@ -4082,11 +4129,26 @@ async fn ssr_readability_sections_arms_and_copy_text() {
     let m = markup_of(&html);
     assert!(!m.contains("<script>alert(5)"));
     assert!(!m.contains("<b>is</b>") && !m.contains("<i>x</i>"));
-    // Order: at a glance, bottom line, clinical practice, outcomes.
+    // Order: at a glance, bottom line, clinical practice, outcomes, in the
+    // earlier layout (the original run view) and on the new page.
+    let (page, orig) = views(&m);
+    let in_orig = |x: &str| {
+        orig.find(x)
+            .unwrap_or_else(|| panic!("{x} missing: {orig}"))
+    };
+    assert!(in_orig("At a glance: ") < in_orig(">Bottom line<"));
+    assert!(in_orig(">Bottom line<") < in_orig("What this means for clinical practice"));
+    assert!(in_orig("What this means for clinical practice") < in_orig("Outcome by outcome"));
+    let in_page = |x: &str| {
+        page.find(x)
+            .unwrap_or_else(|| panic!("{x} missing: {page}"))
+    };
+    assert!(in_page(">At a glance<") < in_page(">Bottom line<"));
+    assert!(in_page(">Bottom line<") < in_page("What this means for clinical practice"));
+    assert!(in_page("What this means for clinical practice") < in_page("Outcome by outcome"));
+    // The intervention arm first in the paired bars too.
+    assert!(in_page(">self-fixating<") < in_page(">tacked<"));
     let at = |x: &str| m.find(x).unwrap_or_else(|| panic!("{x} missing: {m}"));
-    assert!(at("At a glance: ") < at(">Bottom line<"));
-    assert!(at(">Bottom line<") < at("What this means for clinical practice"));
-    assert!(at("What this means for clinical practice") < at("Outcome by outcome"));
     assert!(m.contains("No patient benefit &lt;script&gt;alert(5)&lt;/script&gt;."));
     assert!(m.contains("Chronic pain: RR 0.53 (0.20 to 1.39)"));
     assert!(m.contains("Either mesh &lt;b&gt;is&lt;/b&gt; reasonable."));
@@ -4172,11 +4234,17 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
     assert!(!m.contains("[99999999]") && !m.contains("[41060645]"));
     assert!(m.contains("PMID 99999999"));
     // Review minor 3: an added row cites its study once.
-    let row = &m[m.find("<tr class=\"added\">").unwrap()..];
+    let (page, orig) = views(&m);
+    let row = &orig[orig.find("<tr class=\"added\">").unwrap()..];
     let row = &row[..row.find("</tr>").unwrap()];
     assert_eq!(row.matches("#ref-1").count(), 1, "{row}");
     // The untraced "5" is marked.
     assert!(m.contains("not traced"), "the mark");
+    // Part A: the new page labels each addition and links the not-relevant
+    // list's PMIDs too.
+    assert!(page.matches(ADDED_LABEL).count() >= 3);
+    assert!(page.contains("Judged not relevant (1)") && page.contains("PMID 99999999"));
+    assert!(page.contains(r#"data-mark="c:outcome_additions.0.text""#));
     // Stored as given: the writer's answer is not touched.
     let a: AnswerV3 = serde_json::from_value(body).unwrap();
     assert_eq!(
@@ -4268,15 +4336,32 @@ async fn ssr_small_fixes_notable_citations_and_leads() {
 /// children (a textarea's children are not escaped by Leptos).
 #[test]
 fn the_page_never_writes_model_text_as_html() {
-    let src = include_str!("../src/app.rs");
-    assert!(!src.contains("inner_html="), "inner_html used");
-    assert!(!src.contains("inner_html ="), "inner_html used");
-    let area = &src[src.find("id=COPY_AREA").expect("copy textarea")..];
-    let close = area.find("</textarea>").expect("close");
-    assert!(
-        area[..close].trim_end().ends_with('>'),
-        "the textarea must be empty"
-    );
+    // Part A: the page's code is in app.rs and its app/ submodules; each
+    // copy textarea (the page's and the original run view's) is empty.
+    let mut areas = 0;
+    for src in [
+        include_str!("../src/app.rs"),
+        include_str!("../src/app/page.rs"),
+        include_str!("../src/app/details.rs"),
+    ] {
+        assert!(!src.contains("inner_html="), "inner_html used");
+        assert!(!src.contains("inner_html ="), "inner_html used");
+        let mut rest = src;
+        while let Some(i) = rest.find("<textarea") {
+            let area = &rest[i..];
+            let close = area.find("</textarea>").expect("close");
+            // Every textarea (the question box too) is empty in the markup.
+            assert!(
+                area[..close].trim_end().ends_with('>'),
+                "the textarea must be empty"
+            );
+            if area[..close].contains("COPY_AREA") {
+                areas += 1;
+            }
+            rest = &area[close..];
+        }
+    }
+    assert_eq!(areas, 2, "the page's and the original run view's");
 }
 
 /// Stage 4 review 2, 3, 5, 6 and 8 on the page: a guideline with no source
@@ -4352,12 +4437,31 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
     let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
     assert_eq!(s, StatusCode::OK);
     let m = markup_of(&html);
-    let section =
-        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    // The earlier layout (the original run view).
+    let (page, orig) = views(&m);
+    let section = &orig
+        [orig.find("Guidelines and consensus").unwrap()..orig.find(">Applicability<").unwrap()];
     assert!(
         section.contains("A society (2020): Use either."),
         "{section}"
     );
+    // Part A: the same flags in the new page's Guidelines section.
+    let gp = &page[page.find("Guidelines and consensus statements").unwrap()
+        ..page.find(">Applicability<").unwrap()];
+    for want in [
+        ">A society<",
+        "(2020) Use either.",
+        r#"<span class="flag-label">no source among the studies; not verified</span>"#,
+        "Possible guideline: quote not found in the abstract, check the paper",
+        r#"href="https://pubmed.ncbi.nlm.nih.gov/38888888/""#,
+        r#"href="https://pubmed.ncbi.nlm.nih.gov/37777777/""#,
+        "EHS 2023<sup title=",
+    ] {
+        assert!(gp.contains(want), "{want}: {gp}");
+    }
+    assert!(page.contains(
+        r#"NCT9999 <span class="flag-label">named in the record; the source text does not repeat it</span>"#
+    ));
     assert!(
         section.contains(
             r#"<span class="flag-label">no source among the studies; not verified</span>"#
