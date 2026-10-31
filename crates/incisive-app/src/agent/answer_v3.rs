@@ -1067,6 +1067,12 @@ pub fn text_fields(a: &WrittenAnswer) -> Vec<(String, &str)> {
 
 /// One number as the page writes it: value, unit, arm, CI and p.
 pub fn number_text(n: &Number) -> String {
+    number_text_p(n, false)
+}
+
+/// [`number_text`], with `clean_p` its p without a leading `P` or `=`
+/// (Part A item 12: "p P < .001"; display only).
+fn number_text_p(n: &Number, clean_p: bool) -> String {
     let v = |x: f64| {
         if x.fract() == 0.0 && x.abs() < 1e15 {
             format!("{x:.0}")
@@ -1089,7 +1095,11 @@ pub fn number_text(n: &Number) -> String {
     if let (Some(l), Some(h)) = (n.ci_low, n.ci_high) {
         t.push_str(&format!(", CI {} to {}", v(l), v(h)));
     }
-    if let Some(p) = n.p.as_deref().filter(|p| !p.trim().is_empty()) {
+    if clean_p {
+        if let Some(p) = crate::answer_page::p_label(n.p.as_deref()) {
+            t.push_str(&format!(", {p}"));
+        }
+    } else if let Some(p) = n.p.as_deref().filter(|p| !p.trim().is_empty()) {
         t.push_str(&format!(", p {}", p.trim()));
     }
     t
@@ -1173,10 +1183,15 @@ pub fn arm_lines<'a>(o: &Outcome, comparison_of: impl Fn(&str) -> Option<&'a str
 /// The arm line as text: "label: 80.3 min (robotic TAPP) vs 64.2 min
 /// (laparoscopic TEP)".
 pub fn arm_line_text(o: &Outcome, l: &ArmLine) -> String {
+    arm_line_text_p(o, l, false)
+}
+
+/// [`arm_line_text`], with `clean_p` as [`number_text_p`].
+fn arm_line_text_p(o: &Outcome, l: &ArmLine, clean_p: bool) -> String {
     let parts: Vec<String> = l
         .numbers
         .iter()
-        .map(|&i| number_text(&o.numbers[i]))
+        .map(|&i| number_text_p(&o.numbers[i], clean_p))
         .collect();
     if l.label.is_empty() {
         parts.join(" vs ")
@@ -1308,10 +1323,22 @@ impl AnswerV3 {
         notes
     }
 
-    /// The answer as plain text, for "Copy as text" (Stage 4 item 10): the
-    /// page's sections in its order, citations as reference numbers, marks
-    /// as words, and the numbered references. Nothing is left out.
+    /// The answer as plain text (Stage 4 item 10): the page's sections in
+    /// its order, citations as reference numbers, marks as words, and the
+    /// numbered references. Nothing is left out. The completeness review is
+    /// given this text, so it is kept exactly as it was; the Copy button
+    /// uses [`AnswerV3::copy_text`].
     pub fn plain_text(&self) -> String {
+        self.plain_text_with(false)
+    }
+
+    /// "Copy as text" (Part A): [`AnswerV3::plain_text`] with each p
+    /// printed without a leading `P` or `=` (item 12). Same renderer.
+    pub fn copy_text(&self) -> String {
+        self.plain_text_with(true)
+    }
+
+    fn plain_text_with(&self, clean_p: bool) -> String {
         let refs = self.ref_numbers();
         let u = &self.untraced;
         let t = |text: &str, field: &str| plain(text, &refs, field, u, "not traced");
@@ -1436,7 +1463,7 @@ impl AnswerV3 {
                             .any(|j| whole_marked(&format!("outcomes.{i}.numbers.{j}"), u));
                         o.push_str(&format!(
                             "  Numbers: {}{cite}{}\n",
-                            arm_line_text(x, &l),
+                            arm_line_text_p(x, &l, clean_p),
                             if untraced { " (not traced)" } else { "" }
                         ));
                     }
@@ -2253,6 +2280,31 @@ mod tests {
     /// Stage 4 item 10: Copy as text holds every section, citations as
     /// reference numbers, marks as words, the arms in order and the
     /// references; no raw PMID markers.
+    /// Part A item 12: Copy as text prints "p < .001", never "p P < .001";
+    /// the plain text the completeness review is given is unchanged.
+    #[test]
+    fn copy_text_normalises_p_and_plain_text_is_unchanged() {
+        let mut a = sample();
+        let w = a.answer.as_mut().unwrap();
+        w.outcomes[0].numbers[0].p = Some("P < .001".into());
+        w.outcomes[0].numbers[1].p = Some("p=0.03".into());
+        let plain = a.plain_text();
+        let copy = a.copy_text();
+        assert!(plain.contains("p P < .001") && plain.contains("p p=0.03"));
+        assert!(copy.contains(", p < .001") && copy.contains(", p 0.03"));
+        assert!(!copy.contains("p P <"));
+        // Only the p values differ.
+        assert_eq!(
+            plain
+                .replace("p P < .001", "p < .001")
+                .replace("p p=0.03", "p 0.03"),
+            copy
+        );
+        // Without p values the two are byte-identical.
+        let b = sample();
+        assert_eq!(b.plain_text(), b.copy_text());
+    }
+
     #[test]
     fn plain_text_has_every_section_in_page_order() {
         let t = sample().plain_text();
