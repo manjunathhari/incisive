@@ -2934,9 +2934,11 @@ async fn ssr_run_page_shows_mode_badge() {
     assert!(!body.contains(r#"<span class="badge mode">Quick</span>"#));
 }
 
-/// Folding follow-up item 1: on a finished run, Progress is one closed
-/// `<details>` ("Progress · N steps · Done") holding the steps unchanged;
-/// while the run is running it is open and not folded, as before.
+/// Folding follow-up item 1: on a run that finished with an answer,
+/// Progress is one closed `<details>` ("Progress · N steps · Done")
+/// holding the steps unchanged; while the run is running, and on a run
+/// that ended with no answer (interrupted, or done but empty), it is open
+/// and not folded, as before (its steps say why).
 #[tokio::test]
 async fn ssr_progress_folds_once_the_run_has_ended() {
     let Some((pool, _guard)) = test_pool().await else {
@@ -2971,8 +2973,17 @@ async fn ssr_progress_folds_once_the_run_has_ended() {
         "running: not folded"
     );
     assert!(m.contains("<li>step &lt;one&gt;</li><li>step two</li><li>step three</li>"));
+    assert!(
+        save_answer(&pool, run, &answer_v3_json(false))
+            .await
+            .unwrap()
+    );
     assert!(set_status(&pool, run, RunStatus::Done, None).await.unwrap());
-    let (s, body) = send(router(st), api("GET", &format!("/runs/{run}"), &email)).await;
+    let (s, body) = send(
+        router(st.clone()),
+        api("GET", &format!("/runs/{run}"), &email),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let m = page(&body);
     let at = m
@@ -2990,6 +3001,35 @@ async fn ssr_progress_folds_once_the_run_has_ended() {
         !m.contains("<h3>Progress</h3>"),
         "the heading is in the summary"
     );
+    // Ended with no answer: open, as before.
+    for (status, why) in [
+        (RunStatus::Interrupted, Some("interrupted")),
+        (RunStatus::Done, None),
+    ] {
+        let run = create_run(&pool, uid, "no answer", RunMode::Quick, 500)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            set_status(&pool, run, RunStatus::Running, None)
+                .await
+                .unwrap()
+        );
+        add_step(&pool, run, StepKind::Search, "the reason it stopped")
+            .await
+            .unwrap();
+        assert!(set_status(&pool, run, status, why).await.unwrap());
+        let (s, body) = send(
+            router(st.clone()),
+            api("GET", &format!("/runs/{run}"), &email),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let m = page(&body);
+        assert!(m.contains("<h3>Progress</h3>"), "{status:?}: {m}");
+        assert!(!m.contains(r#"<details class="run-fold""#), "{status:?}");
+        assert!(m.contains("<li>the reason it stopped</li>"), "{status:?}");
+    }
 }
 
 #[test]

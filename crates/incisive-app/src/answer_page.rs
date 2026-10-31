@@ -1967,16 +1967,42 @@ mod tests {
         );
         assert_eq!(
             preview(&[
-                t("the conclusion holds with caveats."),
+                t("The conclusion holds with caveats."),
                 l("Caveats"),
                 t("No RCT after TNT.")
             ]),
             "The conclusion holds with caveats. No RCT after TNT.",
-            "no \"Verdict:\" or \"Caveats\", first letter up"
+            "no \"Verdict:\" or \"Caveats\""
         );
         assert_eq!(
             preview(&[l("Other"), t("EARCS Delphi consensus")]),
             "EARCS Delphi consensus"
+        );
+    }
+
+    #[test]
+    fn a_preview_keeps_text_as_written() {
+        assert_eq!(
+            preview(&[t("pCR was 12%"), t("cT3 and ypT0 tumours [4].")]),
+            "pCR was 12% cT3 and ypT0 tumours."
+        );
+        assert_eq!(
+            preview(&[l("Case mix"), t("ypT0 after TNT")]),
+            "ypT0 after TNT"
+        );
+    }
+
+    #[test]
+    fn a_preview_strips_citations_only() {
+        assert_eq!(
+            preview(&[t("HR 0.72 [95% CI 0.55\u{2013}0.94] for DFS [3].")]),
+            "HR 0.72 [95% CI 0.55\u{2013}0.94] for DFS."
+        );
+        assert_eq!(
+            preview(&[t(
+                "Conversion [n = 45/120] was lower [1, 3; 2\u{2013}4] [5-6] [41060645 as 10]."
+            )]),
+            "Conversion [n = 45/120] was lower."
         );
     }
 
@@ -2067,7 +2093,9 @@ mod tests {
                 .iter()
                 .any(|d| d.starts_with("Number check: 1 of 10"))
         );
-        assert!(dropped.iter().any(|d| d.starts_with("Coverage: ")));
+        // Coverage moves: its Progress step is written best-effort.
+        assert!(moved.iter().any(|m| m.starts_with("Coverage: ")));
+        assert!(!dropped.iter().any(|d| d.starts_with("Coverage: ")));
         assert!(
             dropped
                 .iter()

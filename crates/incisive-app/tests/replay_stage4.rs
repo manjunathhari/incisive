@@ -2105,7 +2105,8 @@ fn folding_every_details_section_is_closed_with_a_preview() {
         "Completeness review",
         "References",
     ];
-    let preview = regex::Regex::new(r#"<div class="ap-preview">([^<]*)</div>"#).unwrap();
+    let preview =
+        regex::Regex::new(r#"<span aria-hidden="true" class="ap-preview">([^<]*)</span>"#).unwrap();
     let cite = regex::Regex::new(r"\[\d").unwrap();
     for (name, a) in part_a_answers() {
         let html = incisive_app::app::render_answer_v3(a.clone());
@@ -2125,7 +2126,18 @@ fn folding_every_details_section_is_closed_with_a_preview() {
         }
         for (t, sec) in &secs {
             let summary = &sec[..sec.find("</summary>").unwrap()];
-            assert!(summary.contains(&format!("<h3>{t}</h3>")), "{name}: {t}");
+            assert!(
+                summary.contains(&format!(
+                    r#"<span class="ap-sec-h" role="heading" aria-level="3">{t}</span>"#
+                )),
+                "{name}: {t}"
+            );
+            // Phrasing content only; the preview is not part of the name.
+            assert!(
+                !summary.contains("<div") && !summary.contains("<h3"),
+                "{name}: {t}"
+            );
+            assert!(summary.contains(r#"<span aria-hidden="true" class="ap-preview">"#));
             assert!(
                 summary.contains(r#"<span class="ap-count">"#),
                 "{name}: {t}"
