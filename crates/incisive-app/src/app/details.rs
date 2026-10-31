@@ -682,7 +682,7 @@ fn cost(c: &Ctx) -> AnyView {
         rupees(a.cost_paise),
         view! {
             <p>{line}</p>
-            <button class="secondary small" on:click=move |_| copy_answer(&text, copy)>
+            <button class="secondary small" on:click=move |_| copy_answer(&text, copy, COPY_AREA)>
                 {move || match copy.get() {
                     CopyState::Ready => "Copy as text",
                     CopyState::Copied => "Copied",

@@ -922,10 +922,32 @@ fn answer_view(a: Answer) -> impl IntoView {
     }
 }
 
+/// Reference numbers by PMID, and the id prefix of the view drawing them
+/// (Part A item 13): "" for the page, "orig-" for the original run view
+/// below it, so no id appears twice (`#orig-ref-N`).
+struct Refs {
+    nums: std::collections::HashMap<String, u16>,
+    prefix: &'static str,
+}
+
+impl std::ops::Deref for Refs {
+    type Target = std::collections::HashMap<String, u16>;
+    fn deref(&self) -> &Self::Target {
+        &self.nums
+    }
+}
+
+impl Refs {
+    /// " [n]" linking reference `n` ([`ref_link`] in this view).
+    fn link(&self, n: u16) -> AnyView {
+        ref_link(self.prefix, n)
+    }
+}
+
 /// Answer text with its `[PMID]` markers as numbered links to the
 /// references (`#ref-N`). Text stays plain (escaped); a PMID with no
 /// reference (none should be left after the citation check) is not shown.
-fn cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
+fn cited(text: &str, refs: &Refs) -> AnyView {
     split_citations(text, |p| refs.contains_key(p))
         .into_iter()
         .map(|seg| match seg {
@@ -946,7 +968,7 @@ fn cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
                             .enumerate()
                             .map(|(i, n)| {
                                 view! {
-                                    <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a>
+                                    <a href=format!("#{}ref-{n}", refs.prefix) rel="external">{n.to_string()}</a>
                                     {(i < last).then_some(", ")}
                                 }
                             })
@@ -961,7 +983,7 @@ fn cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
         .into_any()
 }
 
-fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
+fn reference_v3_view(r: ReferenceV3, prefix: &str) -> impl IntoView {
     let mut head = r.title.trim_end_matches('.').to_string();
     head.push('.');
     match (&r.journal, r.year) {
@@ -976,7 +998,7 @@ fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
         .clone()
         .and_then(|d| doi_link(&d).map(|href| (d, href)));
     view! {
-        <li id=format!("ref-{}", r.n)>
+        <li id=format!("{prefix}ref-{}", r.n)>
             {format!("[{}] ", r.n)}
             {r.retracted.then(|| view! { <span class="retracted">"RETRACTED \u{2014} do not rely on this paper. "</span> })}
             {head}
@@ -1013,7 +1035,7 @@ fn mark_view(m: Mark) -> AnyView {
 /// `spans` marks on `field` (the text itself is never changed).
 #[derive(Clone, Copy)]
 struct Marks<'a> {
-    refs: &'a std::collections::HashMap<String, u16>,
+    refs: &'a Refs,
     spans: &'a [Span],
     mark: Mark,
 }
@@ -1045,7 +1067,7 @@ impl Marks<'_> {
 #[allow(clippy::too_many_arguments)]
 fn written_v3_view(
     w: WrittenAnswer,
-    refs: &std::collections::HashMap<String, u16>,
+    refs: &Refs,
     untraced: &[Span],
     evidence: &std::collections::HashMap<String, EvidenceV3>,
     skeptic_guidelines: Vec<(usize, SkepticItem)>,
@@ -1089,7 +1111,7 @@ fn written_v3_view(
                     {mk.t(&g.body, &format!("guidelines.{i}.body"))}
                     {g.year.map(|y| format!(" ({y})"))}
                     ": " {mk.t(&g.statement, &format!("guidelines.{i}.statement"))}
-                    {n.map(ref_link)}
+                    {n.map(|n| refs.link(n))}
                     {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
                 </li>
             }
@@ -1111,7 +1133,7 @@ fn written_v3_view(
         }
         // A reference when there is one, otherwise PubMed (as the leads).
         let link = match refs.get(&g.pmid) {
-            Some(n) => ref_link(*n),
+            Some(n) => refs.link(*n),
             None => pubmed_link(&g.pmid)
                 .map(|href| {
                     view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", g.pmid)}</a> }
@@ -1134,7 +1156,7 @@ fn written_v3_view(
     }
     for l in guideline_leads {
         let link = match refs.get(&l.pmid) {
-            Some(n) => ref_link(*n),
+            Some(n) => refs.link(*n),
             None => pubmed_link(&l.pmid)
                 .map(|href| {
                     view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", l.pmid)}</a> }
@@ -1161,7 +1183,7 @@ fn written_v3_view(
                                         {mk.t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))} ": "
                                     })}
                                     {mk.t(&k.value_text, &format!("at_a_glance.key_numbers.{i}.value_text"))}
-                                    {refs.get(&k.pmid).copied().map(ref_link)}
+                                    {refs.get(&k.pmid).copied().map(|n| refs.link(n))}
                                 </li>
                             })
                             .collect_view()}
@@ -1219,7 +1241,7 @@ fn written_v3_view(
                         <li>
                             {arm_line_text(o, &l)}
                             {flagged.then(|| mark_view(Mark::NotTraced))}
-                            {refs.get(&l.pmid).copied().map(ref_link)}
+                            {refs.get(&l.pmid).copied().map(|n| refs.link(n))}
                         </li>
                     }
                     .into_any()
@@ -1349,7 +1371,7 @@ fn written_v3_view(
                                         <tr>
                                             <td>
                                                 {mk.t(&s.label, &format!("studies.{i}.label"))}
-                                                {n.map(ref_link)}
+                                                {n.map(|n| refs.link(n))}
                                                 {e.filter(|e| e.found_by_skeptic).map(|e| view! {
                                                     <br /><span class="flag-label added">{format!("{FOUND_BY_SKEPTIC}; {}", e.second_wave())}</span>
                                                 })}
@@ -1438,7 +1460,7 @@ fn written_v3_view(
 
 /// Review minor 4: text whose citation markers become reference links, or
 /// PubMed links for studies with no reference (never dropped, never raw).
-fn pmid_cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
+fn pmid_cited(text: &str, refs: &Refs) -> AnyView {
     split_citations(text, |p| refs.contains_key(p))
         .into_iter()
         .map(|seg| match seg {
@@ -1446,7 +1468,7 @@ fn pmid_cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyV
             Segment::Cite(ids) => ids
                 .into_iter()
                 .map(|p| match refs.get(&p) {
-                    Some(n) => ref_link(*n),
+                    Some(n) => refs.link(*n),
                     None => pubmed_link(&p)
                         .map(|href| {
                             view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
@@ -1462,22 +1484,22 @@ fn pmid_cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyV
 }
 
 /// The reference links of `pmids` that have references, in order.
-fn ref_links(pmids: &[String], refs: &std::collections::HashMap<String, u16>) -> AnyView {
+fn ref_links(pmids: &[String], refs: &Refs) -> AnyView {
     let mut n: Vec<u16> = pmids
         .iter()
         .filter_map(|p| refs.get(p.trim()).copied())
         .collect();
     n.sort_unstable();
     n.dedup();
-    n.into_iter().map(ref_link).collect_view().into_any()
+    n.into_iter()
+        .map(|n| refs.link(n))
+        .collect_view()
+        .into_any()
 }
 
 /// Stage 4b: the completeness review's checks line, its notes and,
 /// collapsed, the gaps it judged not relevant (each with why).
-fn completeness_view(
-    c: Option<CompletenessV3>,
-    refs: &std::collections::HashMap<String, u16>,
-) -> Option<AnyView> {
+fn completeness_view(c: Option<CompletenessV3>, refs: &Refs) -> Option<AnyView> {
     let c = c?;
     let cm = Marks {
         refs,
@@ -1524,9 +1546,9 @@ fn completeness_view(
     )
 }
 
-/// " [n]" linking reference `n`.
-fn ref_link(n: u16) -> AnyView {
-    view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
+/// " [n]" linking reference `n` (`#<prefix>ref-n`).
+fn ref_link(prefix: &str, n: u16) -> AnyView {
+    view! { " " <span class="cite">"[" <a href=format!("#{prefix}ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
         .into_any()
 }
 
@@ -1590,7 +1612,7 @@ fn evidence_line(e: &EvidenceV3) -> String {
 
 /// "Funding: …" from the extracted row (Stage 4 item 3), when it was
 /// looked for; a number the source does not have is marked.
-fn funding_view(e: &EvidenceV3, refs: &std::collections::HashMap<String, u16>) -> Option<AnyView> {
+fn funding_view(e: &EvidenceV3, refs: &Refs) -> Option<AnyView> {
     if !e.funding_checked {
         return None;
     }
@@ -1621,7 +1643,7 @@ fn funding_view(e: &EvidenceV3, refs: &std::collections::HashMap<String, u16>) -
 /// a "not verified" mark (Stage 4 item 7).
 fn skeptic_v3_view(
     k: crate::agent::answer_v3::SkepticV3,
-    refs: &std::collections::HashMap<String, u16>,
+    refs: &Refs,
     on_rows: &std::collections::HashSet<String>,
 ) -> AnyView {
     let mk = Marks {
@@ -1698,7 +1720,7 @@ fn skeptic_v3_view(
         .collect();
     let study = |p: String| -> AnyView {
         if let Some(n) = refs.get(&p) {
-            ref_link(*n)
+            refs.link(*n)
         } else if (1..=9).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
             let href = format!("https://pubmed.ncbi.nlm.nih.gov/{p}/");
             view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
@@ -1743,9 +1765,13 @@ fn skeptic_v3_view(
 }
 
 /// A Phase 3 answer (AnswerV3), in the spec §2 order, as escaped text and
-/// links only. The polished layout is Stage 4.
-fn answer_v3_view(a: AnswerV3) -> impl IntoView {
-    let refs = a.ref_numbers();
+/// links only. Since Part A it is the collapsed "Original run view" below
+/// the interactive page; `prefix` keeps its ids apart from the page's.
+fn answer_v3_view(a: AnswerV3, prefix: &'static str) -> impl IntoView {
+    let refs = Refs {
+        nums: a.ref_numbers(),
+        prefix,
+    };
     let rerun = rerun_href(&a.question, a.mode);
     let cost = format!(
         "{} \u{b7} {}",
@@ -1757,6 +1783,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
     // Copy as text (Stage 4 item 10): the whole answer as plain text.
     let text = a.plain_text();
     let copy = RwSignal::new(CopyState::Ready);
+    let copy_id = format!("{prefix}{COPY_AREA}");
     // Other notable findings (Stage 4 item 12): code's, then the writer's.
     let notable_writer: Vec<NotableFinding> = a
         .answer
@@ -1862,7 +1889,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             } else {
                 view! {
                     <ul class="refs-list">
-                        {a.references.into_iter().map(reference_v3_view).collect_view()}
+                        {a.references.into_iter().map(|r| reference_v3_view(r, prefix)).collect_view()}
                     </ul>
                 }
                     .into_any()
@@ -1884,7 +1911,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 
             <button
                 class="secondary small"
-                on:click=move |_| copy_answer(&text, copy)
+                on:click=move |_| copy_answer(&text, copy, &copy_id)
             >
                 {move || match copy.get() {
                     CopyState::Ready => "Copy as text",
@@ -1897,7 +1924,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             // children, so the text is set as its value in the click
             // handler, never written as HTML.
             <textarea
-                id=COPY_AREA
+                id=format!("{prefix}{COPY_AREA}")
                 class=move || if copy.get() == CopyState::Manual { "copy-area shown" } else { "copy-area" }
                 readonly=true
                 aria-hidden=move || (copy.get() != CopyState::Manual).to_string()
@@ -1913,6 +1940,42 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 pub fn render_answer_v3(a: AnswerV3) -> String {
     use leptos::tachys::view::RenderHtml;
     Owner::new().with(|| page::answer_page_view(a).to_html())
+}
+
+/// The original run view (Part A item 13, owner decision 3): today's
+/// answer view, unchanged but for its id prefix, inside one closed
+/// `<details>` (it opens without hydration), with one debug line.
+/// Removing it later is its entry in `answer_page::PAGE_ORDER` and this.
+fn original_view(a: AnswerV3) -> AnyView {
+    let (outcomes, numbers, studies, references, untraced, comp_untraced) =
+        crate::answer_page::debug_counts(&a);
+    let debug = format!(
+        "Answer version {} \u{b7} {} \u{b7} {} \u{b7} {outcomes} outcomes \u{b7} {numbers} numbers \u{b7} {studies} studies \u{b7} {references} references \u{b7} {untraced} untraced spans ({comp_untraced} in the completeness review)",
+        a.version,
+        mode_label(a.mode),
+        date_ist(a.created_at)
+    );
+    view! {
+        <details class="ap-original">
+            <summary>
+                "Original run view (for checking) \u{2014} the answer as stored, in the earlier layout"
+            </summary>
+            <p class="hint ap-debug">{debug}</p>
+            {answer_v3_view(a, ORIGINAL_PREFIX)}
+        </details>
+    }
+    .into_any()
+}
+
+/// The id prefix of the original run view.
+const ORIGINAL_PREFIX: &str = "orig-";
+
+/// Today's answer view alone, as the original run view draws it, with
+/// `prefix` on its ids (server only; for the Part A tests).
+#[cfg(feature = "ssr")]
+pub fn render_original_v3(a: AnswerV3, prefix: &'static str) -> String {
+    use leptos::tachys::view::RenderHtml;
+    Owner::new().with(|| answer_v3_view(a, prefix).to_html())
 }
 
 /// The id of the hidden textarea holding the plain-text answer.
@@ -1934,7 +1997,7 @@ enum CopyState {
 /// textarea is copied with `execCommand("copy")`, and if that fails too the
 /// textarea is shown with its text selected so it can be copied by hand
 /// (phones). Browser only.
-fn copy_answer(text: &str, state: RwSignal<CopyState>) {
+fn copy_answer(text: &str, state: RwSignal<CopyState>, id: &str) {
     #[cfg(feature = "hydrate")]
     {
         use wasm_bindgen::JsCast;
@@ -1943,7 +2006,7 @@ fn copy_answer(text: &str, state: RwSignal<CopyState>) {
         let area = || {
             web_sys::window()
                 .and_then(|w| w.document())
-                .and_then(|d| d.get_element_by_id(COPY_AREA))
+                .and_then(|d| d.get_element_by_id(id))
                 .and_then(|e| e.dyn_into::<web_sys::HtmlTextAreaElement>().ok())
         };
         if let Some(a) = area() {
@@ -1996,7 +2059,7 @@ fn copy_answer(text: &str, state: RwSignal<CopyState>) {
     }
     #[cfg(not(feature = "hydrate"))]
     {
-        let _ = (text, state);
+        let _ = (text, state, id);
     }
 }
 
@@ -2005,7 +2068,7 @@ fn copy_answer(text: &str, state: RwSignal<CopyState>) {
 fn notable_view(
     code: &[NotableFinding],
     writer: &[NotableFinding],
-    refs: &std::collections::HashMap<String, u16>,
+    refs: &Refs,
     untraced: &[Span],
 ) -> Option<AnyView> {
     if code.is_empty() && writer.is_empty() {
@@ -2018,7 +2081,10 @@ fn notable_view(
             .collect();
         n.sort_unstable();
         n.dedup();
-        n.into_iter().map(ref_link).collect_view().into_any()
+        n.into_iter()
+            .map(|n| refs.link(n))
+            .collect_view()
+            .into_any()
     };
     let wk = Marks {
         refs,

@@ -378,7 +378,7 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
                 view! { {super::details::details_view(&c)} {super::details::sheets_view(&c)} }
                     .into_any(),
             ),
-            Block::Original => None,
+            Block::Original => Some(super::original_view(a.clone())),
         })
         .collect();
     view! { <div class="ap">{blocks}</div> }
