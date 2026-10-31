@@ -79,6 +79,38 @@ pub async fn get_view(state: &AppState, user: &User, run_id: Uuid) -> Result<Run
     }
 }
 
+/// The user's runs as Library cards, newest first (read-only; same scoping
+/// and limit as [`list_view`]).
+pub async fn library_view(
+    state: &AppState,
+    user: &User,
+    limit: Option<i64>,
+) -> Result<Vec<crate::library::LibraryCard>, RunApiError> {
+    store::library_cards(&state.pool, user.id, clamp_limit(limit), None)
+        .await
+        .map_err(|_| failed("library", user.id))
+}
+
+/// The Ask page's recent runs and today's counts (read-only, the user's
+/// own runs only; no spend).
+pub async fn ask_overview(
+    state: &AppState,
+    user: &User,
+) -> Result<crate::library::AskOverview, RunApiError> {
+    use crate::library::{ASK_RECENT, AskOverview, ist_day, now_utc, today_counts};
+    let recent = store::library_cards(&state.pool, user.id, ASK_RECENT, None)
+        .await
+        .map_err(|_| failed("ask_overview", user.id))?;
+    // Today's runs are bounded by the daily cost cap; the limit is a guard.
+    let today = store::library_cards(&state.pool, user.id, 1000, Some(ist_day(now_utc())))
+        .await
+        .map_err(|_| failed("ask_overview", user.id))?;
+    Ok(AskOverview {
+        recent,
+        today: today_counts(&today),
+    })
+}
+
 async fn audit_deleted(state: &AppState, user: &User, run_id: Uuid) {
     if audit::append(
         &state.pool,

@@ -250,6 +250,71 @@ pub async fn list_runs(pool: &PgPool, user_id: i64, limit: i64) -> sqlx::Result<
     .collect()
 }
 
+/// The user's runs as Library cards, newest first (read-only; ivory
+/// redesign). Only the parts of each stored answer a card shows are read
+/// from its JSON: the At a glance verdict, the bottom line and its
+/// certainty, and the number of references (version 2 answers: the first
+/// bottom-line claim). With `ist_day`, only the runs created on that IST
+/// calendar day (the Ask page's Today card).
+pub async fn library_cards(
+    pool: &PgPool,
+    user_id: i64,
+    limit: i64,
+    ist_day: Option<chrono::NaiveDate>,
+) -> sqlx::Result<Vec<crate::library::LibraryCard>> {
+    let rows = sqlx::query(
+        "SELECT r.id, r.mode, r.status, r.created_at, r.question, \
+                EXTRACT(EPOCH FROM (r.finished_at - COALESCE(r.started_at, r.created_at)))::BIGINT \
+                    AS duration_s, \
+                a.run_id IS NOT NULL AS has_body, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,at_a_glance,verdict}' END AS glance, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,text}' \
+                     ELSE a.body #>> '{bottom_line,0,text}' END AS bottom_line, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,certainty}' END AS certainty, \
+                CASE WHEN jsonb_typeof(a.body -> 'references') = 'array' \
+                     THEN jsonb_array_length(a.body -> 'references') END AS refs \
+         FROM incisive.runs r \
+         LEFT JOIN incisive.run_answers a ON a.run_id = r.id \
+         WHERE r.user_id = $1 \
+           AND ($3::DATE IS NULL OR (r.created_at AT TIME ZONE 'Asia/Kolkata')::DATE = $3::DATE) \
+         ORDER BY r.created_at DESC, r.id \
+         LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .bind(ist_day)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|r| {
+            let mode: String = r.try_get("mode")?;
+            let status: String = r.try_get("status")?;
+            let has_body: bool = r.try_get("has_body")?;
+            let refs: Option<i32> = r.try_get("refs")?;
+            let stored = has_body.then(|| -> sqlx::Result<crate::library::StoredParts> {
+                Ok(crate::library::StoredParts {
+                    glance_verdict: r.try_get("glance")?,
+                    bottom_line: r.try_get("bottom_line")?,
+                    certainty: r.try_get("certainty")?,
+                    references: refs.and_then(|n| u32::try_from(n).ok()),
+                })
+            });
+            Ok(crate::library::card(
+                r.try_get("id")?,
+                mode_of(&mode)?,
+                RunStatus::parse(&status).ok_or_else(|| decode_err("run status", &status))?,
+                r.try_get("created_at")?,
+                r.try_get("question")?,
+                r.try_get("duration_s")?,
+                stored.transpose()?,
+            ))
+        })
+        .collect()
+}
+
 /// Delete one of the user's runs (steps and answer cascade). False if it is
 /// not theirs or does not exist.
 pub async fn delete_run(pool: &PgPool, user_id: i64, run_id: Uuid) -> sqlx::Result<bool> {
