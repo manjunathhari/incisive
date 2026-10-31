@@ -244,7 +244,7 @@ fn run_id_of(b: &Value) -> uuid::Uuid {
 }
 
 const RUN_STARTED: &str =
-    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
+    "Working on it \u{2014} you can leave this page; the answer will be in your Library.";
 
 fn one_request_id(rows: &[(String, Option<uuid::Uuid>, Value)]) {
     let first = rows[0].1.expect("request id");
@@ -1314,7 +1314,7 @@ async fn home_page_renders_question_box() {
     let body =
         String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains("Incisive"));
-    assert!(body.contains("Cut to the evidence."));
+    assert!(body.contains("Medical literature \u{2014} searched, checked, summarised"));
     assert!(body.contains("<textarea"), "{body}");
-    assert!(body.contains("Send"));
+    assert!(body.contains("Read the evidence"));
 }

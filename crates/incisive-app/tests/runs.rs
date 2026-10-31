@@ -943,7 +943,7 @@ use std::sync::Arc;
 const RULE_QUESTION: &str =
     "52 y/o M, robotic LAR, ICG for leak? Evidence on anastomotic resection";
 const RUN_STARTED: &str =
-    "Working on it \u{2014} you can leave this page; the answer will be in My questions.";
+    "Working on it \u{2014} you can leave this page; the answer will be in your Library.";
 const RUN_IN_PROGRESS: &str = "You already have a question running.";
 
 fn app_state(pool: PgPool) -> AppState {
@@ -2308,8 +2308,10 @@ async fn ssr_history_page_renders() {
     finished_run(&pool, uid, "ICG <b>leak</b> evidence?", 10).await;
     let (s, body) = send(router(st.clone()), api("GET", "/history", &email)).await;
     assert_eq!(s, StatusCode::OK);
-    assert!(body.contains("My questions"), "{body}");
-    assert!(body.contains("Delete all my history"), "{body}");
+    // Ivory redesign: My questions is the Library; no delete there yet
+    // (owner decision 4).
+    assert!(body.contains(r#"<h1 class="iv-h1">Library</h1>"#), "{body}");
+    assert!(!body.contains("Delete all my history"), "{body}");
     assert!(
         body.contains("ICG &lt;b&gt;leak&lt;/b&gt; evidence?"),
         "{body}"
@@ -2847,7 +2849,8 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
         return;
     };
     let mut st = app_state(pool.clone());
-    // The hints come from config (`RUN_LIMITS`), not from constants.
+    // The limits come from config (`RUN_LIMITS`), not from constants; the
+    // page no longer shows them, `/api/fn/me` still carries them.
     st.runs.quick.limit_paise = 1200;
     let uid = new_user(&pool).await;
     let email = email_of(&pool, uid).await;
@@ -2856,9 +2859,18 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
     assert!(body.contains(r#"name="mode""#), "{body}");
     assert!(body.contains(r#"value="quick""#), "{body}");
     assert!(body.contains(r#"value="focused""#), "{body}");
-    assert!(body.contains("Quick \u{b7} up to \u{20b9}12"), "{body}");
+    // Ivory redesign: the radio cards show the name and typical time, and
+    // no price (owner decision 7); the cap still applies in the engine.
+    assert!(
+        body.contains(r#"<span class="iv-mode-name">Quick</span>"#),
+        "{body}"
+    );
     // Stage 3: shown as Full; the stored value is still `focused`.
-    assert!(body.contains("Full \u{b7} up to \u{20b9}40"), "{body}");
+    assert!(
+        body.contains(r#"<span class="iv-mode-name">Full</span>"#),
+        "{body}"
+    );
+    assert!(!body.contains('\u{20b9}'), "no price on Ask");
     // Focused is the one checked before the browser applies a saved choice.
     let focused = body.find(r#"value="focused""#).unwrap();
     let tag_start = body[..focused].rfind('<').unwrap();
@@ -2880,7 +2892,7 @@ async fn ssr_ask_page_shows_mode_toggle_with_configured_limits() {
         "{fs_tag}"
     );
     assert!(
-        body.contains(r#"<p class="hint" id="depth-hint">"#),
+        body.contains(r#"<p id="depth-hint" class="iv-steps">"#),
         "{body}"
     );
 
@@ -4735,4 +4747,279 @@ async fn ssr_review_flags_guidelines_leads_and_registration() {
     let area = &m[m.find(r#"id="answer-plain-text""#).unwrap()..];
     let area = &area[..area.find('>').unwrap()];
     assert!(area.contains(r#"tabindex="-1""#), "{area}");
+}
+
+// ---------- ivory redesign: header, Ask, Library ----------
+
+/// A finished Full run with a stored AnswerV3 whose verdict and certainty
+/// are given (`verdict` None: no At a glance, so the card falls back to the
+/// bottom line's first sentence).
+async fn ivory_run(
+    pool: &PgPool,
+    uid: i64,
+    question: &str,
+    verdict: Option<&str>,
+    certainty: &str,
+    age_s: i64,
+) -> Uuid {
+    let id = create_run(pool, uid, question, RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(pool, id, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    let mut a = answer_v3_json(false);
+    a["question"] = json!(question);
+    a["mode"] = json!("focused");
+    a["answer"]["bottom_line"]["certainty"] = json!(certainty);
+    if let Some(v) = verdict {
+        a["answer"]["at_a_glance"] =
+            json!({"verdict": v, "key_numbers": [], "main_caveat": "Small trials."});
+    }
+    assert!(save_answer(pool, id, &a).await.unwrap());
+    assert!(set_status(pool, id, RunStatus::Done, None).await.unwrap());
+    backdate(pool, id, "created_at", age_s).await;
+    id
+}
+
+/// The links marked as the current page (the CSS mentions the attribute too).
+fn current_links(body: &str) -> Vec<String> {
+    let re = regex::Regex::new(r#"<a [^>]*aria-current="page"[^>]*>"#).unwrap();
+    re.find_iter(body).map(|m| m.as_str().to_string()).collect()
+}
+
+async fn owner_user(pool: &PgPool) -> (i64, String) {
+    let email = format!("ivory-{}@example.com", Uuid::new_v4());
+    let uid = sqlx::query_scalar(
+        "INSERT INTO incisive.users (email, display_name, role, daily_cap_paise) \
+         VALUES ($1, 'Manjunath Haridas', 'owner', 100000) RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (uid, email)
+}
+
+/// Every page renders the shared header (logo tile, name, nav, date,
+/// initials) and the nav marks the current page with `aria-current`.
+#[tokio::test]
+async fn ivory_pages_render_with_the_shared_header() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, email) = owner_user(&pool).await;
+    let run = ivory_run(&pool, uid, "Header question?", Some("Verdict."), "Low", 10).await;
+    for (path, current) in [
+        ("/".to_string(), Some(r#"<a href="/" aria-current="page">"#)),
+        (
+            "/history".to_string(),
+            Some(r#"<a href="/history" aria-current="page">"#),
+        ),
+        (
+            "/activity".to_string(),
+            Some(r#"<a href="/activity" aria-current="page">"#),
+        ),
+        (format!("/runs/{run}"), None),
+    ] {
+        let (s, body) = send(router(st.clone()), api("GET", &path, &email)).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        let m = markup_of(&body);
+        assert!(m.contains(r#"<header class="iv-head">"#), "{path}");
+        assert!(
+            m.contains(r#"<span aria-hidden="true" class="iv-tile">"#),
+            "{path}"
+        );
+        assert!(
+            m.contains(r#"<span class="iv-name">Incisive</span>"#),
+            "{path}"
+        );
+        assert!(
+            m.contains(r#"<nav aria-label="Main" class="iv-nav">"#),
+            "{path}"
+        );
+        assert!(m.contains(r#"class="iv-date""#), "{path}");
+        // The avatar (streamed once sign-in is known).
+        assert!(body.contains(">MH</span>"), "{path}");
+        assert!(body.contains("Signed in as Manjunath Haridas"), "{path}");
+        match current {
+            Some(c) => {
+                assert!(body.contains(c), "{path}: {c}");
+                assert_eq!(current_links(&body), vec![c.to_string()], "{path}");
+            }
+            None => assert!(current_links(&body).is_empty(), "{path}"),
+        }
+    }
+    // A signed-in surgeon (not the owner) gets no Activity link.
+    let other = new_user(&pool).await;
+    let other_email = email_of(&pool, other).await;
+    let (_, body) = send(router(st.clone()), api("GET", "/", &other_email)).await;
+    assert!(!body.contains(r#"href="/activity""#));
+    // Not signed in: the header still renders, with the sign-in message.
+    let req = Request::get("/").body(Body::empty()).unwrap();
+    let (s, body) = send(router(st), req).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains(r#"<header class="iv-head">"#));
+    // The sign-in message, as before the redesign (in the header).
+    assert!(
+        body.contains(r#"<p class="iv-signin">You're not signed in to Incisive."#)
+            || body.contains(r#"<p class="iv-signin">You&#x27;re not signed in to Incisive."#)
+            || body.contains("Checking sign-in"),
+        "{body}"
+    );
+}
+
+/// No price (₹) on Ask or the Library: not on the depth cards, the latest
+/// answers, the Today card or the library cards.
+#[tokio::test]
+async fn ivory_no_price_on_ask_or_library() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, email) = owner_user(&pool).await;
+    let run = ivory_run(&pool, uid, "Priced question?", Some("Verdict."), "Low", 10).await;
+    add_cost(&pool, run, 2345).await.unwrap();
+    for path in ["/", "/history"] {
+        let (s, body) = send(router(st.clone()), api("GET", path, &email)).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(body.contains("Priced question?"), "{path}");
+        assert!(!body.contains('\u{20b9}'), "{path}: {body}");
+        assert!(!body.contains("23.45"), "{path}");
+    }
+}
+
+/// The Library and the latest answers: grouping by normalised question
+/// ("Asked N times"), the verdict (At a glance, else the bottom line's
+/// first sentence, citations stripped), a run with no answer shows its
+/// status, and the certainty drives the pips. Text is escaped.
+#[tokio::test]
+async fn ivory_library_and_latest_answers_read_stored_runs() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (uid, email) = owner_user(&pool).await;
+    ivory_run(
+        &pool,
+        uid,
+        "Robotic hernia <b>repair</b>?",
+        Some("Old verdict."),
+        "Low",
+        300,
+    )
+    .await;
+    ivory_run(
+        &pool,
+        uid,
+        "  robotic HERNIA <b>repair</b>? ",
+        Some("No proven benefit [41060645]."),
+        "Low",
+        200,
+    )
+    .await;
+    ivory_run(&pool, uid, "POEM or Heller?", None, "Moderate", 100).await;
+    let failed = create_run(&pool, uid, "Failed question?", RunMode::Quick, 500)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(&pool, failed, RunStatus::Failed, None)
+            .await
+            .unwrap()
+    );
+
+    let (s, body) = send(router(st.clone()), api("GET", "/history", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(body.contains("Asked 2 times"), "{body}");
+    assert!(body.contains("No proven benefit."), "{body}");
+    assert!(!body.contains("[41060645]"));
+    // The fallback: the bottom line's first sentence, citations stripped.
+    assert!(
+        body.contains("No benefit &lt;script&gt;alert(1)&lt;/script&gt;."),
+        "{body}"
+    );
+    assert!(
+        body.contains("Didn\u{2019}t finish \u{2014} no answer"),
+        "{body}"
+    );
+    assert!(body.contains("\u{25cf}\u{25cf}\u{25cf}\u{25cb}"));
+    assert!(
+        body.contains("Robotic hernia &lt;b&gt;repair&lt;/b&gt;?")
+            || body.contains("robotic HERNIA &lt;b&gt;repair&lt;/b&gt;?")
+    );
+    assert!(!body.contains("<b>repair</b>"));
+    // Edit & re-run is the existing fragment link; no delete.
+    assert!(body.contains(r#"href="/#q="#), "{body}");
+    assert!(!body.contains("Delete"));
+
+    let (s, body) = send(router(st), api("GET", "/", &email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&body);
+    assert!(m.contains("Latest answers"));
+    assert!(body.contains("asked 2 times"), "{body}");
+    assert!(body.contains("No proven benefit."));
+    // Today: 3 answers, 3 questions (the failed run has none).
+    assert!(body.contains("3 answers"), "{body}");
+    assert!(body.contains("3 questions"), "{body}");
+}
+
+/// The new read-only server functions return the signed-in user's runs
+/// only, and need a signed-in user.
+#[tokio::test]
+async fn ivory_server_functions_are_scoped_to_the_signed_in_user() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let st = app_state(pool.clone());
+    let (a, a_email) = owner_user(&pool).await;
+    let b = new_user(&pool).await;
+    let b_email = email_of(&pool, b).await;
+    let mine = ivory_run(&pool, a, "Alpha question?", Some("Alpha."), "Low", 10).await;
+    let theirs = ivory_run(&pool, b, "Bravo question?", Some("Bravo."), "Low", 10).await;
+    let call = |path: &'static str, email: Option<String>| {
+        let st = st.clone();
+        async move {
+            let mut req =
+                Request::post(path).header("content-type", "application/x-www-form-urlencoded");
+            if let Some(e) = email {
+                req = req.header("x-dev-user-email", e);
+            }
+            send(router(st), req.body(Body::empty()).unwrap()).await
+        }
+    };
+    let (s, body) = call("/api/fn/my_library", Some(a_email.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = as_json(&body);
+    let ids: Vec<String> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, vec![mine.to_string()]);
+    assert!(!body.contains("Bravo"));
+    assert!(!body.contains(&theirs.to_string()));
+    let (s, body) = call("/api/fn/my_ask_overview", Some(b_email)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v = as_json(&body);
+    assert_eq!(v["recent"].as_array().unwrap().len(), 1);
+    assert_eq!(v["recent"][0]["id"], theirs.to_string());
+    assert_eq!(v["today"]["answers"], 1);
+    assert!(!body.contains("Alpha"));
+    // No price fields in either.
+    assert!(!body.contains("paise"));
+    // Not signed in: refused.
+    let (s, _) = call("/api/fn/my_library", None).await;
+    assert_ne!(s, StatusCode::OK);
+    let (s, _) = call("/api/fn/my_ask_overview", None).await;
+    assert_ne!(s, StatusCode::OK);
+    // And the Library page itself never shows the other user's run.
+    let (_, body) = send(router(st.clone()), api("GET", "/history", &a_email)).await;
+    assert!(body.contains("Alpha question?"));
+    assert!(!body.contains("Bravo question?"));
 }
