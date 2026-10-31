@@ -24,7 +24,10 @@ use crate::agent::answer::{
     mode_label, render_text, rerun_href, screened_text, show_insufficient, stopped_text,
     unavailable_text,
 };
-use crate::agent::answer_v3::{AnswerV3, ReferenceV3, Segment, WrittenAnswer, split_citations};
+use crate::agent::answer_v3::{
+    AnswerV3, EvidenceV3, NO_GUIDELINE_SOURCE, NotableFinding, ReferenceV3, Segment, SkepticItem,
+    Span, WrittenAnswer, arm_line_text, arm_lines, marked_runs, split_citations, whole_marked,
+};
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 use uuid::Uuid;
@@ -95,6 +98,14 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .answer .cite a { text-decoration:none; }
 .answer .retracted { color:var(--red); font-weight:600; }
 .answer details summary { cursor:pointer; font-weight:600; margin:18px 0 6px; }
+.answer .etype { display:inline-block; margin-top:2px; padding:0 6px; border-radius:8px; font-size:.72rem; background:#e6edf5; color:var(--accent); }
+.answer .glance { margin-top:12px; } .answer .glance ul { margin:4px 0 6px; }
+.answer ul.arms { list-style:none; padding-left:0; margin:6px 0 0; font-size:.8rem; color:var(--muted); }
+.answer textarea.copy-area { position:absolute; left:-9999px; width:1px; height:1px; opacity:0; }
+.answer textarea.copy-area.shown { position:static; width:100%; height:12rem; opacity:1; margin-top:8px; font-size:.8rem; }
+.answer sup.flag { font-size:.68rem; color:var(--amber); margin-left:2px; white-space:nowrap; cursor:help; }
+.answer .flag-label { font-size:.75rem; color:var(--amber); font-weight:600; }
+.answer ul.unverified { padding-left:16px; margin:4px 0 0; font-size:.8rem; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -704,7 +715,9 @@ fn run_view(v: RunView) -> impl IntoView {
     }
 }
 
-/// A stored answer, by format.
+/// A stored answer, by format. Short-lived (one per page render), so the
+/// size difference between the variants does not matter.
+#[allow(clippy::large_enum_variant)]
 enum Body {
     V2(Answer),
     V3(AnswerV3),
@@ -966,22 +979,242 @@ fn reference_v3_view(r: ReferenceV3) -> impl IntoView {
     }
 }
 
+/// Which mark a flagged number gets (Stage 4 items 5 and 7).
+#[derive(Clone, Copy)]
+enum Mark {
+    /// The writer's number, not traced to what it was given.
+    NotTraced,
+    /// An extractor or skeptic number its source does not have.
+    NotVerified,
+}
+
+fn mark_view(m: Mark) -> AnyView {
+    let (label, title) = match m {
+        Mark::NotTraced => (
+            "not traced",
+            "This number was not found in a verified quote, a structured number or an abstract given to the writer.",
+        ),
+        Mark::NotVerified => (
+            "not verified",
+            "This number was not found in the source text.",
+        ),
+    };
+    view! { <sup class="flag" title=title>{label}</sup> }.into_any()
+}
+
+/// Text with numbered citations ([`cited`]) and a small mark after each run
+/// `spans` marks on `field` (the text itself is never changed).
+#[derive(Clone, Copy)]
+struct Marks<'a> {
+    refs: &'a std::collections::HashMap<String, u16>,
+    spans: &'a [Span],
+    mark: Mark,
+}
+
+impl Marks<'_> {
+    fn t(&self, text: &str, field: &str) -> AnyView {
+        let runs = marked_runs(text, field, self.spans);
+        if runs.iter().all(|(_, m)| !m) {
+            return cited(text, self.refs);
+        }
+        let mark = self.mark;
+        runs.into_iter()
+            .map(|(t, m)| view! { {cited(&t, self.refs)} {m.then(|| mark_view(mark))} })
+            .collect_view()
+            .into_any()
+    }
+
+    /// The mark alone, when `field` is marked as a whole (a structured
+    /// number).
+    fn whole(&self, field: &str) -> Option<AnyView> {
+        whole_marked(field, self.spans).then(|| mark_view(self.mark))
+    }
+}
+
 /// The written part of a Phase 3 answer: bottom line, outcome table,
-/// trials table, conflicts, applicability, what would change it.
+/// trials table, conflicts, guidelines, applicability, what would change it.
+/// Numbers not traced to the writer's sources carry a "not traced" mark.
 fn written_v3_view(
     w: WrittenAnswer,
     refs: &std::collections::HashMap<String, u16>,
-    evidence: &std::collections::HashMap<String, String>,
+    untraced: &[Span],
+    evidence: &std::collections::HashMap<String, EvidenceV3>,
+    skeptic_guidelines: Vec<(usize, SkepticItem)>,
+    skeptic_spans: &[Span],
+    guideline_leads: Vec<crate::agent::answer_v3::SkepticLead>,
 ) -> impl IntoView {
     let full = !evidence.is_empty();
+    let mk = Marks {
+        refs,
+        spans: untraced,
+        mark: Mark::NotTraced,
+    };
     let c = w.bottom_line.certainty;
+    // Guidelines (Stage 4 item 1; R-S4a): the skeptic's verified guidelines
+    // and its unverified guideline leads. The writer no longer writes them;
+    // answers stored with writer guidelines still show them first.
+    let mut guidelines: Vec<AnyView> = w
+        .guidelines
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let n = g.pmid.as_ref().and_then(|p| refs.get(p).copied());
+            // Stage 4 review 2: no PMID (none given, or removed by the
+            // citation check): flagged, never presented as sourced.
+            let unsourced = g.pmid.is_none();
+            view! {
+                <li>
+                    {mk.t(&g.body, &format!("guidelines.{i}.body"))}
+                    {g.year.map(|y| format!(" ({y})"))}
+                    ": " {mk.t(&g.statement, &format!("guidelines.{i}.statement"))}
+                    {n.map(ref_link)}
+                    {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
+                </li>
+            }
+            .into_any()
+        })
+        .collect();
+    // The skeptic's bodies keep their "not verified" marks (review 3).
+    let sk = Marks {
+        refs,
+        spans: skeptic_spans,
+        mark: Mark::NotVerified,
+    };
+    for (i, g) in skeptic_guidelines {
+        if w.guidelines
+            .iter()
+            .any(|x| x.pmid.as_deref() == Some(g.pmid.as_str()))
+        {
+            continue;
+        }
+        // A reference when there is one, otherwise PubMed (as the leads).
+        let link = match refs.get(&g.pmid) {
+            Some(n) => ref_link(*n),
+            None => pubmed_link(&g.pmid)
+                .map(|href| {
+                    view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", g.pmid)}</a> }
+                        .into_any()
+                })
+                .unwrap_or_else(|| ().into_any()),
+        };
+        let unsourced = g.pmid.trim().is_empty();
+        guidelines.push(
+            view! {
+                <li>
+                    {sk.t(&g.text, &format!("guidelines.{i}.text"))}
+                    {g.quote.map(|q| view! { " \u{2014} " {cited(&format!("\u{201c}{q}\u{201d}"), refs)} })}
+                    {link}
+                    {unsourced.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> })}
+                </li>
+            }
+            .into_any(),
+        );
+    }
+    for l in guideline_leads {
+        let link = match refs.get(&l.pmid) {
+            Some(n) => ref_link(*n),
+            None => pubmed_link(&l.pmid)
+                .map(|href| {
+                    view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {}", l.pmid)}</a> }
+                        .into_any()
+                })
+                .unwrap_or_else(|| ().into_any()),
+        };
+        guidelines
+            .push(view! { <li><span class="flag-label">{l.text()}</span> {link}</li> }.into_any());
+    }
+    // At a glance (Stage 4 item 8): about five lines, at the top.
+    let glance = w.at_a_glance.as_ref().map(|g| {
+        view! {
+            <section class="box glance" aria-label="At a glance">
+                <p><strong>"At a glance: "</strong> {mk.t(&g.verdict, "at_a_glance.verdict")}</p>
+                {(!g.key_numbers.is_empty()).then(|| view! {
+                    <ul>
+                        {g.key_numbers
+                            .iter()
+                            .enumerate()
+                            .map(|(i, k)| view! {
+                                <li>
+                                    {(!k.label.is_empty()).then(|| view! {
+                                        {mk.t(&k.label, &format!("at_a_glance.key_numbers.{i}.label"))} ": "
+                                    })}
+                                    {mk.t(&k.value_text, &format!("at_a_glance.key_numbers.{i}.value_text"))}
+                                    {refs.get(&k.pmid).copied().map(ref_link)}
+                                </li>
+                            })
+                            .collect_view()}
+                    </ul>
+                })}
+                {(!g.main_caveat.is_empty()).then(|| view! {
+                    <p><strong>"Main caveat: "</strong> {mk.t(&g.main_caveat, "at_a_glance.main_caveat")}</p>
+                })}
+            </section>
+        }
+    });
+    // What this means for clinical practice (Stage 4 item 9).
+    let practice = w.clinical_practice.as_ref().map(|p| {
+        // Labelled parts as a list; text under no label as written
+        // (flat schema: parsed from labelled lines, never dropped).
+        let parts: Vec<AnyView> = [
+            ("Default choice", &p.default_choice, "default_choice"),
+            ("Who may benefit", &p.who_may_benefit, "who_may_benefit"),
+            ("Counselling", &p.counselling, "counselling"),
+            ("Cost per case", &p.cost_per_case, "cost_per_case"),
+        ]
+        .into_iter()
+        .filter(|(_, t, _)| !t.is_empty())
+        .map(|(label, t, f)| {
+            view! { <dt>{label}</dt><dd>{mk.t(t, &format!("clinical_practice.{f}"))}</dd> }.into_any()
+        })
+        .collect();
+        view! {
+            <h3>"What this means for clinical practice"</h3>
+            {(!parts.is_empty()).then(|| view! { <dl>{parts}</dl> })}
+            {(!p.text.is_empty()).then(|| view! { <p>{mk.t(&p.text, "clinical_practice.text")}</p> })}
+        }
+    });
+    // Each outcome's structured numbers, by label and study, the
+    // intervention arm first (Stage 4 item 10).
+    let comparison = |p: &str| {
+        w.studies
+            .iter()
+            .find(|s| s.pmid == p)
+            .map(|s| s.comparison.as_str())
+    };
+    let arms: Vec<Vec<AnyView>> = w
+        .outcomes
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            arm_lines(o, comparison)
+                .into_iter()
+                .map(|l| {
+                    let flagged = l
+                        .numbers
+                        .iter()
+                        .any(|j| whole_marked(&format!("outcomes.{i}.numbers.{j}"), untraced));
+                    view! {
+                        <li>
+                            {arm_line_text(o, &l)}
+                            {flagged.then(|| mark_view(Mark::NotTraced))}
+                            {refs.get(&l.pmid).copied().map(ref_link)}
+                        </li>
+                    }
+                    .into_any()
+                })
+                .collect()
+        })
+        .collect();
+    let mut arms = arms.into_iter();
     view! {
+        {glance}
         <h3>"Bottom line"</h3>
-        <p>{cited(&w.bottom_line.text, refs)}</p>
+        <p>{mk.t(&w.bottom_line.text, "bottom_line.text")}</p>
         <p>
             <span class=c.class()>{format!("Certainty: {}", c.as_str())}</span>
-            " " <span class="conf">{cited(&w.bottom_line.certainty_reason, refs)}</span>
+            " " <span class="conf">{mk.t(&w.bottom_line.certainty_reason, "bottom_line.certainty_reason")}</span>
         </p>
+        {practice}
 
         <h3>"Outcome by outcome"</h3>
         {if w.outcomes.is_empty() {
@@ -1001,14 +1234,21 @@ fn written_v3_view(
                         </thead>
                         <tbody>
                             {w.outcomes
-                                .into_iter()
-                                .map(|o| view! {
+                                .iter()
+                                .enumerate()
+                                .map(|(i, o)| view! {
                                     <tr>
-                                        <td>{cited(&o.outcome, refs)}</td>
-                                        <td>{cited(&o.rct_evidence, refs)}</td>
-                                        <td>{cited(&o.effect_text, refs)}</td>
+                                        <td>
+                                            {mk.t(&o.outcome, &format!("outcomes.{i}.outcome"))}
+                                            {o.evidence_type.label().map(|l| view! { <br /><span class="etype">{l}</span> })}
+                                        </td>
+                                        <td>{mk.t(&o.rct_evidence, &format!("outcomes.{i}.rct_evidence"))}</td>
+                                        <td>
+                                            {mk.t(&o.effect_text, &format!("outcomes.{i}.effect_text"))}
+                                            {arms.next().filter(|a| !a.is_empty()).map(|a| view! { <ul class="arms">{a}</ul> })}
+                                        </td>
                                         <td><span class=o.certainty.class()>{o.certainty.as_str()}</span></td>
-                                        <td>{cited(&o.why, refs)}</td>
+                                        <td>{mk.t(&o.why, &format!("outcomes.{i}.why"))}</td>
                                     </tr>
                                 })
                                 .collect_view()}
@@ -1038,29 +1278,31 @@ fn written_v3_view(
                         </thead>
                         <tbody>
                             {w.studies
-                                .into_iter()
-                                .map(|s| {
+                                .iter()
+                                .enumerate()
+                                .map(|(i, s)| {
                                     let n = refs.get(&s.pmid).copied();
-                                    let checked = full.then(|| {
-                                        evidence
-                                            .get(s.pmid.trim())
-                                            .cloned()
-                                            .unwrap_or_else(|| "not extracted".to_string())
-                                    });
-                                    let design = match s.n {
-                                        Some(n) => format!("{} \u{b7} n = {n} \u{b7} {}", s.design, s.setting),
-                                        None => format!("{} \u{b7} {}", s.design, s.setting),
-                                    };
+                                    let e = evidence.get(s.pmid.trim());
+                                    let checked = full.then(|| evidence_cell(e));
+                                    let funding = e.and_then(|e| funding_view(e, refs));
                                     view! {
                                         <tr>
                                             <td>
-                                                {cited(&s.label, refs)}
-                                                {n.map(|n| view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> })}
+                                                {mk.t(&s.label, &format!("studies.{i}.label"))}
+                                                {n.map(ref_link)}
                                             </td>
-                                            <td>{cited(&design, refs)}</td>
-                                            <td>{cited(&s.comparison, refs)}</td>
-                                            <td>{cited(&s.key_results, refs)}</td>
-                                            <td>{cited(&s.appraisal, refs)}</td>
+                                            <td>
+                                                {mk.t(&s.design, &format!("studies.{i}.design"))}
+                                                {s.n.map(|n| format!(" \u{b7} n = {n}"))}
+                                                {mk.whole(&format!("studies.{i}.n"))}
+                                                " \u{b7} " {mk.t(&s.setting, &format!("studies.{i}.setting"))}
+                                            </td>
+                                            <td>{mk.t(&s.comparison, &format!("studies.{i}.comparison"))}</td>
+                                            <td>{mk.t(&s.key_results, &format!("studies.{i}.key_results"))}</td>
+                                            <td>
+                                                {mk.t(&s.appraisal, &format!("studies.{i}.appraisal"))}
+                                                {funding}
+                                            </td>
                                             {checked.map(|c| view! { <td>{c}</td> })}
                                         </tr>
                                     }
@@ -1080,71 +1322,204 @@ fn written_v3_view(
             view! {
                 <ul>
                     {w.conflicts
-                        .into_iter()
-                        .map(|x| view! { <li>{cited(&x.text, refs)}</li> })
+                        .iter()
+                        .enumerate()
+                        .map(|(i, x)| view! { <li>{mk.t(&x.text, &format!("conflicts.{i}.text"))}</li> })
                         .collect_view()}
                 </ul>
             }
                 .into_any()
         }}
 
+        {(!guidelines.is_empty()).then(|| view! {
+            <h3>"Guidelines and consensus statements"</h3>
+            <ul>{guidelines}</ul>
+        })}
+
         <h3>"Applicability"</h3>
         <dl>
-            <dt>"Case mix"</dt><dd>{cited(&w.applicability.case_mix, refs)}</dd>
-            <dt>"India and cost"</dt><dd>{cited(&w.applicability.india_cost_context, refs)}</dd>
-            <dt>"Training"</dt><dd>{cited(&w.applicability.training, refs)}</dd>
+            <dt>"Case mix"</dt><dd>{mk.t(&w.applicability.case_mix, "applicability.case_mix")}</dd>
+            <dt>"India and cost"</dt><dd>{mk.t(&w.applicability.india_cost_context, "applicability.india_cost_context")}</dd>
+            <dt>"Training"</dt><dd>{mk.t(&w.applicability.training, "applicability.training")}</dd>
         </dl>
 
         <h3>"What would change this answer"</h3>
         <ul>
             {w.would_change
-                .into_iter()
-                .map(|x| view! { <li>{cited(&x, refs)}</li> })
+                .iter()
+                .enumerate()
+                .map(|(i, x)| view! { <li>{mk.t(x, &format!("would_change.{i}"))}</li> })
                 .collect_view()}
         </ul>
     }
 }
 
+/// " [n]" linking reference `n`.
+fn ref_link(n: u16) -> AnyView {
+    view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
+        .into_any()
+}
+
+/// The trials table's "Evidence checked" cell: what was read, the verified
+/// quotes, and (Stage 4 item 7) what was kept but not verified, labelled.
+fn evidence_cell(e: Option<&EvidenceV3>) -> AnyView {
+    let Some(e) = e else {
+        return "not extracted".into_any();
+    };
+    let unverified: Vec<String> = e
+        .unverified_details
+        .iter()
+        .map(|u| format!("{}: {}", u.outcome, u.effect_text))
+        .collect();
+    let numbers = (e.numbers_unverified > 0).then(|| {
+        format!(
+            " \u{b7} {} not verified",
+            if e.numbers_unverified == 1 {
+                "1 number".to_string()
+            } else {
+                format!("{} numbers", e.numbers_unverified)
+            }
+        )
+    });
+    let registration = e
+        .trial_registration_unverified
+        .as_ref()
+        .map(|r| view! { " \u{b7} registration " {r.clone()} " " <span class="flag-label">"not in the source"</span> });
+    view! {
+        {evidence_line(e)}
+        {numbers}
+        {registration}
+        {(!unverified.is_empty()).then(|| view! {
+            <ul class="unverified">
+                {unverified
+                    .into_iter()
+                    .map(|u| view! { <li>{u} " " <span class="flag-label">"not verified against the paper's wording"</span></li> })
+                    .collect_view()}
+            </ul>
+        })}
+    }
+    .into_any()
+}
+
+/// What the extractor read for a study and how many quotes it verified.
+fn evidence_line(e: &EvidenceV3) -> String {
+    if e.text == "not extracted" {
+        return "not extracted (abstract)".to_string();
+    }
+    format!(
+        "{} \u{b7} {} verified {}",
+        e.text,
+        e.verified_quotes,
+        if e.verified_quotes == 1 {
+            "quote"
+        } else {
+            "quotes"
+        }
+    )
+}
+
+/// "Funding: …" from the extracted row (Stage 4 item 3), when it was
+/// looked for; a number the source does not have is marked.
+fn funding_view(e: &EvidenceV3, refs: &std::collections::HashMap<String, u16>) -> Option<AnyView> {
+    if !e.funding_checked {
+        return None;
+    }
+    let mk = Marks {
+        refs,
+        spans: &e.spans,
+        mark: Mark::NotVerified,
+    };
+    Some(match &e.funding {
+        Some(f) => {
+            view! { <br /><span class="conf">"Funding: " {mk.t(f, "funding")}</span> }.into_any()
+        }
+        None => {
+            let w = if e.text == "full text" {
+                "text"
+            } else {
+                "abstract"
+            };
+            view! { <br /><span class="conf">{format!("Funding: not stated in the {w}")}</span> }
+                .into_any()
+        }
+    })
+}
+
 /// The skeptic's review (Full): verdict, caveats, overlaps, missed trials,
-/// contradictions and guidelines, as escaped text with numbered citations.
+/// meta-analysis pool notes, contradictions and guidelines, as escaped text
+/// with numbered citations; a number no text its tools returned has carries
+/// a "not verified" mark (Stage 4 item 7).
 fn skeptic_v3_view(
     k: crate::agent::answer_v3::SkepticV3,
     refs: &std::collections::HashMap<String, u16>,
 ) -> AnyView {
-    // Each line: the skeptic's text (citations linked) and the studies it
-    // names: a numbered reference when there is one, otherwise a PubMed
-    // link (re-review 3: a study whose record could not be fetched is not
-    // dropped). Only PMIDs of 1 to 9 digits are linked.
-    let line = |text: String, pmids: Vec<String>| (text, pmids);
-    let quoted = |i: &crate::agent::answer_v3::SkepticItem| match &i.quote {
-        Some(q) => line(
-            format!("{} \u{2014} \u{201c}{q}\u{201d}", i.text),
-            vec![i.pmid.clone()],
-        ),
-        None => line(i.text.clone(), vec![i.pmid.clone()]),
+    let mk = Marks {
+        refs,
+        spans: &k.spans,
+        mark: Mark::NotVerified,
     };
-    let caveats: Vec<(String, Vec<String>)> = k
+    // Each line: the skeptic's text (its path for marks, citations linked;
+    // a verified quote after it) and the studies it names: a numbered
+    // reference when there is one, otherwise a PubMed link (re-review 3: a
+    // study whose record could not be fetched is not dropped). Only PMIDs
+    // of 1 to 9 digits are linked.
+    type Line = (String, String, Option<String>, Vec<String>);
+    let item = |path: String, i: &SkepticItem| -> Line {
+        (path, i.text.clone(), i.quote.clone(), vec![i.pmid.clone()])
+    };
+    let caveats: Vec<Line> = k
         .must_mention
         .iter()
-        .map(|m| line(m.clone(), vec![]))
+        .enumerate()
+        .map(|(i, m)| (format!("must_mention.{i}"), m.clone(), None, vec![]))
         .collect();
-    let overlaps: Vec<(String, Vec<String>)> = k
+    let overlaps: Vec<Line> = k
         .overlaps
         .iter()
-        .map(|o| line(o.note.clone(), o.pmids.clone()))
+        .enumerate()
+        .map(|(i, o)| {
+            (
+                format!("overlaps.{i}.note"),
+                o.note.clone(),
+                None,
+                o.pmids.clone(),
+            )
+        })
         .collect();
-    let missed: Vec<(String, Vec<String>)> = k.missed_rcts.iter().map(quoted).collect();
+    let missed: Vec<Line> = k
+        .missed_rcts
+        .iter()
+        .enumerate()
+        .map(|(i, x)| item(format!("missed_rcts.{i}.text"), x))
+        .collect();
+    let pooled: Vec<Line> = k
+        .ma_notes
+        .iter()
+        .enumerate()
+        .map(|(i, x)| item(format!("ma_notes.{i}.text"), x))
+        .collect();
     // Each with its verified quote (review 2).
-    let against: Vec<(String, Vec<String>)> = k
+    let against: Vec<Line> = k
         .contradicting
         .iter()
-        .chain(&k.guidelines)
-        .map(quoted)
+        .enumerate()
+        .map(|(i, x)| item(format!("contradicting.{i}.text"), x))
+        .chain(
+            k.guidelines
+                .iter()
+                .enumerate()
+                .map(|(i, x)| item(format!("guidelines.{i}.text"), x)),
+        )
+        .collect();
+    // Unverified leads (review 6): PMID and kind only, no quote or claim.
+    let leads: Vec<Line> = k
+        .leads
+        .iter()
+        .map(|l| (String::new(), l.text(), None, vec![l.pmid.clone()]))
         .collect();
     let study = |p: String| -> AnyView {
         if let Some(n) = refs.get(&p) {
-            view! { " " <span class="cite">"[" <a href=format!("#ref-{n}") rel="external">{n.to_string()}</a> "]"</span> }
-                .into_any()
+            ref_link(*n)
         } else if (1..=9).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()) {
             let href = format!("https://pubmed.ncbi.nlm.nih.gov/{p}/");
             view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
@@ -1153,14 +1528,20 @@ fn skeptic_v3_view(
             ().into_any()
         }
     };
-    let list = |title: &'static str, xs: Vec<(String, Vec<String>)>| {
+    let list = |title: &'static str, xs: Vec<Line>| {
         (!xs.is_empty()).then(|| {
             view! {
                 <p><strong>{title}</strong></p>
                 <ul>
                     {xs
                         .into_iter()
-                        .map(|(t, ps)| view! { <li>{cited(&t, refs)} {ps.into_iter().map(study).collect_view()}</li> })
+                        .map(|(path, t, q, ps)| view! {
+                            <li>
+                                {mk.t(&t, &path)}
+                                {q.map(|q| view! { " \u{2014} " {cited(&format!("\u{201c}{q}\u{201d}"), refs)} })}
+                                {ps.into_iter().map(study).collect_view()}
+                            </li>
+                        })
                         .collect_view()}
                 </ul>
             }
@@ -1173,7 +1554,9 @@ fn skeptic_v3_view(
             {list("Caveats", caveats)}
             {list("Not independent", overlaps)}
             {list("Trials the search missed", missed)}
+            {list("What the meta-analyses pooled", pooled)}
             {list("Evidence against, and guidelines", against)}
+            {list("Unverified leads", leads)}
         </section>
     }
     .into_any()
@@ -1189,56 +1572,57 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         rupees(a.cost_paise),
         duration_text(a.elapsed_s)
     );
-    let i = a.integrity;
-    let mut notes: Vec<String> = Vec::new();
-    if let Some(r) = &a.stopped_early {
-        notes.push(format!(
-            "Research stopped early ({r}); the answer uses what was found by then."
-        ));
-    }
-    if i.dropped_unseen > 0 {
-        notes.push(format!(
-            "{} selected by the researcher but not returned by this run's searches: left out.",
-            i.dropped_unseen
-        ));
-    }
-    if i.dropped_unfetched > 0 {
-        notes.push(format!(
-            "{} selected but could not be fetched: left out.",
-            i.dropped_unfetched
-        ));
-    }
-    if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
-        notes.push(format!(
-            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
-            i.removed_citations, i.dropped_numbers, i.dropped_studies
-        ));
-    }
+    let notes = a.trail_notes();
+    let untraced = a.untraced.clone();
+    // Copy as text (Stage 4 item 10): the whole answer as plain text.
+    let text = a.plain_text();
+    let copy = RwSignal::new(CopyState::Ready);
+    // Other notable findings (Stage 4 item 12): code's, then the writer's.
+    let notable_writer: Vec<NotableFinding> = a
+        .answer
+        .as_ref()
+        .map(|w| w.notable_findings.clone())
+        .unwrap_or_default();
+    let notable = notable_view(&a.notable_code, &notable_writer, &refs, &untraced);
     let n_searches = a.searches.len();
-    // Full: per study, what the extractor read and how many quotes it
-    // verified.
-    let evidence: std::collections::HashMap<String, String> = a
+    // Full: per study, what the extractor read and checked.
+    let evidence: std::collections::HashMap<String, EvidenceV3> = a
         .evidence
         .iter()
-        .map(|e| {
-            let line = if e.text == "not extracted" {
-                "not extracted (abstract)".to_string()
-            } else {
-                format!(
-                    "{} \u{b7} {} verified {}",
-                    e.text,
-                    e.verified_quotes,
-                    if e.verified_quotes == 1 {
-                        "quote"
-                    } else {
-                        "quotes"
-                    }
-                )
-            };
-            (e.pmid.clone(), line)
-        })
+        .map(|e| (e.pmid.clone(), e.clone()))
         .collect();
-    let written = a.answer.map(|w| written_v3_view(w, &refs, &evidence));
+    let guideline_leads: Vec<crate::agent::answer_v3::SkepticLead> = a
+        .skeptic
+        .as_ref()
+        .map(|k| {
+            k.leads
+                .iter()
+                .filter(|l| l.kind == "guideline")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let skeptic_guidelines: Vec<(usize, SkepticItem)> = a
+        .skeptic
+        .as_ref()
+        .map(|k| k.guidelines.iter().cloned().enumerate().collect())
+        .unwrap_or_default();
+    let skeptic_spans: Vec<Span> = a
+        .skeptic
+        .as_ref()
+        .map(|k| k.spans.clone())
+        .unwrap_or_default();
+    let written = a.answer.map(|w| {
+        written_v3_view(
+            w,
+            &refs,
+            &untraced,
+            &evidence,
+            skeptic_guidelines,
+            &skeptic_spans,
+            guideline_leads,
+        )
+    });
     let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
     let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
@@ -1258,6 +1642,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             }}
 
             {skeptic}
+            {notable}
             {(!run_notes.is_empty())
                 .then(|| view! {
                     <ul class="hint">{run_notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
@@ -1288,8 +1673,176 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 
             <h3>"Cost and time"</h3>
             <p>{cost}</p>
+
+            <button
+                class="secondary small"
+                on:click=move |_| copy_answer(&text, copy)
+            >
+                {move || match copy.get() {
+                    CopyState::Ready => "Copy as text",
+                    CopyState::Copied => "Copied",
+                    CopyState::Manual => "Select the text below and copy it",
+                }}
+            </button>
+            // The fallback (shown only when the clipboard refused). It is
+            // empty in the markup: Leptos does not escape a textarea's
+            // children, so the text is set as its value in the click
+            // handler, never written as HTML.
+            <textarea
+                id=COPY_AREA
+                class=move || if copy.get() == CopyState::Manual { "copy-area shown" } else { "copy-area" }
+                readonly=true
+                aria-hidden=move || (copy.get() != CopyState::Manual).to_string()
+                tabindex=move || if copy.get() == CopyState::Manual { "0" } else { "-1" }
+            ></textarea>
         </section>
     }
+}
+
+/// A stored Phase 3 answer as the run page draws it (server only; for
+/// tests and the Stage 4 replay).
+#[cfg(feature = "ssr")]
+pub fn render_answer_v3(a: AnswerV3) -> String {
+    use leptos::tachys::view::RenderHtml;
+    Owner::new().with(|| answer_v3_view(a).to_html())
+}
+
+/// The id of the hidden textarea holding the plain-text answer.
+const COPY_AREA: &str = "answer-plain-text";
+
+/// What the Copy button has done (set only in the browser).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "hydrate"), allow(dead_code))]
+enum CopyState {
+    Ready,
+    Copied,
+    /// The clipboard refused: the textarea is shown, its text selected.
+    Manual,
+}
+
+/// Copy `text` (Stage 4 item 10). In the click handler: the text is set as
+/// the hidden textarea's value (a property, never HTML), then
+/// `navigator.clipboard.writeText` is called; if the Clipboard API is missing or refuses, the selected
+/// textarea is copied with `execCommand("copy")`, and if that fails too the
+/// textarea is shown with its text selected so it can be copied by hand
+/// (phones). Browser only.
+fn copy_answer(text: &str, state: RwSignal<CopyState>) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::prelude::Closure;
+        use web_sys::js_sys::Reflect;
+        let area = || {
+            web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id(COPY_AREA))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlTextAreaElement>().ok())
+        };
+        if let Some(a) = area() {
+            a.set_value(text);
+        }
+        let select = move || -> bool {
+            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                return false;
+            };
+            let Some(area) = area() else {
+                return false;
+            };
+            // iOS will not select inside a readonly textarea (review 8).
+            area.set_read_only(false);
+            area.set_tab_index(0);
+            let _ = area.focus();
+            area.select();
+            let _ = area.set_selection_range(0, area.value().len() as u32);
+            doc.dyn_into::<web_sys::HtmlDocument>()
+                .ok()
+                .and_then(|d| d.exec_command("copy").ok())
+                .unwrap_or(false)
+        };
+        let Some(w) = web_sys::window() else {
+            return;
+        };
+        let nav = w.navigator();
+        let has_clipboard = Reflect::get(&nav, &"clipboard".into())
+            .map(|c| !c.is_undefined() && !c.is_null())
+            .unwrap_or(false);
+        if !has_clipboard {
+            state.set(if select() {
+                CopyState::Copied
+            } else {
+                CopyState::Manual
+            });
+            return;
+        }
+        let ok = Closure::once(move |_: wasm_bindgen::JsValue| state.set(CopyState::Copied));
+        let failed = Closure::once(move |_: wasm_bindgen::JsValue| {
+            state.set(if select() {
+                CopyState::Copied
+            } else {
+                CopyState::Manual
+            });
+        });
+        let _ = nav.clipboard().write_text(text).then2(&ok, &failed);
+        ok.forget();
+        failed.forget();
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (text, state);
+    }
+}
+
+/// "Other notable findings from this run" (Stage 4 item 12): the items code
+/// built from the team's checks, then the writer's, each with its studies.
+fn notable_view(
+    code: &[NotableFinding],
+    writer: &[NotableFinding],
+    refs: &std::collections::HashMap<String, u16>,
+    untraced: &[Span],
+) -> Option<AnyView> {
+    if code.is_empty() && writer.is_empty() {
+        return None;
+    }
+    let studies = |pmids: &[String]| -> AnyView {
+        let mut n: Vec<u16> = pmids
+            .iter()
+            .filter_map(|p| refs.get(p.trim()).copied())
+            .collect();
+        n.sort_unstable();
+        n.dedup();
+        n.into_iter().map(ref_link).collect_view().into_any()
+    };
+    let wk = Marks {
+        refs,
+        spans: untraced,
+        mark: Mark::NotTraced,
+    };
+    Some(
+        view! {
+            <h3>"Other notable findings from this run"</h3>
+            <ul class="notable">
+                {code
+                    .iter()
+                    .map(|n| {
+                        let mk = Marks {
+                            refs,
+                            spans: &n.spans,
+                            mark: Mark::NotVerified,
+                        };
+                        view! { <li>{mk.t(&n.text, "text")} {studies(&n.pmids)}</li> }
+                    })
+                    .collect_view()}
+                {writer
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| view! {
+                        <li>{wk.t(&n.text, &format!("notable_findings.{i}.text"))} {studies(&n.pmids)}</li>
+                    })
+                    .collect_view()}
+            </ul>
+        }
+        .into_any(),
+    )
 }
 
 #[component]

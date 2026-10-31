@@ -375,6 +375,25 @@ static THOUSANDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?$").expect("thousands pattern is valid")
 });
 
+/// Stage 4 follow-up: where a *spaced* minus sign before byte `start` of `s`
+/// begins. A dash (`-`, `−`, `–`) followed by exactly one space before a
+/// number is a sign when the character before the dash (spaces skipped)
+/// opens a value: `,` `(` `:` `;` or `[` ("95% CI, - 0.34" is −0.34, a
+/// PDF-extraction artefact). After a digit it stays a range or a
+/// subtraction ("12 - 2.3" is 12 and 2.3). Shared by quotes ([`numbers`])
+/// and free text (the extractor's `signed_start`), so both read alike.
+pub(crate) fn spaced_minus(s: &str, start: usize) -> Option<usize> {
+    let before = s.get(..start)?;
+    let rest = before.strip_suffix(' ')?;
+    let dash = rest.chars().next_back()?;
+    if !matches!(dash, '-' | '\u{2212}' | '\u{2013}') {
+        return None;
+    }
+    let at = rest.len() - dash.len_utf8();
+    let opener = rest[..at].trim_end_matches(' ').chars().next_back()?;
+    matches!(opener, ',' | '(' | ':' | ';' | '[').then_some(at)
+}
+
 /// The number tokens of `s`, read from its normalised (folded) form, so a
 /// middle-dot decimal is one number. A `-` right after a digit or `%` is a
 /// range dash, not a sign, and right after a letter a hyphen ("COVID-19"
@@ -403,6 +422,11 @@ pub(crate) fn numbers(s: &str) -> Vec<String> {
                     .is_some_and(|c| c.is_ascii_digit() || c == '%' || c.is_alphabetic())
             {
                 t = &t[1..];
+            }
+            let spaced;
+            if !t.starts_with('-') && spaced_minus(&s, start).is_some() {
+                spaced = format!("-{t}");
+                t = &spaced;
             }
             out.push(match t.strip_prefix('-') {
                 Some(r) if r.starts_with('.') => format!("-0{r}"),

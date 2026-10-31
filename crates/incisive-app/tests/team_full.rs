@@ -338,9 +338,10 @@ fn outcome(name: &str, quote: &str, numbers: Vec<Value>) -> Value {
 /// Study A is read from its PMC full text, study B from its abstract. A's
 /// first quote is found, but one of its numbers is not in it (dropped); A's
 /// second quote fails and is fixed by the correction; B's quote fails twice
-/// and is dropped with its number. Every call is charged.
+/// and is kept, flagged, with its number (Stage 4 item 7: flag, never
+/// delete). Every call is charged.
 #[tokio::test]
-async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
+async fn extractor_verifies_quotes_corrects_once_and_flags_what_fails() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let ft = full_text_from_xml(&lit_fixture("epmc_fulltext.xml")).unwrap();
@@ -404,21 +405,41 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
     assert_eq!(a.text, TextKind::FullText);
     assert_eq!(a.outcomes_verified, 2);
     assert_eq!(a.outcomes[0].quote, a1);
-    assert_eq!(a.outcomes[0].numbers.len(), 1, "987654 is not in the quote");
+    let flags: Vec<bool> = a.outcomes[0].numbers.iter().map(|n| n.verified).collect();
+    assert_eq!(
+        flags,
+        [true, false],
+        "987654 is not in the quote: kept, flagged"
+    );
     assert_eq!(a.outcomes[1].quote, a2, "fixed by the correction");
     assert_eq!(a.outcomes[1].numbers.len(), 1);
     // 987654, and n randomised 120 / analysed 110: the source has neither
-    // (review 1: n only when the source states it).
-    assert_eq!((a.numbers_dropped, a.corrections), (3, 1));
+    // (review 1: n only when the source states it; kept aside, labelled).
+    assert_eq!((a.numbers_unverified, a.corrections), (3, 1));
     assert_eq!((a.n_randomised, a.n_analysed), (None, None));
+    assert_eq!(
+        (a.n_randomised_unverified, a.n_analysed_unverified),
+        (Some(120), Some(110))
+    );
     assert!(a.unverified_outcomes.is_empty());
     let b = &x.rows[1];
     assert_eq!(b.text, TextKind::Abstract);
     assert_eq!(b.outcomes_verified, 0);
     assert_eq!(b.unverified_outcomes, ["Outcome B1"]);
-    assert_eq!((b.numbers_dropped, b.corrections), (3, 1));
+    assert_eq!(b.outcomes.len(), 1, "kept");
+    assert!(!b.outcomes[0].verified);
+    assert_eq!(b.outcomes[0].quote, "Self-fixating mesh was better by 50%.");
+    assert!(!b.outcomes[0].numbers[0].verified);
+    assert_eq!((b.numbers_unverified, b.corrections), (3, 1));
     assert_eq!(b.independence.group_or_centre, "Aabenraa");
-    assert_eq!((x.outcomes_verified(), x.numbers_dropped()), (2, 6));
+    assert_eq!(
+        (
+            x.outcomes_verified(),
+            x.outcomes_unverified(),
+            x.numbers_unverified()
+        ),
+        (2, 1, 6)
+    );
 
     // Requests: the extractor model, low effort, format, no tools; the
     // study's text wrapped; the question as data.
@@ -450,7 +471,9 @@ async fn extractor_verifies_quotes_corrects_once_and_drops_what_fails() {
     let l = lines(&steps_of(&ctx, uid).await);
     assert_eq!(
         l.last().map(String::as_str),
-        Some("Extractor: 2/2 studies (2 verified outcomes, 6 numbers dropped)"),
+        Some(
+            "Extractor: 2/2 studies (2 verified outcomes, 1 not verified, 6 numbers not verified; all kept, labelled)"
+        ),
         "{l:?}"
     );
 }
@@ -592,7 +615,11 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
     assert_eq!(r.verdict, Verdict::HoldsWithCaveats);
     assert_eq!(r.contradicting.len(), 1);
     assert_eq!(r.contradicting[0].quote, c_quote);
-    assert_eq!((r.dropped_unseen, r.dropped_quotes), (1, 1));
+    // Stage 4 review 6: the seen study's unfound quote is a lead (PMID
+    // only); the unseen PMID is dropped and counted.
+    assert_eq!((r.dropped_unseen, r.dropped_quotes), (1, 0));
+    assert_eq!(r.leads.len(), 1);
+    assert_eq!(r.leads[0].pmid, SEEN_C);
     assert_eq!(r.missed_rcts.len(), 1);
     assert_eq!(r.missed_rcts[0].pmid, SEEN_C);
     assert_eq!(r.overlaps[0].pmids, [SEEN_A, SEEN_B]);
@@ -636,7 +663,8 @@ async fn skeptic_checks_its_pmids_and_quotes_and_reports_progress() {
     for want in [
         "Skeptic: 1 search so far (turn 1 of 8)",
         "Skeptic: verdict holds with caveats, 2 caveats",
-        "Skeptic: dropped 1 entries naming studies its searches did not return and 1 whose quote was not found",
+        "Skeptic: 1 entry naming studies its searches did not return; not shown",
+        "Skeptic: 1 study whose quote was not found kept as unverified leads (PMID only)",
     ] {
         assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
     }
@@ -970,13 +998,15 @@ async fn full_team_run_end_to_end_through_the_worker() {
     let l = lines(&v.steps);
     for want in [
         "Extractor and skeptic: extracting 2 studies and challenging the conclusion",
-        "Extractor: 2/2 studies (2 verified outcomes, 4 numbers dropped)",
+        "Extractor: 2/2 studies (2 verified outcomes, 0 not verified, 4 numbers not verified; all kept, labelled)",
         "Skeptic: verdict holds with caveats, 1 caveat",
         "Writer: writing the answer from 2 studies (2 with an abstract)",
         "Answer ready",
     ] {
         assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:?}");
     }
+    // Stage 4 item 5: the number trace reports its counts (nothing removed).
+    assert!(l.iter().any(|x| x.starts_with("Number check: ")), "{l:?}");
 }
 
 /// The skeptic fails (its first turn errors): the writer proceeds without
@@ -1343,9 +1373,13 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
         DepthSettings::FOCUSED,
     )
     .await;
-    let writer =
-        incisive_app::agent::writer_v3::reserve_full(&ctx.llm, &ctx.budget, QUESTION, 16000)
-            .unwrap();
+    let writer = incisive_app::agent::writer_v3::reserve_full(
+        &ctx.llm,
+        &ctx.budget,
+        QUESTION,
+        DepthSettings::FOCUSED.writer_max_tokens,
+    )
+    .unwrap();
     let review = incisive_app::agent::team::review_reserve(&ctx).unwrap();
     eprintln!(
         "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; review reserve {review}"

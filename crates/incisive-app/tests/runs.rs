@@ -3251,9 +3251,21 @@ async fn recovery_releases_reservations_whose_run_is_gone() {
     assert_eq!(reservation(&pool, fresh).await, Some(4000));
     assert_eq!(reservation(&pool, live).await, Some(4000));
     assert_eq!(reservation(&pool, gate_req).await, Some(30));
-    // The caps no longer count it.
+    // The caps no longer count it. Asked as of the gate reservation's own
+    // instant, so the IST day boundary cannot split the reservations (it
+    // did at 00:04 IST, with "now" on the next day).
+    let gate_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT at FROM incisive.spend WHERE request_id = $1 AND kind = 'reservation'",
+    )
+    .bind(gate_req)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
-        totals(&pool, u1).await.unwrap().today_paise,
+        incisive_app::spend::totals_at(&pool, u1, gate_at)
+            .await
+            .unwrap()
+            .today_paise,
         30,
         "only the gate reservation remains"
     );
@@ -3327,6 +3339,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 certainty: Certainty::VeryLow,
                 why: "wide CI".into(),
                 pmids: vec!["41060645".into()],
+                evidence_type: EvidenceType::RctMetaAnalysis,
             }],
             studies: vec![Study {
                 pmid: "39979619".into(),
@@ -3348,6 +3361,10 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
                 training: "A low-risk index case.".into(),
             },
             would_change: vec!["A multicentre blinded RCT".into()],
+            at_a_glance: None,
+            clinical_practice: None,
+            guidelines: vec![],
+            notable_findings: vec![],
         }),
         empty_reason: None,
         references: vec![
@@ -3387,6 +3404,8 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         skeptic: None,
         evidence: vec![],
         notes: vec![],
+        untraced: vec![],
+        notable_code: vec![],
     };
     serde_json::to_value(a).unwrap()
 }
@@ -3403,7 +3422,8 @@ fn markup_of(html: &str) -> String {
             .map_or("", |j| &rest[i + j + "</script>".len()..]);
     }
     markup.push_str(rest);
-    markup
+    // Leptos's hydration markers between adjacent text and views.
+    markup.replace("<!>", "")
 }
 
 async fn v3_page(pool: &PgPool, body: serde_json::Value) -> (StatusCode, String) {
@@ -3631,6 +3651,11 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
             pmids: vec!["41060645".into(), "39979619".into(), "12345678".into()],
             note: "same group".into(),
         }],
+        ma_notes: vec![],
+        spans: vec![],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
     });
     a.evidence = vec![EvidenceV3 {
         pmid: "39979619".into(),
@@ -3638,6 +3663,12 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
         verified_quotes: 3,
         numbers_dropped: 1,
         unverified_outcomes: vec![],
+        numbers_unverified: 0,
+        unverified_details: vec![],
+        funding: None,
+        funding_checked: false,
+        spans: vec![],
+        trial_registration_unverified: None,
     }];
     a.notes = vec![
         "Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such."
@@ -3668,4 +3699,493 @@ async fn ssr_full_answer_shows_the_skeptic_box_and_evidence_checked() {
     assert!(m.contains("Extraction stopped at the Full limit"));
     // The box comes before the references.
     assert!(m.find("Challenged by the skeptic").unwrap() < m.find(">References<").unwrap());
+}
+
+// ---------- Phase 3 Stage 4: refine the answer, flag, never delete ----------
+
+/// Stage 4 items 1, 3 and 4: the guidelines section (the writer's, then the
+/// skeptic's verified quotes it did not list), funding in the trials
+/// table's appraisal, and the skeptic's meta-analysis pool notes, escaped.
+#[tokio::test]
+async fn ssr_full_answer_shows_guidelines_funding_and_pool_notes() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.guidelines = vec![GuidelineV3 {
+        pmid: Some("41060645".into()),
+        body: "European <b>Hernia</b> Society".into(),
+        year: Some(2023),
+        statement: "Either approach is acceptable [41060645].".into(),
+        pmid_removed: false,
+    }];
+    let mut second = w.studies[0].clone();
+    second.pmid = "41060645".into();
+    w.studies.push(second);
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![
+            SkepticItem {
+                pmid: "41060645".into(),
+                text: "EHS".into(),
+                quote: Some("already listed by the writer".into()),
+            },
+            SkepticItem {
+                pmid: "39979619".into(),
+                text: "ACG".into(),
+                quote: Some("We recommend <i>POEM</i> or LHM.".into()),
+            },
+        ],
+        overlaps: vec![],
+        ma_notes: vec![SkepticItem {
+            pmid: "39979619".into(),
+            text: "Its 7-RCT pool counts one observational study as an RCT.".into(),
+            quote: None,
+        }],
+        spans: vec![],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
+    });
+    a.evidence = vec![
+        EvidenceV3 {
+            pmid: "39979619".into(),
+            text: "abstract only".into(),
+            verified_quotes: 2,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: None,
+            funding_checked: true,
+            spans: vec![],
+            trial_registration_unverified: None,
+        },
+        EvidenceV3 {
+            pmid: "41060645".into(),
+            text: "full text".into(),
+            verified_quotes: 2,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: Some("Intuitive <script>x</script> Surgical".into()),
+            funding_checked: true,
+            spans: vec![],
+            trial_registration_unverified: None,
+        },
+    ];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("Guidelines and consensus statements"), "{m}");
+    assert!(m.contains(
+        "European &lt;b&gt;Hernia&lt;/b&gt; Society (2023): Either approach is acceptable"
+    ));
+    let section =
+        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    assert!(
+        section
+            .contains("ACG \u{2014} \u{201c}We recommend &lt;i&gt;POEM&lt;/i&gt; or LHM.\u{201d}"),
+        "{section}"
+    );
+    assert!(
+        !section.contains("EHS \u{2014}"),
+        "a skeptic guideline the writer listed is not repeated there"
+    );
+    assert!(m.contains("Funding: not stated in the abstract"));
+    assert!(!m.contains("<script>x"));
+    assert!(m.contains("Funding: Intuitive &lt;script&gt;x&lt;/script&gt; Surgical"));
+    assert!(m.contains("What the meta-analyses pooled"));
+    assert!(m.contains("Its 7-RCT pool counts one observational study as an RCT."));
+    // The guidelines come after the conflicts and before applicability.
+    let g = m.find("Guidelines and consensus statements").unwrap();
+    assert!(m.find("Conflicting evidence").unwrap() < g);
+    assert!(g < m.find(">Applicability<").unwrap());
+}
+
+/// Stage 4 items 5 and 7: untraced numbers carry a "not traced" mark,
+/// skeptic and funding numbers a "not verified" mark, unverified outcomes
+/// are listed with their values and a label; the text is unchanged, there is
+/// no `[?]`, and model text stays escaped.
+#[tokio::test]
+async fn ssr_marks_untraced_and_unverified_numbers_without_changing_text() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.bottom_line.text = "Pain fell by 37% <b>x</b> [41060645].".into();
+    // "37%" is bytes 13..16 of the bottom line; trial n is marked whole.
+    a.untraced = vec![
+        Span::new("bottom_line.text", 13, 16),
+        Span::new("studies.0.n", 0, 0),
+    ];
+    a.integrity.numbers_checked = 12;
+    a.integrity.numbers_untraced = 2;
+    a.integrity.outcomes_unverified = 1;
+    a.integrity.numbers_unverified = 2;
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec!["Recurrence was 7% in 2019.".into()],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![],
+        overlaps: vec![],
+        ma_notes: vec![],
+        spans: vec![Span::new("must_mention.0", 15, 17)],
+        leads: vec![],
+        dropped_unseen: 0,
+        dropped_quotes: 0,
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "abstract only".into(),
+        verified_quotes: 2,
+        numbers_dropped: 0,
+        unverified_outcomes: vec!["Recurrence".into()],
+        numbers_unverified: 2,
+        unverified_details: vec![UnverifiedOutcomeV3 {
+            outcome: "Recurrence <i>".into(),
+            effect_text: "1 vs 1 at 2 years".into(),
+        }],
+        funding: Some("Grant 4471".into()),
+        funding_checked: true,
+        spans: vec![Span::new("funding", 6, 10)],
+        trial_registration_unverified: None,
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(!m.contains("[?]"));
+    // The bottom line keeps its text; the mark follows "37%".
+    assert!(m.contains("Pain fell by 37%<sup title="), "{m}");
+    assert!(m.contains(r#"class="flag">not traced</sup>"#));
+    assert!(m.contains(">not traced</sup> &lt;b&gt;x&lt;/b&gt;"), "{m}");
+    assert!(m.contains("n = 120<sup title="), "{m}");
+    // The skeptic's caveat: "7%" marked not verified, text intact.
+    assert!(m.contains("Recurrence was 7%<sup title="), "{m}");
+    assert!(m.contains(">not verified</sup> in 2019."));
+    // Funding: the grant number marked.
+    assert!(m.contains("Funding: Grant 4471<sup title="), "{m}");
+    // The unverified outcome is listed with its values and a label.
+    assert!(m.contains("Recurrence &lt;i&gt;: 1 vs 1 at 2 years"));
+    assert!(
+        m.contains("not verified against the paper&#x27;s wording")
+            || m.contains("not verified against the paper's wording")
+    );
+    assert!(m.contains("2 numbers not verified"));
+    // The trail says what was marked; nothing removed.
+    assert!(m.contains("Number check: 2 of 12 numbers in the answer not traced"));
+    // Stage 4 item 6: the evidence label (answer_v3_json's outcome).
+    assert!(
+        m.contains(r#"<span class="etype">RCT meta-analysis</span>"#),
+        "{m}"
+    );
+    assert!(m.contains("1 outcomes and 2 numbers could not be matched"));
+}
+
+/// Stage 4: a v3 answer stored before Stage 4 (none of the new fields)
+/// loads with defaults and renders unchanged.
+#[tokio::test]
+async fn ssr_v3_answers_stored_before_stage4_still_render() {
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    let o = body.as_object_mut().unwrap();
+    for k in ["untraced", "notable_code"] {
+        assert!(o.remove(k).is_some(), "{k}");
+    }
+    for k in [
+        "numbers_checked",
+        "numbers_untraced",
+        "numbers_unverified",
+        "outcomes_unverified",
+    ] {
+        o["integrity"].as_object_mut().unwrap().remove(k).unwrap();
+    }
+    let w = o["answer"].as_object_mut().unwrap();
+    for k in [
+        "at_a_glance",
+        "clinical_practice",
+        "guidelines",
+        "notable_findings",
+    ] {
+        assert!(w.remove(k).is_some(), "{k}");
+    }
+    for oc in w["outcomes"].as_array_mut().unwrap() {
+        oc.as_object_mut().unwrap().remove("evidence_type").unwrap();
+    }
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    let wa = a.answer.as_ref().unwrap();
+    assert!(wa.at_a_glance.is_none() && wa.clinical_practice.is_none());
+    assert!(wa.guidelines.is_empty() && wa.notable_findings.is_empty());
+    assert_eq!(
+        wa.outcomes[0].evidence_type,
+        incisive_app::agent::answer_v3::EvidenceType::Unknown,
+        "R-S4a: no label for answers stored before Stage 4"
+    );
+    assert!(a.untraced.is_empty() && a.notable_code.is_empty());
+    // A Stage 3 skeptic and evidence entry without the Stage 4 fields.
+    body["skeptic"] = json!({"verdict": "holds", "must_mention": ["a"], "contradicting": [],
+        "missed_rcts": [], "guidelines": [], "overlaps": []});
+    body["evidence"] = json!([{"pmid": "39979619", "text": "full text", "verified_quotes": 1,
+        "numbers_dropped": 2, "unverified_outcomes": ["Pain"]}]);
+    let a: incisive_app::agent::answer_v3::AnswerV3 = serde_json::from_value(body.clone()).unwrap();
+    assert!(a.skeptic.as_ref().unwrap().ma_notes.is_empty());
+    assert!(!a.evidence[0].funding_checked);
+    let (s, html) = v3_page(&pool, body).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(m.contains("The trials"));
+    assert!(!m.contains("not traced"));
+    assert!(!m.contains("Funding:"), "old rows never looked for funding");
+    assert!(!m.contains("Guidelines and consensus"));
+    assert!(
+        !m.contains(r#"class="etype""#),
+        "no evidence label for old answers"
+    );
+}
+
+/// Stage 4 items 8-10 and 12: the at-a-glance box at the top, clinical
+/// practice after the bottom line, the intervention arm first from the
+/// structured arms, the notable findings (code's then the writer's), and the
+/// Copy-as-text button with its plain-text fallback, all escaped.
+#[tokio::test]
+async fn ssr_readability_sections_arms_and_copy_text() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    let w = a.answer.as_mut().unwrap();
+    w.at_a_glance = Some(AtAGlance {
+        verdict: "No patient benefit <script>alert(5)</script>.".into(),
+        key_numbers: vec![KeyNumber {
+            label: "Chronic pain".into(),
+            value_text: "RR 0.53 (0.20 to 1.39)".into(),
+            pmid: "41060645".into(),
+        }],
+        main_caveat: "Two small trials.".into(),
+    });
+    w.clinical_practice = Some(ClinicalPractice {
+        default_choice: "Either mesh <b>is</b> reasonable.".into(),
+        who_may_benefit: "Not shown.".into(),
+        counselling: "Pain is similar.".into(),
+        cost_per_case: "not known".into(),
+        text: String::new(),
+    });
+    w.studies[0].comparison = "Self-fixating vs tacked".into();
+    w.outcomes[0].numbers = vec![
+        Number {
+            label: "Pain score".into(),
+            value: 2.4,
+            unit: None,
+            arm: Some("tacked".into()),
+            ci_low: None,
+            ci_high: None,
+            p: None,
+            pmid: "39979619".into(),
+        },
+        Number {
+            label: "Pain score".into(),
+            value: 2.1,
+            unit: None,
+            arm: Some("self-fixating".into()),
+            ci_low: None,
+            ci_high: None,
+            p: None,
+            pmid: "39979619".into(),
+        },
+    ];
+    w.notable_findings = vec![NotableFinding {
+        text: "Withdrawals were lopsided, 2 vs 9 <i>x</i> [39979619].".into(),
+        pmids: vec!["39979619".into()],
+        spans: vec![],
+    }];
+    a.notable_code = vec![NotableFinding {
+        text: "Not independent evidence (the skeptic): same centre.".into(),
+        pmids: vec!["41060645".into(), "39979619".into()],
+        spans: vec![],
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(!m.contains("<script>alert(5)"));
+    assert!(!m.contains("<b>is</b>") && !m.contains("<i>x</i>"));
+    // Order: at a glance, bottom line, clinical practice, outcomes.
+    let at = |x: &str| m.find(x).unwrap_or_else(|| panic!("{x} missing: {m}"));
+    assert!(at("At a glance: ") < at(">Bottom line<"));
+    assert!(at(">Bottom line<") < at("What this means for clinical practice"));
+    assert!(at("What this means for clinical practice") < at("Outcome by outcome"));
+    assert!(m.contains("No patient benefit &lt;script&gt;alert(5)&lt;/script&gt;."));
+    assert!(m.contains("Chronic pain: RR 0.53 (0.20 to 1.39)"));
+    assert!(m.contains("Either mesh &lt;b&gt;is&lt;/b&gt; reasonable."));
+    assert!(m.contains("Cost per case"));
+    // Item 10: the intervention arm (self-fixating) first.
+    assert!(
+        m.contains("Pain score: 2.1 (self-fixating) vs 2.4 (tacked)"),
+        "{m}"
+    );
+    // Item 12: code's items, then the writer's, with their references.
+    let n = at("Other notable findings from this run");
+    assert!(n > at("Outcome by outcome") && n < at(">References<"));
+    assert!(at("Not independent evidence (the skeptic)") < at("Withdrawals were lopsided"));
+    assert!(m.contains("2 vs 9 &lt;i&gt;x&lt;/i&gt;"));
+    // Copy as text: the button, and the fallback textarea, which is empty
+    // in the markup (a textarea's children are not escaped; its value is
+    // set in the click handler).
+    assert!(m.contains("Copy as text"));
+    let area = &m[at(r#"id="answer-plain-text""#)..];
+    let area = &area[..area.find("</textarea>").unwrap()];
+    assert!(area.ends_with('>'), "empty: {area}");
+    // What it copies (the same function the handler uses).
+    let t = a.plain_text();
+    assert!(t.contains("AT A GLANCE") && t.contains("WHAT THIS MEANS FOR CLINICAL PRACTICE"));
+    assert!(t.contains("[1] Biological vs Synthetic Mesh. JAMA Surg, 2025. PMID 41060645."));
+    assert!(!t.contains("[41060645"), "citations as reference numbers");
+}
+
+/// Stage 4: model text reaches the page only as escaped text: the page code
+/// never sets `inner_html`, and the copy fallback's textarea has no
+/// children (a textarea's children are not escaped by Leptos).
+#[test]
+fn the_page_never_writes_model_text_as_html() {
+    let src = include_str!("../src/app.rs");
+    assert!(!src.contains("inner_html="), "inner_html used");
+    assert!(!src.contains("inner_html ="), "inner_html used");
+    let area = &src[src.find("id=COPY_AREA").expect("copy textarea")..];
+    let close = area.find("</textarea>").expect("close");
+    assert!(
+        area[..close].trim_end().ends_with('>'),
+        "the textarea must be empty"
+    );
+}
+
+/// Stage 4 review 2, 3, 5, 6 and 8 on the page: a guideline with no source
+/// is flagged; a skeptic guideline body keeps its "not verified" mark in the
+/// Guidelines section; leads show only "Possible …: quote not found …" and a
+/// PubMed link (no claim, no quote); the unverified registration is
+/// labelled; the trail says how many skeptic entries were not shown; the
+/// copy textarea is out of the tab order until it is needed.
+#[tokio::test]
+async fn ssr_review_flags_guidelines_leads_and_registration() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut a: AnswerV3 = serde_json::from_value(answer_v3_json(false)).unwrap();
+    a.mode = RunMode::Focused;
+    a.answer.as_mut().unwrap().guidelines = vec![GuidelineV3 {
+        pmid: None,
+        body: "A society".into(),
+        year: Some(2020),
+        statement: "Use either.".into(),
+        pmid_removed: true,
+    }];
+    a.skeptic = Some(SkepticV3 {
+        verdict: "holds with caveats".into(),
+        must_mention: vec![],
+        contradicting: vec![],
+        missed_rcts: vec![],
+        guidelines: vec![
+            SkepticItem {
+                pmid: "41060645".into(),
+                text: "EHS 2023 statement".into(),
+                quote: Some("Either approach is acceptable.".into()),
+            },
+            // Its record could not be fetched: no reference, PubMed instead.
+            SkepticItem {
+                pmid: "37777777".into(),
+                text: "ACG guideline".into(),
+                quote: Some("We recommend POEM or LHM.".into()),
+            },
+        ],
+        overlaps: vec![],
+        ma_notes: vec![],
+        spans: vec![Span::new("guidelines.0.text", 4, 8)],
+        leads: vec![
+            SkepticLead {
+                pmid: "39999999".into(),
+                kind: "contradicting study".into(),
+            },
+            SkepticLead {
+                pmid: "38888888".into(),
+                kind: "guideline".into(),
+            },
+        ],
+        dropped_unseen: 2,
+        dropped_quotes: 0,
+    });
+    a.evidence = vec![EvidenceV3 {
+        pmid: "39979619".into(),
+        text: "abstract only".into(),
+        verified_quotes: 2,
+        numbers_dropped: 0,
+        unverified_outcomes: vec![],
+        numbers_unverified: 0,
+        unverified_details: vec![],
+        funding: None,
+        funding_checked: true,
+        spans: vec![],
+        trial_registration_unverified: Some("NCT9999".into()),
+    }];
+    let (s, html) = v3_page(&pool, serde_json::to_value(&a).unwrap()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    let section =
+        &m[m.find("Guidelines and consensus").unwrap()..m.find(">Applicability<").unwrap()];
+    assert!(
+        section.contains("A society (2020): Use either."),
+        "{section}"
+    );
+    assert!(
+        section.contains(
+            r#"<span class="flag-label">no source among the studies; not verified</span>"#
+        ),
+        "{section}"
+    );
+    // R-S4a: the skeptic's guideline lead is listed in the section, PMID
+    // only, flagged.
+    assert!(
+        section.contains("Possible guideline: quote not found in the abstract, check the paper"),
+        "{section}"
+    );
+    assert!(section.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/38888888/""#));
+    // Final review 3: a skeptic guideline without a reference links to PubMed.
+    assert!(
+        section.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/37777777/""#),
+        "{section}"
+    );
+    // Review 3: the skeptic's mark carried into the Guidelines section.
+    assert!(section.contains("EHS 2023<sup title="), "{section}");
+    assert!(section.contains(">not verified</sup> statement"));
+    // Review 6: the lead, PMID only, linked to PubMed.
+    assert!(m.contains("Unverified leads"));
+    assert!(m.contains(
+        "Possible contradicting study: quote not found in the abstract, check the paper"
+    ));
+    assert!(m.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/39999999/""#));
+    assert!(
+        m.contains("registration NCT9999 <span class=\"flag-label\">not in the source</span>"),
+        "{m}"
+    );
+    // Review 5.
+    assert!(m.contains(
+        "The skeptic gave 2 entries whose quote or study could not be found; not shown."
+    ));
+    // Review 8: out of the tab order until shown.
+    let area = &m[m.find(r#"id="answer-plain-text""#).unwrap()..];
+    let area = &area[..area.find('>').unwrap()];
+    assert!(area.contains(r#"tabindex="-1""#), "{area}");
 }

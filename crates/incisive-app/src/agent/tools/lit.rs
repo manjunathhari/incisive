@@ -316,7 +316,7 @@ impl Tool for SearchPubmed {
         "search_pubmed"
     }
     fn description(&self) -> &'static str {
-        "Search PubMed (relevance order). Use PubMed syntax: field tags such as [tiab], [mh], [pt], [dp], AND/OR/NOT and quoted phrases. Returns the total match count and records with pmid, title, year, journal and publication types. No abstracts: use get_abstracts for those."
+        "Search PubMed (relevance order). Use PubMed syntax: field tags such as [tiab], [mh], [pt], [dp], AND/OR/NOT and quoted phrases. For guidelines and consensus statements add (\"practice guideline\"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti]), which also catches plural titles. Returns the total match count and records with pmid, title, year, journal and publication types. No abstracts: use get_abstracts for those."
     }
     fn input_schema(&self) -> Value {
         query_schema(MAX_SEARCH_RESULTS, "A PubMed query.")
@@ -350,7 +350,7 @@ impl Tool for SearchEpmc {
         "search_europepmc"
     }
     fn description(&self) -> &'static str {
-        "Search Europe PMC (relevance order). Use Europe PMC syntax, e.g. TITLE:\"...\", ABSTRACT:\"...\", PUB_TYPE:\"randomized controlled trial\", PUB_YEAR:[2015 TO 2026], AND/OR. Finds records PubMed may miss (preprints, PMC full texts). Returns the total match count and records with pmid (if any), pmcid, doi, title, year, journal and publication types."
+        "Search Europe PMC (relevance order). Use Europe PMC syntax, e.g. TITLE:\"...\", ABSTRACT:\"...\", PUB_TYPE:\"randomized controlled trial\", PUB_YEAR:[2015 TO 2026], AND/OR; for guidelines (PUB_TYPE:\"practice guideline\" OR PUB_TYPE:\"guideline\" OR TITLE:guideline* OR TITLE:consensus OR TITLE:recommendation*). Finds records PubMed may miss (preprints, PMC full texts). Returns the total match count and records with pmid (if any), pmcid, doi, title, year, journal and publication types."
     }
     fn input_schema(&self) -> Value {
         query_schema(MAX_SEARCH_RESULTS, "A Europe PMC query.")

@@ -60,8 +60,9 @@
 //!
 //! **Time.** Research wraps up at the time limit less the writer's
 //! allowance (`writer_time_allowance_s`, set by the worker). The writer is
-//! not started with less than [`WRITER_MIN_TIME`] left before the hard
-//! stop: the run ends `partial` (`writer_time`) with the references.
+//! not started with less than [`writer_min_time`] (Quick 150 s, Full 180 s)
+//! left before the hard stop: the run ends `partial` (`writer_time`) with the
+//! references.
 //!
 //! **Outcomes** (`partial` runs with a kind store it as `error_kind`):
 //! * an unpriced writer model: `failed` (`llm`) before any research;
@@ -93,8 +94,8 @@ use chrono::Utc;
 
 use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
 use super::answer_v3::{
-    ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, ReferenceV3, SkepticItem, SkepticOverlap,
-    SkepticV3,
+    ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, NotableFinding, ReferenceV3, SkepticItem,
+    SkepticLead, SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
 };
 use super::extractor::{self, Extraction, StudyRef};
 use super::llm::StepError;
@@ -119,10 +120,22 @@ pub const WRITER_UNREADABLE: &str =
     "The writer's answer could not be read. The studies found are listed below; please ask again.";
 /// Bottom line when too little time was left to write.
 pub const WRITER_NO_TIME: &str = "Not enough of the time limit was left to write the answer. The studies found are listed below; please ask again.";
-/// The writer is not started with less time than this before the hard stop.
-// 120 s: the live smoke (30 Oct) had the Opus writer take 44 s for 3 studies
-// (4,768 output tokens); 10 studies is roughly double.
-pub const WRITER_MIN_TIME: Duration = Duration::from_secs(120);
+/// The writer is not started with less time than this before the hard stop:
+/// a writer that could not finish ends the run `partial` (`writer_time`) with
+/// its references, instead of losing everything at the hard stop. The live
+/// Full writer (31 Oct) took 109 s for about 13,500 output tokens, so a reply
+/// at the 20,000-token ceiling takes about 160 s: Full keeps 180 s. A Quick
+/// reply has the same ceiling but fewer, shorter inputs: Quick keeps 150 s.
+pub const WRITER_MIN_TIME_QUICK: Duration = Duration::from_secs(150);
+pub const WRITER_MIN_TIME_FULL: Duration = Duration::from_secs(180);
+
+/// [`WRITER_MIN_TIME_QUICK`] or [`WRITER_MIN_TIME_FULL`] for `mode`.
+pub fn writer_min_time(mode: RunMode) -> Duration {
+    match mode {
+        RunMode::Quick => WRITER_MIN_TIME_QUICK,
+        RunMode::Focused => WRITER_MIN_TIME_FULL,
+    }
+}
 
 type Stop = &'static str;
 
@@ -159,7 +172,7 @@ fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
@@ -181,6 +194,8 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         skeptic: None,
         evidence: Vec::new(),
         notes: Vec::new(),
+        untraced: Vec::new(),
+        notable_code: Vec::new(),
     }
 }
 
@@ -398,14 +413,18 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             });
         }
         answer.evidence = evidence_summary(&studies, &reviewed.extraction);
+        integrity.numbers_unverified = reviewed.extraction.numbers_unverified();
+        integrity.outcomes_unverified = reviewed.extraction.outcomes_unverified();
+        answer.integrity = integrity;
         answer.skeptic = reviewed.review.as_ref().map(skeptic_summary);
+        answer.notable_code = notable_code(reviewed.review.as_ref(), &reviewed.extraction);
         answer.notes = reviewed.notes.clone();
     }
 
     // The writer: only with time for it before the hard stop.
     gate(ctx).await?;
     let left = ctx.budget.until_hard_stop(Instant::now());
-    if left < WRITER_MIN_TIME {
+    if left < writer_min_time(ctx.mode) {
         tracing::info!(run_id = %ctx.run_id, left_s = left.as_secs(), "too little time left for the writer");
         add_line(
             ctx,
@@ -433,18 +452,19 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         ),
     )
     .await;
+    let full_input = FullInput {
+        rows: &reviewed.extraction.rows,
+        skeptic: reviewed.review.as_ref(),
+        skeptic_note: reviewed.skeptic_note,
+        missed: &reviewed.missed,
+    };
     let (system, user) = if full {
         (
             writer_v3::SYSTEM_FULL,
             writer_user_full(
                 &ctx.question,
                 &studies,
-                &FullInput {
-                    rows: &reviewed.extraction.rows,
-                    skeptic: reviewed.review.as_ref(),
-                    skeptic_note: reviewed.skeptic_note,
-                    missed: &reviewed.missed,
-                },
+                &full_input,
                 &research.contradictions,
                 &research.searches,
             ),
@@ -466,9 +486,31 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .chain(&reviewed.cited)
         .map(|s| s.pmid.clone())
         .collect();
-    match writer_v3::write_with(ctx, &ctx.llm, system, &user).await {
-        Ok(mut written) => {
+    match writer_v3::write_counted(ctx, &ctx.llm, system, &user).await {
+        Ok((mut written, labels_defaulted)) => {
+            integrity.labels_defaulted = labels_defaulted;
             check_citations(&mut written, &selected, &mut integrity);
+            // R-S4a: the evidence label per outcome, from the cited studies'
+            // designs (the researcher's labels; missed trials are RCTs).
+            let designs: Vec<(String, String)> = studies
+                .iter()
+                .chain(&reviewed.missed)
+                .map(|s| (s.pmid.clone(), s.design.clone()))
+                .collect();
+            writer_v3::evidence_types(&mut written, |p| {
+                designs
+                    .iter()
+                    .find(|(id, _)| id == p)
+                    .and_then(|(_, d)| writer_v3::design_class(d))
+            });
+            // Stage 4 item 5: mark (never change) the numbers not traced to
+            // what the writer was given.
+            let allowed = writer_v3::allowed_numbers(&studies, full.then_some(&full_input));
+            let (untraced, checked) =
+                writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p));
+            integrity.numbers_checked = checked;
+            integrity.numbers_untraced = count(untraced.len());
+            answer.untraced = untraced;
             answer.integrity = integrity;
             answer.answer = Some(written);
             let line = if integrity.removed_citations == 0
@@ -490,6 +532,19 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
                         "trial row",
                         "trial rows"
                     )
+                )
+            };
+            add_line(ctx, StepKind::Check, &line).await;
+            let line = if integrity.numbers_untraced == 0 {
+                format!(
+                    "Number check: all {} traced to a verified quote, structured number or abstract",
+                    plural(integrity.numbers_checked as usize, "number", "numbers")
+                )
+            } else {
+                format!(
+                    "Number check: {} of {} not traced to a verified quote, structured number or abstract (marked \"not traced\"; nothing removed)",
+                    integrity.numbers_untraced,
+                    plural(integrity.numbers_checked as usize, "number", "numbers")
                 )
             };
             add_line(ctx, StepKind::Check, &line).await;
@@ -689,7 +744,8 @@ async fn review_phase(
             .iter()
             .map(|c| &c.pmid)
             .chain(r.guidelines.iter().map(|g| &g.pmid))
-            .chain(r.overlaps.iter().flat_map(|o| &o.pmids));
+            .chain(r.overlaps.iter().flat_map(|o| &o.pmids))
+            .chain(r.ma_notes.iter().map(|m| &m.pmid));
         for p in quoted {
             if !studies.iter().any(|s| &s.pmid == p)
                 && !missed_ids.contains(p)
@@ -755,7 +811,7 @@ fn missed_input(pmid: &str, p: &Paper, why: String) -> StudyInput {
 }
 
 /// Per selected study, what the extractor did (for the page).
-fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
+pub fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
     studies
         .iter()
         .map(|s| match x.rows.iter().find(|r| r.pmid == s.pmid) {
@@ -763,8 +819,27 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
                 pmid: s.pmid.clone(),
                 text: r.text.as_str().to_string(),
                 verified_quotes: r.outcomes_verified,
-                numbers_dropped: r.numbers_dropped,
+                numbers_dropped: 0,
                 unverified_outcomes: r.unverified_outcomes.clone(),
+                numbers_unverified: r.numbers_unverified,
+                unverified_details: r
+                    .outcomes
+                    .iter()
+                    .filter(|o| !o.verified)
+                    .map(|o| UnverifiedOutcomeV3 {
+                        outcome: o.outcome.clone(),
+                        effect_text: o.effect_text.clone(),
+                    })
+                    .collect(),
+                funding: r.funding.clone(),
+                funding_checked: true,
+                trial_registration_unverified: r.trial_registration_unverified.clone(),
+                spans: r
+                    .spans
+                    .iter()
+                    .filter(|s| s.field == "funding")
+                    .cloned()
+                    .collect(),
             },
             None => EvidenceV3 {
                 pmid: s.pmid.clone(),
@@ -772,13 +847,96 @@ fn evidence_summary(studies: &[StudyInput], x: &Extraction) -> Vec<EvidenceV3> {
                 verified_quotes: 0,
                 numbers_dropped: 0,
                 unverified_outcomes: Vec::new(),
+                numbers_unverified: 0,
+                unverified_details: Vec::new(),
+                funding: None,
+                funding_checked: false,
+                spans: Vec::new(),
+                trial_registration_unverified: None,
             },
         })
         .collect()
 }
 
+/// "Other notable findings from this run", the part built by code (Stage 4
+/// item 12; no AI call, no search): non-independent trials, trials the
+/// search missed and what meta-analyses pooled (from the skeptic, its text
+/// unchanged, its unverified numbers still marked), and how many extracted
+/// outcomes and numbers could not be verified. Second-hand appraisal claims
+/// are not structured in the evidence rows, so they are not listed here.
+pub fn notable_code(review: Option<&SkepticReview>, x: &Extraction) -> Vec<NotableFinding> {
+    let mut out = Vec::new();
+    let item = |prefix: &str, text: &str, field: &str, pmids: Vec<String>, spans: &[Span]| {
+        let shift = prefix.len();
+        NotableFinding {
+            text: format!("{prefix}{text}"),
+            pmids,
+            spans: spans
+                .iter()
+                .filter(|s| s.field == field)
+                .map(|s| Span {
+                    field: "text".into(),
+                    start: s
+                        .start
+                        .saturating_add(u32::try_from(shift).unwrap_or(u32::MAX)),
+                    len: s.len,
+                })
+                .collect(),
+        }
+    };
+    if let Some(r) = review {
+        for (i, o) in r.overlaps.iter().enumerate() {
+            out.push(item(
+                "Not independent evidence (the skeptic): ",
+                &o.note,
+                &format!("overlaps.{i}.note"),
+                o.pmids.clone(),
+                &r.spans,
+            ));
+        }
+        for (i, m) in r.missed_rcts.iter().enumerate() {
+            out.push(item(
+                "A randomised trial the researcher's search missed (the skeptic): ",
+                &m.why,
+                &format!("missed_rcts.{i}.text"),
+                vec![m.pmid.clone()],
+                &r.spans,
+            ));
+        }
+        for (i, m) in r.ma_notes.iter().enumerate() {
+            out.push(item(
+                "What a meta-analysis pooled (the skeptic): ",
+                &m.note,
+                &format!("ma_notes.{i}.text"),
+                vec![m.pmid.clone()],
+                &r.spans,
+            ));
+        }
+    }
+    let outcomes = x.outcomes_unverified();
+    let numbers = x.numbers_unverified();
+    if outcomes + numbers > 0 {
+        let pmids: Vec<String> = x
+            .rows
+            .iter()
+            .filter(|r| r.numbers_unverified > 0 || !r.unverified_outcomes.is_empty())
+            .map(|r| r.pmid.clone())
+            .collect();
+        out.push(NotableFinding {
+            text: format!(
+                "The extractor could not match {} and {} to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
+                plural(outcomes as usize, "outcome", "outcomes"),
+                plural(numbers as usize, "number", "numbers")
+            ),
+            pmids,
+            spans: Vec::new(),
+        });
+    }
+    out
+}
+
 /// The skeptic's review as the page shows it.
-fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
+pub fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
     SkepticV3 {
         verdict: r.verdict.as_str().to_string(),
         must_mention: r.must_mention.clone(),
@@ -817,5 +975,103 @@ fn skeptic_summary(r: &SkepticReview) -> SkepticV3 {
                 note: o.note.clone(),
             })
             .collect(),
+        ma_notes: r
+            .ma_notes
+            .iter()
+            .map(|m| SkepticItem {
+                pmid: m.pmid.clone(),
+                text: m.note.clone(),
+                quote: None,
+            })
+            .collect(),
+        // The paths are the page's (the review's spans use them).
+        spans: r.spans.clone(),
+        leads: r
+            .leads
+            .iter()
+            .map(|l| SkepticLead {
+                pmid: l.pmid.clone(),
+                kind: l.kind.clone(),
+            })
+            .collect(),
+        dropped_unseen: r.dropped_unseen,
+        dropped_quotes: r.dropped_quotes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::extractor::EvidenceRow;
+    use crate::agent::skeptic::{MaNote, MissedRct, Overlap, Verdict};
+
+    fn row(pmid: &str, unverified: &[&str], numbers: u32) -> EvidenceRow {
+        serde_json::from_value(serde_json::json!({
+            "pmid": pmid, "text": "abstract", "design": "RCT", "n_randomised": null,
+            "n_analysed": null, "setting": "", "centres": "single", "country": "", "population": "",
+            "intervention": "", "comparator": "", "follow_up": "", "blinding": "",
+            "primary_endpoint": "", "powered_for_primary": null, "surgeon_experience": "",
+            "outcomes": [], "appraisal": {"bias": "", "power": "", "learning_curve": "", "applicability": ""},
+            "independence": {"trial_registration": null, "group_or_centre": "", "note": ""},
+            "unverified_outcomes": unverified, "outcomes_verified": 0,
+            "numbers_unverified": numbers, "corrections": 0
+        }))
+        .unwrap()
+    }
+
+    /// Stage 4 item 12: the code-built notable findings come from the
+    /// skeptic's overlaps, missed trials and meta-analysis notes (text
+    /// unchanged, its unverified numbers still marked) and the extractor's
+    /// unverified counts. No AI call; nothing when there is nothing.
+    #[test]
+    fn notable_findings_are_built_by_code_from_the_checks() {
+        let review = SkepticReview {
+            verdict: Verdict::HoldsWithCaveats,
+            must_mention: vec![],
+            contradicting: vec![],
+            missed_rcts: vec![MissedRct {
+                pmid: "333".into(),
+                why: "a 2026 trial".into(),
+            }],
+            guidelines: vec![],
+            overlaps: vec![Overlap {
+                pmids: vec!["111".into(), "222".into()],
+                note: "DIRECT and ROLAIS share one centre (Aabenraa).".into(),
+            }],
+            ma_notes: vec![MaNote {
+                pmid: "444".into(),
+                note: "Its 7-RCT pool counts an observational study.".into(),
+            }],
+            searches: vec![],
+            leads: vec![],
+            dropped_unseen: 0,
+            dropped_quotes: 0,
+            numbers_flagged: 1,
+            spans: vec![Span::new("missed_rcts.0.text", 2, 6)],
+        };
+        let x = Extraction {
+            rows: vec![row("111", &["Recurrence"], 3), row("222", &[], 0)],
+            ..Extraction::default()
+        };
+        let items = notable_code(Some(&review), &x);
+        let texts: Vec<&str> = items.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "Not independent evidence (the skeptic): DIRECT and ROLAIS share one centre (Aabenraa).",
+                "A randomised trial the researcher's search missed (the skeptic): a 2026 trial",
+                "What a meta-analysis pooled (the skeptic): Its 7-RCT pool counts an observational study.",
+                "The extractor could not match 1 outcome and 3 numbers to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.",
+            ]
+        );
+        assert_eq!(items[0].pmids, ["111", "222"]);
+        assert_eq!(items[3].pmids, ["111"]);
+        // The skeptic's mark moves with its text.
+        let s = &items[1].spans[0];
+        assert_eq!(
+            &items[1].text[s.start as usize..(s.start + s.len) as usize],
+            "2026"
+        );
+        assert!(notable_code(None, &Extraction::default()).is_empty());
     }
 }

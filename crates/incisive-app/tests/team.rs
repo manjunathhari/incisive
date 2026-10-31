@@ -696,7 +696,7 @@ async fn quick_team_run_end_to_end_through_the_worker() {
     assert_eq!(writer.len(), 1);
     let wr = writer[0];
     assert_eq!(wr.max_tokens, DepthSettings::QUICK.writer_max_tokens);
-    assert_eq!(wr.max_tokens, 16_000);
+    assert_eq!(wr.max_tokens, 20_000);
     assert!(wr.tools.is_empty());
     let oc = wr.output_config.as_ref().unwrap();
     assert!(oc.format.is_some());
@@ -705,7 +705,8 @@ async fn quick_team_run_end_to_end_through_the_worker() {
         "the writer runs at the model's default effort"
     );
     let sys = wr.system.as_deref().unwrap();
-    assert!(sys.contains("Bengaluru") && sys.contains("Indian cost context"));
+    // Stage 4 item 9: written for any clinician; India context kept.
+    assert!(!sys.contains("Bengaluru") && sys.contains("Indian cost context"));
     let text = request_user_text(wr);
     assert!(text.contains(&format!("<source id=\"pmid-{SEEN_A}\">")));
     assert!(text.contains(&format!("<source id=\"pmid-{SEEN_B}\">")));
@@ -799,7 +800,7 @@ async fn the_engine_switch_picks_the_pipeline_and_the_limits() {
 
 /// Stage 3 §0: `FULL_ENGINE` picks Full's pipeline and limits on its own.
 /// `team`: ₹300, 10 minutes (hard stop 660 s; owner ruling R-S3a),
-/// research wrapping up at 600 − 150 (writer) − 180 (review) s. `classic`: exactly Phase 2
+/// research wrapping up at 600 − 180 (writer, Stage 4) − 180 (review) s. `classic`: exactly Phase 2
 /// Focused (₹40, 300 s, wrap-up at 60%, the Frame step first). Quick is
 /// untouched by it.
 #[tokio::test]
@@ -815,7 +816,7 @@ async fn the_full_engine_switch_picks_the_pipeline_and_the_limits() {
     }
     use incisive_app::runs::Engine;
     for (engine, limit, hard_stop_s, wrap_up_s) in [
-        (Engine::Team, 30000, 600 + 60, 600 - 150 - 180),
+        (Engine::Team, 30000, 600 + 60, 600 - 180 - 180),
         (Engine::Classic, 4000, 300 + 60, 180),
     ] {
         let mut st = app_state(
@@ -1261,7 +1262,7 @@ fn truncated(llm: ScriptedLlm, key: &str) -> ScriptedLlm {
     llm.when(key).reply_stop(
         "{\"bottom_line\": {\"text\": \"cut",
         StopReason::MaxTokens,
-        usage(3000, 16000),
+        usage(3000, 20000),
     )
 }
 
@@ -1346,7 +1347,7 @@ async fn a_truncated_writer_is_retried_once_at_low_effort() {
         Some(Effort::Low),
         "the retry runs at low effort"
     );
-    assert_eq!(w[1].max_tokens, 16_000);
+    assert_eq!(w[1].max_tokens, 20_000);
 }
 
 /// Finding 1: truncated twice, the run ends partial with its references,
@@ -1379,7 +1380,7 @@ async fn a_writer_truncated_twice_ends_partial_with_the_references() {
     assert_eq!(writer_requests(&llm).len(), 2);
 }
 
-/// Finding 1: at real prices a truncated writer (charged its full 16,000
+/// Finding 1: at real prices a truncated writer (charged its full 20,000
 /// output tokens) is retried only when the budget allows; otherwise the
 /// run ends partial `writer_truncated`. Never failed, never over the limit.
 #[tokio::test]
@@ -1387,7 +1388,8 @@ async fn a_truncated_writer_retries_only_when_the_budget_allows() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let (mut once, mut twice) = (false, false);
-    for limit in (6000..=16000).step_by(1000) {
+    // From just above the Quick minimum (₹65.77 with a 20,000-token writer).
+    for limit in (7000..=17000).step_by(1000) {
         let mut script = ScriptedLlm::new();
         script = turn(
             script,
@@ -1404,7 +1406,7 @@ async fn a_truncated_writer_retries_only_when_the_budget_allows() {
             script = script.when(STUDIES_HEADING).reply_stop(
                 "{",
                 StopReason::MaxTokens,
-                usage(2500, 16000),
+                usage(2500, 20000),
             );
         }
         let llm = Arc::new(script);
@@ -1496,8 +1498,10 @@ async fn a_rate_limited_researcher_final_call_ends_partial() {
     assert!(writer_requests(&llm).is_empty());
 }
 
-/// Finding 2: with less than WRITER_MIN_TIME left before the hard stop, the writer
-/// is not started; the run ends partial with the references.
+/// Finding 2: with less than the writer's minimum time (Quick 150 s) left
+/// before the hard stop, the writer is not started; the run ends partial
+/// with the references. Stage 4: 140 s left is now too little (it was
+/// enough at 120 s).
 #[tokio::test]
 async fn too_little_time_left_skips_the_writer() {
     let Some(pool) = pool().await else { return };
@@ -1513,7 +1517,7 @@ async fn too_little_time_left_skips_the_writer() {
     let budget = Arc::new(
         RunBudget::new(run, uid, 6000, Instant::now(), prices(), 88.0)
             .with_time_limit(settings.agent_time_limit_s)
-            .aged_for_test(hard - Duration::from_secs(50)),
+            .aged_for_test(hard - Duration::from_secs(140)),
     );
     let ctx = RunContext {
         state: app_state(pool.clone(), lit.clone()),

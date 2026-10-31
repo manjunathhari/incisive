@@ -394,26 +394,33 @@ so call independent searches together).
 METHOD:
 1. Search iteratively from several angles: randomised controlled trials of the intervention against its comparator; \
 named trials (search the acronyms you find); systematic reviews and meta-analyses, preferring those that pool RCTs only; \
-recent RCTs (the last two or three years); and guidelines when the question is about practice recommendations.
+recent RCTs (the last two or three years); and guidelines when the question is about practice recommendations. \
+For guidelines, search publication types and title words, plurals and variants included, e.g. topic terms AND \
+(\"practice guideline\"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti]).
 2. Write real search queries: PubMed syntax ([tiab], [pt], [dp], AND/OR/NOT, quoted phrases) or Europe PMC syntax. \
 Never paste the question's wording into a query.
 3. Use find_related on the key trials to catch anything the searches missed.
 {reading}5. Stop when new searches stop turning up new relevant studies, or when your turns run out.
 
-SELECTION: 6 to 10 studies that matter most: every relevant RCT (not protocols), plus the 2 to 4 best or most recent \
+SELECTION: 6 to {max} studies that matter most: every relevant RCT (not protocols), plus the 2 to 4 best or most recent \
 meta-analyses. Add observational studies only when no RCT covers an outcome the question asks about. Fewer is fine when \
 less exists; never pad the list.
+When you select a follow-up or secondary report of a trial (longer follow-up, a subgroup or cost analysis), also find and \
+select the trial's primary report if a search can find it (search the trial name, registration number or first author); \
+it counts toward the {max}, so leave out a less important study instead.
 
 Record any study that may CONTRADICT the majority view, and why.
 
-When you have finished, end your turn with a short summary of what you found. You will then be asked for the study list."
+When you have finished, end your turn with a short summary of what you found. You will then be asked for the study list.",
+        max = MAX_SELECTED
     )
 }
 
 const FINAL_SYSTEM: &str = "You are the RESEARCHER on an evidence team. Report the result of your research as JSON matching the schema. \
 Use only PMIDs that appear in the tool results of the transcript; never add a study from memory. \
 selected: at most 10 studies, the ones that matter most (every relevant RCT, plus the 2 to 4 best or most recent meta-analyses; \
-observational studies only when no RCT covers an outcome); design is RCT, SR_MA (systematic review or meta-analysis) or other; \
+observational studies only when no RCT covers an outcome; with a follow-up or secondary report, its trial's primary report \
+when your searches found it); design is RCT, SR_MA (systematic review or meta-analysis) or other; \
 why is one line. searches: each search you ran with its database and hit count. considered_not_selected: notable studies you \
 left out, with the reason. possible_contradictions: studies that may contradict the majority view, with a one-line note.";
 
@@ -753,5 +760,41 @@ mod tests {
         for word in ["hernia", "inguinal", "TAPP", "robotic"] {
             assert!(!p.to_lowercase().contains(&word.to_lowercase()), "{word}");
         }
+    }
+
+    /// Stage 4 items 1 and 2: the guideline search catches "Practice
+    /// Guideline" publication types and plural titles (the achalasia run
+    /// missed "ACG Clinical Guidelines: …", PMID 32773454, with
+    /// `guideline[pt] OR guideline[ti]`); a follow-up report brings its
+    /// primary report.
+    #[test]
+    fn the_prompt_asks_for_guideline_variants_and_primary_reports() {
+        for p in [system_prompt(8, false), system_prompt(15, true)] {
+            assert!(
+                p.contains(
+                    r#"("practice guideline"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])"#
+                ),
+                "{p}"
+            );
+            assert!(p.contains("also find and select the trial's primary report"));
+            assert!(p.contains(&format!("6 to {MAX_SELECTED} studies")));
+        }
+        assert!(FINAL_SYSTEM.contains("its trial's primary report"));
+    }
+
+    /// Stage 4 review 9: the guideline example the prompts and tool
+    /// descriptions give is a query the PubMed tool accepts.
+    #[test]
+    fn the_guideline_query_example_passes_validate_query() {
+        let example = r#"("practice guideline"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])"#;
+        for p in [
+            system_prompt(8, true),
+            crate::agent::skeptic::system_prompt(8),
+        ] {
+            assert!(p.contains(example), "{p}");
+        }
+        assert_eq!(crate::agent::search::validate_query(example), Ok(()));
+        let full = format!("achalasia[tiab] AND {example}");
+        assert_eq!(crate::agent::search::validate_query(&full), Ok(()));
     }
 }

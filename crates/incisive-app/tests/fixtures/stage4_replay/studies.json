@@ -1,0 +1,55 @@
+{
+  "searches": [
+    {"query": "robotic inguinal hernia repair laparoscopic randomized controlled trial", "hits": 24},
+    {"query": "(robotic[Title] OR robot-assisted[Title]) AND inguinal hernia[Title] AND (randomized OR randomised)", "hits": 35},
+    {"query": "robotic inguinal hernia (TEP OR totally extraperitoneal OR eTEP) laparoscopic randomized", "hits": 5},
+    {"query": "robotic inguinal hernia repair cost analysis laparoscopic", "hits": 48},
+    {"query": "robotic laparoscopic inguinal hernia randomized clinical trial [2024-2026]", "hits": 15},
+    {"query": "(robot*[Title] OR \"da Vinci\"[Title] OR Hugo[Title] OR Versius[Title]) AND (groin[Title] OR inguinal[Title]) AND Randomized Controlled Trial[Publication Type]", "hits": 10},
+    {"query": "robotic inguinal hernia randomized cost hospital costs operating room trial", "hits": 0},
+    {"query": "robotic versus laparoscopic inguinal hernia repair [2025/06-2026/12, sorted by date]", "hits": 31},
+    {"query": "robotic inguinal hernia (chronic pain OR quality of life OR recurrence) randomized long-term follow-up", "hits": 4},
+    {"query": "find_related_articles on 32186683 (RIVAL), 41511872 (ROGER), 40277023 (ROLAIS); top ~30 screened", "hits": 500}
+  ],
+  "selected": [
+    {"pmid": "32186683", "pmcid": "PMC7081145", "doi": "10.1001/jamasurg.2020.0034", "title": "Robotic Inguinal vs Transabdominal Laparoscopic Inguinal Hernia Repair: The RIVAL Randomized Clinical Trial.", "year": 2020, "journal": "JAMA Surg", "design": "RCT", "why": "First multicentre RCT (n=102, rTAPP vs lTAPP): no difference in pain/QoL/wound events at 30 d; longer OR time (75.5 vs 40.5 min), higher cost ($3258 vs $1421), more surgeon frustration."},
+    {"pmid": "35578051", "pmcid": null, "doi": "10.1007/s00464-022-09320-9", "title": "Laparoscopic versus robotic inguinal hernia repair: 1- and 2-year outcomes from the RIVAL trial.", "year": 2022, "journal": "Surg Endosc", "design": "RCT", "why": "Only RCT long-term data: pain, QoL (SF-36), physical activity and recurrence (1 vs 1) similar at 1-2 years; ~25% loss to follow-up."},
+    {"pmid": "41511872", "pmcid": "PMC12785885", "doi": "10.1093/bjs/znaf283", "title": "Robotic versus laparoscopic minimally invasive inguinal hernia repair: randomized clinical trial (the ROGER trial).", "year": 2025, "journal": "Br J Surg", "design": "RCT", "why": "Largest blinded RCT vs TEP (n=182, rTAPP vs lTEP): no difference in 24-h pain or complications; rTAPP 16 min longer; lower surgeon workload (NASA-TLX)."},
+    {"pmid": "40632168", "pmcid": "PMC12241199", "doi": "10.1007/s10029-025-03402-y", "title": "Shorter operative times following robotic-assisted transabdominal preperitoneal inguinal hernia repair (TAPP) compared to laparoscopic TAPP: the Danish Inguinal Randomized Controlled Trial (DIRECT).", "year": 2025, "journal": "Hernia", "design": "RCT", "why": "RCT (n=138) by experienced surgeons: rTAPP had SHORTER operative time than lTAPP despite ~5 min docking; key for operative-time question."},
+    {"pmid": "40277023", "pmcid": null, "doi": "10.1093/bjs/znaf074", "title": "Inflammatory response and short-term outcomes after laparoscopic versus robotic transabdominal preperitoneal inguinal hernia repair: randomized clinical trial (ROLAIS).", "year": 2025, "journal": "Br J Surg", "design": "RCT", "why": "Open-label RCT (n=139): rTAPP lower CRP/IL-6, shorter OR time (-13.4 min), fewer complications (23% vs 41.5%), more same-day discharge; no chronic pain/recurrence difference."},
+    {"pmid": "40450465", "pmcid": null, "doi": "10.1016/j.amjsurg.2025.116429", "title": "Robotic assisted surgery reduces ergonomic risk during minimally invasive inguinal hernia repair: the VOLTAIRE randomised controlled trial.", "year": 2025, "journal": "Am J Surg", "design": "RCT", "why": "RCT (n=59, open-console robot): better surgeon ergonomics, more patients back to normal activity at 14 d (39% vs 5%), but OR time doubled (65 vs 32 min)."},
+    {"pmid": "42527734", "pmcid": null, "doi": "10.1007/s00464-026-13240-3", "title": "Laparoscopic versus robotic transabdominal preperitoneal inguinal hernia repair: a randomized controlled trial.", "year": 2026, "journal": "Surg Endosc", "design": "RCT", "why": "Newest RCT, Indian (AIIMS) setting (n=101, 2:1, double-blind): no difference in early pain, OR time, return to activity or 4-week complications; questions value in low-resource settings."},
+    {"pmid": "37580577", "pmcid": null, "doi": "10.1007/s00464-023-10331-3", "title": "Stray energy injury during robotic versus laparoscopic inguinal hernia repair: a randomized controlled trial.", "year": 2023, "journal": "Surg Endosc", "design": "RCT", "why": "Small VA RCT of rTAPP vs lTAPP on a safety mechanism: port-site stray thermal injury similar (60% vs 49%); included for completeness of RCT set."},
+    {"pmid": "42625069", "pmcid": "PMC13582080", "doi": "10.1007/s00464-026-13253-y", "title": "Robotic versus laparoscopic inguinal hernia repair: a systematic review and meta-analysis of randomized controlled trials.", "year": 2026, "journal": "Surg Endosc", "design": "SR/MA", "why": "Most comprehensive RCT-only MA (7 RCTs, 9 reports, 691 pts, TAPP+TEP comparators, GRADE): no significant difference in any outcome incl. complications, recurrence, same-day discharge, QoL, cost; low/very-low certainty."},
+    {"pmid": "42927985", "pmcid": null, "doi": "10.1177/10926429261501679", "title": "Robotic Versus Laparoscopic Transabdominal Preperitoneal Inguinal Hernia Repair: An Updated Systematic Review and Meta-Analysis of Randomized Controlled Trials.", "year": 2026, "journal": "J Laparoendosc Adv Surg Tech A", "design": "SR/MA", "why": "Most recent RCT-only MA (search to Aug 2026; 4 rTAPP vs lTAPP RCTs, 401 pts, RoB2/GRADE): no difference in complications, seroma, hematoma, SSI; OR time +18.5 min NS with I2 98%."}
+  ],
+  "considered_not_selected": [
+    {"pmid": "41384988", "reason": "RCT-only MA rTAPP vs lTAPP (3 RCTs, 300 pts); superseded by 42625069 and 42927985."},
+    {"pmid": "41182506", "reason": "RCT-only MA (3 RCTs, 379 pts, GRADE); superseded; notable that sensitivity analysis favoured rTAPP on OR time (-15 min)."},
+    {"pmid": "42842114", "reason": "RCT-only MA (4 RCTs, 482 pts) focused on surgeon ergonomics/task load; overlaps 42625069. Useful backup for ergonomics."},
+    {"pmid": "41941030", "reason": "Mixed RCT+cohort MA (14 studies, 5520 pts): OR time +10.9 min, costs consistently higher, chronic pain NS; not RCT-only but best pooled cost statement - backup for cost question."},
+    {"pmid": "42541618", "reason": "Mixed RCT+observational MA (78,940 pts); recurrence and OR-time estimates driven by observational data."},
+    {"pmid": "41452528", "reason": "MA rTAPP vs lTEP (6 studies incl. observational) with TSA; mixed designs."},
+    {"pmid": "42295453", "reason": "Bayesian NMA of 29 RCTs across 5 techniques; rTAPP node sparse; indirect comparisons."},
+    {"pmid": "41258567", "reason": "Markov cost-utility model (Italian NHS): ICER EUR 44,480/QALY, <25% probability cost-effective at EUR 30k; model-based, not trial; backup for cost question."},
+    {"pmid": "42130225", "reason": "Prospective non-randomised Hugo RAS bilateral cost study (n=64): EUR 4366 vs 1691, ICER EUR 29,488/QALY; observational."},
+    {"pmid": "38503978", "reason": "Retrospective Spanish cost analysis (n=98): robotic procedural cost EUR 2319 vs 357; observational."},
+    {"pmid": "40259091", "reason": "Retrospective US single-centre cost/time study; robotic costlier for unilateral, faster for bilateral; observational."},
+    {"pmid": "42426402", "reason": "Population-based NY/FL registry (265,955 pts) on recurrence requiring reoperation; observational."},
+    {"pmid": "39118135", "reason": "ROLAIS trial protocol (results in 40277023)."},
+    {"pmid": "35794884", "reason": "Trial protocol (robotic vs conventional MIS IHR); results appear to be ROGER 41511872."},
+    {"pmid": "42853338", "reason": "Fragility-index review of IHR RCTs; all eligible comparisons lap vs open, none robotic."},
+    {"pmid": "38408054", "reason": "Older 2024 mixed-design MA (PLoS One); superseded."},
+    {"pmid": "38910645", "reason": "Older 2024 Cureus MA; superseded."},
+    {"pmid": "33475236", "reason": "2021 MA largely of observational data; superseded."},
+    {"pmid": "38285028", "reason": "RCT of regional blocks within robotic repair; not robotic vs laparoscopic."},
+    {"pmid": "40960714", "reason": "Multicentre propensity-weighted study of laparoscopic vs robotic TEP; observational (no TEP-vs-rTEP RCT found)."}
+  ],
+  "possible_contradictions": [
+    {"pmid": "40277023", "note": "ROLAIS found robotic TAPP BETTER: fewer complications (23% vs 41.5%), fewer haematomas, shorter OR time, more same-day discharge, lower inflammatory markers. Open-label, single centre; lap arm complication rate unusually high."},
+    {"pmid": "40632168", "note": "DIRECT found robotic TAPP FASTER than laparoscopic TAPP, opposite to RIVAL, ROGER and VOLTAIRE, which all found robotic longer. Experienced surgeons; operative time drives the high heterogeneity (I2 ~98%) in the MAs."},
+    {"pmid": "40450465", "note": "VOLTAIRE: more robotic patients back to normal activity at 14 d (39% vs 5%), a secondary outcome in a small RCT; the AIIMS RCT 42527734 found no difference in return to activity."},
+    {"pmid": "42541618", "note": "Mixed-design MA reports lower recurrence with robotic repair (RR 0.32), unlike RCT-only MAs (RD 0.00); driven by observational cohorts, low certainty."},
+    {"pmid": "41452528", "note": "Mixed-design MA rTAPP vs lTEP with TSA claims robust reduction in postoperative pain (MD -1.59), whereas the ROGER RCT (same comparison) found no pain difference."}
+  ]
+}
