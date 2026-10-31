@@ -39,8 +39,8 @@ use super::answer_v3::{
     WrittenAnswer, citation_ranges, clean_citations, marked_runs, split_citations, text_fields,
 };
 use super::extractor::{
-    Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind,
-    all_allowed_unsigned, quote_values, written_numbers,
+    Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind, all_allowed,
+    has_own_sign, quote_values, written_numbers, written_traced,
 };
 use super::llm::{
     Effort, OutputSchema, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
@@ -1830,13 +1830,16 @@ pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> 
 /// each structured number (value and CI bounds) and trial n, as spans of
 /// the stored text (a structured one marks its whole entry). The text is
 /// never changed. Returns the spans and how many numbers were checked. The
-/// tokeniser and matching are the extractor's (ranges, COVID-19, signs);
-/// since Stage 4b a sign difference still matches ("13.4 min shorter"
-/// traces to a quote's "−13.4").
+/// tokeniser and matching are the extractor's (ranges, COVID-19, signs).
+/// `loose_sign` (Full, Stage 4b; review S1): a number written in prose with
+/// no sign of its own also traces to its source's magnitude ("13.4 min
+/// shorter" for "−13.4"); a signed one, a structured number and n must match
+/// exactly. Quick passes `false`: its check is exactly as before.
 pub fn trace_numbers(
     a: &WrittenAnswer,
     allowed: &[f64],
     known: impl Fn(&str) -> bool,
+    loose_sign: bool,
 ) -> (Vec<Span>, u32) {
     let mut spans = Vec::new();
     let mut checked = 0u32;
@@ -1847,7 +1850,7 @@ pub fn trace_numbers(
                 continue;
             }
             checked += 1;
-            if !all_allowed_unsigned(&v, allowed) {
+            if !written_traced(&v, has_own_sign(text, s), allowed, loose_sign) {
                 spans.push(Span::new(field.clone(), s, e));
             }
         }
@@ -1859,7 +1862,7 @@ pub fn trace_numbers(
                 .into_iter()
                 .flatten()
                 .collect();
-            if !all_allowed_unsigned(&v, allowed) {
+            if !all_allowed(&v, allowed) {
                 spans.push(Span::new(format!("outcomes.{i}.numbers.{j}"), 0, 0));
             }
         }
@@ -1867,7 +1870,7 @@ pub fn trace_numbers(
     for (i, s) in a.studies.iter().enumerate() {
         if let Some(n) = s.n {
             checked += 1;
-            if !all_allowed_unsigned(&[n as f64], allowed) {
+            if !all_allowed(&[n as f64], allowed) {
                 spans.push(Span::new(format!("studies.{i}.n"), 0, 0));
             }
         }
@@ -3060,7 +3063,7 @@ mod tests {
             "Pain 2.1 vs 2.4 (95% CI 0.48-1.13), COVID-19, 4 vs 5 in 2019\u{2013}2021; n = 100.",
         );
         let known = |p: &str| p == "11111111" || p == "22222222";
-        let (spans, checked) = trace_numbers(&a, &allowed, known);
+        let (spans, checked) = trace_numbers(&a, &allowed, known, false);
         assert_eq!(a, before, "the text is never changed");
         assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["1.25", "7%"]);
         assert!(
@@ -3082,35 +3085,51 @@ mod tests {
         ok.outcomes[0].numbers.truncate(1);
         ok.studies[1].n = None;
         ok.guidelines.clear();
-        let (spans, _) = trace_numbers(&ok, &allowed, known);
+        let (spans, _) = trace_numbers(&ok, &allowed, known, false);
         assert!(spans.is_empty(), "{spans:?}");
     }
 
-    /// Stage 4b item 1: a sign difference still traces. The 31 Oct run 2
-    /// marked "13.4" although the quote has "−13.4" (U+2212); "13.4 min
-    /// shorter", a hyphen-minus and a structured −13.4 all trace to it.
+    /// Stage 4b item 1 and review S1: in Full, a number written with no
+    /// sign of its own traces to its source's magnitude (the 31 Oct run 2
+    /// marked "13.4" although the quote has "−13.4", U+2212); a number with
+    /// its own sign must match exactly ("+2.3" or "−2.3" against a source
+    /// 2.3 or −2.3 is a direction, and stays marked), and so must a
+    /// structured number. Quick keeps the exact check.
     #[test]
-    fn a_sign_difference_still_traces() {
+    fn a_sign_difference_traces_only_without_a_sign_of_its_own() {
         let mut a = answer();
         a.bottom_line.text = "Operative time was 13.4 min shorter [11111111].".into();
-        a.outcomes[0].effect_text = "-13.4 min and \u{2212}2.3 points [11111111]".into();
+        a.outcomes[0].effect_text = "-13.4 min; pain \u{2212}2.3 and +0.05 [11111111]".into();
         a.outcomes[0].numbers.truncate(1);
         a.outcomes[0].numbers[0].value = -13.4;
         a.studies[0].n = None;
         a.studies[1].n = None;
-        let allowed = quote_values("Mean difference \u{2212}13.4 min (p < 0.001); pain 2.3.");
+        let allowed = quote_values(
+            "Mean difference \u{2212}13.4 min (p < 0.001); pain 2.3; RD \u{2212}0.05.",
+        );
         assert!(allowed.contains(&-13.4), "U+2212 is a minus: {allowed:?}");
         let known = |p: &str| p == "11111111" || p == "22222222";
-        let (spans, _) = trace_numbers(&a, &allowed, known);
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
         assert!(
-            !spans.iter().any(|s| s.field == "bottom_line.text"
-                || s.field == "outcomes.0.effect_text"
-                || s.field == "outcomes.0.numbers.0"),
+            traced_marks(&a, &spans, "bottom_line.text").is_empty(),
             "{spans:?}"
         );
-        // A different magnitude is still marked.
+        assert_eq!(
+            traced_marks(&a, &spans, "outcomes.0.effect_text"),
+            ["\u{2212}2.3", "0.05"],
+            "own signs that contradict the source stay marked"
+        );
+        assert!(!spans.iter().any(|s| s.field == "outcomes.0.numbers.0"));
+        // A structured number with the other sign is marked.
+        a.outcomes[0].numbers[0].value = 13.4;
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
+        assert!(spans.contains(&Span::new("outcomes.0.numbers.0", 0, 0)));
+        // Quick: exact, as before Stage 4b ("13.4" against "−13.4" marked).
+        let (spans, _) = trace_numbers(&a, &allowed, known, false);
+        assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["13.4"]);
+        // A different magnitude is always marked.
         a.bottom_line.text = "Operative time was 13.5 min shorter [11111111].".into();
-        let (spans, _) = trace_numbers(&a, &allowed, known);
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
         assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["13.5"]);
     }
 

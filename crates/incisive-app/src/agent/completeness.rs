@@ -43,7 +43,7 @@ use super::answer_v3::{
     AddedConflict, AddedOutcome, CompletenessV3, CoverageGap, CoverageV3, NotAdded, Outcome,
     OutcomeAddition, Span, citation_ranges, clean_citations,
 };
-use super::extractor::{all_allowed_unsigned, written_numbers};
+use super::extractor::{has_own_sign, written_numbers, written_traced};
 use super::llm::{
     Effort, OutputSchema, StepError, hold_estimate, neutralise_source_tags, read_structured,
     wrap_source,
@@ -476,7 +476,7 @@ fn trace(c: &CompletenessV3, allowed: &[f64], known: impl Fn(&str) -> bool) -> V
             if cites.iter().any(|(a, b)| s >= *a && e <= *b) {
                 continue;
             }
-            if !all_allowed_unsigned(&v, allowed) {
+            if !written_traced(&v, has_own_sign(t, s), allowed, true) {
                 spans.push(Span::new(field.clone(), s, e));
             }
         }
@@ -503,7 +503,37 @@ pub async fn review(
     if left < MIN_TIME {
         return skipped("time");
     }
-    review_waiting(ctx, llm, user, cx, left.saturating_sub(MARGIN)).await
+    let mut wait = left.saturating_sub(MARGIN);
+    #[cfg(feature = "test-util")]
+    if let Some(cap) = test_wait_cap(ctx.run_id) {
+        wait = wait.min(cap);
+    }
+    review_waiting(ctx, llm, user, cx, wait).await
+}
+
+/// Tests only (review S3): a shorter wait for one run's review, so a full
+/// run's timeout path can be tested without waiting minutes. Keyed by run,
+/// so other tests are unaffected.
+#[cfg(feature = "test-util")]
+static TEST_WAIT_CAPS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<uuid::Uuid, Duration>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(feature = "test-util")]
+pub fn cap_wait_for_test(run: uuid::Uuid, wait: Duration) {
+    TEST_WAIT_CAPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run, wait);
+}
+
+#[cfg(feature = "test-util")]
+fn test_wait_cap(run: uuid::Uuid) -> Option<Duration> {
+    TEST_WAIT_CAPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&run)
+        .copied()
 }
 
 /// [`review`] once its time gate passed, waiting at most `wait` for the

@@ -37,33 +37,39 @@ use super::answer_v3::{
     CoverageCounts, CoverageGap, CoverageV3, GapKind, MAX_STORED_GAPS, Segment, WrittenAnswer,
     citation_ranges, split_citations, text_fields,
 };
-use super::extractor::{EvidenceRow, RowNumber, same_magnitude, written_numbers};
+use super::extractor::{
+    EvidenceRow, RowNumber, all_allowed, has_own_sign, same_magnitude, written_numbers,
+};
 use super::skeptic::SkepticReview;
 
 /// Characters kept of a gap's text.
 const MAX_GAP_TEXT: usize = 600;
 
-/// Every number the answer writes: the numbers in its text fields outside
-/// citation markers, and each structured number's value and CI bounds.
-pub fn answer_numbers(w: &WrittenAnswer, known: impl Fn(&str) -> bool) -> Vec<f64> {
+/// Every number the answer writes, each with whether it may match a source
+/// up to its sign (review S1): the numbers in its text fields outside
+/// citation markers (sign-free only when written with no sign of their
+/// own), and each structured number's value and CI bounds and each trial n
+/// (exact).
+pub fn answer_numbers(w: &WrittenAnswer, known: impl Fn(&str) -> bool) -> Vec<(f64, bool)> {
     let mut out = Vec::new();
     for (_, text) in text_fields(w) {
         let cites = citation_ranges(text, &known);
         for (s, e, v) in written_numbers(text) {
             if !cites.iter().any(|(a, b)| s >= *a && e <= *b) {
-                out.extend(v);
+                let free = !has_own_sign(text, s);
+                out.extend(v.into_iter().map(|x| (x, free)));
             }
         }
     }
     for o in &w.outcomes {
         for n in &o.numbers {
-            out.push(n.value);
-            out.extend(n.ci_low);
-            out.extend(n.ci_high);
+            out.push((n.value, false));
+            out.extend(n.ci_low.map(|x| (x, false)));
+            out.extend(n.ci_high.map(|x| (x, false)));
         }
     }
     for s in &w.studies {
-        out.extend(s.n.map(|n| n as f64));
+        out.extend(s.n.map(|n| (n as f64, false)));
     }
     out
 }
@@ -176,7 +182,10 @@ pub fn check(
     known: impl Fn(&str) -> bool,
 ) -> CoverageV3 {
     let have = answer_numbers(w, &known);
-    let covered = |v: f64| have.iter().any(|a| same_magnitude(*a, v));
+    let covered = |v: f64| {
+        have.iter()
+            .any(|(a, free)| all_allowed(&[v], &[*a]) || (*free && same_magnitude(*a, v)))
+    };
     let rows_text: Vec<String> = w
         .outcomes
         .iter()
@@ -462,7 +471,33 @@ mod tests {
                 .starts_with("Coverage: 1 verified number and 1 outcome not in the draft")
         );
         // U+2212 and the hyphen-minus are one sign.
-        assert!(answer_numbers(&w, known).contains(&-2.3));
+        assert!(answer_numbers(&w, known).contains(&(-2.3, false)));
+        // Review S1: a number with its own sign covers only the same signed
+        // value; a structured number covers only its exact value.
+        let rows = vec![row(
+            "11111111",
+            vec![vo("Risk", vec![rn("RD", -0.05), rn("MD", -7.5)])],
+        )];
+        let w = answer(
+            vec![out(
+                "Risk",
+                "RD +0.05 [11111111]",
+                vec![Number {
+                    label: "MD".into(),
+                    value: 7.5,
+                    unit: None,
+                    arm: None,
+                    ci_low: None,
+                    ci_high: None,
+                    p: None,
+                    pmid: "11111111".into(),
+                }],
+                &["11111111"],
+            )],
+            "x",
+        );
+        let c = check(&w, &rows, |_| false, None, known);
+        assert_eq!(c.counts.numbers_missing, 2, "{:?}", c.gaps);
     }
 
     /// An outcome with no number is covered by its name's words in an

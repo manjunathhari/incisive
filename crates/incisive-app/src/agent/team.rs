@@ -540,7 +540,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             // what the writer was given.
             let allowed = writer_v3::allowed_numbers(&studies, full.then_some(&full_input));
             let (untraced, checked) =
-                writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p));
+                // Review S1: Quick keeps the exact check; Full lets a number
+                // written with no sign of its own match up to the sign.
+                writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p), full);
             integrity.numbers_checked = checked;
             integrity.numbers_untraced = count(untraced.len());
             answer.untraced = untraced;
@@ -945,6 +947,21 @@ pub fn pick_design(pub_types: &[String]) -> &'static str {
     }
 }
 
+/// Review B1: kept free before the writer's start gate when the second wave
+/// is bounded.
+pub const WAVE2_MARGIN: Duration = Duration::from_secs(15);
+
+/// How long the second wave may run from `now`: until the writer's start
+/// gate (the hard stop less [`WRITER_MIN_TIME_FULL`]) less
+/// [`WAVE2_MARGIN`]; zero when that point has passed. With the defaults the
+/// wave ends by 465 s.
+pub fn wave2_time(ctx: &RunContext, now: Instant) -> Duration {
+    ctx.budget
+        .until_hard_stop(now)
+        .saturating_sub(WRITER_MIN_TIME_FULL)
+        .saturating_sub(WAVE2_MARGIN)
+}
+
 /// The note when the second wave did not extract the picks.
 fn picks_note(n: usize, why: &str) -> String {
     format!(
@@ -967,6 +984,10 @@ async fn second_wave(
     finishing: i64,
     out: &mut Reviewed,
 ) -> Result<(), Stop> {
+    // The writer and the completeness review keep their share; the second
+    // wave may use the rest. Released first, also when the skeptic failed
+    // (review minor 1).
+    ctx.budget.set_finish_reserve(finishing);
     let Some(r) = out.review.as_ref() else {
         return Ok(());
     };
@@ -976,9 +997,6 @@ async fn second_wave(
         .filter(|p| !studies.iter().any(|s| s.pmid == p.pmid))
         .map(|p| (p.pmid.clone(), p.why.clone()))
         .collect();
-    // The writer and the completeness review keep their share; the second
-    // wave may use the rest.
-    ctx.budget.set_finish_reserve(finishing);
     if picks.is_empty() {
         return Ok(());
     }
@@ -1024,12 +1042,25 @@ async fn second_wave(
             });
         }
     }
+    // Review S4: a pick the fetch did not return is said, never dropped
+    // silently.
+    let missing = picks.len() - refs.len();
+    if missing > 0 {
+        let line = format!(
+            "{} picked by the skeptic could not be fetched",
+            plural(missing, "study", "studies")
+        );
+        add_line(ctx, StepKind::Note, &line).await;
+        out.notes.push(format!("{line}."));
+    }
     if refs.is_empty() {
         return Ok(());
     }
     // Time and money for the second wave; otherwise the writer gets the
-    // abstracts, labelled.
+    // abstracts, labelled. Review B1: the whole wave must end before the
+    // writer's start gate, less a margin.
     let now = Instant::now();
+    let deadline = wave2_time(ctx, now);
     let per_study = extractor::typical_max_hold(
         &ctx.llm,
         &ctx.budget,
@@ -1043,7 +1074,7 @@ async fn second_wave(
         + i128::from(k.finish_reserve)
         + i128::from(k.in_flight_reserve)
         + i128::from(per_study);
-    let skip = if ctx.budget.until_wrap_up(now) < WAVE2_MIN_TIME {
+    let skip = if ctx.budget.until_wrap_up(now) < WAVE2_MIN_TIME || deadline.is_zero() {
         Some("time")
     } else if need > i128::from(ctx.budget.limit_paise()) || ctx.budget.should_wrap_up(now) {
         Some("cost limit")
@@ -1069,12 +1100,25 @@ async fn second_wave(
         ),
     )
     .await;
-    let texts = extractor::fetch_full_texts(ctx, &ctx.lit, &refs)
-        .await
-        .map_err(StepError::kind)?;
-    let x = extractor::extract_rows(ctx, &ctx.llm, &refs, &texts)
-        .await
-        .map_err(StepError::kind)?;
+    let wave = async {
+        let texts = extractor::fetch_full_texts(ctx, &ctx.lit, &refs).await?;
+        extractor::extract_rows(ctx, &ctx.llm, &refs, &texts).await
+    };
+    let x = match tokio::time::timeout(deadline, wave).await {
+        Ok(x) => x.map_err(StepError::kind)?,
+        Err(_) => {
+            // Calls already made are detached: their charges are still
+            // booked and their holds stay counted until they settle.
+            tracing::info!(run_id = %ctx.run_id, picks = refs.len(), "second extraction wave timed out");
+            let line = picks_note(refs.len(), "time");
+            add_line(ctx, StepKind::Note, &line).await;
+            out.notes.push(format!("{line}."));
+            out.extraction
+                .not_extracted
+                .extend(refs.iter().map(|r| r.pmid.clone()));
+            return Ok(());
+        }
+    };
     tracing::info!(
         run_id = %ctx.run_id, rows = x.rows.len(), stopped = x.stopped, failed = x.failed,
         "second extraction wave done"

@@ -4139,7 +4139,7 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
         "outcome_additions": [{"outcome": "Recurrence", "row": 0,
             "text": "Pooled RR 0.53 across 5 RCTs [41060645].", "pmids": ["41060645"]}],
         "added_conflicts": [{"text": "AIIMS found no pain benefit [39979619].", "pmids": ["39979619"], "unsourced": false}],
-        "not_added": [{"gap": "RULA score", "reason": "ergonomics not asked"}],
+        "not_added": [{"gap": "RULA score [41060645]", "reason": "ergonomics not asked [99999999]"}],
         "notes": ["Certainty Moderate rests on one trial."],
         "untraced": [{"field": "outcome_additions.0.text", "start": 22, "len": 1}],
         "removed_citations": 0
@@ -4164,7 +4164,17 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
     ));
     assert!(m.contains("Judged not relevant (1)"));
     assert!(m.contains("RULA score"));
-    assert!(m.contains("note from the completeness review"));
+    // Review minor 5: the notes carry the same label on the page and in
+    // Copy as text.
+    assert!(!m.contains("note from the completeness review"));
+    // Review minor 4: raw PMIDs in the not-relevant list become a reference
+    // link or a PubMed link, never a raw marker.
+    assert!(!m.contains("[99999999]") && !m.contains("[41060645]"));
+    assert!(m.contains("PMID 99999999"));
+    // Review minor 3: an added row cites its study once.
+    let row = &m[m.find("<tr class=\"added\">").unwrap()..];
+    let row = &row[..row.find("</tr>").unwrap()];
+    assert_eq!(row.matches("#ref-1").count(), 1, "{row}");
     // The untraced "5" is marked.
     assert!(m.contains("not traced"), "the mark");
     // Stored as given: the writer's answer is not touched.
@@ -4189,7 +4199,12 @@ async fn ssr_completeness_additions_are_labelled_and_escaped() {
         "{t}"
     );
     assert!(t.contains("COMPLETENESS REVIEW"));
-    assert!(t.contains("Judged not relevant: RULA score"));
+    assert!(
+        t.contains(
+            "Judged not relevant: RULA score [1] \u{2014} ergonomics not asked [PMID 99999999]"
+        ),
+        "{t}"
+    );
     assert!(t.contains("Note: Completeness: 4 gaps found"));
     // A skipped review says so, and adds nothing.
     let mut skipped = answer_v3_json(false);

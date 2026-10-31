@@ -393,6 +393,18 @@ pub struct EvidenceV3 {
     pub found_by_skeptic: bool,
 }
 
+impl EvidenceV3 {
+    /// Review S2: what the second wave did for a pick, for its label:
+    /// "extracted in a second wave" only when it has an extraction row.
+    pub fn second_wave(&self) -> &'static str {
+        if self.text == "not extracted" {
+            "not extracted in the second wave; abstract only"
+        } else {
+            "extracted in a second wave"
+        }
+    }
+}
+
 /// The label of a study the skeptic picked for extraction.
 pub const FOUND_BY_SKEPTIC: &str = "found by the skeptic";
 
@@ -1475,9 +1487,7 @@ impl AnswerV3 {
                     }
                     if let Some(e) = self.evidence.iter().find(|e| e.pmid == s.pmid) {
                         if e.found_by_skeptic {
-                            o.push_str(&format!(
-                                "  ({FOUND_BY_SKEPTIC}; extracted in a second wave)\n"
-                            ));
+                            o.push_str(&format!("  ({FOUND_BY_SKEPTIC}; {})\n", e.second_wave()));
                         }
                         if e.funding_checked {
                             let f = e.funding.as_deref().map_or_else(
@@ -1701,7 +1711,8 @@ impl AnswerV3 {
             for n in &c.not_added {
                 o.push_str(&format!(
                     "- Judged not relevant: {} \u{2014} {}\n",
-                    n.gap, n.reason
+                    cited_or_pmid(&n.gap, &refs),
+                    cited_or_pmid(&n.reason, &refs)
                 ));
             }
         }
@@ -1746,6 +1757,26 @@ impl AnswerV3 {
         }
         o
     }
+}
+
+/// Review minor 4: `text` with each citation marker as reference numbers
+/// ("[1]"), or "PMID 12345678" for a study with no reference: no PMID is
+/// dropped or left as a raw marker.
+pub fn cited_or_pmid(text: &str, refs: &HashMap<String, u16>) -> String {
+    let mut out = String::new();
+    for seg in split_citations(text, |p| refs.contains_key(p)) {
+        match seg {
+            Segment::Text(t) => out.push_str(&t),
+            Segment::Cite(ids) => {
+                let parts: Vec<String> = ids
+                    .iter()
+                    .map(|p| refs.get(p).map_or(format!("PMID {p}"), |n| n.to_string()))
+                    .collect();
+                out.push_str(&format!("[{}]", parts.join(", ")));
+            }
+        }
+    }
+    out
 }
 
 /// " [1, 3]" for the PMIDs that have references.

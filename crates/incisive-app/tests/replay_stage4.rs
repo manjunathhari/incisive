@@ -608,8 +608,12 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
             .and_then(|s| writer_v3::design_class(&s.design))
     });
     let allowed = writer_v3::allowed_numbers(&studies, Some(&full));
-    let (untraced, checked) =
-        writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p));
+    let (untraced, checked) = writer_v3::trace_numbers(
+        &written,
+        &allowed,
+        |p| selected.iter().any(|s| s == p),
+        true,
+    );
     integrity.numbers_checked = checked;
     integrity.numbers_untraced = untraced.len() as u32;
     let extraction = Extraction {
@@ -737,11 +741,13 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     assert_eq!(counts["page_outcome_rows"], 51);
     assert_eq!(counts["page_references"], 10);
     assert_eq!(counts["page_caveats"], 8);
-    // Pinned: what the trace marks on the prototype payloads (16 of 523;
-    // see the Stage 4 report §8 for each). Stage 4b: a sign difference
-    // still matches, so the 6 sign-only marks of Stage 4 (22) are gone.
+    // Pinned: what the trace marks on the prototype payloads (22 of 523;
+    // see the Stage 4 report §8 for each). Stage 4b review S1: only a
+    // number written with no sign of its own may match up to its sign; the
+    // six sign-only marks here are all written with a minus of their own
+    // ("− 0.02"), so they stay marked, as in Stage 4.
     assert_eq!(counts["numbers_checked"], 523);
-    assert_eq!(counts["numbers_untraced"], 16);
+    assert_eq!(counts["numbers_untraced"], 22);
     // What the trace marked, as text, for the report.
     let fields = incisive_app::agent::answer_v3::text_fields(&written);
     let marked: Vec<String> = untraced

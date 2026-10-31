@@ -1293,9 +1293,10 @@ fn written_v3_view(
                                             <br />
                                             <span class="flag-label added">{ADDED_LABEL}</span>
                                         </td>
-                                        <td>{ref_links(&x.pmids, refs)}</td>
+                                        <td>"\u{2013}"</td>
                                         <td>
                                             {cm.t(&x.effect_text, &format!("added_outcomes.{k}.effect_text"))}
+                                            {ref_links(&not_cited_at_end(&x.effect_text, &x.pmids), refs)}
                                             {unsourced(x.unsourced)}
                                         </td>
                                         <td>
@@ -1346,8 +1347,8 @@ fn written_v3_view(
                                             <td>
                                                 {mk.t(&s.label, &format!("studies.{i}.label"))}
                                                 {n.map(ref_link)}
-                                                {e.filter(|e| e.found_by_skeptic).map(|_| view! {
-                                                    <br /><span class="flag-label added">{FOUND_BY_SKEPTIC}</span>
+                                                {e.filter(|e| e.found_by_skeptic).map(|e| view! {
+                                                    <br /><span class="flag-label added">{format!("{FOUND_BY_SKEPTIC}; {}", e.second_wave())}</span>
                                                 })}
                                                 {row_leads
                                                     .get(s.pmid.trim())
@@ -1432,6 +1433,31 @@ fn written_v3_view(
     }
 }
 
+/// Review minor 4: text whose citation markers become reference links, or
+/// PubMed links for studies with no reference (never dropped, never raw).
+fn pmid_cited(text: &str, refs: &std::collections::HashMap<String, u16>) -> AnyView {
+    split_citations(text, |p| refs.contains_key(p))
+        .into_iter()
+        .map(|seg| match seg {
+            Segment::Text(t) => t.into_any(),
+            Segment::Cite(ids) => ids
+                .into_iter()
+                .map(|p| match refs.get(&p) {
+                    Some(n) => ref_link(*n),
+                    None => pubmed_link(&p)
+                        .map(|href| {
+                            view! { " " <a href=href rel="noopener noreferrer" target="_blank">{format!("PMID {p}")}</a> }
+                                .into_any()
+                        })
+                        .unwrap_or_else(|| p.into_any()),
+                })
+                .collect_view()
+                .into_any(),
+        })
+        .collect_view()
+        .into_any()
+}
+
 /// The reference links of `pmids` that have references, in order.
 fn ref_links(pmids: &[String], refs: &std::collections::HashMap<String, u16>) -> AnyView {
     let mut n: Vec<u16> = pmids
@@ -1463,7 +1489,7 @@ fn completeness_view(
             view! {
                 <li>
                     {cm.t(n, &format!("notes.{k}"))}
-                    " " <span class="flag-label added">"note from the completeness review"</span>
+                    " " <span class="flag-label added">{ADDED_LABEL}</span>
                 </li>
             }
             .into_any()
@@ -1472,7 +1498,10 @@ fn completeness_view(
     let not_added: Vec<AnyView> = c
         .not_added
         .iter()
-        .map(|n| view! { <li>{n.gap.clone()} " \u{2014} " {n.reason.clone()}</li> }.into_any())
+        .map(|n| {
+            view! { <li>{pmid_cited(&n.gap, refs)} " \u{2014} " {pmid_cited(&n.reason, refs)}</li> }
+                .into_any()
+        })
         .collect();
     let n_not = not_added.len();
     Some(

@@ -564,6 +564,25 @@ pub(crate) fn same_magnitude(a: f64, b: f64) -> bool {
     same(a.abs(), b.abs())
 }
 
+/// Whether the number written at byte `start` of `text` (as
+/// [`written_numbers`] gives it, its minus included) carries a sign of its
+/// own: a minus (`-`, `−`, `–`) or a `+` right before it. Review S1: only a
+/// number with no sign of its own may match its source up to the sign.
+pub(crate) fn has_own_sign(text: &str, start: usize) -> bool {
+    text.get(start..)
+        .is_some_and(|t| t.starts_with(['-', '\u{2212}', '\u{2013}', '+']))
+        || text.get(..start).is_some_and(|t| t.ends_with('+'))
+}
+
+/// Review S1: whether a number written in prose traces to `allowed`. Exact
+/// values always do. With `loose` (Full and the coverage check, not Quick),
+/// a number written with no sign of its own also matches its source's
+/// magnitude ("13.4 min shorter" for "−13.4"); one with its own sign must
+/// match exactly (a written "+2.3" against a source "−2.3" stays marked).
+pub(crate) fn written_traced(values: &[f64], own_sign: bool, allowed: &[f64], loose: bool) -> bool {
+    all_allowed(values, allowed) || (loose && !own_sign && all_allowed_unsigned(values, allowed))
+}
+
 /// [`all_allowed`] up to the sign (Stage 4b item 1): for checks of the
 /// answer against its sources (the writer's "not traced" marks and the
 /// coverage check), where a sign difference is wording, not a different
