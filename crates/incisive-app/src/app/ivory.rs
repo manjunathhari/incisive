@@ -196,10 +196,21 @@ details.iv-thread[open] .iv-thread-toggle::after { content:'Hide'; }
 .iv-wrap .iv-actions button.iv-copy { border:0; background:transparent; color:var(--iv-accent); font-family:inherit; font-size:13px; font-weight:600; padding:0 10px; min-height:44px; cursor:pointer; border-radius:8px; }
 .iv-actions textarea.copy-area { position:absolute; left:-9999px; width:1px; height:1px; opacity:0; }
 .iv-actions textarea.copy-area.shown { position:static; width:100%; height:10rem; opacity:1; margin-top:8px; font-size:.8rem; }
+.iv-del { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+.iv-del-q { font-size:13px; color:var(--iv-alert); font-weight:600; }
+.iv-wrap .iv-del button { font-family:inherit; font-size:13px; min-height:44px; cursor:pointer; border-radius:999px; }
+.iv-wrap .iv-del button.iv-del-icon { width:44px; padding:0; border:0; background:transparent; color:var(--iv-muted); display:inline-flex; align-items:center; justify-content:center; }
+.iv-wrap .iv-del button.iv-del-icon:hover { color:var(--iv-alert); }
+.iv-wrap .iv-del button.iv-keep { border:1px solid var(--iv-line); background:var(--iv-card); color:var(--iv-ink); padding:0 12px; }
+.iv-wrap .iv-del button.iv-del-yes { border:0; background:var(--iv-alert); color:#fff; font-weight:700; padding:0 12px; }
+.iv-danger { padding-top:4px; }
+.iv-wrap button.iv-delete-all { margin-left:0; }
+.iv-danger .box p { margin:0 0 8px; }
 /* ---- the run page chrome (the answer content is not touched) ---- */
 .run-chrome, .run-back { font-family:var(--iv-font); }
 .run-back a { color:var(--iv-accent); font-weight:600; text-decoration:none; display:inline-flex; align-items:center; min-height:44px; }
-.run-chrome .run-question { font-weight:600; color:var(--iv-ink); line-height:1.3; }
+.run-chrome .run-question { font-size:1.2rem; margin:.83em 0; font-weight:600; color:var(--iv-ink); line-height:1.3; }
+.activity-title { font-size:1.5em; margin:.83em 0; font-weight:bold; }
 .run-chrome .badge { font-family:var(--iv-font); font-weight:600; }
 .run-chrome .badge.mode { background:var(--iv-tint); color:var(--iv-accent); }
 .run-chrome h3, .run-fold > summary h3 { font-family:var(--iv-font); font-weight:600; color:var(--iv-ink); }
