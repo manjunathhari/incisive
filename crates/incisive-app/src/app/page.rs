@@ -12,7 +12,7 @@
 //! writer's, `c:` the completeness review's, `s:` the skeptic's, `e:<pmid>:`
 //! a study's funding, `n<k>:` a code-built notable finding). Only the "not
 //! traced" mark on a trial or review registration ID is not drawn (item 12;
-//! counted in Checks).
+//! counted under Other notable findings since the folding follow-up).
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,5 +1,11 @@
-//! Part A items 10 and 11: the Details (one continuous page, every section
-//! open, empty sections hidden) and the study sheets.
+//! Part A items 10 and 11: the Details and the study sheets.
+//!
+//! Folding follow-up (31 Oct): each Details section is a native
+//! `<details>`, closed, whose `<summary>` holds the section's head, a
+//! 3-line preview (built by [`ap::preview`]) and "Show all"/"Show less"
+//! (CSS). The full body, with every mark and chip, is the open
+//! `<details>`'s content, so it is in the HTML and opens with no script.
+//! Empty sections are hidden.
 //!
 //! Each reference has one study sheet: a native `<dialog>` drawn on the
 //! server (closed), opened with `showModal` from any chip, tile, number
@@ -11,26 +17,52 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 
 use super::page::{Ctx, Links, Mk, chips, mark_el, rich, sheet_click, sheet_id, unsourced_label};
-use super::{COPY_AREA, CopyState, Mark, copy_answer, doi_link, pubmed_link, rupees};
-use crate::agent::answer::duration_text;
+use super::{COPY_AREA, CopyState, Mark, copy_answer, doi_link, pubmed_link};
 use crate::agent::answer_v3::{
     ADDED_LABEL, EvidenceV3, FOUND_BY_SKEPTIC, NotableFinding, ReferenceV3, count_noun,
     not_cited_at_end, whole_marked,
 };
-use crate::answer_page::{self as ap, CitedIn, GuidelineSource, Section};
+use crate::answer_page::{self as ap, CitedIn, GuidelineSource, PreviewPart, Section};
 
-/// One Details section: heading, count, body. `None` when it is empty.
-fn section(title: &'static str, count: String, body: AnyView) -> AnyView {
+/// One Details section, folded: a closed `<details>` whose summary is the
+/// heading, the count, the preview of `parts` and "Show all" (CSS); the
+/// body is its content. The summary holds phrasing content only (spans
+/// shown as blocks; the heading is a span with the heading role), and the
+/// preview is hidden from assistive technology, so the disclosure's name
+/// is the heading and the count.
+fn section(title: &'static str, count: String, parts: &[PreviewPart], body: AnyView) -> AnyView {
+    use leptos::tachys::html::attribute::custom::CustomAttribute;
+    let preview = ap::preview(parts);
+    // A level-3 heading in phrasing content (`view!` has no aria-level).
+    let heading = leptos::html::span()
+        .attr("class", "ap-sec-h")
+        .attr("role", "heading")
+        .attr("aria-level", "3")
+        .child(title);
     view! {
-        <section class="ap-sec" aria-label=title>
-            <div class="ap-sec-head">
-                <h3>{title}</h3>
-                <span class="ap-count">{count}</span>
-            </div>
+        <details class="ap-sec ap-fold" aria-label=title>
+            <summary>
+                <span class="ap-sec-head">
+                    {heading}
+                    <span class="ap-count">{count}</span>
+                </span>
+                <span class="ap-preview" aria-hidden="true">{preview}</span>
+                <span class="ap-more" aria-hidden="true"></span>
+            </summary>
             <div class="ap-sec-body">{body}</div>
-        </section>
+        </details>
     }
     .into_any()
+}
+
+/// A content text, for a preview.
+fn pt(t: impl Into<String>) -> PreviewPart {
+    PreviewPart::Text(t.into())
+}
+
+/// A label or sub-heading, for a preview (skipped).
+fn pl(t: impl Into<String>) -> PreviewPart {
+    PreviewPart::Label(t.into())
 }
 
 /// A small heading inside a section.
@@ -68,7 +100,9 @@ fn leads_on_rows(c: &Ctx) -> HashSet<String> {
         .collect()
 }
 
-/// The Details: a heading and the sections in [`ap::SECTION_ORDER`].
+/// The Details: a heading, the sections in [`ap::SECTION_ORDER`], then
+/// Copy as text (it was in Cost and time, which the new page no longer
+/// draws; the cost and time are in the header's meta line).
 pub(super) fn details_view(c: &Ctx) -> AnyView {
     let on_rows = leads_on_rows(c);
     let sections: Vec<AnyView> = ap::SECTION_ORDER
@@ -82,16 +116,14 @@ pub(super) fn details_view(c: &Ctx) -> AnyView {
             Section::Trials => trials(c),
             Section::Notable => notable(c),
             Section::Completeness => completeness(c),
-            Section::Checks => checks(c),
             Section::References => Some(references(c)),
-            Section::SearchTrail => search_trail(c),
-            Section::Cost => Some(cost(c)),
         })
         .collect();
     view! {
         <div class="ap-details">
             <h3 class="ap-details-title">"Details"</h3>
             {sections}
+            {copy_row(c)}
         </div>
     }
     .into_any()
@@ -126,9 +158,16 @@ fn conflicts(c: &Ctx) -> Option<AnyView> {
             .into_any()
         }))
         .collect::<Vec<_>>();
+    let parts: Vec<PreviewPart> = w
+        .conflicts
+        .iter()
+        .map(|x| pt(&x.text))
+        .chain(added.iter().map(|x| pt(&x.text)))
+        .collect();
     Some(section(
         "Conflicting evidence",
         n.to_string(),
+        &parts,
         view! { <ul>{items}</ul> }.into_any(),
     ))
 }
@@ -142,6 +181,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
     let mut body: Vec<AnyView> = Vec::new();
     let mut current: Option<String> = None;
     let mut items: Vec<AnyView> = Vec::new();
+    let mut parts: Vec<PreviewPart> = Vec::new();
     let flush = |body: &mut Vec<AnyView>, items: &mut Vec<AnyView>| {
         if !items.is_empty() {
             body.push(view! { <ul>{std::mem::take(items)}</ul> }.into_any());
@@ -165,6 +205,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                 _ => e.body.clone().into_any(),
             };
             body.push(view! { <div class="ap-kicker">{head}</div> }.into_any());
+            parts.push(pl(&e.body));
             current = Some(e.body.clone());
         }
         let item = match e.source {
@@ -173,6 +214,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                     continue;
                 };
                 let n = g.pmid.as_ref().and_then(|p| c.ref_of(p));
+                parts.push(pt(&g.statement));
                 view! {
                     <li>
                         {g.year.map(|y| format!("({y}) "))}
@@ -188,6 +230,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                 let Some(g) = c.a.skeptic.as_ref().map(|k| &k.guidelines[i]) else {
                     continue;
                 };
+                parts.push(pt(&g.text));
                 view! {
                     <li>
                         {c.t(&g.text, &format!("guidelines.{i}.text"), c.sm())}
@@ -203,6 +246,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                 let Some(l) = c.a.skeptic.as_ref().map(|k| &k.leads[i]) else {
                     continue;
                 };
+                parts.push(pt(l.text()));
                 view! { <li><span class="flag-label">{l.text()}</span> {study_ref(c, &l.pmid)}</li> }
                     .into_any()
             }
@@ -213,6 +257,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
     Some(section(
         "Guidelines and consensus statements",
         n.to_string(),
+        &parts,
         body.into_any(),
     ))
 }
@@ -251,7 +296,7 @@ fn folded_view(c: &Ctx, folded: &[GuidelineSource]) -> AnyView {
 
 fn applicability(c: &Ctx) -> Option<AnyView> {
     let a = &c.w?.applicability;
-    let parts: Vec<AnyView> = [
+    let fields = [
         ("Case mix", &a.case_mix, "applicability.case_mix"),
         (
             "India and cost",
@@ -259,19 +304,24 @@ fn applicability(c: &Ctx) -> Option<AnyView> {
             "applicability.india_cost_context",
         ),
         ("Training", &a.training, "applicability.training"),
-    ]
-    .into_iter()
-    .filter(|(_, t, _)| !t.trim().is_empty())
-    .map(|(label, t, f)| view! { <dt>{label}</dt><dd>{c.t(t, f, c.wm())}</dd> }.into_any())
-    .collect();
-    if parts.is_empty() {
+    ];
+    let shown = fields.iter().filter(|(_, t, _)| !t.trim().is_empty());
+    let rows: Vec<AnyView> = shown
+        .clone()
+        .map(|(label, t, f)| view! { <dt>{*label}</dt><dd>{c.t(t, f, c.wm())}</dd> }.into_any())
+        .collect();
+    if rows.is_empty() {
         return None;
     }
-    let n = parts.len();
+    let parts: Vec<PreviewPart> = shown
+        .flat_map(|(label, t, _)| [pl(*label), pt(t.as_str())])
+        .collect();
+    let n = rows.len();
     Some(section(
         "Applicability",
         n.to_string(),
-        view! { <dl class="ap-dl">{parts}</dl> }.into_any(),
+        &parts,
+        view! { <dl class="ap-dl">{rows}</dl> }.into_any(),
     ))
 }
 
@@ -286,9 +336,11 @@ fn would_change(c: &Ctx) -> Option<AnyView> {
         .enumerate()
         .map(|(i, x)| view! { <li>{c.t(x, &format!("would_change.{i}"), c.wm())}</li> }.into_any())
         .collect();
+    let parts: Vec<PreviewPart> = w.would_change.iter().map(pt).collect();
     Some(section(
         "What would change this answer",
         w.would_change.len().to_string(),
+        &parts,
         view! { <ul>{items}</ul> }.into_any(),
     ))
 }
@@ -369,6 +421,11 @@ fn skeptic(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                 .collect(),
         ),
     ];
+    let mut parts: Vec<PreviewPart> = vec![pt(format!("The conclusion {}.", k.verdict))];
+    for (title, xs) in groups.iter().filter(|(_, xs)| !xs.is_empty()) {
+        parts.push(pl(*title));
+        parts.extend(xs.iter().map(|(_, t, _, _)| pt(t)));
+    }
     let body: Vec<AnyView> = std::iter::once(
         view! { <p class="ap-verdict-line">{format!("Verdict: the conclusion {}.", k.verdict)}</p> }
             .into_any(),
@@ -399,6 +456,7 @@ fn skeptic(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
     Some(section(
         "Challenged by the skeptic",
         count_noun(n, "caveat", "caveats"),
+        &parts,
         body.into_any(),
     ))
 }
@@ -505,17 +563,43 @@ fn trials(c: &Ctx) -> Option<AnyView> {
         })
         .collect();
     let n = cards.len();
+    let mut parts: Vec<PreviewPart> = vec![pl(TRIALS_HINT)];
+    parts.extend(w.studies.iter().map(|s| {
+        // "Label: design · n = N · comparison.", empty parts left out.
+        let size = s.n.map(|n| format!("n = {}", ap::fmt_value(n as f64)));
+        let line: Vec<String> = [
+            Some(s.design.trim().to_string()),
+            size,
+            Some(s.comparison.trim().trim_end_matches('.').to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|x| !x.is_empty())
+        .collect();
+        let label = s.label.trim();
+        pt(match (label.is_empty(), line.is_empty()) {
+            (_, true) => label.to_string(),
+            (true, false) => format!("{}.", line.join(" \u{b7} ")),
+            (false, false) => format!("{label}: {}.", line.join(" \u{b7} ")),
+        })
+    }));
     Some(section(
         "The trials",
         n.to_string(),
+        &parts,
         view! {
-            <p class="ap-muted">"Tap a study for its sheet, or open its details here."</p>
+            <p class="ap-muted">{TRIALS_HINT}</p>
             {cards}
         }
         .into_any(),
     ))
 }
 
+/// The trials' hint line (not part of their preview).
+const TRIALS_HINT: &str = "Tap a study for its sheet, or open its details here.";
+
+/// Other notable findings: code's items, the writer's, then the former
+/// Checks lines that warn the reader ([`ap::moved_check_lines`]).
 fn notable(c: &Ctx) -> Option<AnyView> {
     let writer: &[NotableFinding] = c.w.map_or(&[], |w| w.notable_findings.as_slice());
     // Stage 4b item 5: the skeptic's repeats stay in its section only.
@@ -525,10 +609,17 @@ fn notable(c: &Ctx) -> Option<AnyView> {
             .enumerate()
             .filter(|(_, n)| !n.repeats_skeptic())
             .collect();
-    let n = code.len() + writer.len();
+    let moved = ap::moved_check_lines(c.a);
+    let n = code.len() + writer.len() + moved.len();
     if n == 0 {
         return None;
     }
+    let parts: Vec<PreviewPart> = code
+        .iter()
+        .map(|(_, x)| pt(&x.text))
+        .chain(writer.iter().map(|x| pt(&x.text)))
+        .chain(moved.iter().map(pt))
+        .collect();
     let items: Vec<AnyView> = code
         .into_iter()
         .map(|(k, x)| {
@@ -556,10 +647,16 @@ fn notable(c: &Ctx) -> Option<AnyView> {
             }
             .into_any()
         }))
+        .chain(
+            moved
+                .into_iter()
+                .map(|l| view! { <li class="ap-check-note">{l}</li> }.into_any()),
+        )
         .collect();
     Some(section(
         "Other notable findings from this run",
         n.to_string(),
+        &parts,
         view! { <ul>{items}</ul> }.into_any(),
     ))
 }
@@ -602,9 +699,18 @@ fn completeness(c: &Ctx) -> Option<AnyView> {
         .collect();
     let n_not = not_added.len();
     let count = x.notes.len() + n_not + x.added();
+    let mut parts: Vec<PreviewPart> = vec![pt(format!("{}.", x.line())), pl("Notes")];
+    parts.extend(x.notes.iter().map(pt));
+    parts.push(pl("Judged not relevant"));
+    parts.extend(
+        x.not_added
+            .iter()
+            .map(|n| pt(format!("{} \u{2014} {}", n.gap.trim(), n.reason.trim()))),
+    );
     Some(section(
         "Completeness review",
         count.to_string(),
+        &parts,
         view! {
             <p class="ap-muted">{x.line()}</p>
             {(!notes.is_empty()).then(|| view! { {sub("Notes".to_string())} <ul>{notes}</ul> })}
@@ -614,35 +720,6 @@ fn completeness(c: &Ctx) -> Option<AnyView> {
             })}
         }
         .into_any(),
-    ))
-}
-
-/// The integrity lines and notes (and how many registration-ID marks were
-/// not drawn).
-fn checks(c: &Ctx) -> Option<AnyView> {
-    let mut lines: Vec<String> = c.a.notes.clone();
-    lines.extend(c.a.trail_notes());
-    let hidden = ap::suppressed_registration_marks(c.a);
-    if hidden > 0 {
-        lines.push(format!(
-            "{} on a trial or review registration ID not drawn on this page (the earlier layout below shows {}).",
-            count_noun(
-                u32::try_from(hidden).unwrap_or(u32::MAX),
-                "\u{201c}not traced\u{201d} mark",
-                "\u{201c}not traced\u{201d} marks"
-            ),
-            if hidden == 1 { "it" } else { "them" }
-        ));
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    let n = lines.len();
-    Some(section(
-        "Checks",
-        n.to_string(),
-        view! { <ul>{lines.into_iter().map(|l| view! { <li>{l}</li> }).collect_view()}</ul> }
-            .into_any(),
     ))
 }
 
@@ -684,44 +761,35 @@ fn references(c: &Ctx) -> AnyView {
         view! { <ul class="ap-refs">{refs.iter().map(reference_item).collect_view()}</ul> }
             .into_any()
     };
-    section("References", refs.len().to_string(), body)
+    let parts: Vec<PreviewPart> = refs
+        .iter()
+        .map(|r| {
+            let mut t = r.title.trim().trim_end_matches('.').to_string();
+            t.push('.');
+            match (&r.journal, r.year) {
+                (Some(j), Some(y)) => t.push_str(&format!(" {j}, {y}.")),
+                (Some(j), None) => t.push_str(&format!(" {j}.")),
+                (None, Some(y)) => t.push_str(&format!(" {y}.")),
+                (None, None) => {}
+            }
+            pt(t)
+        })
+        .collect();
+    let parts = if parts.is_empty() {
+        vec![pt("None.")]
+    } else {
+        parts
+    };
+    section("References", refs.len().to_string(), &parts, body)
 }
 
-fn search_trail(c: &Ctx) -> Option<AnyView> {
-    let s = &c.a.searches;
-    if s.is_empty() {
-        return None;
-    }
-    let n = u32::try_from(s.len()).unwrap_or(u32::MAX);
-    Some(section(
-        "Search trail",
-        count_noun(n, "search", "searches"),
-        view! {
-            <ul>
-                {s.iter()
-                    .map(|x| view! { <li>{format!("{}: ", x.source)} <code>{x.query.clone()}</code> {format!(" \u{2014} {} hits", x.hits)}</li> })
-                    .collect_view()}
-            </ul>
-        }
-        .into_any(),
-    ))
-}
-
-/// Cost and time, and Copy as text (Part A: p printed once, item 12).
-fn cost(c: &Ctx) -> AnyView {
-    let a = c.a;
-    let text = a.copy_text();
+/// Copy as text (Part A: p printed once, item 12), as it was in Cost and
+/// time: the same button, the same text, the same empty textarea.
+fn copy_row(c: &Ctx) -> AnyView {
+    let text = c.a.copy_text();
     let copy = RwSignal::new(CopyState::Ready);
-    let line = format!(
-        "{} \u{b7} {}",
-        rupees(a.cost_paise),
-        duration_text(a.elapsed_s)
-    );
-    section(
-        "Cost and time",
-        rupees(a.cost_paise),
-        view! {
-            <p>{line}</p>
+    view! {
+        <div class="ap-copy">
             <button class="secondary small" on:click=move |_| copy_answer(&text, copy, COPY_AREA)>
                 {move || match copy.get() {
                     CopyState::Ready => "Copy as text",
@@ -737,9 +805,9 @@ fn cost(c: &Ctx) -> AnyView {
                 aria-hidden=move || (copy.get() != CopyState::Manual).to_string()
                 tabindex=move || if copy.get() == CopyState::Manual { "0" } else { "-1" }
             ></textarea>
-        }
-        .into_any(),
-    )
+        </div>
+    }
+    .into_any()
 }
 
 // ---------- 11. the study sheets ----------

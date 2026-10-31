@@ -55,7 +55,10 @@ pub const PAGE_ORDER: [Block; 10] = [
     Block::Original,
 ];
 
-/// The Details sections, in their order (item 10).
+/// The Details sections, in their order (item 10). The folding follow-up
+/// (31 Oct) removed Checks, Search trail and Cost and time from the new
+/// page (the original run view keeps them); the Checks lines that warn the
+/// reader are drawn under Other notable findings ([`moved_check_lines`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Conflicts,
@@ -66,13 +69,12 @@ pub enum Section {
     Trials,
     Notable,
     Completeness,
-    Checks,
     References,
-    SearchTrail,
-    Cost,
 }
 
-pub const SECTION_ORDER: [Section; 12] = [
+/// The frozen Details order (folding follow-up item 4). Each section is
+/// drawn folded to a preview ([`preview`]); empty sections are hidden.
+pub const SECTION_ORDER: [Section; 9] = [
     Section::Conflicts,
     Section::Guidelines,
     Section::Applicability,
@@ -81,10 +83,7 @@ pub const SECTION_ORDER: [Section; 12] = [
     Section::Trials,
     Section::Notable,
     Section::Completeness,
-    Section::Checks,
     Section::References,
-    Section::SearchTrail,
-    Section::Cost,
 ];
 
 // ---------- p values (item 12) ----------
@@ -787,6 +786,161 @@ pub fn suppressed_registration_marks(a: &AnswerV3) -> usize {
     w + c
 }
 
+/// The line saying how many registration-ID "not traced" marks the new
+/// page does not draw (item 12), when there are any. It was in Checks; it
+/// is drawn under Other notable findings since the folding follow-up.
+pub fn registration_note(a: &AnswerV3) -> Option<String> {
+    let hidden = suppressed_registration_marks(a);
+    (hidden > 0).then(|| {
+        format!(
+            "{} on a trial or review registration ID not drawn on this page (the earlier layout below shows {}).",
+            crate::agent::answer_v3::count_noun(
+                u32::try_from(hidden).unwrap_or(u32::MAX),
+                "\u{201c}not traced\u{201d} mark",
+                "\u{201c}not traced\u{201d} marks"
+            ),
+            if hidden == 1 { "it" } else { "them" }
+        )
+    })
+}
+
+/// The start of the code-built notable finding that counts what the
+/// extractor could not match (Stage 4 item 12).
+const EXTRACTOR_NOTABLE: &str = "The extractor could not match ";
+
+/// What happens to a line of the former Checks section on the new page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckLine {
+    /// Drawn under Other notable findings.
+    Moved(String),
+    /// Not drawn on the new page: the same information is in Progress (the
+    /// run's step lines, shown folded above the page), in Other notable
+    /// findings or in the Completeness review. The original run view keeps
+    /// it.
+    Dropped(String),
+}
+
+/// The former Checks section's lines, in its order (the run's notes, the
+/// trail notes, the registration-ID count), each moved or dropped
+/// (folding follow-up item 3). Dropped, as duplicates:
+/// - "Number check: …": the same line is a Progress step, and every
+///   untraced number carries its "not traced" mark on the page;
+/// - "Completeness: … found; …": a Progress step, and the Completeness
+///   review's first line (a skipped review is a warning: it moves);
+/// - "Extraction: …": only when Other notable findings has the extractor's
+///   own count line.
+///
+/// Everything else moves: stopped early, studies left out, citations
+/// removed, labels defaulted, the skeptic's dropped entries, any run note
+/// such as a skipped or failed step, the registration-ID count, and the
+/// "Coverage: …" line (its Progress step is written best-effort, so it may
+/// be missing there).
+pub fn check_lines(a: &AnswerV3) -> Vec<CheckLine> {
+    let extractor_notable = a
+        .notable_code
+        .iter()
+        .any(|n| !n.repeats_skeptic() && n.text.starts_with(EXTRACTOR_NOTABLE));
+    let completeness_line = a
+        .completeness
+        .as_ref()
+        .filter(|c| c.skipped.is_none())
+        .map(|c| format!("{}.", c.line()));
+    let mut out: Vec<CheckLine> = a.notes.iter().cloned().map(CheckLine::Moved).collect();
+    for l in a.trail_notes() {
+        let dup = l.starts_with("Number check: ")
+            || completeness_line.as_deref() == Some(l.as_str())
+            || (extractor_notable && l.starts_with("Extraction: "));
+        out.push(if dup {
+            CheckLine::Dropped(l)
+        } else {
+            CheckLine::Moved(l)
+        });
+    }
+    out.extend(registration_note(a).map(CheckLine::Moved));
+    out
+}
+
+/// The former Checks lines drawn under Other notable findings.
+pub fn moved_check_lines(a: &AnswerV3) -> Vec<String> {
+    check_lines(a)
+        .into_iter()
+        .filter_map(|l| match l {
+            CheckLine::Moved(t) => Some(t),
+            CheckLine::Dropped(_) => None,
+        })
+        .collect()
+}
+
+// ---------- folded sections: the preview (folding follow-up item 2) ----------
+
+/// A piece of a section's content, for its preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewPart {
+    /// A sub-heading or label ("Case mix", "Caveats", "Other"): skipped.
+    Label(String),
+    /// Content text, as stored (citations are stripped).
+    Text(String),
+}
+
+/// About how long a preview is, in characters (CSS clamps it to 3 lines).
+pub const PREVIEW_MAX: usize = 300;
+
+/// A citation only: reference numbers or PMIDs, alone or in a list
+/// ("[1]", "[1, 3]", "[2–4]", "[12345678; 23456789]", "[41060645 as 10]").
+/// Other bracketed text ("[95% CI 0.55–0.94]", "[n = 45/120]") is content
+/// and stays in a preview.
+static PREVIEW_CITE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[\s*\d{1,9}(?:\s*(?:[,;\u{2013}-]|as)\s*\d{1,9})*\s*\]").expect("valid")
+});
+
+/// `text` without its citation brackets ([`PREVIEW_CITE`]), spaces before
+/// punctuation removed, whitespace squashed.
+fn strip_preview_citations(text: &str) -> String {
+    let t = PREVIEW_CITE.replace_all(text, "");
+    let t = SPACE_PUNCT.replace_all(&t, "$1");
+    SPACES.replace_all(&t, " ").trim().to_string()
+}
+
+/// A folded section's preview: plain text from its first content item
+/// on, labels skipped, citation brackets stripped (other bracketed text,
+/// such as a CI, is kept), text kept as written (no case change: "pCR",
+/// "cT3"), items joined with
+/// single spaces (the stored text carries no mark words or flag labels:
+/// the page draws those as their own elements, and they are not passed
+/// here), cut at a word to about [`PREVIEW_MAX`] characters (an
+/// ellipsis when cut). Display only: the open section draws the full body
+/// with its marks and chips.
+pub fn preview(parts: &[PreviewPart]) -> String {
+    let mut joined = String::new();
+    for p in parts {
+        let PreviewPart::Text(t) = p else { continue };
+        let t = strip_preview_citations(t);
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(t);
+        if joined.chars().count() > PREVIEW_MAX {
+            break;
+        }
+    }
+    if joined.chars().count() <= PREVIEW_MAX {
+        return joined;
+    }
+    let cut: String = joined.chars().take(PREVIEW_MAX).collect();
+    let cut = match cut.rfind(char::is_whitespace) {
+        Some(i) if i > PREVIEW_MAX / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!(
+        "{}\u{2026}",
+        cut.trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+    )
+}
+
 // ---------- guidelines (items 10 and 12) ----------
 
 /// A statement as a comparison key: quotes and a final full stop removed,
@@ -1192,7 +1346,7 @@ mod tests {
         assert_eq!(PAGE_ORDER.first(), Some(&Block::Header));
         assert_eq!(PAGE_ORDER.last(), Some(&Block::Original));
         assert_eq!(SECTION_ORDER[0], Section::Conflicts);
-        assert_eq!(SECTION_ORDER[11], Section::Cost);
+        assert_eq!(SECTION_ORDER[8], Section::References);
     }
 
     #[test]
@@ -1788,5 +1942,203 @@ mod tests {
         let v = visible(&answer_with(Some(w)));
         assert!(v.forest && v.out_of_100 && v.compare && !v.no_numbers);
         assert_eq!(debug_counts(&answer_with(None)), (0, 0, 0, 0, 0, 0));
+    }
+
+    // ---------- the folding follow-up (31 Oct) ----------
+
+    fn t(s: &str) -> PreviewPart {
+        PreviewPart::Text(s.into())
+    }
+
+    fn l(s: &str) -> PreviewPart {
+        PreviewPart::Label(s.into())
+    }
+
+    #[test]
+    fn a_preview_skips_labels_and_starts_at_the_first_content() {
+        assert_eq!(
+            preview(&[
+                l("Case mix"),
+                t("Mostly cT1-T3 [1, 2]."),
+                l("Training"),
+                t("High-volume centres.")
+            ]),
+            "Mostly cT1-T3. High-volume centres."
+        );
+        assert_eq!(
+            preview(&[
+                t("The conclusion holds with caveats."),
+                l("Caveats"),
+                t("No RCT after TNT.")
+            ]),
+            "The conclusion holds with caveats. No RCT after TNT.",
+            "no \"Verdict:\" or \"Caveats\""
+        );
+        assert_eq!(
+            preview(&[l("Other"), t("EARCS Delphi consensus")]),
+            "EARCS Delphi consensus"
+        );
+    }
+
+    #[test]
+    fn a_preview_keeps_text_as_written() {
+        assert_eq!(
+            preview(&[t("pCR was 12%"), t("cT3 and ypT0 tumours [4].")]),
+            "pCR was 12% cT3 and ypT0 tumours."
+        );
+        assert_eq!(
+            preview(&[l("Case mix"), t("ypT0 after TNT")]),
+            "ypT0 after TNT"
+        );
+    }
+
+    #[test]
+    fn a_preview_strips_citations_only() {
+        assert_eq!(
+            preview(&[t("HR 0.72 [95% CI 0.55\u{2013}0.94] for DFS [3].")]),
+            "HR 0.72 [95% CI 0.55\u{2013}0.94] for DFS."
+        );
+        assert_eq!(
+            preview(&[t(
+                "Conversion [n = 45/120] was lower [1, 3; 2\u{2013}4] [5-6] [41060645 as 10]."
+            )]),
+            "Conversion [n = 45/120] was lower."
+        );
+    }
+
+    #[test]
+    fn a_preview_joins_items_with_single_spaces() {
+        let p = preview(&[
+            t("Case mix  "),
+            t("\nThe trials enrolled"),
+            t(" mostly  low  tumours "),
+        ]);
+        assert_eq!(p, "Case mix The trials enrolled mostly low tumours");
+        assert!(!p.contains("mixThe") && !p.contains("  "));
+    }
+
+    #[test]
+    fn a_preview_strips_citations() {
+        assert_eq!(
+            preview(&[
+                t(
+                    "REAL found lower recurrence [1]. COLRAR [12345678; 23456789] did not [3 as 4] ."
+                ),
+                t("[2] Title.")
+            ]),
+            "REAL found lower recurrence. COLRAR did not. Title."
+        );
+    }
+
+    #[test]
+    fn a_preview_is_cut_at_a_word_near_the_cap() {
+        let long = "word ".repeat(200);
+        let p = preview(&[t(&long)]);
+        assert!(p.ends_with("word\u{2026}"), "{p}");
+        assert!(p.chars().count() <= PREVIEW_MAX + 1);
+        assert!(p.chars().count() > PREVIEW_MAX - 10);
+        // Multi-byte text is cut on a character, never inside one.
+        let p = preview(&[t(&"é—".repeat(400))]);
+        assert_eq!(p.chars().count(), PREVIEW_MAX + 1);
+        // Short text is kept whole, with no ellipsis.
+        assert_eq!(preview(&[t("Short.")]), "Short.");
+    }
+
+    #[test]
+    fn an_empty_preview_is_empty() {
+        assert_eq!(preview(&[]), "");
+        assert_eq!(preview(&[l("Notes"), t("  "), t("[1]")]), "");
+    }
+
+    #[test]
+    fn checks_lines_move_unless_they_repeat_progress_or_the_page() {
+        use crate::agent::answer_v3::{CoverageV3, NotableFinding};
+        let mut a = answer_with(None);
+        a.notes = vec!["Extraction stopped at the Full limit; 1 study uses the abstract only, labelled as such.".into()];
+        a.stopped_early = Some("time limit".into());
+        a.integrity.removed_citations = 2;
+        a.integrity.numbers_checked = 10;
+        a.integrity.numbers_untraced = 1;
+        a.integrity.numbers_unverified = 3;
+        a.coverage = Some(CoverageV3::default());
+        a.completeness = Some(CompletenessV3 {
+            gaps_found: 4,
+            ..CompletenessV3::default()
+        });
+        let lines = check_lines(&a);
+        let moved = moved_check_lines(&a);
+        let dropped: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                CheckLine::Dropped(t) => Some(t.as_str()),
+                CheckLine::Moved(_) => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), moved.len() + dropped.len());
+        assert!(moved[0].starts_with("Extraction stopped at the Full limit"));
+        assert!(
+            moved
+                .iter()
+                .any(|m| m.starts_with("Research stopped early (time limit)"))
+        );
+        assert!(
+            moved
+                .iter()
+                .any(|m| m.starts_with("Citation check: 2 unknown citations removed"))
+        );
+        // No extractor line among the notable findings: "Extraction:" moves.
+        assert!(moved.iter().any(|m| m.starts_with("Extraction: 3 numbers")));
+        assert!(
+            dropped
+                .iter()
+                .any(|d| d.starts_with("Number check: 1 of 10"))
+        );
+        // Coverage moves: its Progress step is written best-effort.
+        assert!(moved.iter().any(|m| m.starts_with("Coverage: ")));
+        assert!(!dropped.iter().any(|d| d.starts_with("Coverage: ")));
+        assert!(
+            dropped
+                .iter()
+                .any(|d| d.starts_with("Completeness: 4 gaps found"))
+        );
+        // With the extractor's own line under notable findings, it drops.
+        a.notable_code = vec![NotableFinding {
+            text: "The extractor could not match 3 numbers to the papers' wording; they are kept and labelled \u{201c}not verified\u{201d} in the trials table.".into(),
+            pmids: vec![],
+            spans: vec![],
+        }];
+        assert!(
+            !moved_check_lines(&a)
+                .iter()
+                .any(|m| m.starts_with("Extraction: "))
+        );
+        // A skipped completeness review warns: it moves.
+        a.completeness = Some(CompletenessV3::skipped("time", 4));
+        assert!(
+            moved_check_lines(&a)
+                .iter()
+                .any(|m| m.starts_with("Completeness review skipped: time"))
+        );
+        // Nothing to say: nothing moves.
+        assert!(check_lines(&answer_with(None)).is_empty());
+        assert_eq!(registration_note(&answer_with(None)), None);
+    }
+
+    #[test]
+    fn the_registration_count_moves_to_notable_findings() {
+        let mut w = written(vec![], vec![study("1", "RCT", "a vs b")]);
+        w.studies[0].appraisal = "Same cohort (NTR3593)".into();
+        let t = w.studies[0].appraisal.clone();
+        let mut a = answer_with(Some(w));
+        let s = t.find("3593").unwrap();
+        a.untraced = vec![Span::new("studies.0.appraisal", s, s + 4)];
+        let note = registration_note(&a).unwrap();
+        assert!(
+            note.starts_with(
+                "1 \u{201c}not traced\u{201d} mark on a trial or review registration ID"
+            )
+        );
+        assert!(note.ends_with("(the earlier layout below shows it)."));
+        assert_eq!(moved_check_lines(&a), vec![note]);
     }
 }
