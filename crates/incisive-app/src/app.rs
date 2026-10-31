@@ -629,7 +629,8 @@ fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
         .into_any(),
         Ok(AskOutcome::RunStarted { message, alert, .. }) => view! {
             <div class="box green" role="status">
-                <p>{message}</p>
+                // The API text names "My questions"; the page is now the Library.
+                <p>{message.replace("in My questions.", "in your Library.")}</p>
                 {alert.map(|a| view! { <p>{a}</p> })}
             </div>
         }
@@ -780,7 +781,7 @@ fn run_view(v: RunView) -> impl IntoView {
     view! {
         // Page chrome (ivory redesign): Figtree; the answer below is untouched.
         <div class="run-chrome">
-            <h2 class="run-question">{heading}</h2>
+            <h1 class="run-question">{heading}</h1>
             <p>
                 {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
                 <span class="meta">{rupees(v.summary.cost_paise)}</span>
@@ -2279,7 +2280,7 @@ fn notable_view(
 fn ActivityPage() -> impl IntoView {
     let data = Resource::new(|| (), |_| get_activity());
     view! {
-        <h2>"Activity"</h2>
+        <h1 class="activity-title">"Activity"</h1>
         <Suspense fallback=|| view! { <p>"Loading the activity log…"</p> }>
             {move || {
                 data.get()
