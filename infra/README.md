@@ -503,6 +503,7 @@ default or set; the Deploy workflow checks the defaults too.
 | `writer` | writes the structured answer | `claude-opus-5-5` |
 | `extractor` | extracts and appraises each study (Stage 3) | `claude-sonnet-5-5` |
 | `skeptic` | looks for contradicting evidence (Stage 3) | `claude-sonnet-5-5` |
+| `completeness` | the add-only completeness review after the Full writer (Stage 4b); `claude-opus-5-5` switches it to Opus | `claude-sonnet-5-5` |
 
 **Full (Stage 3).** **Full** (shown as Full; the stored mode and the `RUN_LIMITS`
 key stay `focused`) runs the whole team: the researcher (Opus, abstracts and full
@@ -520,6 +521,19 @@ It is checked like `QUICK_ENGINE`. Under `team` a Full run reserves
 `writer_time_allowance_s + review_time_allowance_s` (180 + 180 s) before the time limit (at 240 s), the extractor and skeptic `writer_time_allowance_s`
 before it (at 420 s), and the writer is not started with less than 180 s left before the hard stop (at 480 s; the run then ends partial,
 `writer_time`, with its references). The live Full writer took 109 s for about 13,500 output tokens, so about 160 s at its 20,000-token ceiling. Under `classic` it reserves `limit_paise` (₹40) and uses `time_limit_s`.
+
+**Completeness review (Stage 4b, Full only).** After the Full writer, code compares what the team
+verified with the answer (the coverage check), and one add-only call (the `completeness` model)
+adds what matters, each addition labelled "added on completeness review"; the writer's answer is
+stored unchanged. It never fails a run: short of time (under 90 s before the hard stop), money, an
+API error or an unusable reply, it is skipped with "Completeness review skipped: …". A third optional
+variable switches it off:
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `COMPLETENESS` | no | `on` or `off` (the rollback switch: Full answers then ship as the writer wrote them, as before Stage 4b) | `on` |
+
+It is checked like `FULL_ENGINE` (only the ends trimmed); the app refuses any other value at startup.
 
 **Rolling back.** Prefer `QUICK_ENGINE=classic` / `FULL_ENGINE=classic` to rolling back the image: it needs
 no code change and keeps Phase 3 answers readable. Phase 3 adds migration 0010 (an

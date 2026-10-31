@@ -95,6 +95,11 @@ pub struct AgentModels {
     /// Phase 3 skeptic (Stage 3). Default Sonnet 5.5.
     #[serde(default = "default_model")]
     pub skeptic: String,
+    /// Phase 3 completeness writer (Stage 4b, Full only; one add-only
+    /// structured call after the writer). Default Sonnet 5.5 (owner
+    /// decision, 31 Oct); set `claude-opus-5-5` to switch.
+    #[serde(default = "default_model")]
+    pub completeness: String,
 }
 
 fn default_model() -> String {
@@ -122,6 +127,7 @@ impl Default for AgentModels {
             writer: default_opus_model(),
             extractor: default_model(),
             skeptic: default_model(),
+            completeness: default_model(),
         }
     }
 }
@@ -132,7 +138,7 @@ impl AgentModels {
     pub fn from_json(json: &str) -> Result<AgentModels, String> {
         let m: AgentModels = serde_json::from_str(json).map_err(|e| {
             format!(
-                "expected a JSON object with optional keys frame, search, screen, extract, write, check, researcher, writer, extractor, skeptic, each a model id (line {}, column {})",
+                "expected a JSON object with optional keys frame, search, screen, extract, write, check, researcher, writer, extractor, skeptic, completeness, each a model id (line {}, column {})",
                 e.line(),
                 e.column()
             )
@@ -149,7 +155,7 @@ impl AgentModels {
 
     /// Every (step or role, model) pair, for validation (the startup price
     /// check covers each of them).
-    pub fn entries(&self) -> [(&'static str, &str); 10] {
+    pub fn entries(&self) -> [(&'static str, &str); 11] {
         [
             ("frame", &self.frame),
             ("search", &self.search),
@@ -161,6 +167,7 @@ impl AgentModels {
             ("writer", &self.writer),
             ("extractor", &self.extractor),
             ("skeptic", &self.skeptic),
+            ("completeness", &self.completeness),
         ]
     }
 }
@@ -494,7 +501,9 @@ pub fn wrap_source(id: &str, text: &str) -> String {
 
 /// The steps that finish a run (Write, Check). Their calls may use the finish
 /// reserve; every other step's calls must leave it free.
-pub const FINISHING_STEPS: [&str; 2] = ["write", "check"];
+/// Stage 4b: the completeness writer (`completeness`) is a finishing step
+/// too: it runs after the writer, from its own share of the finish reserve.
+pub const FINISHING_STEPS: [&str; 3] = ["write", "check", "completeness"];
 
 /// The JSON Schema a structured call asks for ([`LlmCall::structured`]),
 /// sent as `output_config.format` (structured outputs). It must be

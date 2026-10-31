@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use claude_client::Usage;
 use incisive_app::agent::answer_v3::{
-    ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3, SearchEntry,
+    ADDED_LABEL, ANSWER_VERSION, AnswerV3, IntegrityV3, ReferenceV3, SearchEntry,
 };
 use incisive_app::agent::extractor::{
     self, EvidenceRow, Extraction, MAX_OUTCOMES, ReportedRow, SourceText, source_text,
@@ -30,7 +30,7 @@ use incisive_app::agent::researcher::Contradiction;
 use incisive_app::agent::skeptic::SkepticReview;
 use incisive_app::agent::skeptic::{self, SkepticReport};
 use incisive_app::agent::writer_v3::{self, FullInput, StudyInput};
-use incisive_app::agent::{RunContext, team};
+use incisive_app::agent::{RunContext, completeness, coverage, team};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::identity::{IapVerifier, JwkSource};
@@ -125,8 +125,7 @@ fn studies() -> (Vec<StudyInput>, Vec<Contradiction>, Vec<SearchEntry>) {
 /// given as a structured number. Field names of both the Stage 3 and Stage
 /// 4 rows are given (serde ignores the other), so the same replay runs on
 /// both.
-fn rows() -> Vec<Value> {
-    let f = fixture("evidence.json");
+fn rows_of(f: &Value) -> Vec<Value> {
     f["studies"]
         .as_array()
         .unwrap()
@@ -295,12 +294,16 @@ fn source_of(x: &Value) -> SourceText {
 /// The prototype's rows pushed through the extractor's own checks
 /// (`first_pass` and `finish_row`) against their rebuilt source texts.
 fn checked_rows() -> Vec<EvidenceRow> {
-    let f = fixture("evidence.json");
+    checked_rows_of(&fixture("evidence.json"))
+}
+
+/// [`checked_rows`] of an evidence payload.
+fn checked_rows_of(f: &Value) -> Vec<EvidenceRow> {
     f["studies"]
         .as_array()
         .unwrap()
         .iter()
-        .zip(rows())
+        .zip(rows_of(f))
         .map(|(x, mut v)| {
             let o = v.as_object_mut().unwrap();
             for k in [
@@ -358,7 +361,7 @@ fn prices() -> Prices {
 }
 
 /// A running Full run for the writer's call (no literature calls are made).
-async fn ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
+async fn run_ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
     let oa = OaPolicy::default();
     let client = AllowlistedClient::new("Incisive/test", oa.clone())
         .with_base_override("http://127.0.0.1:9")
@@ -412,6 +415,7 @@ async fn ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
             runs: RunsConfig::default(),
             quick_engine: Engine::Team,
             full_engine: Engine::Team,
+            completeness: false,
             worker: WorkerHandle::default(),
             llm: None,
             lit: lit.clone(),
@@ -588,7 +592,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
                 },
             ),
     );
-    let ctx = ctx(&pool, llm.clone()).await;
+    let ctx = run_ctx(&pool, llm.clone()).await;
     let mut written = writer_v3::write_with(&ctx, &ctx.llm, writer_v3::SYSTEM_FULL, &user)
         .await
         .unwrap_or_else(|_| panic!("the scripted writer reply reads"));
@@ -604,8 +608,12 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
             .and_then(|s| writer_v3::design_class(&s.design))
     });
     let allowed = writer_v3::allowed_numbers(&studies, Some(&full));
-    let (untraced, checked) =
-        writer_v3::trace_numbers(&written, &allowed, |p| selected.iter().any(|s| s == p));
+    let (untraced, checked) = writer_v3::trace_numbers(
+        &written,
+        &allowed,
+        |p| selected.iter().any(|s| s == p),
+        true,
+    );
     integrity.numbers_checked = checked;
     integrity.numbers_untraced = untraced.len() as u32;
     let extraction = Extraction {
@@ -646,6 +654,8 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         notes: vec![],
         untraced: untraced.clone(),
         notable_code: team::notable_code(Some(&review), &extraction),
+        coverage: None,
+        completeness: None,
     };
     // Stored and read back as the run page does.
     let stored: AnswerV3 = serde_json::from_value(serde_json::to_value(&answer).unwrap()).unwrap();
@@ -732,7 +742,10 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
     assert_eq!(counts["page_references"], 10);
     assert_eq!(counts["page_caveats"], 8);
     // Pinned: what the trace marks on the prototype payloads (22 of 523;
-    // see the stage report §8 for each).
+    // see the Stage 4 report §8 for each). Stage 4b review S1: only a
+    // number written with no sign of its own may match up to its sign; the
+    // six sign-only marks here are all written with a minus of their own
+    // ("− 0.02"), so they stay marked, as in Stage 4.
     assert_eq!(counts["numbers_checked"], 523);
     assert_eq!(counts["numbers_untraced"], 22);
     // What the trace marked, as text, for the report.
@@ -763,6 +776,189 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         )
         .unwrap();
     }
+
+    // ---- Stage 4b item 1: the coverage check on the full answer ----
+    let known = |p: &str| selected.iter().any(|s| s == p);
+    let is_meta = |p: &str| studies.iter().any(|s| s.pmid == p && s.design == "SR/MA");
+    let all = coverage::check(&written, &rows, is_meta, Some(&review), known);
+    // The scripted writer wrote every outcome of every row it was shown.
+    assert_eq!(all.counts.outcomes_missing, 0, "{:?}", all.gaps);
+    assert_eq!(all.counts.numbers_missing, 0, "{:?}", all.gaps);
+    assert_eq!(all.counts.outcomes_checked, 51);
+    // Every verified structured number is checked (the extractor's check
+    // flagged the rest of the 174).
+    let verified_numbers = rows
+        .iter()
+        .flat_map(|r| &r.outcomes)
+        .filter(|o| o.verified)
+        .flat_map(|o| &o.numbers)
+        .filter(|n| n.verified)
+        .count();
+    assert_eq!(all.counts.numbers_checked as usize, verified_numbers);
+    assert_eq!(verified_numbers, 136);
+    eprintln!("COVERAGE full answer: {:?}", all.counts);
+
+    // ---- Stage 4b item 1: a reconstructed 31 Oct run 1 ----
+    // Run 1's extractor had ROGER's workload among its six outcomes (the
+    // prototype's had it tenth, past the cap): move it first. Run 1 then
+    // left out the workload (NASA-TLX 18.4 vs 34.0), the AIIMS pain at 6 h
+    // and 12 h and rescue analgesia: the check reports them as gaps.
+    let mut f1 = fixture("evidence.json");
+    for x in f1["studies"].as_array_mut().unwrap() {
+        if x["pmid"] == "41511872" {
+            let o = x["outcomes"].as_array_mut().unwrap();
+            let i = o
+                .iter()
+                .position(|o| s(&o["outcome"]).contains("NASA raw TLX"))
+                .unwrap();
+            let nasa = o.remove(i);
+            o.insert(0, nasa);
+        }
+    }
+    let rows = checked_rows_of(&f1);
+    let full1 = scripted_answer(&rows, &studies, &review);
+    let mut run1 = serde_json::from_value::<writer_v3::WireAnswer>(full1)
+        .expect("the scripted run-1 answer reads")
+        .into_answer()
+        .0;
+    let before = run1.outcomes.len();
+    run1.outcomes.retain(|o| {
+        !(o.outcome.contains("NASA raw TLX")
+            || o.outcome.starts_with("Acute pain (primary), VAS")
+            || o.outcome.starts_with("Rescue analgesia"))
+    });
+    assert_eq!(run1.outcomes.len(), before - 3);
+    let cov = coverage::check(&run1, &rows, is_meta, Some(&review), known);
+    let gap_numbers = |pmid: &str| -> Vec<f64> {
+        cov.gaps
+            .iter()
+            .filter(|g| g.pmid == pmid)
+            .flat_map(|g| g.numbers.clone())
+            .collect()
+    };
+    let roger = gap_numbers("41511872");
+    assert!(roger.contains(&18.4), "ROGER NASA-TLX 18.4: {:?}", cov.gaps);
+    let aiims_row = rows.iter().find(|r| r.pmid == "42527734").unwrap();
+    let pain = aiims_row
+        .outcomes
+        .iter()
+        .find(|o| o.outcome.starts_with("Acute pain (primary), VAS"))
+        .unwrap();
+    let aiims = gap_numbers("42527734");
+    let pain_missing: Vec<f64> = pain
+        .numbers
+        .iter()
+        .map(|n| n.value)
+        .filter(|v| aiims.contains(v))
+        .collect();
+    assert!(
+        !pain_missing.is_empty(),
+        "AIIMS 6 h / 12 h pain: {:?} not in {:?}",
+        pain.numbers,
+        cov.gaps
+    );
+    assert!(
+        cov.gaps
+            .iter()
+            .any(|g| g.pmid == "42527734" && g.outcome.starts_with("Rescue analgesia")),
+        "rescue analgesia: {:?}",
+        cov.gaps
+    );
+    eprintln!(
+        "COVERAGE run 1: {:?}\n{}\n{:#?}",
+        cov.counts,
+        cov.line(),
+        cov.gaps
+    );
+
+    // ---- Stage 4b item 2: the completeness review on run 1 (scripted) ----
+    // The real prompt assembly and the real call path (`completeness::review`,
+    // a ScriptedLlm replying), the code checks, the store round trip and the
+    // page. Nothing the writer wrote changes; additions appear labelled.
+    let mut a1 = answer.clone();
+    a1.answer = Some(run1.clone());
+    a1.coverage = Some(cov.clone());
+    let full1 = FullInput {
+        rows: &rows,
+        skeptic: Some(&review),
+        skeptic_note: None,
+        missed: &[],
+    };
+    let comp_user = completeness::user(
+        QUESTION,
+        &a1.plain_text(),
+        &cov,
+        &writer_v3::full_blocks(&studies, &full1),
+    );
+    assert!(
+        comp_user.contains("NASA raw TLX"),
+        "the gap reaches the review"
+    );
+    assert!(comp_user.contains("<source id=\"row-41511872\">"));
+    assert!(comp_user.len() <= completeness::worst_case_user(QUESTION).len());
+    let first_row = run1.outcomes[0].outcome.clone();
+    let comp_llm = Arc::new(ScriptedLlm::new().when("GAPS FOUND BY CODE").reply_json(
+        json!({
+            "added_outcomes": [{"outcome": "Surgeon workload (NASA raw TLX)",
+                "effect_text": "Mean 18.4 with robotic TAPP vs 34.0 with TEP (lower = less workload) [41511872]",
+                "pmids": ["41511872"], "certainty": "Low", "why": "one trial"},
+                {"outcome": "Rescue analgesia", "effect_text": "20.6% vs 17.9%; ARD 2.7% (95% CI -13.7% to 19.1%) [42527734]",
+                "pmids": ["42527734"], "certainty": "Low", "why": "one small trial"}],
+            "outcome_additions": [{"outcome": first_row, "text": "Pain at 6 h: mean difference 0.28 [42527734].", "pmids": ["42527734"]}],
+            "added_conflicts": [],
+            "not_added": [{"gap": "AIIMS 12 h CI bound", "reason": "already covered by the 6 h estimate"}],
+            "notes": [{"text": "Certainty for workload rests on one trial."}]
+        }),
+        Usage { input_tokens: 25_000, output_tokens: 1_800, ..Usage::default() },
+    ));
+    let cctx = run_ctx(&pool, comp_llm.clone()).await;
+    let allowed1 = writer_v3::allowed_numbers(&studies, Some(&full1));
+    let cx = completeness::Context {
+        selected: &selected,
+        allowed: &allowed1,
+        outcomes: &run1.outcomes,
+        gaps_found: cov.gaps.len() as u32,
+    };
+    let c = completeness::review(&cctx, &cctx.llm, &comp_user, &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped, None);
+    assert_eq!(c.added(), 3);
+    assert_eq!(c.outcome_additions[0].row, 0);
+    assert_eq!(c.removed_citations, 0);
+    assert!(
+        c.untraced.is_empty(),
+        "every added number traces: {:?}",
+        c.untraced
+    );
+    let written_before = serde_json::to_string(&a1.answer).unwrap();
+    a1.completeness = Some(c);
+    let stored1: AnswerV3 = serde_json::from_value(serde_json::to_value(&a1).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_string(&stored1.answer).unwrap(),
+        written_before,
+        "add-only"
+    );
+    let html1 = incisive_app::app::render_answer_v3(stored1.clone());
+    let page1 = flat(&page_text(&html1));
+    assert!(page1.contains("Mean 18.4 with robotic TAPP vs 34.0 with TEP"));
+    assert!(page1.contains("Pain at 6 h: mean difference 0.28"));
+    assert!(page1.matches(ADDED_LABEL).count() >= 3);
+    assert!(page1.contains("Judged not relevant (1)"));
+    let text1 = stored1.plain_text();
+    assert!(
+        text1.matches(ADDED_LABEL).count() >= 4,
+        "rows, sentence and note"
+    );
+    // Everything the writer wrote is still on the page.
+    for o in &run1.outcomes {
+        let name: String = flat(&o.outcome).chars().take(60).collect();
+        assert!(page1.contains(&name), "{name}");
+    }
+    eprintln!(
+        "COMPLETENESS replay: {}",
+        stored1.completeness.as_ref().unwrap().line()
+    );
 }
 
 /// Number tokens in the writer's input from the prototype payloads, pinned:
@@ -916,5 +1112,186 @@ async fn write_probe_writer_schema_payload() {
         "variants": variants,
         "skipped": "Only B (the Stage 3 control) and S (live) are sent (owner ruling R-S4a)."
     });
+    std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+}
+
+/// The reconstructed 31 Oct run 1 without a database: the prototype rows
+/// (ROGER's workload among its six), the validated review, the scripted
+/// answer with the workload, the AIIMS 6 h / 12 h pain and rescue analgesia
+/// left out, its coverage, and the completeness review's real user message.
+fn run1_review_user() -> (String, usize) {
+    let (studies, _, searches) = studies();
+    let selected: Vec<String> = studies.iter().map(|s| s.pmid.clone()).collect();
+    let mut f1 = fixture("evidence.json");
+    for x in f1["studies"].as_array_mut().unwrap() {
+        if x["pmid"] == "41511872" {
+            let o = x["outcomes"].as_array_mut().unwrap();
+            let i = o
+                .iter()
+                .position(|o| s(&o["outcome"]).contains("NASA raw TLX"))
+                .unwrap();
+            let nasa = o.remove(i);
+            o.insert(0, nasa);
+        }
+    }
+    let rows = checked_rows_of(&f1);
+    let review = validated_review(&selected);
+    let mut run1 =
+        serde_json::from_value::<writer_v3::WireAnswer>(scripted_answer(&rows, &studies, &review))
+            .unwrap()
+            .into_answer()
+            .0;
+    run1.outcomes.retain(|o| {
+        !(o.outcome.contains("NASA raw TLX")
+            || o.outcome.starts_with("Acute pain (primary), VAS")
+            || o.outcome.starts_with("Rescue analgesia"))
+    });
+    let known = |p: &str| selected.iter().any(|s| s == p);
+    let is_meta = |p: &str| studies.iter().any(|s| s.pmid == p && s.design == "SR/MA");
+    let cov = coverage::check(&run1, &rows, is_meta, Some(&review), known);
+    let references: Vec<ReferenceV3> = studies
+        .iter()
+        .enumerate()
+        .map(|(i, s)| ReferenceV3 {
+            n: i as u16 + 1,
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            journal: s.journal.clone(),
+            year: s.year,
+            doi: s.doi.clone(),
+            retracted: false,
+            found_by_skeptic: false,
+        })
+        .collect();
+    let a = AnswerV3 {
+        version: ANSWER_VERSION,
+        question: QUESTION.into(),
+        mode: RunMode::Focused,
+        created_at: chrono::Utc::now(),
+        answer: Some(run1),
+        empty_reason: None,
+        references,
+        searches,
+        integrity: IntegrityV3::default(),
+        stopped_early: None,
+        cost_paise: 0,
+        elapsed_s: 0,
+        skeptic: Some(team::skeptic_summary(&review)),
+        evidence: vec![],
+        notes: vec![],
+        untraced: vec![],
+        notable_code: vec![],
+        coverage: Some(cov.clone()),
+        completeness: None,
+    };
+    let full = FullInput {
+        rows: &rows,
+        skeptic: Some(&review),
+        skeptic_note: None,
+        missed: &[],
+    };
+    (
+        completeness::user(
+            QUESTION,
+            &a.plain_text(),
+            &cov,
+            &writer_v3::full_blocks(&studies, &full),
+        ),
+        cov.gaps.len(),
+    )
+}
+
+/// Writes the payload of `.superpowers/phase3/smoke-stage4b.sh` (not a
+/// test): the completeness review's real prompt, schema and user message on
+/// the reconstructed run 1 (gaps present), and the skeptic's first turn
+/// with its Stage 4b prompt over the prototype's selection.
+///   SMOKE_PAYLOAD_OUT=payload.json cargo test -p incisive-app \
+///     --test replay_stage4 write_smoke_stage4b_payload -- --ignored
+#[tokio::test]
+#[ignore = "writes the smoke payload; not a test"]
+async fn write_smoke_stage4b_payload() {
+    use incisive_app::agent::llm::SOURCE_RULE;
+    use incisive_app::agent::researcher;
+    use incisive_app::agent::skeptic::Picture;
+    use incisive_app::agent::tools::lit::LitTools;
+    let out = std::env::var("SMOKE_PAYLOAD_OUT").expect("SMOKE_PAYLOAD_OUT");
+    let rule = |s: &str| format!("{s}\n\n{SOURCE_RULE}");
+    let (user, gaps) = run1_review_user();
+    let (studies, contradictions, _) = studies();
+    let pool = lazy_pool(&SecretString::from(
+        "postgres://u:p@127.0.0.1:1/x".to_string(),
+    ))
+    .unwrap();
+    let lit = LitTools::new(
+        incisive_app::agent::testing::offline_literature(),
+        pool,
+        Uuid::nil(),
+        QUESTION,
+    );
+    let picture: Vec<Picture> = studies
+        .iter()
+        .map(|s| Picture {
+            pmid: s.pmid.clone(),
+            title: s.title.clone(),
+            design: s.design.clone(),
+            why: s.why.clone(),
+        })
+        .collect();
+    let payload = json!({
+        "question": QUESTION,
+        "completeness": {
+            "model": incisive_app::agent::llm::AgentModels::default().completeness,
+            "system": rule(completeness::SYSTEM),
+            "schema": completeness::schema(),
+            "user": user,
+            "gaps": gaps,
+            "max_tokens": completeness::MAX_TOKENS,
+            "effort": "low",
+        },
+        "skeptic": {
+            "system": rule(&skeptic::system_prompt(8)),
+            "tools": lit.registry_of(&researcher::QUICK_TOOLS).defs(),
+            "task": skeptic::task(QUESTION, &picture, &contradictions),
+            "max_tokens": DepthSettings::FOCUSED.skeptic_max_tokens,
+        }
+    });
+    std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+}
+
+/// Writes the payload of `.superpowers/phase3/probe-stage4b-schemas.sh`
+/// (not a test): the completeness review's schema with its real system
+/// prompt, the skeptic's changed final schema (`extract_next` added) with
+/// its real final prompt, and the writer's live schema (unchanged, the
+/// control), each with a tiny user message.
+///   SMOKE_PAYLOAD_OUT=probe.json cargo test -p incisive-app \
+///     --test replay_stage4 write_probe_stage4b_payload -- --ignored
+#[tokio::test]
+#[ignore = "writes the probe payload; not a test"]
+async fn write_probe_stage4b_payload() {
+    use incisive_app::agent::llm::SOURCE_RULE;
+    use incisive_app::agent::writer_v3::schema_complexity;
+    let out = std::env::var("SMOKE_PAYLOAD_OUT").expect("SMOKE_PAYLOAD_OUT");
+    let rule = |s: &str| format!("{s}\n\n{SOURCE_RULE}");
+    let cx = |v: &Value| {
+        let c = schema_complexity(v);
+        json!({"bytes": c.bytes, "enum_values": c.enum_values, "nullable_unions": c.nullable_unions,
+            "depth": c.depth, "properties": c.properties, "objects": c.objects})
+    };
+    let models = incisive_app::agent::llm::AgentModels::default();
+    let probes = vec![
+        json!({"name": "C", "what": "completeness review schema (Stage 4b, new)", "model": models.completeness,
+            "effort": "low", "system": rule(completeness::SYSTEM), "schema": completeness::schema(),
+            "complexity": cx(&completeness::schema()), "live": true,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nReview the answer for completeness now, as JSON matching the schema."}),
+        json!({"name": "K", "what": "skeptic final schema with extract_next (Stage 4b, changed)", "model": models.skeptic,
+            "effort": "low", "system": rule(skeptic::FINAL_SYSTEM), "schema": skeptic::report_schema(),
+            "complexity": cx(&skeptic::report_schema()), "live": true,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nSubmit your review now, as JSON matching the schema."}),
+        json!({"name": "S", "what": "writer live schema (unchanged; the control)", "model": models.writer,
+            "effort": null, "system": rule(writer_v3::SYSTEM_FULL), "schema": writer_v3::writer_schema(),
+            "complexity": cx(&writer_v3::writer_schema()), "live": false,
+            "user": "<question>\nDoes a test question compile?\n</question>\n\nSTUDIES SELECTED BY THE RESEARCHER (0):\n\nWrite the answer now, as JSON matching the schema."}),
+    ];
+    let payload = json!({"max_tokens": 32, "probes": probes});
     std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
 }

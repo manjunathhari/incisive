@@ -193,6 +193,7 @@ fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
         full_engine: incisive_app::runs::Engine::Classic,
+        completeness: false,
         // The real pipeline.
         worker: WorkerHandle::default(),
         llm: Some(incisive_app::agent::testing::agent_llm(llm, MODEL)),

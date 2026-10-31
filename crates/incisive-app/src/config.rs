@@ -48,6 +48,9 @@ pub struct Config {
     /// Engine for Full runs (`FULL_ENGINE`: `team`, the default, or
     /// `classic`, the Phase 2 Focused pipeline). The owner's rollback switch.
     pub full_engine: Engine,
+    /// Stage 4b: the completeness review after the Full writer
+    /// (`COMPLETENESS`: `on`, the default, or `off`, the rollback switch).
+    pub completeness: bool,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -209,6 +212,17 @@ impl Config {
             })?,
         };
 
+        let completeness = match lookup("COMPLETENESS").as_deref() {
+            None | Some("on") => true,
+            Some("off") => false,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "COMPLETENESS",
+                    reason: "expected `on` or `off`".to_string(),
+                });
+            }
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -284,6 +298,7 @@ impl Config {
             agent_models,
             quick_engine,
             full_engine,
+            completeness,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -847,6 +862,42 @@ mod tests {
             (c.quick_engine, c.full_engine),
             (Engine::Team, Engine::Classic)
         );
+    }
+
+    /// Stage 4b: `COMPLETENESS` is `on` (default) or `off`, trimmed; anything
+    /// else is refused at startup without echoing the value.
+    #[test]
+    fn completeness_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(c.completeness, "on by default");
+        assert_eq!(c.agent_models.completeness, "claude-sonnet-5-5");
+        for (v, want) in [("on", true), ("off", false), (" off ", false), ("  ", true)] {
+            let mut pairs = full();
+            pairs.push(("COMPLETENESS", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.completeness, want, "{v:?}");
+        }
+        for bad in ["On", "OFF", "true", "0", "of f"] {
+            let mut pairs = full();
+            pairs.push(("COMPLETENESS", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "COMPLETENESS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            assert!(!err.to_string().contains(bad));
+        }
+        // The model switch: Opus by AGENT_MODELS.
+        let mut pairs = full();
+        pairs.push(("AGENT_MODELS", r#"{"completeness": "claude-opus-5-5"}"#));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert_eq!(c.agent_models.completeness, "claude-opus-5-5");
     }
 
     /// The CI container smoke's exact prod environment (`.github/workflows/

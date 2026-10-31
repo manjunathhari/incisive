@@ -42,6 +42,9 @@ pub struct AppState {
     pub quick_engine: QuickEngine,
     /// Which engine answers Full runs (`FULL_ENGINE`; default `team`).
     pub full_engine: Engine,
+    /// Stage 4b: whether Full runs make the completeness review after the
+    /// writer (`COMPLETENESS`; default on).
+    pub completeness: bool,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev

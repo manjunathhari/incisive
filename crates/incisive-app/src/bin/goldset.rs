@@ -1074,6 +1074,7 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         // FULL_ENGINE say.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
         full_engine: incisive_app::runs::Engine::Classic,
+        completeness: false,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,

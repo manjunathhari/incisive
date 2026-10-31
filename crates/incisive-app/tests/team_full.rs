@@ -161,6 +161,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         runs: RunsConfig::default(),
         quick_engine: Engine::Team,
         full_engine: Engine::Team,
+        completeness: false,
         worker: WorkerHandle::default(),
         llm: None,
         lit,
@@ -750,7 +751,24 @@ fn full_script_impl(
     contra: Option<(&str, &str)>,
     turn_usage: impl Fn(usize) -> Usage,
 ) -> ScriptedLlm {
-    let mut llm = ScriptedLlm::new()
+    full_script_on(
+        ScriptedLlm::new(),
+        research_turns,
+        quotes,
+        contra,
+        turn_usage,
+    )
+}
+
+/// [`full_script_impl`] on top of `base` (its keyed replies match first).
+fn full_script_on(
+    base: ScriptedLlm,
+    research_turns: usize,
+    quotes: Option<(&str, &str)>,
+    contra: Option<(&str, &str)>,
+    turn_usage: impl Fn(usize) -> Usage,
+) -> ScriptedLlm {
+    let mut llm = base
         // Finals first: they also contain their role's task.
         .when(RESEARCHER_FINAL)
         .reply_json(study_list(&[(SEEN_A, "RCT"), (SEEN_B, "RCT")]), u())
@@ -1007,6 +1025,15 @@ async fn full_team_run_end_to_end_through_the_worker() {
     }
     // Stage 4 item 5: the number trace reports its counts (nothing removed).
     assert!(l.iter().any(|x| x.starts_with("Number check: ")), "{l:?}");
+    // Stage 4b item 1: the coverage check runs after the writer (code) and
+    // reports its counts; the writer's answer is unchanged by it.
+    let cov = a.coverage.as_ref().expect("coverage in Full");
+    assert_eq!(cov.counts.outcomes_checked, 2, "{cov:?}");
+    assert!(
+        l.iter().any(|x| x.starts_with("Coverage: ")),
+        "missing coverage line in {l:?}"
+    );
+    assert!(a.trail_notes().iter().any(|n| n.starts_with("Coverage: ")));
 }
 
 /// The skeptic fails (its first turn errors): the writer proceeds without
@@ -1297,9 +1324,22 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     let mut min_viable = None;
+    // Stage 4b: with the completeness review on (its own reserve) and the
+    // second wave's share reserved.
+    let script = || {
+        full_script_on(
+            ScriptedLlm::new()
+                .when(COMPLETENESS_KEY)
+                .reply_json(completeness_json(), usage(30_000, 2_500)),
+            15,
+            None,
+            None,
+            |_| usage(1500, 1500),
+        )
+    };
     for limit in (4000..=34000).step_by(1000) {
-        let llm = Arc::new(full_script(15, None));
-        let (ctx, uid) = full_ctx(
+        let llm = Arc::new(script());
+        let (mut ctx, uid) = full_ctx(
             &pool,
             literature(&server),
             real_models(llm.clone()),
@@ -1307,6 +1347,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             DepthSettings::FOCUSED,
         )
         .await;
+        ctx.state.completeness = true;
         let out = run_team(&ctx).await;
         let reqs = llm.requests();
         let spent: i64 = charges_settle(&pool, uid, reqs.len()).await.iter().sum();
@@ -1335,8 +1376,9 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             .filter(|r| request_user_text(r).contains(SKEPTIC_KEY) && !r.tools.is_empty())
             .count();
         let rows = by_key(&reqs, "Study PMID").len();
+        let comp = by_key(&reqs, COMPLETENESS_KEY).len();
         eprintln!(
-            "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, charged {spent}"
+            "MEASURED Full limit {limit}: research rounds {rounds}, skeptic turns {sk_turns}, extraction calls {rows}, completeness calls {comp}, charged {spent}"
         );
     }
     let mut hi = min_viable.expect("a Full run fits under ₹340");
@@ -1344,8 +1386,8 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     let mut lo = hi - 1000;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        let llm = Arc::new(full_script(15, None));
-        let (ctx, _) = full_ctx(
+        let llm = Arc::new(script());
+        let (mut ctx, _) = full_ctx(
             &pool,
             literature(&server),
             real_models(llm.clone()),
@@ -1353,6 +1395,7 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
             DepthSettings::FOCUSED,
         )
         .await;
+        ctx.state.completeness = true;
         let _ = run_team(&ctx).await;
         if by_key(&llm.requests(), STUDIES_HEADING).len() == 1 {
             hi = mid;
@@ -1381,8 +1424,12 @@ async fn full_runs_never_overspend_and_always_reach_the_writer() {
     )
     .unwrap();
     let review = incisive_app::agent::team::review_reserve(&ctx).unwrap();
+    let picks = incisive_app::agent::team::pick_reserve(&ctx).unwrap();
+    let comp = completeness::reserve(&ctx.llm, &ctx.budget, QUESTION).unwrap();
+    let writer_prompt = incisive_app::agent::writer_v3::worst_case_full_user(QUESTION).len();
+    let comp_prompt = completeness::worst_case_user(QUESTION).len();
     eprintln!(
-        "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; review reserve {review}"
+        "MEASURED Full: smallest limit that reaches the writer {min_viable} paise; writer reserve {writer}; completeness reserve {comp}; review reserve {review} (of which second wave {picks}); worst-case writer prompt {writer_prompt} bytes; worst-case completeness prompt {comp_prompt} bytes"
     );
     assert!(min_viable <= DepthSettings::FOCUSED.agent_limit_paise);
 }
@@ -1887,4 +1934,654 @@ async fn the_kept_share_leaves_doubled_room_for_holds_in_flight() {
         }
     }
     assert!(finals > 10, "{finals}");
+}
+
+// ---------- Stage 4b item 2: the completeness review ----------
+
+use incisive_app::agent::answer_v3::ADDED_LABEL;
+use incisive_app::agent::completeness;
+
+/// In the completeness review's message only.
+const COMPLETENESS_KEY: &str = "GAPS FOUND BY CODE";
+
+fn completeness_json() -> Value {
+    json!({
+        "added_outcomes": [{"outcome": "Recurrence", "effect_text": format!("No recurrence reported [{SEEN_A}]"),
+            "pmids": [SEEN_A], "certainty": "Low", "why": "one trial"}],
+        "outcome_additions": [{"outcome": "pain", "text": format!("Both arms scored alike [{SEEN_B}]."), "pmids": [SEEN_B]}],
+        "added_conflicts": [{"text": format!("A missed trial differs [{SEEN_C}]."), "pmids": [SEEN_C]}],
+        "not_added": [{"gap": "B's follow-up length", "reason": "not about pain"}],
+        "notes": [{"text": "Certainty Low fits one group's trials."}]
+    })
+}
+
+/// A Full run (`run_team`) with the completeness review `on` or not, and
+/// `extra` keyed replies first.
+async fn full_run_with(
+    pool: &PgPool,
+    server: &MockServer,
+    on: bool,
+    extra: impl FnOnce(ScriptedLlm) -> ScriptedLlm,
+) -> (AnswerV3, Vec<String>, Arc<ScriptedLlm>, i64, RunContext) {
+    let (qa, qb) = quotes_for(pool, server).await;
+    let llm = Arc::new(full_script_on(
+        extra(ScriptedLlm::new()),
+        1,
+        Some((&qa, &qb)),
+        None,
+        |_| usage(1500, 1500),
+    ));
+    let (mut ctx, uid) = full_ctx(
+        pool,
+        literature(server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.state.completeness = on;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    let l = lines(&steps_of(&ctx, uid).await);
+    (a, l, llm, uid, ctx)
+}
+
+/// Stage 4b item 2: the review adds labelled rows, sentences, conflicts and
+/// notes; the writer's stored answer is byte-identical to the same run
+/// without the review; the review sees the plain-text answer, the gaps and
+/// the evidence as the writer saw it; every call is charged.
+#[tokio::test]
+async fn the_completeness_review_only_adds_and_labels() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (off, off_lines, _, _, _) = full_run_with(&pool, &server, false, |l| l).await;
+    assert!(off.completeness.is_none(), "COMPLETENESS=off: no review");
+    assert!(!off_lines.iter().any(|l| l.starts_with("Completeness")));
+    let (on, l, llm, uid, _) = full_run_with(&pool, &server, true, |l| {
+        l.when(COMPLETENESS_KEY)
+            .reply_json(completeness_json(), usage(4000, 900))
+    })
+    .await;
+    // Add-only: the writer's stored text is byte-identical.
+    assert_eq!(
+        serde_json::to_string(&on.answer).unwrap(),
+        serde_json::to_string(&off.answer).unwrap()
+    );
+    let c = on.completeness.as_ref().expect("the review");
+    assert_eq!(c.skipped, None);
+    assert_eq!(c.added_outcomes[0].outcome, "Recurrence");
+    assert_eq!(
+        c.outcome_additions[0].row, 0,
+        "matched to the writer's Pain row"
+    );
+    assert_eq!(c.added_conflicts[0].pmids, [SEEN_C]);
+    assert_eq!(c.not_added.len(), 1);
+    assert_eq!(c.notes.len(), 1);
+    assert_eq!(c.removed_citations, 0, "{c:?}");
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Completeness: ") && x.contains("3 added")),
+        "{l:?}"
+    );
+    // What it was given, and how it was called.
+    let reqs = llm.requests();
+    let rq = by_key(&reqs, COMPLETENESS_KEY);
+    assert_eq!(rq.len(), 1);
+    assert_eq!(rq[0].max_tokens, completeness::MAX_TOKENS);
+    assert!(
+        rq[0]
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("COMPLETENESS REVIEWER")
+    );
+    let t = request_user_text(rq[0]);
+    assert!(t.contains("<source id=\"answer\">") && t.contains("BOTTOM LINE"));
+    assert!(
+        t.contains(&format!("<source id=\"row-{SEEN_A}\">")),
+        "the rows as the writer saw them"
+    );
+    assert!(t.contains("<source id=\"skeptic\">"));
+    assert!(!t.contains(STUDIES_HEADING));
+    let rows = charges_settle(&pool, uid, reqs.len()).await;
+    assert_eq!(rows.len(), reqs.len(), "every call charged");
+    assert_eq!(on.cost_paise, rows.iter().sum::<i64>());
+    // Labelled in Copy as text.
+    assert!(on.plain_text().matches(ADDED_LABEL).count() >= 3);
+}
+
+/// Stage 4b owner constraint: a refused schema or API error, or an
+/// unusable reply, never fails the run: the answer ships as the writer
+/// wrote it, with "Completeness review skipped: …".
+#[tokio::test]
+async fn a_failed_completeness_review_ships_the_answer_unchanged() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (off, _, _, _, _) = full_run_with(&pool, &server, false, |l| l).await;
+    let refused = |l: ScriptedLlm| {
+        l.when(COMPLETENESS_KEY)
+            .fail(claude_client::ClaudeError::Api {
+                status: 400,
+                error_type: "invalid_request_error".into(),
+                message: "The compiled grammar is too large".into(),
+            })
+    };
+    let unusable = |l: ScriptedLlm| {
+        l.when(COMPLETENESS_KEY)
+            .reply_text("I could not do that.", usage(4000, 20))
+    };
+    for (what, reason) in [("refused", "error"), ("unusable", "unusable reply")] {
+        let (a, l, _, _, _) = if what == "refused" {
+            full_run_with(&pool, &server, true, refused).await
+        } else {
+            full_run_with(&pool, &server, true, unusable).await
+        };
+        assert_eq!(
+            serde_json::to_string(&a.answer).unwrap(),
+            serde_json::to_string(&off.answer).unwrap(),
+            "{what}"
+        );
+        let c = a.completeness.as_ref().unwrap();
+        assert_eq!(c.skipped.as_deref(), Some(reason), "{what}");
+        assert_eq!(c.added(), 0);
+        let want =
+            format!("Completeness review skipped: {reason}; the answer is as the writer wrote it");
+        assert!(l.contains(&want), "{what}: {l:?}");
+        assert!(a.trail_notes().iter().any(|n| n.starts_with(&want)));
+    }
+}
+
+/// Stage 4b owner constraint: too little time, too little money and a
+/// timeout each skip the review with a note; nothing is called when the
+/// gate says no, and a timed-out call is still charged.
+#[tokio::test]
+async fn the_completeness_review_is_skipped_for_time_money_and_timeout() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let cx = completeness::Context {
+        selected: &[],
+        allowed: &[],
+        outcomes: &[],
+        gaps_found: 3,
+    };
+    // Time: under MIN_TIME before the hard stop, no call.
+    let llm = Arc::new(ScriptedLlm::new());
+    let (mut ctx, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let s = DepthSettings::FOCUSED;
+    ctx.budget = Arc::new(
+        RunBudget::new(
+            ctx.run_id,
+            ctx.user.id,
+            20000,
+            Instant::now(),
+            prices(),
+            88.0,
+        )
+        .with_time_limit(s.agent_time_limit_s)
+        .aged_for_test(Duration::from_secs(u64::from(s.agent_time_limit_s))),
+    );
+    let c = completeness::review(&ctx, &ctx.llm, "x", &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("time"));
+    assert_eq!(c.gaps_found, 3);
+    assert!(llm.requests().is_empty());
+    // Money: the limit is spent, so the hold is refused; no call.
+    let (ctx, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.budget.record_spent_for_test(20000);
+    let c = completeness::review(&ctx, &ctx.llm, "x", &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("cost limit"));
+    assert!(llm.requests().is_empty());
+    // Timeout: the reply comes after the wait; skipped, and still charged.
+    let slow = Arc::new(
+        ScriptedLlm::new()
+            .delay(Duration::from_millis(600))
+            .reply_json(completeness_json(), usage(1000, 100)),
+    );
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(slow.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let c = completeness::review_waiting(&ctx, &ctx.llm, "x", &cx, Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("time"));
+    assert_eq!(slow.requests().len(), 1);
+    assert_eq!(charges_settle(&pool, uid, 1).await.len(), 1, "charged");
+}
+
+// ---------- Stage 4b item 3: the skeptic's picks, a second extraction wave ----------
+
+use incisive_app::agent::answer_v3::FOUND_BY_SKEPTIC;
+
+/// The skeptic's final review, picking C for extraction (and A, already
+/// selected).
+fn picking_review() -> Value {
+    json!({
+        "contradicting": [], "missed_rcts": [{"pmid": SEEN_C, "why": "missed comparison"}],
+        "guidelines": [], "overlaps": [], "ma_notes": [],
+        "extract_next": [{"pmid": SEEN_C, "why": "a missed RCT"}, {"pmid": SEEN_A, "why": "selected already"}],
+        "verdict": "holds_with_caveats", "must_mention": ["A and B share a group."], "searches": []
+    })
+}
+
+/// The skeptic's final review, picking C for extraction.
+fn skeptic_final_picking(final_usage: Usage) -> impl FnOnce(ScriptedLlm) -> ScriptedLlm {
+    move |l: ScriptedLlm| {
+        l.when(SKEPTIC_FINAL)
+            .reply_json(picking_review(), final_usage)
+            .when(&format!("Study PMID {SEEN_C}:"))
+            .reply_json(row(vec![]), u())
+    }
+}
+
+/// Stage 4b item 3: the skeptic's pick goes through the same extractor
+/// (a second wave after the skeptic), joins the writer's input as a row,
+/// is referenced and labelled "found by the skeptic" on the page and in
+/// Copy as text, and is not repeated as a missed trial's abstract. The
+/// pick already selected is ignored.
+#[tokio::test]
+async fn the_skeptics_pick_is_extracted_in_a_second_wave() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (a, l, llm, _, _) = full_run_with(&pool, &server, false, skeptic_final_picking(u())).await;
+    assert!(
+        l.iter()
+            .any(|x| x == "Extractor: second wave, extracting 1 study found by the skeptic"),
+        "{l:?}"
+    );
+    let reqs = llm.requests();
+    assert_eq!(by_key(&reqs, &format!("Study PMID {SEEN_C}:")).len(), 1);
+    let w = by_key(&reqs, STUDIES_HEADING);
+    let t = request_user_text(w[0]);
+    assert!(
+        t.contains("STUDIES SELECTED BY THE RESEARCHER (3)"),
+        "the pick joins the studies"
+    );
+    assert!(
+        t.contains(&format!("<source id=\"row-{SEEN_C}\">")),
+        "as an evidence row"
+    );
+    assert!(t.contains("Found by the skeptic: a missed RCT"));
+    assert!(
+        !t.contains(&format!("Found by the skeptic - PMID {SEEN_C}")),
+        "not repeated as a missed trial's abstract"
+    );
+    let e = a
+        .evidence
+        .iter()
+        .find(|e| e.pmid == SEEN_C)
+        .expect("evidence row");
+    assert!(e.found_by_skeptic);
+    assert!(a.evidence.iter().filter(|e| e.found_by_skeptic).count() == 1);
+    let r = a.references.iter().find(|r| r.pmid == SEEN_C).unwrap();
+    assert!(r.found_by_skeptic);
+    assert_eq!(r.n, 3, "after the selection");
+    assert_eq!(
+        a.skeptic.as_ref().unwrap().extract_next.len(),
+        1,
+        "the selected study is not a pick"
+    );
+    let html = incisive_app::app::render_answer_v3(a.clone());
+    assert!(html.contains("Picked for extraction (second wave)"));
+    let plain = a.plain_text();
+    assert!(plain.contains("Picked for extraction: a missed RCT"));
+    // The label is drawn on the trials table row when the writer has one.
+    let mut with_row = a.clone();
+    with_row.answer.as_mut().unwrap().studies[0].pmid = SEEN_C.into();
+    let html = incisive_app::app::render_answer_v3(with_row.clone());
+    assert!(html.contains(FOUND_BY_SKEPTIC));
+    assert!(
+        with_row
+            .plain_text()
+            .contains("(found by the skeptic; extracted in a second wave)")
+    );
+}
+
+/// Stage 4b item 3: the second wave is skipped, with a note, when the review
+/// phase is too close to its wrap-up point or the money is short; the pick
+/// still reaches the writer from its abstract. No new step fails the run.
+#[tokio::test]
+async fn the_second_wave_is_skipped_for_time_or_money() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    for (what, settings, final_usage) in [
+        (
+            "time",
+            // The review phase wraps up 10 s in: under WAVE2_MIN_TIME left.
+            DepthSettings {
+                writer_time_allowance_s: 590,
+                ..DepthSettings::FOCUSED
+            },
+            u(),
+        ),
+        (
+            "cost limit",
+            DepthSettings::FOCUSED,
+            // The skeptic's final call costs far more than its hold.
+            usage(2_100_000, 200),
+        ),
+    ] {
+        let llm = Arc::new(full_script_on(
+            skeptic_final_picking(final_usage)(ScriptedLlm::new()),
+            1,
+            Some((&qa, &qb)),
+            None,
+            |_| usage(1500, 1500),
+        ));
+        let (ctx, uid) = full_ctx(
+            &pool,
+            literature(&server),
+            agent_llm(llm.clone(), MODEL),
+            20000,
+            settings,
+        )
+        .await;
+        let out = run_team(&ctx).await;
+        let l = lines(&steps_of(&ctx, uid).await);
+        let note = format!(
+            "1 study picked by the skeptic was not extracted ({what}); the writer was given its abstract"
+        );
+        assert!(l.contains(&note), "{what}: {l:?}");
+        assert!(by_key(&llm.requests(), &format!("Study PMID {SEEN_C}:")).is_empty());
+        // Review S3: the answer ships, unconditionally.
+        let PipelineOutcome::Done(body) = out else {
+            panic!("{what}: {out:?}")
+        };
+        let a: AnswerV3 = serde_json::from_value(body).unwrap();
+        assert!(a.answer.is_some(), "{what}");
+        assert!(a.notes.contains(&format!("{note}.")));
+        let reqs = llm.requests();
+        let w = by_key(&reqs, STUDIES_HEADING);
+        assert_eq!(w.len(), 1, "{what}: the writer was called");
+        let t = request_user_text(w[0]);
+        assert!(
+            t.contains(&format!("<source id=\"pmid-{SEEN_C}\">")),
+            "its abstract"
+        );
+        // Review S2: not called "extracted in a second wave".
+        let e = a.evidence.iter().find(|e| e.pmid == SEEN_C).unwrap();
+        assert!(e.found_by_skeptic);
+        assert_eq!(
+            e.second_wave(),
+            "not extracted in the second wave; abstract only"
+        );
+        // Drawn on the trial row when the writer gives the pick one.
+        let mut with_row = a.clone();
+        with_row.answer.as_mut().unwrap().studies[0].pmid = SEEN_C.into();
+        let t = with_row.plain_text();
+        assert!(
+            t.contains("(found by the skeptic; not extracted in the second wave; abstract only)"),
+            "{what}"
+        );
+        assert!(!t.contains("; extracted in a second wave)"), "{what}");
+    }
+}
+
+/// Review S3: an API error or a refused schema in the second wave's
+/// extraction leaves a note; the pick reaches the writer from its abstract
+/// and the answer ships.
+#[tokio::test]
+async fn second_wave_errors_leave_a_note_and_the_answer_ships() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    for (what, status, kind, msg) in [
+        ("API error", 500u16, "api_error", "internal"),
+        (
+            "refused schema",
+            400,
+            "invalid_request_error",
+            "The compiled grammar is too large",
+        ),
+    ] {
+        let (a, l, llm, _, _) = full_run_with(&pool, &server, false, move |base| {
+            base.when(&format!("Study PMID {SEEN_C}:"))
+                .fail(claude_client::ClaudeError::Api {
+                    status,
+                    error_type: kind.into(),
+                    message: msg.into(),
+                })
+                .when(SKEPTIC_FINAL)
+                .reply_json(picking_review(), u())
+        })
+        .await;
+        let note = "1 study picked by the skeptic was not extracted (extraction failed); the writer was given its abstract";
+        assert!(l.contains(&note.to_string()), "{what}: {l:?}");
+        assert!(
+            a.answer.is_some() && a.notes.contains(&format!("{note}.")),
+            "{what}"
+        );
+        let reqs = llm.requests();
+        let t = request_user_text(by_key(&reqs, STUDIES_HEADING)[0]);
+        assert!(
+            t.contains(&format!("<source id=\"pmid-{SEEN_C}\">")),
+            "{what}: its abstract"
+        );
+        let e = a.evidence.iter().find(|e| e.pmid == SEEN_C).unwrap();
+        assert_eq!(
+            e.second_wave(),
+            "not extracted in the second wave; abstract only"
+        );
+    }
+}
+
+/// Review B1: the second wave is bounded by the writer's start gate. A
+/// pick's extraction that does not return in time is cut off with a note;
+/// the run still reaches the writer and ships an answer. The time limit is
+/// set so the bound is about 5 s after the start (hard stop 200 s, less the
+/// writer's 180 s gate and the 15 s margin).
+#[tokio::test]
+async fn a_slow_second_wave_is_cut_off_and_the_answer_ships() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    let never: incisive_app::agent::llm::Gate = Arc::new(|| false);
+    let base = ScriptedLlm::new()
+        .until(&format!("Study PMID {SEEN_C}:"), never)
+        .when(SKEPTIC_FINAL)
+        .reply_json(picking_review(), u())
+        .when(&format!("Study PMID {SEEN_C}:"))
+        .reply_json(row(vec![]), u());
+    let llm = Arc::new(full_script_on(base, 1, Some((&qa, &qb)), None, |_| {
+        usage(1500, 1500)
+    }));
+    let settings = DepthSettings {
+        agent_time_limit_s: 140,
+        writer_time_allowance_s: 10,
+        review_time_allowance_s: 10,
+        ..DepthSettings::FOCUSED
+    };
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        settings,
+    )
+    .await;
+    let started = Instant::now();
+    let out = run_team(&ctx).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "cut off, not waited for"
+    );
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_some());
+    let l = lines(&steps_of(&ctx, uid).await);
+    let note =
+        "1 study picked by the skeptic was not extracted (time); the writer was given its abstract";
+    assert!(l.contains(&note.to_string()), "{l:?}");
+    assert!(
+        l.iter()
+            .any(|x| x == "Extractor: second wave, extracting 1 study found by the skeptic"),
+        "the wave started, then was cut off: {l:?}"
+    );
+    let reqs = llm.requests();
+    assert_eq!(
+        by_key(&reqs, &format!("Study PMID {SEEN_C}:")).len(),
+        1,
+        "the call was made"
+    );
+    assert_eq!(by_key(&reqs, STUDIES_HEADING).len(), 1, "the writer ran");
+    let e = a.evidence.iter().find(|e| e.pmid == SEEN_C).unwrap();
+    assert_eq!(
+        e.second_wave(),
+        "not extracted in the second wave; abstract only"
+    );
+}
+
+/// Review S3: the completeness review timing out inside a full run ships
+/// the answer as the writer wrote it, with the note.
+#[tokio::test]
+async fn a_completeness_timeout_in_a_full_run_ships_the_answer() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    let never: incisive_app::agent::llm::Gate = Arc::new(|| false);
+    let base = ScriptedLlm::new()
+        .until(COMPLETENESS_KEY, never)
+        .when(COMPLETENESS_KEY)
+        .reply_json(completeness_json(), usage(4000, 900));
+    let llm = Arc::new(full_script_on(base, 1, Some((&qa, &qb)), None, |_| {
+        usage(1500, 1500)
+    }));
+    let (mut ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.state.completeness = true;
+    completeness::cap_wait_for_test(ctx.run_id, Duration::from_millis(300));
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_some());
+    assert_eq!(
+        a.completeness.as_ref().unwrap().skipped.as_deref(),
+        Some("time")
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        l.contains(
+            &"Completeness review skipped: time; the answer is as the writer wrote it".to_string()
+        ),
+        "{l:?}"
+    );
+    assert_eq!(
+        by_key(&llm.requests(), COMPLETENESS_KEY).len(),
+        1,
+        "the call was made"
+    );
+}
+
+/// Review S3 and S4: a pick whose record cannot be fetched (the whole fetch
+/// fails, or PubMed returns no record for it) gets a visible note, never a
+/// silent drop, and the answer ships. The pick is a study only the skeptic's
+/// Europe PMC search returned (so no other test caches it).
+#[tokio::test]
+async fn a_pick_that_cannot_be_fetched_gets_a_note_and_the_answer_ships() {
+    use wiremock::matchers::query_param;
+    let Some(pool) = pool().await else { return };
+    for (what, pick, fail) in [
+        ("not returned", "88888881", false),
+        ("fetch fails", "88888882", true),
+    ] {
+        let server = hernia_server().await;
+        let epmc = json!({"hitCount": 1, "resultList": {"result": [
+            {"id": pick, "source": "MED", "pmid": pick, "title": "A newer trial (fixture)", "pubYear": "2026"}
+        ]}});
+        Mock::given(method("GET"))
+            .and(path(EPMC_SEARCH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(epmc.to_string()))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        if fail {
+            Mock::given(method("GET"))
+                .and(path(ESUMMARY))
+                .and(query_param("id", pick))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .mount(&server)
+                .await;
+        }
+        let (qa, qb) = quotes_for(&pool, &server).await;
+        let review = json!({
+            "contradicting": [], "missed_rcts": [], "guidelines": [], "overlaps": [], "ma_notes": [],
+            "extract_next": [{"pmid": pick, "why": "a newer trial"}],
+            "verdict": "holds_with_caveats", "must_mention": [], "searches": []
+        });
+        let base = ScriptedLlm::new()
+            .when(SKEPTIC_FINAL)
+            .reply_json(review, u())
+            .when(SKEPTIC_KEY)
+            .reply_blocks(
+                vec![tool_call(
+                    "e1",
+                    "search_europepmc",
+                    json!({"query": "hernia AND robotic", "max_results": 10}),
+                )],
+                Some(StopReason::ToolUse),
+                u(),
+            );
+        let llm = Arc::new(full_script_on(base, 1, Some((&qa, &qb)), None, |_| {
+            usage(1500, 1500)
+        }));
+        let (ctx, uid) = full_ctx(
+            &pool,
+            literature(&server),
+            agent_llm(llm.clone(), MODEL),
+            20000,
+            DepthSettings::FOCUSED,
+        )
+        .await;
+        let out = run_team(&ctx).await;
+        let PipelineOutcome::Done(body) = out else {
+            panic!("{what}: {out:?}")
+        };
+        let a: AnswerV3 = serde_json::from_value(body).unwrap();
+        assert!(a.answer.is_some(), "{what}");
+        assert_eq!(
+            a.skeptic.as_ref().unwrap().extract_next.len(),
+            1,
+            "{what}: the pick was accepted (its own result)"
+        );
+        let note = "1 study picked by the skeptic could not be fetched";
+        let l = lines(&steps_of(&ctx, uid).await);
+        assert!(l.contains(&note.to_string()), "{what}: {l:?}");
+        assert!(a.notes.contains(&format!("{note}.")), "{what}");
+        assert!(!a.references.iter().any(|r| r.pmid == pick));
+    }
 }

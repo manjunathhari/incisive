@@ -40,13 +40,13 @@ use super::answer_v3::{
 };
 use super::extractor::{
     Centres, EvidenceRow, MAX_NUMBERS, MAX_OUTCOMES, QuoteSource, RowNumber, TextKind, all_allowed,
-    quote_values, written_numbers,
+    has_own_sign, quote_values, written_numbers, written_traced,
 };
 use super::llm::{
     Effort, OutputSchema, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
     neutralise_source_tags, read_structured, wrap_source,
 };
-use super::researcher::{Contradiction, MAX_CONTRADICTIONS, MAX_SELECTED};
+use super::researcher::{Contradiction, MAX_CONTRADICTIONS, MAX_SELECTED, MAX_SELECTED_FULL};
 use super::skeptic::SkepticReview;
 use super::{AgentLlm, RunContext};
 use crate::gate::neutralise_close_tag;
@@ -999,6 +999,11 @@ there are none; never convert currencies, never estimate Indian prices, never in
 study that contradicts itself, lopsided withdrawals between arms, industry funding or conflicts, a design that is not \
 what its label says), each citing its study with a [PMID] marker, drawn only from the evidence rows, appraisals and skeptic review provided.";
 
+/// Studies the Full writer is shown, at most (Stage 4b item 3): the
+/// researcher's twelve and the skeptic's three picks. The writer's prompt,
+/// schema and `max_tokens` are unchanged; only its input has up to 15 rows.
+pub const MAX_WRITER_STUDIES: usize = MAX_SELECTED_FULL + super::skeptic::MAX_PICKS;
+
 /// Byte caps of the Full-mode row and review fields shown to the writer
 /// (after neutralising).
 pub struct FullCaps {
@@ -1318,13 +1323,25 @@ pub fn writer_user_full(
     contradictions: &[Contradiction],
     searches: &[SearchEntry],
 ) -> String {
-    let c = STUDY_CAPS;
     let mut u = format!(
         "<question>\n{}\n</question>\n\n{STUDIES_HEADING} ({}):\n\n",
         neutralise_close_tag(question),
         studies.len()
     );
-    for (i, s) in studies.iter().take(MAX_SELECTED).enumerate() {
+    u.push_str(&full_blocks(studies, full));
+    u.push_str(&notes_tail(studies, contradictions, searches));
+    u
+}
+
+/// The evidence part of the Full writer's message, exactly as the writer
+/// is shown it: each study (its evidence row, or its record and abstract),
+/// the skeptic's review and the trials the skeptic found. Stage 4b: the
+/// completeness review is given the same text ("the evidence rows, as the
+/// writer saw them"), so there is one assembly.
+pub fn full_blocks(studies: &[StudyInput], full: &FullInput<'_>) -> String {
+    let c = STUDY_CAPS;
+    let mut u = String::new();
+    for (i, s) in studies.iter().take(MAX_WRITER_STUDIES).enumerate() {
         let body = match full.rows.iter().find(|r| r.pmid == s.pmid) {
             Some(r) => format!("Verified evidence row:\n{}", row_block(s, r)),
             None => format!(
@@ -1365,11 +1382,11 @@ pub fn writer_user_full(
         ));
     }
     u.push('\n');
-    u.push_str(&notes_tail(studies, contradictions, searches));
     u
 }
 
-/// The largest Full writer prompt `question` can produce: ten studies, each
+/// The largest Full writer prompt `question` can produce: fifteen studies
+/// (Stage 4b: twelve selected and three picked by the skeptic), each
 /// with a row at every cap (rows are larger than abstracts), a skeptic
 /// review at every cap and three missed trials at the abstract caps.
 pub fn worst_case_full_user(question: &str) -> String {
@@ -1391,7 +1408,7 @@ pub fn worst_case_full_user(question: &str) -> String {
         design: x(DESIGN_BYTES),
         why: x(STUDY_CAPS.why),
     };
-    let studies: Vec<StudyInput> = (0..MAX_SELECTED).map(worst_study).collect();
+    let studies: Vec<StudyInput> = (0..MAX_WRITER_STUDIES).map(worst_study).collect();
     let number = RowNumber {
         label: x(k.number),
         value: f64::MIN_POSITIVE,
@@ -1491,6 +1508,7 @@ pub fn worst_case_full_user(question: &str) -> String {
                 note: x(k.claim),
             })
             .collect(),
+        extract_next: vec![],
         searches: vec![],
         leads: (0..2 * super::skeptic::MAX_ITEMS)
             .map(|i| super::skeptic::Lead {
@@ -1813,10 +1831,15 @@ pub fn allowed_numbers(studies: &[StudyInput], full: Option<&FullInput<'_>>) -> 
 /// the stored text (a structured one marks its whole entry). The text is
 /// never changed. Returns the spans and how many numbers were checked. The
 /// tokeniser and matching are the extractor's (ranges, COVID-19, signs).
+/// `loose_sign` (Full, Stage 4b; review S1): a number written in prose with
+/// no sign of its own also traces to its source's magnitude ("13.4 min
+/// shorter" for "−13.4"); a signed one, a structured number and n must match
+/// exactly. Quick passes `false`: its check is exactly as before.
 pub fn trace_numbers(
     a: &WrittenAnswer,
     allowed: &[f64],
     known: impl Fn(&str) -> bool,
+    loose_sign: bool,
 ) -> (Vec<Span>, u32) {
     let mut spans = Vec::new();
     let mut checked = 0u32;
@@ -1827,7 +1850,7 @@ pub fn trace_numbers(
                 continue;
             }
             checked += 1;
-            if !all_allowed(&v, allowed) {
+            if !written_traced(&v, has_own_sign(text, s), allowed, loose_sign) {
                 spans.push(Span::new(field.clone(), s, e));
             }
         }
@@ -2753,6 +2776,7 @@ mod tests {
                 pmid: "22222222".into(),
                 note: "its RCT pool includes an observational study".into(),
             }],
+            extract_next: vec![],
             searches: vec![],
             leads: vec![],
             dropped_unseen: 0,
@@ -3039,7 +3063,7 @@ mod tests {
             "Pain 2.1 vs 2.4 (95% CI 0.48-1.13), COVID-19, 4 vs 5 in 2019\u{2013}2021; n = 100.",
         );
         let known = |p: &str| p == "11111111" || p == "22222222";
-        let (spans, checked) = trace_numbers(&a, &allowed, known);
+        let (spans, checked) = trace_numbers(&a, &allowed, known, false);
         assert_eq!(a, before, "the text is never changed");
         assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["1.25", "7%"]);
         assert!(
@@ -3061,8 +3085,52 @@ mod tests {
         ok.outcomes[0].numbers.truncate(1);
         ok.studies[1].n = None;
         ok.guidelines.clear();
-        let (spans, _) = trace_numbers(&ok, &allowed, known);
+        let (spans, _) = trace_numbers(&ok, &allowed, known, false);
         assert!(spans.is_empty(), "{spans:?}");
+    }
+
+    /// Stage 4b item 1 and review S1: in Full, a number written with no
+    /// sign of its own traces to its source's magnitude (the 31 Oct run 2
+    /// marked "13.4" although the quote has "−13.4", U+2212); a number with
+    /// its own sign must match exactly ("+2.3" or "−2.3" against a source
+    /// 2.3 or −2.3 is a direction, and stays marked), and so must a
+    /// structured number. Quick keeps the exact check.
+    #[test]
+    fn a_sign_difference_traces_only_without_a_sign_of_its_own() {
+        let mut a = answer();
+        a.bottom_line.text = "Operative time was 13.4 min shorter [11111111].".into();
+        a.outcomes[0].effect_text = "-13.4 min; pain \u{2212}2.3 and +0.05 [11111111]".into();
+        a.outcomes[0].numbers.truncate(1);
+        a.outcomes[0].numbers[0].value = -13.4;
+        a.studies[0].n = None;
+        a.studies[1].n = None;
+        let allowed = quote_values(
+            "Mean difference \u{2212}13.4 min (p < 0.001); pain 2.3; RD \u{2212}0.05.",
+        );
+        assert!(allowed.contains(&-13.4), "U+2212 is a minus: {allowed:?}");
+        let known = |p: &str| p == "11111111" || p == "22222222";
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
+        assert!(
+            traced_marks(&a, &spans, "bottom_line.text").is_empty(),
+            "{spans:?}"
+        );
+        assert_eq!(
+            traced_marks(&a, &spans, "outcomes.0.effect_text"),
+            ["\u{2212}2.3", "0.05"],
+            "own signs that contradict the source stay marked"
+        );
+        assert!(!spans.iter().any(|s| s.field == "outcomes.0.numbers.0"));
+        // A structured number with the other sign is marked.
+        a.outcomes[0].numbers[0].value = 13.4;
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
+        assert!(spans.contains(&Span::new("outcomes.0.numbers.0", 0, 0)));
+        // Quick: exact, as before Stage 4b ("13.4" against "−13.4" marked).
+        let (spans, _) = trace_numbers(&a, &allowed, known, false);
+        assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["13.4"]);
+        // A different magnitude is always marked.
+        a.bottom_line.text = "Operative time was 13.5 min shorter [11111111].".into();
+        let (spans, _) = trace_numbers(&a, &allowed, known, true);
+        assert_eq!(traced_marks(&a, &spans, "bottom_line.text"), ["13.5"]);
     }
 
     /// Stage 4 item 5: what the writer may use. A verified row gives its

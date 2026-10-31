@@ -155,6 +155,7 @@ async fn main() {
         runs: config.runs,
         quick_engine: config.quick_engine,
         full_engine: config.full_engine,
+        completeness: config.completeness,
         worker: WorkerHandle::default(),
         llm,
         lit,

@@ -204,6 +204,25 @@ pub struct NotableFinding {
     pub spans: Vec<Span>,
 }
 
+/// The prefixes of the code-built notable findings that repeat the
+/// skeptic's box (Stage 4 item 12). Stage 4b item 5: they are drawn in the
+/// skeptic's box only; the notable findings keep the writer's items and the
+/// extractor's counts line. Stored answers keep them (display only).
+pub const NOTABLE_OVERLAP: &str = "Not independent evidence (the skeptic): ";
+pub const NOTABLE_MISSED: &str =
+    "A randomised trial the researcher's search missed (the skeptic): ";
+pub const NOTABLE_POOLED: &str = "What a meta-analysis pooled (the skeptic): ";
+
+impl NotableFinding {
+    /// A code-built item that repeats the skeptic's box (not drawn among
+    /// the notable findings, Stage 4b item 5).
+    pub fn repeats_skeptic(&self) -> bool {
+        [NOTABLE_OVERLAP, NOTABLE_MISSED, NOTABLE_POOLED]
+            .iter()
+            .any(|p| self.text.starts_with(p))
+    }
+}
+
 /// A marked run of stored text (Stage 4 items 5 and 7): `len` bytes from
 /// byte `start` of the text at `field` (a path such as
 /// `outcomes.2.effect_text`). The text itself is never changed; the page
@@ -368,7 +387,26 @@ pub struct EvidenceV3 {
     /// source does not contain, shown labelled "not in the source".
     #[serde(default)]
     pub trial_registration_unverified: Option<String>,
+    /// Stage 4b item 3: a study the skeptic found and picked for
+    /// extraction (the second wave); labelled "found by the skeptic".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub found_by_skeptic: bool,
 }
+
+impl EvidenceV3 {
+    /// Review S2: what the second wave did for a pick, for its label:
+    /// "extracted in a second wave" only when it has an extraction row.
+    pub fn second_wave(&self) -> &'static str {
+        if self.text == "not extracted" {
+            "not extracted in the second wave; abstract only"
+        } else {
+            "extracted in a second wave"
+        }
+    }
+}
+
+/// The label of a study the skeptic picked for extraction.
+pub const FOUND_BY_SKEPTIC: &str = "found by the skeptic";
 
 /// An extracted outcome whose quote was not found in the paper (Stage 4
 /// item 7): kept with its values, labelled "not verified".
@@ -408,6 +446,9 @@ pub struct SkepticV3 {
     pub dropped_unseen: u32,
     #[serde(default)]
     pub dropped_quotes: u32,
+    /// Stage 4b item 3: studies it picked for extraction (second wave).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extract_next: Vec<SkepticItem>,
 }
 
 /// An unverified lead of the skeptic (Stage 4 review 6).
@@ -498,6 +539,291 @@ pub struct IntegrityV3 {
     pub labels_defaulted: u32,
 }
 
+// ---------- Stage 4b item 1: the coverage check ----------
+
+/// What a coverage gap is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GapKind {
+    /// A verified structured number of an evidence row the answer does not
+    /// write.
+    Number,
+    /// A verified extracted outcome none of whose numbers (or, with none,
+    /// whose name) the answer has.
+    Outcome,
+    /// A verified number of a study the researcher labelled a meta-analysis.
+    Pooled,
+    /// A skeptic item (contradicting evidence, missed trial, meta-analysis
+    /// note, guideline, overlap) whose study the answer's main sections
+    /// never cite.
+    SkepticItem,
+}
+
+impl GapKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GapKind::Number => "number",
+            GapKind::Outcome => "outcome",
+            GapKind::Pooled => "pooled",
+            GapKind::SkepticItem => "skeptic_item",
+        }
+    }
+}
+
+/// One thing the team verified that the written answer does not say.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageGap {
+    pub kind: GapKind,
+    pub pmid: String,
+    /// The extracted outcome's name (empty for a skeptic item).
+    pub outcome: String,
+    /// What is missing, in words (the row's number line or effect, or the
+    /// skeptic's text).
+    pub text: String,
+    /// The missing values (empty for a skeptic item).
+    #[serde(default)]
+    pub numbers: Vec<f64>,
+}
+
+/// The coverage check's counts (all gaps, also those past the stored cap).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageCounts {
+    /// Verified structured numbers checked, and those the answer lacks
+    /// (pooled ones included; numbers of a missing outcome included).
+    pub numbers_checked: u32,
+    pub numbers_missing: u32,
+    /// Of `numbers_missing`, from studies labelled meta-analyses.
+    pub pooled_missing: u32,
+    pub outcomes_checked: u32,
+    pub outcomes_missing: u32,
+    pub skeptic_checked: u32,
+    pub skeptic_missing: u32,
+    /// Gaps not stored (past [`MAX_STORED_GAPS`]); counted above.
+    #[serde(default)]
+    pub gaps_cut: u32,
+}
+
+/// Gaps stored per answer, at most (the counts cover them all).
+pub const MAX_STORED_GAPS: usize = 80;
+
+/// Stage 4b item 1: what the team verified that the written answer does
+/// not say. Code only (no AI call); additive on [`AnswerV3`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CoverageV3 {
+    pub gaps: Vec<CoverageGap>,
+    pub counts: CoverageCounts,
+}
+
+/// "2 outcomes and 5 numbers", "5 numbers" or "1 outcome" (Stage 4b item
+/// 5: number agreement, zero parts left out); `None` when both are zero.
+pub fn unverified_counts(outcomes: u32, numbers: u32) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if outcomes > 0 {
+        parts.push(count_noun(outcomes, "outcome", "outcomes"));
+    }
+    if numbers > 0 {
+        parts.push(count_noun(numbers, "number", "numbers"));
+    }
+    (!parts.is_empty()).then(|| join_counts(&parts))
+}
+
+/// "1 number" / "2 numbers".
+pub fn count_noun(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The parts of a count list that are not zero, joined "a, b and c".
+pub fn join_counts(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [a] => a.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+impl CoverageV3 {
+    /// The step line and trail note: "Coverage: 14 verified numbers (2
+    /// pooled) and 3 outcomes not in the draft; 1 skeptic item not cited",
+    /// zero parts left out.
+    pub fn line(&self) -> String {
+        let c = self.counts;
+        let mut parts: Vec<String> = Vec::new();
+        if c.numbers_missing > 0 {
+            let mut p = count_noun(c.numbers_missing, "verified number", "verified numbers");
+            if c.pooled_missing > 0 {
+                p.push_str(&format!(" ({} pooled)", c.pooled_missing));
+            }
+            parts.push(p);
+        }
+        if c.outcomes_missing > 0 {
+            parts.push(count_noun(c.outcomes_missing, "outcome", "outcomes"));
+        }
+        let mut line = if parts.is_empty() {
+            format!(
+                "Coverage: all {} and {} are in the draft",
+                count_noun(c.numbers_checked, "verified number", "verified numbers"),
+                count_noun(c.outcomes_checked, "outcome", "outcomes")
+            )
+        } else {
+            format!("Coverage: {} not in the draft", join_counts(&parts))
+        };
+        if c.skeptic_missing > 0 {
+            line.push_str(&format!(
+                "; {} not cited",
+                count_noun(c.skeptic_missing, "skeptic item", "skeptic items")
+            ));
+        }
+        line
+    }
+}
+
+// ---------- Stage 4b item 2: the completeness review ----------
+
+/// The label every addition of the completeness review carries.
+pub const ADDED_LABEL: &str = "added on completeness review";
+
+/// A new outcome row added by the completeness review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedOutcome {
+    pub outcome: String,
+    pub effect_text: String,
+    pub pmids: Vec<String>,
+    /// `None`: not graded (a sentence for a row the answer does not have,
+    /// shown as a new row).
+    pub certainty: Option<Certainty>,
+    pub why: String,
+    /// The citation check left it with no study among the given ones:
+    /// shown flagged, never removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A sentence appended to one of the writer's outcome rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeAddition {
+    /// The row's name as the review gave it.
+    pub outcome: String,
+    /// Index of the writer's outcome row it was matched to.
+    pub row: usize,
+    pub text: String,
+    pub pmids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A conflict the review found the answer does not reflect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedConflict {
+    pub text: String,
+    pub pmids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A gap the review judged not relevant to the question, with why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotAdded {
+    pub gap: String,
+    pub reason: String,
+}
+
+/// Stage 4b item 2: what the add-only completeness review (one AI call
+/// after the writer, Full only) added. The writer's answer is stored
+/// unchanged; these are drawn beside it, each labelled [`ADDED_LABEL`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletenessV3 {
+    /// Why the review did not run or could not be used ("time", "cost
+    /// limit", "error", "unusable reply"); `None` when it ran. The answer
+    /// then ships exactly as the writer wrote it.
+    #[serde(default)]
+    pub skipped: Option<String>,
+    /// Gaps the coverage check gave it.
+    #[serde(default)]
+    pub gaps_found: u32,
+    #[serde(default)]
+    pub added_outcomes: Vec<AddedOutcome>,
+    #[serde(default)]
+    pub outcome_additions: Vec<OutcomeAddition>,
+    #[serde(default)]
+    pub added_conflicts: Vec<AddedConflict>,
+    #[serde(default)]
+    pub not_added: Vec<NotAdded>,
+    /// Inconsistency notes (it never changes a rating).
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// Numbers in its additions not traced to what the writer was given
+    /// (paths `added_outcomes.0.effect_text`, `outcome_additions.1.text`,
+    /// `added_conflicts.0.text`, `notes.0`, …): marked "not traced".
+    #[serde(default)]
+    pub untraced: Vec<Span>,
+    /// Citations of studies outside the given ones, removed (text kept).
+    #[serde(default)]
+    pub removed_citations: u32,
+    /// Items past the stored caps (counted, not shown).
+    #[serde(default)]
+    pub items_cut: u32,
+    /// Certainty labels it gave that were not recognised (shown "not
+    /// graded").
+    #[serde(default)]
+    pub labels_defaulted: u32,
+}
+
+impl CompletenessV3 {
+    /// A review that did not run, for `reason`.
+    pub fn skipped(reason: &str, gaps_found: u32) -> CompletenessV3 {
+        CompletenessV3 {
+            skipped: Some(reason.to_string()),
+            gaps_found,
+            ..CompletenessV3::default()
+        }
+    }
+
+    /// Additions made (rows, sentences and conflicts).
+    pub fn added(&self) -> usize {
+        self.added_outcomes.len() + self.outcome_additions.len() + self.added_conflicts.len()
+    }
+
+    /// The checks line: "Completeness: 12 gaps found; 7 added, 5 judged not
+    /// relevant (listed)", or "Completeness review skipped: time".
+    pub fn line(&self) -> String {
+        if let Some(r) = &self.skipped {
+            return format!(
+                "Completeness review skipped: {r}; the answer is as the writer wrote it"
+            );
+        }
+        let mut parts = vec![format!(
+            "{} added",
+            u32::try_from(self.added()).unwrap_or(u32::MAX)
+        )];
+        if !self.not_added.is_empty() {
+            parts.push(format!(
+                "{} judged not relevant (listed)",
+                self.not_added.len()
+            ));
+        }
+        if !self.notes.is_empty() {
+            parts.push(count_noun(
+                u32::try_from(self.notes.len()).unwrap_or(u32::MAX),
+                "note",
+                "notes",
+            ));
+        }
+        format!(
+            "Completeness: {} found; {}",
+            count_noun(self.gaps_found, "gap", "gaps"),
+            join_counts(&parts)
+        )
+    }
+
+    /// The additions of the writer's outcome row `row`, with their index.
+    pub fn additions_to(&self, row: usize) -> impl Iterator<Item = (usize, &OutcomeAddition)> {
+        self.outcome_additions
+            .iter()
+            .enumerate()
+            .filter(move |(_, a)| a.row == row)
+    }
+}
+
 /// The stored Phase 3 answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnswerV3 {
@@ -536,9 +862,41 @@ pub struct AnswerV3 {
     /// skeptic's and extractor's output (no AI call).
     #[serde(default)]
     pub notable_code: Vec<NotableFinding>,
+    /// Stage 4b item 1 (additive): what the team verified that the written
+    /// answer does not say. `None`: Quick, or answers stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageV3>,
+    /// Stage 4b item 2 (additive): the add-only completeness review.
+    /// `None`: Quick, `COMPLETENESS=off`, or answers stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<CompletenessV3>,
 }
 
 impl AnswerV3 {
+    /// Stage 4b item 5: whether the skeptic's lead on `pmid` is shown on its
+    /// study's trial row: the study was selected or extracted (it has
+    /// evidence) and the writer gave it a row. Otherwise the lead stays in
+    /// the leads list.
+    pub fn lead_on_row(&self, pmid: &str) -> bool {
+        self.evidence.iter().any(|e| e.pmid == pmid)
+            && self
+                .answer
+                .as_ref()
+                .is_some_and(|w| w.studies.iter().any(|s| s.pmid.trim() == pmid))
+    }
+
+    /// The skeptic's leads drawn on the trial row of `pmid`.
+    pub fn leads_on_row(&self, pmid: &str) -> Vec<&SkepticLead> {
+        if !self.lead_on_row(pmid) {
+            return Vec::new();
+        }
+        self.skeptic
+            .iter()
+            .flat_map(|k| &k.leads)
+            .filter(|l| l.pmid == pmid)
+            .collect()
+    }
+
     /// Reference number per PMID.
     pub fn ref_numbers(&self) -> HashMap<String, u16> {
         self.references
@@ -610,6 +968,31 @@ pub fn citation_ranges(text: &str, known: impl Fn(&str) -> bool) -> Vec<(usize, 
             ids.iter().any(|i| known(i)) || ids.iter().any(|i| i.len() >= MIN_PMID_DIGITS)
         })
         .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+/// Stage 4b item 5 (doubled citations): of `pmids`, those the citation
+/// marker `text` ends with does not already cite (only spaces and `.` `,`
+/// `;` `)` may follow that marker). Drawing a text and then its PMIDs as
+/// links would otherwise show "… [4]. [4]".
+pub fn not_cited_at_end(text: &str, pmids: &[String]) -> Vec<String> {
+    let t =
+        text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ')'));
+    let known = |p: &str| pmids.iter().any(|x| x.trim() == p);
+    let tail: Vec<String> = citation_ranges(t, known)
+        .into_iter()
+        .filter(|(_, b)| *b == t.len())
+        .flat_map(|(a, b)| {
+            DIGITS
+                .find_iter(&t[a..b])
+                .map(|d| d.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    pmids
+        .iter()
+        .filter(|p| !tail.iter().any(|t| t == p.trim()))
+        .cloned()
         .collect()
 }
 
@@ -852,20 +1235,37 @@ impl AnswerV3 {
         if i.dropped_unseen > 0 {
             notes.push(format!(
                 "{} selected by the researcher but not returned by this run's searches: left out.",
-                i.dropped_unseen
+                count_noun(i.dropped_unseen, "study", "studies")
             ));
         }
         if i.dropped_unfetched > 0 {
             notes.push(format!(
                 "{} selected but could not be fetched: left out.",
-                i.dropped_unfetched
+                count_noun(i.dropped_unfetched, "study", "studies")
             ));
         }
-        if i.removed_citations + i.dropped_numbers + i.dropped_studies > 0 {
-            notes.push(format!(
-            "Citation check: {} unknown citations removed, {} numbers and {} trial rows dropped.",
-            i.removed_citations, i.dropped_numbers, i.dropped_studies
-        ));
+        // Stage 4b item 5: number agreement, and no "0 …" parts.
+        let mut parts: Vec<String> = Vec::new();
+        if i.removed_citations > 0 {
+            parts.push(format!(
+                "{} removed",
+                count_noun(i.removed_citations, "unknown citation", "unknown citations")
+            ));
+        }
+        if i.dropped_numbers > 0 {
+            parts.push(format!(
+                "{} dropped",
+                count_noun(i.dropped_numbers, "number", "numbers")
+            ));
+        }
+        if i.dropped_studies > 0 {
+            parts.push(format!(
+                "{} dropped",
+                count_noun(i.dropped_studies, "trial row", "trial rows")
+            ));
+        }
+        if !parts.is_empty() {
+            notes.push(format!("Citation check: {}.", join_counts(&parts)));
         }
         if i.numbers_checked > 0 {
             notes.push(if i.numbers_untraced == 0 {
@@ -880,20 +1280,30 @@ impl AnswerV3 {
             )
         });
         }
-        if i.outcomes_unverified + i.numbers_unverified > 0 {
+        if let Some(what) = unverified_counts(i.outcomes_unverified, i.numbers_unverified) {
             notes.push(format!(
-            "Extraction: {} outcomes and {} numbers could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}.",
-            i.outcomes_unverified, i.numbers_unverified
-        ));
+                "Extraction: {what} could not be matched to the paper's wording; they are kept and labelled \u{201c}not verified\u{201d}."
+            ));
         }
         if i.labels_defaulted > 0 {
             notes.push(format!(
-                "{} certainty or evidence labels from the writer were not recognised; set to \u{201c}Very low\u{201d} or \u{201c}mixed evidence\u{201d}.",
-                i.labels_defaulted
+                "{} from the writer {} not recognised; set to \u{201c}Very low\u{201d} or \u{201c}mixed evidence\u{201d}.",
+                count_noun(
+                    i.labels_defaulted,
+                    "certainty or evidence label",
+                    "certainty or evidence labels"
+                ),
+                if i.labels_defaulted == 1 { "was" } else { "were" }
             ));
         }
         if let Some(n) = self.skeptic.as_ref().and_then(SkepticV3::dropped_note) {
             notes.push(n);
+        }
+        if let Some(c) = &self.coverage {
+            notes.push(format!("{}.", c.line()));
+        }
+        if let Some(c) = &self.completeness {
+            notes.push(format!("{}.", c.line()));
         }
         notes
     }
@@ -905,6 +1315,20 @@ impl AnswerV3 {
         let refs = self.ref_numbers();
         let u = &self.untraced;
         let t = |text: &str, field: &str| plain(text, &refs, field, u, "not traced");
+        // Stage 4b: the completeness review's text, with its own marks.
+        let no_spans: Vec<Span> = Vec::new();
+        let cu = self
+            .completeness
+            .as_ref()
+            .map_or(&no_spans, |c| &c.untraced);
+        let ct = |text: &str, field: &str| plain(text, &refs, field, cu, "not traced");
+        let unsourced = |flag: bool| {
+            if flag {
+                format!(" ({NO_GUIDELINE_SOURCE})")
+            } else {
+                String::new()
+            }
+        };
         let mut o = format!(
             "{}\n\nDecision support \u{2014} the clinician decides.\n",
             self.question.trim()
@@ -1016,6 +1440,31 @@ impl AnswerV3 {
                             if untraced { " (not traced)" } else { "" }
                         ));
                     }
+                    // Stage 4b: sentences the completeness review appended.
+                    if let Some(c) = &self.completeness {
+                        for (k, a) in c.additions_to(i) {
+                            o.push_str(&format!(
+                                "  Added: {}{}{} ({ADDED_LABEL})\n",
+                                ct(&a.text, &format!("outcome_additions.{k}.text")),
+                                cites(&not_cited_at_end(&a.text, &a.pmids), &refs),
+                                unsourced(a.unsourced)
+                            ));
+                        }
+                    }
+                }
+                // Stage 4b: rows the completeness review added.
+                if let Some(c) = &self.completeness {
+                    for (k, x) in c.added_outcomes.iter().enumerate() {
+                        o.push_str(&format!(
+                            "- {} ({ADDED_LABEL}; certainty {}): {}{}{}\n  Why: {}\n",
+                            ct(&x.outcome, &format!("added_outcomes.{k}.outcome")),
+                            x.certainty.map_or("not graded", Certainty::as_str),
+                            ct(&x.effect_text, &format!("added_outcomes.{k}.effect_text")),
+                            cites(&not_cited_at_end(&x.effect_text, &x.pmids), &refs),
+                            unsourced(x.unsourced),
+                            ct(&x.why, &format!("added_outcomes.{k}.why")),
+                        ));
+                    }
                 }
                 h(&mut o, "The trials");
                 for (i, s) in w.studies.iter().enumerate() {
@@ -1033,7 +1482,13 @@ impl AnswerV3 {
                         t(&s.key_results, &format!("studies.{i}.key_results")),
                         t(&s.appraisal, &format!("studies.{i}.appraisal")),
                     ));
+                    for l in self.leads_on_row(&s.pmid) {
+                        o.push_str(&format!("  Skeptic: {}\n", l.text()));
+                    }
                     if let Some(e) = self.evidence.iter().find(|e| e.pmid == s.pmid) {
+                        if e.found_by_skeptic {
+                            o.push_str(&format!("  ({FOUND_BY_SKEPTIC}; {})\n", e.second_wave()));
+                        }
                         if e.funding_checked {
                             let f = e.funding.as_deref().map_or_else(
                                 || {
@@ -1067,13 +1522,25 @@ impl AnswerV3 {
                     }
                 }
                 h(&mut o, "Conflicting evidence");
-                if w.conflicts.is_empty() {
+                let added_conflicts = self
+                    .completeness
+                    .as_ref()
+                    .map_or(&[][..], |c| c.added_conflicts.as_slice());
+                if w.conflicts.is_empty() && added_conflicts.is_empty() {
                     o.push_str("None identified.\n");
                 }
                 for (i, c) in w.conflicts.iter().enumerate() {
                     o.push_str(&format!(
                         "- {}\n",
                         t(&c.text, &format!("conflicts.{i}.text"))
+                    ));
+                }
+                for (k, c) in added_conflicts.iter().enumerate() {
+                    o.push_str(&format!(
+                        "- {}{}{} ({ADDED_LABEL})\n",
+                        ct(&c.text, &format!("added_conflicts.{k}.text")),
+                        cites(&not_cited_at_end(&c.text, &c.pmids), &refs),
+                        unsourced(c.unsourced)
                     ));
                 }
                 let no_spans: Vec<Span> = Vec::new();
@@ -1152,20 +1619,27 @@ impl AnswerV3 {
             .as_ref()
             .map(|w| w.notable_findings.as_slice())
             .unwrap_or(&[]);
-        if !self.notable_code.is_empty() || !writer_notable.is_empty() {
+        // Stage 4b item 5: the skeptic's items are in its own section only;
+        // a citation the text already ends with is not appended again.
+        let code_notable: Vec<&NotableFinding> = self
+            .notable_code
+            .iter()
+            .filter(|n| !n.repeats_skeptic())
+            .collect();
+        if !code_notable.is_empty() || !writer_notable.is_empty() {
             h(&mut o, "Other notable findings from this run");
-            for n in &self.notable_code {
+            for n in code_notable {
                 o.push_str(&format!(
                     "- {}{}\n",
                     plain(&n.text, &refs, "text", &n.spans, "not verified"),
-                    cites(&n.pmids, &refs)
+                    cites(&not_cited_at_end(&n.text, &n.pmids), &refs)
                 ));
             }
             for (i, n) in writer_notable.iter().enumerate() {
                 o.push_str(&format!(
                     "- {}{}\n",
                     t(&n.text, &format!("notable_findings.{i}.text")),
-                    cites(&n.pmids, &refs)
+                    cites(&not_cited_at_end(&n.text, &n.pmids), &refs)
                 ));
             }
         }
@@ -1187,6 +1661,7 @@ impl AnswerV3 {
                 ));
             }
             let items = [
+                ("Picked for extraction", &k.extract_next, "extract_next"),
                 ("Missed trial", &k.missed_rcts, "missed_rcts"),
                 ("What a meta-analysis pooled", &k.ma_notes, "ma_notes"),
                 ("Evidence against", &k.contradicting, "contradicting"),
@@ -1208,8 +1683,9 @@ impl AnswerV3 {
             }
         }
         if let Some(k) = &self.skeptic {
-            // Unverified leads (review 6): PMID and kind only.
-            for l in &k.leads {
+            // Unverified leads (review 6): PMID and kind only. Stage 4b
+            // item 5: a lead on a study with a trial row is noted there.
+            for l in k.leads.iter().filter(|l| !self.lead_on_row(&l.pmid)) {
                 o.push_str(&format!(
                     "- {}{}\n",
                     l.text(),
@@ -1218,6 +1694,26 @@ impl AnswerV3 {
                 if !refs.contains_key(&l.pmid) {
                     o.push_str(&format!("  PubMed {}\n", l.pmid));
                 }
+            }
+        }
+        // Stage 4b: the completeness review's notes and what it judged not
+        // relevant (its line is with the run's notes below).
+        if let Some(c) = &self.completeness
+            && (!c.notes.is_empty() || !c.not_added.is_empty())
+        {
+            h(&mut o, "Completeness review");
+            for (k, n) in c.notes.iter().enumerate() {
+                o.push_str(&format!(
+                    "- Note ({ADDED_LABEL}): {}\n",
+                    ct(n, &format!("notes.{k}"))
+                ));
+            }
+            for n in &c.not_added {
+                o.push_str(&format!(
+                    "- Judged not relevant: {} \u{2014} {}\n",
+                    cited_or_pmid(&n.gap, &refs),
+                    cited_or_pmid(&n.reason, &refs)
+                ));
             }
         }
         // The run's notes and the search trail's (review 7).
@@ -1251,11 +1747,36 @@ impl AnswerV3 {
             }
             o.push_str(&format!("{line}\n"));
         }
-        if !self.untraced.is_empty() {
+        if !self.untraced.is_empty()
+            || self
+                .completeness
+                .as_ref()
+                .is_some_and(|c| !c.untraced.is_empty())
+        {
             o.push_str("\n(not traced): the number was not found in a verified quote, a structured number or an abstract given to the writer.\n");
         }
         o
     }
+}
+
+/// Review minor 4: `text` with each citation marker as reference numbers
+/// ("[1]"), or "PMID 12345678" for a study with no reference: no PMID is
+/// dropped or left as a raw marker.
+pub fn cited_or_pmid(text: &str, refs: &HashMap<String, u16>) -> String {
+    let mut out = String::new();
+    for seg in split_citations(text, |p| refs.contains_key(p)) {
+        match seg {
+            Segment::Text(t) => out.push_str(&t),
+            Segment::Cite(ids) => {
+                let parts: Vec<String> = ids
+                    .iter()
+                    .map(|p| refs.get(p).map_or(format!("PMID {p}"), |n| n.to_string()))
+                    .collect();
+                out.push_str(&format!("[{}]", parts.join(", ")));
+            }
+        }
+    }
+    out
 }
 
 /// " [1, 3]" for the PMIDs that have references.
@@ -1599,6 +2120,7 @@ mod tests {
                 leads: vec![],
                 dropped_unseen: 0,
                 dropped_quotes: 0,
+                extract_next: vec![],
             }),
             evidence: vec![],
             notes: vec![],
@@ -1608,7 +2130,124 @@ mod tests {
                 pmids: vec![A.into()],
                 spans: vec![],
             }],
+            coverage: None,
+            completeness: None,
         }
+    }
+
+    /// Stage 4b: `coverage` and `completeness` are additive. An answer
+    /// stored before (without them) loads with neither, and one without
+    /// them is stored without the keys, so old answers round-trip as they
+    /// were.
+    #[test]
+    fn coverage_and_completeness_are_additive() {
+        let a = sample();
+        let mut v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("coverage").is_none() && v.get("completeness").is_none());
+        v.as_object_mut().unwrap().remove("coverage");
+        let back: AnswerV3 = serde_json::from_value(v).unwrap();
+        assert_eq!(back, a);
+        assert!(back.coverage.is_none() && back.completeness.is_none());
+        // A skipped review alone (old stored shape of its fields) loads.
+        let c: CompletenessV3 =
+            serde_json::from_value(serde_json::json!({"skipped": "time"})).unwrap();
+        assert_eq!(
+            c.line(),
+            "Completeness review skipped: time; the answer is as the writer wrote it"
+        );
+        assert_eq!(c.added(), 0);
+    }
+
+    /// Stage 4b item 5: counts agree in number and zero parts are left out
+    /// ("1 number", not "1 numbers"; not "0 outcomes and 5 numbers").
+    #[test]
+    fn counts_agree_and_drop_zero_parts() {
+        assert_eq!(unverified_counts(0, 5).as_deref(), Some("5 numbers"));
+        assert_eq!(unverified_counts(1, 0).as_deref(), Some("1 outcome"));
+        assert_eq!(
+            unverified_counts(2, 1).as_deref(),
+            Some("2 outcomes and 1 number")
+        );
+        assert_eq!(unverified_counts(0, 0), None);
+        let mut a = sample();
+        a.integrity = IntegrityV3 {
+            dropped_unseen: 1,
+            removed_citations: 1,
+            numbers_unverified: 1,
+            labels_defaulted: 1,
+            ..IntegrityV3::default()
+        };
+        let n = a.trail_notes().join("\n");
+        for want in [
+            "1 study selected by the researcher but not returned",
+            "Citation check: 1 unknown citation removed.",
+            "Extraction: 1 number could not be matched",
+            "1 certainty or evidence label from the writer was not recognised",
+        ] {
+            assert!(n.contains(want), "{want:?} in {n}");
+        }
+        assert!(!n.contains(" 0 "), "{n}");
+    }
+
+    /// Stage 4b item 5: a lead on a selected study that has a trial row is
+    /// noted on that row, not listed as a PMID; other leads stay listed.
+    #[test]
+    fn leads_on_selected_studies_go_to_their_row() {
+        let mut a = sample();
+        a.evidence = vec![EvidenceV3 {
+            pmid: A.into(),
+            text: "abstract only".into(),
+            verified_quotes: 1,
+            numbers_dropped: 0,
+            unverified_outcomes: vec![],
+            numbers_unverified: 0,
+            unverified_details: vec![],
+            funding: None,
+            funding_checked: false,
+            spans: vec![],
+            trial_registration_unverified: None,
+            found_by_skeptic: false,
+        }];
+        let k = a.skeptic.as_mut().unwrap();
+        k.leads = vec![
+            SkepticLead {
+                pmid: A.into(),
+                kind: "contradicting study".into(),
+            },
+            SkepticLead {
+                pmid: "55555555".into(),
+                kind: "guideline".into(),
+            },
+        ];
+        assert!(a.lead_on_row(A) && !a.lead_on_row("55555555"));
+        let t = a.plain_text();
+        assert!(t.contains(
+            "  Skeptic: Possible contradicting study: quote not found in the abstract, check the paper\n"
+        ), "{t}");
+        assert!(
+            t.contains("- Possible guideline: quote not found in the abstract, check the paper")
+        );
+        assert!(t.contains("PubMed 55555555"));
+        assert!(!t.contains(&format!("PubMed {A}")));
+        assert_eq!(t.matches("Possible contradicting study").count(), 1, "{t}");
+    }
+
+    /// Stage 4b item 5: a text that already ends with a citation gets no
+    /// second one; other PMIDs are still appended.
+    #[test]
+    fn citations_already_at_the_end_are_not_appended() {
+        let p = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        assert!(not_cited_at_end(&format!("Pain fell [{A}]."), &p(&[A])).is_empty());
+        assert!(not_cited_at_end(&format!("Pain fell [{A}; {B}]. "), &p(&[A, B])).is_empty());
+        assert_eq!(
+            not_cited_at_end(&format!("Pain fell [{A}]."), &p(&[A, B])),
+            p(&[B])
+        );
+        assert_eq!(
+            not_cited_at_end(&format!("[{A}] pain fell."), &p(&[A])),
+            p(&[A])
+        );
+        assert_eq!(not_cited_at_end("No citation.", &p(&[A])), p(&[A]));
     }
 
     /// Stage 4 item 10: Copy as text holds every section, citations as
@@ -1638,8 +2277,8 @@ mod tests {
             "APPLICABILITY",
             "WHAT WOULD CHANGE THIS ANSWER",
             "OTHER NOTABLE FINDINGS FROM THIS RUN",
-            "- Not independent evidence (the skeptic): same centre. [1]",
-            "- Withdrawals 2 vs 9 [1]. [1]",
+            // Stage 4b item 5: the citation is not appended twice.
+            "- Withdrawals 2 vs 9 [1].\n",
             "CHALLENGED BY THE SKEPTIC",
             "- Caveat: Recurrence 7% (not verified) in 2019.",
             "REFERENCES",
@@ -1652,6 +2291,9 @@ mod tests {
         }
         assert!(!t.contains("[41060645"), "{t}");
         assert!(!t.contains("99999999"));
+        // Stage 4b item 5: the skeptic's items are in its section only.
+        assert!(!t.contains("[1]. [1]"), "{t}");
+        assert!(!t.contains("Not independent evidence (the skeptic)"), "{t}");
     }
 
     /// Stage 4 review 2, 3, 5, 6 and 7 in Copy as text: a guideline with no
@@ -1693,6 +2335,7 @@ mod tests {
             funding_checked: true,
             spans: vec![],
             trial_registration_unverified: Some("NCT9999".into()),
+            found_by_skeptic: false,
         }];
         a.integrity.numbers_checked = 40;
         a.integrity.numbers_untraced = 1;
