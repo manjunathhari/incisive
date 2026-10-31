@@ -55,7 +55,10 @@ pub const PAGE_ORDER: [Block; 10] = [
     Block::Original,
 ];
 
-/// The Details sections, in their order (item 10).
+/// The Details sections, in their order (item 10). The folding follow-up
+/// (31 Oct) removed Checks, Search trail and Cost and time from the new
+/// page (the original run view keeps them); the Checks lines that warn the
+/// reader are drawn under Other notable findings ([`moved_check_lines`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Conflicts,
@@ -66,13 +69,12 @@ pub enum Section {
     Trials,
     Notable,
     Completeness,
-    Checks,
     References,
-    SearchTrail,
-    Cost,
 }
 
-pub const SECTION_ORDER: [Section; 12] = [
+/// The frozen Details order (folding follow-up item 4). Each section is
+/// drawn folded to a preview ([`preview`]); empty sections are hidden.
+pub const SECTION_ORDER: [Section; 9] = [
     Section::Conflicts,
     Section::Guidelines,
     Section::Applicability,
@@ -81,10 +83,7 @@ pub const SECTION_ORDER: [Section; 12] = [
     Section::Trials,
     Section::Notable,
     Section::Completeness,
-    Section::Checks,
     Section::References,
-    Section::SearchTrail,
-    Section::Cost,
 ];
 
 // ---------- p values (item 12) ----------
@@ -787,6 +786,149 @@ pub fn suppressed_registration_marks(a: &AnswerV3) -> usize {
     w + c
 }
 
+/// The line saying how many registration-ID "not traced" marks the new
+/// page does not draw (item 12), when there are any. It was in Checks; it
+/// is drawn under Other notable findings since the folding follow-up.
+pub fn registration_note(a: &AnswerV3) -> Option<String> {
+    let hidden = suppressed_registration_marks(a);
+    (hidden > 0).then(|| {
+        format!(
+            "{} on a trial or review registration ID not drawn on this page (the earlier layout below shows {}).",
+            crate::agent::answer_v3::count_noun(
+                u32::try_from(hidden).unwrap_or(u32::MAX),
+                "\u{201c}not traced\u{201d} mark",
+                "\u{201c}not traced\u{201d} marks"
+            ),
+            if hidden == 1 { "it" } else { "them" }
+        )
+    })
+}
+
+/// The start of the code-built notable finding that counts what the
+/// extractor could not match (Stage 4 item 12).
+const EXTRACTOR_NOTABLE: &str = "The extractor could not match ";
+
+/// What happens to a line of the former Checks section on the new page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckLine {
+    /// Drawn under Other notable findings.
+    Moved(String),
+    /// Not drawn on the new page: the same information is in Progress (the
+    /// run's step lines, shown folded above the page), in Other notable
+    /// findings or in the Completeness review. The original run view keeps
+    /// it.
+    Dropped(String),
+}
+
+/// The former Checks section's lines, in its order (the run's notes, the
+/// trail notes, the registration-ID count), each moved or dropped
+/// (folding follow-up item 3). Dropped, as duplicates:
+/// - "Number check: …": the same line is a Progress step, and every
+///   untraced number carries its "not traced" mark on the page;
+/// - "Coverage: …": the same line is a Progress step;
+/// - "Completeness: … found; …": a Progress step, and the Completeness
+///   review's first line (a skipped review is a warning: it moves);
+/// - "Extraction: …": only when Other notable findings has the extractor's
+///   own count line.
+///
+/// Everything else (stopped early, studies left out, citations removed,
+/// labels defaulted, the skeptic's dropped entries, any run note such as a
+/// skipped or failed step, the registration-ID count) moves.
+pub fn check_lines(a: &AnswerV3) -> Vec<CheckLine> {
+    let extractor_notable = a
+        .notable_code
+        .iter()
+        .any(|n| !n.repeats_skeptic() && n.text.starts_with(EXTRACTOR_NOTABLE));
+    let completeness_line = a
+        .completeness
+        .as_ref()
+        .filter(|c| c.skipped.is_none())
+        .map(|c| format!("{}.", c.line()));
+    let mut out: Vec<CheckLine> = a.notes.iter().cloned().map(CheckLine::Moved).collect();
+    for l in a.trail_notes() {
+        let dup = l.starts_with("Number check: ")
+            || l.starts_with("Coverage: ")
+            || completeness_line.as_deref() == Some(l.as_str())
+            || (extractor_notable && l.starts_with("Extraction: "));
+        out.push(if dup {
+            CheckLine::Dropped(l)
+        } else {
+            CheckLine::Moved(l)
+        });
+    }
+    out.extend(registration_note(a).map(CheckLine::Moved));
+    out
+}
+
+/// The former Checks lines drawn under Other notable findings.
+pub fn moved_check_lines(a: &AnswerV3) -> Vec<String> {
+    check_lines(a)
+        .into_iter()
+        .filter_map(|l| match l {
+            CheckLine::Moved(t) => Some(t),
+            CheckLine::Dropped(_) => None,
+        })
+        .collect()
+}
+
+// ---------- folded sections: the preview (folding follow-up item 2) ----------
+
+/// A piece of a section's content, for its preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewPart {
+    /// A sub-heading or label ("Case mix", "Caveats", "Other"): skipped.
+    Label(String),
+    /// Content text, as stored (citations are stripped).
+    Text(String),
+}
+
+/// About how long a preview is, in characters (CSS clamps it to 3 lines).
+pub const PREVIEW_MAX: usize = 300;
+
+/// A folded section's preview: plain text from its first content item
+/// on, labels skipped, citation brackets stripped, items joined with
+/// single spaces (the stored text carries no mark words or flag labels:
+/// the page draws those as their own elements, and they are not passed
+/// here), cut at a word to about [`PREVIEW_MAX`] characters (an
+/// ellipsis when cut). Display only: the open section draws the full body
+/// with its marks and chips.
+pub fn preview(parts: &[PreviewPart]) -> String {
+    let mut joined = String::new();
+    for p in parts {
+        let PreviewPart::Text(t) = p else { continue };
+        let t = strip_citations(t);
+        let t = t.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(t);
+        if joined.chars().count() > PREVIEW_MAX {
+            break;
+        }
+    }
+    let mut chars = joined.chars();
+    if let Some(c) = chars.next()
+        && c.is_lowercase()
+    {
+        joined = c.to_uppercase().chain(chars).collect();
+    }
+    if joined.chars().count() <= PREVIEW_MAX {
+        return joined;
+    }
+    let cut: String = joined.chars().take(PREVIEW_MAX).collect();
+    let cut = match cut.rfind(char::is_whitespace) {
+        Some(i) if i > PREVIEW_MAX / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!(
+        "{}\u{2026}",
+        cut.trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+    )
+}
+
 // ---------- guidelines (items 10 and 12) ----------
 
 /// A statement as a comparison key: quotes and a final full stop removed,
@@ -1192,7 +1334,7 @@ mod tests {
         assert_eq!(PAGE_ORDER.first(), Some(&Block::Header));
         assert_eq!(PAGE_ORDER.last(), Some(&Block::Original));
         assert_eq!(SECTION_ORDER[0], Section::Conflicts);
-        assert_eq!(SECTION_ORDER[11], Section::Cost);
+        assert_eq!(SECTION_ORDER[8], Section::References);
     }
 
     #[test]
