@@ -1318,12 +1318,24 @@ pub fn writer_user_full(
     contradictions: &[Contradiction],
     searches: &[SearchEntry],
 ) -> String {
-    let c = STUDY_CAPS;
     let mut u = format!(
         "<question>\n{}\n</question>\n\n{STUDIES_HEADING} ({}):\n\n",
         neutralise_close_tag(question),
         studies.len()
     );
+    u.push_str(&full_blocks(studies, full));
+    u.push_str(&notes_tail(studies, contradictions, searches));
+    u
+}
+
+/// The evidence part of the Full writer's message, exactly as the writer
+/// is shown it: each study (its evidence row, or its record and abstract),
+/// the skeptic's review and the trials the skeptic found. Stage 4b: the
+/// completeness review is given the same text ("the evidence rows, as the
+/// writer saw them"), so there is one assembly.
+pub fn full_blocks(studies: &[StudyInput], full: &FullInput<'_>) -> String {
+    let c = STUDY_CAPS;
+    let mut u = String::new();
     for (i, s) in studies.iter().take(MAX_SELECTED).enumerate() {
         let body = match full.rows.iter().find(|r| r.pmid == s.pmid) {
             Some(r) => format!("Verified evidence row:\n{}", row_block(s, r)),
@@ -1365,7 +1377,6 @@ pub fn writer_user_full(
         ));
     }
     u.push('\n');
-    u.push_str(&notes_tail(studies, contradictions, searches));
     u
 }
 

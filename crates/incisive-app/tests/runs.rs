@@ -963,6 +963,7 @@ fn app_state(pool: PgPool) -> AppState {
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
         full_engine: incisive_app::runs::Engine::Classic,
+        completeness: false,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
@@ -3165,7 +3166,9 @@ fn deploy_workflow_wires_phase3_settings() {
         .expect("deploy step")
         .1;
     assert!(
-        run.contains(r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE"]"#),
+        run.contains(
+            r#"optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE", "COMPLETENESS"]"#
+        ),
         "QUICK_ENGINE must be an optional env var"
     );
     assert_eq!(
@@ -3407,6 +3410,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         untraced: vec![],
         notable_code: vec![],
         coverage: None,
+        completeness: None,
     };
     serde_json::to_value(a).unwrap()
 }
@@ -3592,6 +3596,52 @@ fn deploy_workflow_wires_the_full_engine() {
         2,
         "FULL_ENGINE must reach both the check and the deploy step"
     );
+}
+
+/// The deploy check's COMPLETENESS lines (from the trim to its `esac`).
+fn completeness_check(check: &str) -> String {
+    let start = check.find("cr=").expect("COMPLETENESS trim");
+    let end = start + check[start..].find("esac").expect("esac") + "esac".len();
+    check[start..end].to_string()
+}
+
+/// Stage 4b: the completeness switch reaches the deploy like FULL_ENGINE:
+/// optional, `on` or `off` with only the ends trimmed, written to the
+/// env-vars file only when set; and the completeness model is an
+/// AGENT_MODELS key whose default the price pre-check covers.
+#[test]
+fn deploy_workflow_wires_the_completeness_switch() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    for (value, ok) in [
+        ("on", true),
+        (" off ", true),
+        ("", true),
+        ("o ff", false),
+        ("On", false),
+        ("true", false),
+    ] {
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}\nexit 0", completeness_check(check)))
+            .env("COMPLETENESS", value)
+            .status()
+            .expect("bash");
+        assert_eq!(status.success(), ok, "COMPLETENESS={value:?}");
+    }
+    assert_eq!(
+        deploy
+            .matches("COMPLETENESS: ${{ vars.COMPLETENESS }}")
+            .count(),
+        2,
+        "COMPLETENESS must reach both the check and the deploy step"
+    );
+    assert!(check.contains(r#""completeness": "claude-sonnet-5-5""#));
 }
 
 // ---------- Phase 3 Stage 3: the Full additions to the AnswerV3 page ----------
@@ -4055,6 +4105,93 @@ async fn ssr_readability_sections_arms_and_copy_text() {
     assert!(t.contains("AT A GLANCE") && t.contains("WHAT THIS MEANS FOR CLINICAL PRACTICE"));
     assert!(t.contains("[1] Biological vs Synthetic Mesh. JAMA Surg, 2025. PMID 41060645."));
     assert!(!t.contains("[41060645"), "citations as reference numbers");
+}
+
+/// Stage 4b item 2: the completeness review's additions are drawn in
+/// place, each labelled "added on completeness review": a new row in the
+/// outcome table, a sentence after its row's effect, a conflict, and the
+/// checks line with its notes and (collapsed) what it judged not relevant.
+/// Model text is escaped; its untraced numbers are marked. Copy as text
+/// carries the same labels. The writer's stored answer is unchanged.
+#[tokio::test]
+async fn ssr_completeness_additions_are_labelled_and_escaped() {
+    use incisive_app::agent::answer_v3::*;
+    let Some((pool, _guard)) = test_pool().await else {
+        return;
+    };
+    let mut body = answer_v3_json(false);
+    let written_before = body["answer"].clone();
+    body["completeness"] = json!({
+        "skipped": null, "gaps_found": 4,
+        "added_outcomes": [{"outcome": "Surgeon workload <script>alert(7)</script>",
+            "effect_text": "NASA-TLX 18.4 vs 34.0 [41060645]", "pmids": ["41060645"],
+            "certainty": "Low", "why": "one trial"}],
+        "outcome_additions": [{"outcome": "Recurrence", "row": 0,
+            "text": "Pooled RR 0.53 across 5 RCTs [41060645].", "pmids": ["41060645"]}],
+        "added_conflicts": [{"text": "AIIMS found no pain benefit [39979619].", "pmids": ["39979619"], "unsourced": false}],
+        "not_added": [{"gap": "RULA score", "reason": "ergonomics not asked"}],
+        "notes": ["Certainty Moderate rests on one trial."],
+        "untraced": [{"field": "outcome_additions.0.text", "start": 22, "len": 1}],
+        "removed_citations": 0
+    });
+    let (s, html) = v3_page(&pool, body.clone()).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup_of(&html);
+    assert!(!m.contains("<script>alert(7)"), "escaped");
+    assert!(m.contains("&lt;script&gt;alert(7)&lt;/script&gt;"));
+    assert!(m.contains("<tr class=\"added\">"), "a new row");
+    assert!(
+        m.matches(ADDED_LABEL).count() >= 3,
+        "each addition labelled"
+    );
+    assert!(
+        m.contains("Pooled RR 0.53 across 5"),
+        "the sentence after its row"
+    );
+    assert!(m.contains("AIIMS found no pain benefit"));
+    assert!(m.contains(
+        "Completeness: 4 gaps found; 3 added, 1 judged not relevant (listed) and 1 note"
+    ));
+    assert!(m.contains("Judged not relevant (1)"));
+    assert!(m.contains("RULA score"));
+    assert!(m.contains("note from the completeness review"));
+    // The untraced "5" is marked.
+    assert!(m.contains("not traced"), "the mark");
+    // Stored as given: the writer's answer is not touched.
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        serde_json::to_value(a.answer.as_ref().unwrap()).unwrap(),
+        written_before
+    );
+    let t = a.plain_text();
+    assert!(
+        t.contains(&format!("({ADDED_LABEL}; certainty Low)")),
+        "{t}"
+    );
+    assert!(
+        t.contains(&format!(
+            "  Added: Pooled RR 0.53 across 5 (not traced) RCTs [1]. ({ADDED_LABEL})"
+        )),
+        "{t}"
+    );
+    assert!(
+        t.contains(&format!("AIIMS found no pain benefit [2]. ({ADDED_LABEL})")),
+        "{t}"
+    );
+    assert!(t.contains("COMPLETENESS REVIEW"));
+    assert!(t.contains("Judged not relevant: RULA score"));
+    assert!(t.contains("Note: Completeness: 4 gaps found"));
+    // A skipped review says so, and adds nothing.
+    let mut skipped = answer_v3_json(false);
+    skipped["completeness"] = json!({"skipped": "time", "gaps_found": 2});
+    let (_, html) = v3_page(&pool, skipped).await;
+    let m = markup_of(&html);
+    assert!(m.contains("Completeness review skipped: time; the answer is as the writer wrote it"));
+    assert!(!m.contains(ADDED_LABEL));
+    // An answer stored before Stage 4b has neither section.
+    let (_, html) = v3_page(&pool, answer_v3_json(false)).await;
+    let m = markup_of(&html);
+    assert!(!m.contains("Completeness") && !m.contains("Coverage:"));
 }
 
 /// Stage 4: model text reaches the page only as escaped text: the page code

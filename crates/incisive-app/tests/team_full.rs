@@ -161,6 +161,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         runs: RunsConfig::default(),
         quick_engine: Engine::Team,
         full_engine: Engine::Team,
+        completeness: false,
         worker: WorkerHandle::default(),
         llm: None,
         lit,
@@ -750,7 +751,24 @@ fn full_script_impl(
     contra: Option<(&str, &str)>,
     turn_usage: impl Fn(usize) -> Usage,
 ) -> ScriptedLlm {
-    let mut llm = ScriptedLlm::new()
+    full_script_on(
+        ScriptedLlm::new(),
+        research_turns,
+        quotes,
+        contra,
+        turn_usage,
+    )
+}
+
+/// [`full_script_impl`] on top of `base` (its keyed replies match first).
+fn full_script_on(
+    base: ScriptedLlm,
+    research_turns: usize,
+    quotes: Option<(&str, &str)>,
+    contra: Option<(&str, &str)>,
+    turn_usage: impl Fn(usize) -> Usage,
+) -> ScriptedLlm {
+    let mut llm = base
         // Finals first: they also contain their role's task.
         .when(RESEARCHER_FINAL)
         .reply_json(study_list(&[(SEEN_A, "RCT"), (SEEN_B, "RCT")]), u())
@@ -1896,4 +1914,241 @@ async fn the_kept_share_leaves_doubled_room_for_holds_in_flight() {
         }
     }
     assert!(finals > 10, "{finals}");
+}
+
+// ---------- Stage 4b item 2: the completeness review ----------
+
+use incisive_app::agent::answer_v3::ADDED_LABEL;
+use incisive_app::agent::completeness;
+
+/// In the completeness review's message only.
+const COMPLETENESS_KEY: &str = "GAPS FOUND BY CODE";
+
+fn completeness_json() -> Value {
+    json!({
+        "added_outcomes": [{"outcome": "Recurrence", "effect_text": format!("No recurrence reported [{SEEN_A}]"),
+            "pmids": [SEEN_A], "certainty": "Low", "why": "one trial"}],
+        "outcome_additions": [{"outcome": "pain", "text": format!("Both arms scored alike [{SEEN_B}]."), "pmids": [SEEN_B]}],
+        "added_conflicts": [{"text": format!("A missed trial differs [{SEEN_C}]."), "pmids": [SEEN_C]}],
+        "not_added": [{"gap": "B's follow-up length", "reason": "not about pain"}],
+        "notes": [{"text": "Certainty Low fits one group's trials."}]
+    })
+}
+
+/// A Full run (`run_team`) with the completeness review `on` or not, and
+/// `extra` keyed replies first.
+async fn full_run_with(
+    pool: &PgPool,
+    server: &MockServer,
+    on: bool,
+    extra: impl FnOnce(ScriptedLlm) -> ScriptedLlm,
+) -> (AnswerV3, Vec<String>, Arc<ScriptedLlm>, i64, RunContext) {
+    let (qa, qb) = quotes_for(pool, server).await;
+    let llm = Arc::new(full_script_on(
+        extra(ScriptedLlm::new()),
+        1,
+        Some((&qa, &qb)),
+        None,
+        |_| usage(1500, 1500),
+    ));
+    let (mut ctx, uid) = full_ctx(
+        pool,
+        literature(server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.state.completeness = on;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    let l = lines(&steps_of(&ctx, uid).await);
+    (a, l, llm, uid, ctx)
+}
+
+/// Stage 4b item 2: the review adds labelled rows, sentences, conflicts and
+/// notes; the writer's stored answer is byte-identical to the same run
+/// without the review; the review sees the plain-text answer, the gaps and
+/// the evidence as the writer saw it; every call is charged.
+#[tokio::test]
+async fn the_completeness_review_only_adds_and_labels() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (off, off_lines, _, _, _) = full_run_with(&pool, &server, false, |l| l).await;
+    assert!(off.completeness.is_none(), "COMPLETENESS=off: no review");
+    assert!(!off_lines.iter().any(|l| l.starts_with("Completeness")));
+    let (on, l, llm, uid, _) = full_run_with(&pool, &server, true, |l| {
+        l.when(COMPLETENESS_KEY)
+            .reply_json(completeness_json(), usage(4000, 900))
+    })
+    .await;
+    // Add-only: the writer's stored text is byte-identical.
+    assert_eq!(
+        serde_json::to_string(&on.answer).unwrap(),
+        serde_json::to_string(&off.answer).unwrap()
+    );
+    let c = on.completeness.as_ref().expect("the review");
+    assert_eq!(c.skipped, None);
+    assert_eq!(c.added_outcomes[0].outcome, "Recurrence");
+    assert_eq!(
+        c.outcome_additions[0].row, 0,
+        "matched to the writer's Pain row"
+    );
+    assert_eq!(c.added_conflicts[0].pmids, [SEEN_C]);
+    assert_eq!(c.not_added.len(), 1);
+    assert_eq!(c.notes.len(), 1);
+    assert_eq!(c.removed_citations, 0, "{c:?}");
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Completeness: ") && x.contains("3 added")),
+        "{l:?}"
+    );
+    // What it was given, and how it was called.
+    let reqs = llm.requests();
+    let rq = by_key(&reqs, COMPLETENESS_KEY);
+    assert_eq!(rq.len(), 1);
+    assert_eq!(rq[0].max_tokens, completeness::MAX_TOKENS);
+    assert!(
+        rq[0]
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("COMPLETENESS REVIEWER")
+    );
+    let t = request_user_text(rq[0]);
+    assert!(t.contains("<source id=\"answer\">") && t.contains("BOTTOM LINE"));
+    assert!(
+        t.contains(&format!("<source id=\"row-{SEEN_A}\">")),
+        "the rows as the writer saw them"
+    );
+    assert!(t.contains("<source id=\"skeptic\">"));
+    assert!(!t.contains(STUDIES_HEADING));
+    let rows = charges_settle(&pool, uid, reqs.len()).await;
+    assert_eq!(rows.len(), reqs.len(), "every call charged");
+    assert_eq!(on.cost_paise, rows.iter().sum::<i64>());
+    // Labelled in Copy as text.
+    assert!(on.plain_text().matches(ADDED_LABEL).count() >= 3);
+}
+
+/// Stage 4b owner constraint: a refused schema or API error, or an
+/// unusable reply, never fails the run: the answer ships as the writer
+/// wrote it, with "Completeness review skipped: …".
+#[tokio::test]
+async fn a_failed_completeness_review_ships_the_answer_unchanged() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (off, _, _, _, _) = full_run_with(&pool, &server, false, |l| l).await;
+    let refused = |l: ScriptedLlm| {
+        l.when(COMPLETENESS_KEY)
+            .fail(claude_client::ClaudeError::Api {
+                status: 400,
+                error_type: "invalid_request_error".into(),
+                message: "The compiled grammar is too large".into(),
+            })
+    };
+    let unusable = |l: ScriptedLlm| {
+        l.when(COMPLETENESS_KEY)
+            .reply_text("I could not do that.", usage(4000, 20))
+    };
+    for (what, reason) in [("refused", "error"), ("unusable", "unusable reply")] {
+        let (a, l, _, _, _) = if what == "refused" {
+            full_run_with(&pool, &server, true, refused).await
+        } else {
+            full_run_with(&pool, &server, true, unusable).await
+        };
+        assert_eq!(
+            serde_json::to_string(&a.answer).unwrap(),
+            serde_json::to_string(&off.answer).unwrap(),
+            "{what}"
+        );
+        let c = a.completeness.as_ref().unwrap();
+        assert_eq!(c.skipped.as_deref(), Some(reason), "{what}");
+        assert_eq!(c.added(), 0);
+        let want =
+            format!("Completeness review skipped: {reason}; the answer is as the writer wrote it");
+        assert!(l.contains(&want), "{what}: {l:?}");
+        assert!(a.trail_notes().iter().any(|n| n.starts_with(&want)));
+    }
+}
+
+/// Stage 4b owner constraint: too little time, too little money and a
+/// timeout each skip the review with a note; nothing is called when the
+/// gate says no, and a timed-out call is still charged.
+#[tokio::test]
+async fn the_completeness_review_is_skipped_for_time_money_and_timeout() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let cx = completeness::Context {
+        selected: &[],
+        allowed: &[],
+        outcomes: &[],
+        gaps_found: 3,
+    };
+    // Time: under MIN_TIME before the hard stop, no call.
+    let llm = Arc::new(ScriptedLlm::new());
+    let (mut ctx, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let s = DepthSettings::FOCUSED;
+    ctx.budget = Arc::new(
+        RunBudget::new(
+            ctx.run_id,
+            ctx.user.id,
+            20000,
+            Instant::now(),
+            prices(),
+            88.0,
+        )
+        .with_time_limit(s.agent_time_limit_s)
+        .aged_for_test(Duration::from_secs(u64::from(s.agent_time_limit_s))),
+    );
+    let c = completeness::review(&ctx, &ctx.llm, "x", &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("time"));
+    assert_eq!(c.gaps_found, 3);
+    assert!(llm.requests().is_empty());
+    // Money: the limit is spent, so the hold is refused; no call.
+    let (ctx, _) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    ctx.budget.record_spent_for_test(20000);
+    let c = completeness::review(&ctx, &ctx.llm, "x", &cx)
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("cost limit"));
+    assert!(llm.requests().is_empty());
+    // Timeout: the reply comes after the wait; skipped, and still charged.
+    let slow = Arc::new(
+        ScriptedLlm::new()
+            .delay(Duration::from_millis(600))
+            .reply_json(completeness_json(), usage(1000, 100)),
+    );
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(slow.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let c = completeness::review_waiting(&ctx, &ctx.llm, "x", &cx, Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(c.skipped.as_deref(), Some("time"));
+    assert_eq!(slow.requests().len(), 1);
+    assert_eq!(charges_settle(&pool, uid, 1).await.len(), 1, "charged");
 }

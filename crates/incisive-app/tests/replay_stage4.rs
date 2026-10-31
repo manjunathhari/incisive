@@ -415,6 +415,7 @@ async fn ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
             runs: RunsConfig::default(),
             quick_engine: Engine::Team,
             full_engine: Engine::Team,
+            completeness: false,
             worker: WorkerHandle::default(),
             llm: None,
             lit: lit.clone(),
@@ -650,6 +651,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         untraced: untraced.clone(),
         notable_code: team::notable_code(Some(&review), &extraction),
         coverage: None,
+        completeness: None,
     };
     // Stored and read back as the run page does.
     let stored: AnswerV3 = serde_json::from_value(serde_json::to_value(&answer).unwrap()).unwrap();

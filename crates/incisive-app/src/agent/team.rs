@@ -197,6 +197,7 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         untraced: Vec::new(),
         notable_code: Vec::new(),
         coverage: None,
+        completeness: None,
     }
 }
 
@@ -262,8 +263,18 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     } else {
         0
     };
-    ctx.budget.set_finish_reserve(reserve + review);
-    tracing::info!(run_id = %ctx.run_id, writer_reserve = reserve, review_reserve = review, limit = ctx.budget.limit_paise(), "team: writer reserved");
+    // Stage 4b: the completeness review's own share, after the writer's
+    // (Full, unless COMPLETENESS=off). An unpriced model gets no share: its
+    // call then fails and the review is skipped, never the run.
+    let completeness_reserve = if full && ctx.state.completeness {
+        super::completeness::reserve(&ctx.llm, &ctx.budget, &ctx.question).unwrap_or(0)
+    } else {
+        0
+    };
+    // What the finishing steps keep through the review phase.
+    let finishing = reserve + completeness_reserve;
+    ctx.budget.set_finish_reserve(finishing + review);
+    tracing::info!(run_id = %ctx.run_id, writer_reserve = reserve, completeness_reserve, review_reserve = review, limit = ctx.budget.limit_paise(), "team: writer reserved");
     add_line(
         ctx,
         StepKind::Search,
@@ -400,7 +411,7 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     // Full: the extractor and the skeptic, side by side.
     let mut reviewed = Reviewed::default();
     if full {
-        reviewed = review_phase(ctx, &research, &fetched, &studies, reserve).await?;
+        reviewed = review_phase(ctx, &research, &fetched, &studies, finishing).await?;
         for (k, m) in reviewed.missed.iter().chain(&reviewed.cited).enumerate() {
             answer.references.push(ReferenceV3 {
                 n: u16::try_from(studies.len() + k + 1).unwrap_or(u16::MAX),
@@ -572,6 +583,45 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             if let Some(c) = &answer.coverage {
                 add_line(ctx, StepKind::Check, &c.line()).await;
             }
+            // Stage 4b item 2 (Full, COMPLETENESS on): the add-only review.
+            // It never fails the run: anything short of cancellation or
+            // unrecorded money gives a skipped review and the answer ships
+            // as the writer wrote it (stored unchanged either way).
+            if full && ctx.state.completeness {
+                let cov = answer.coverage.clone().unwrap_or_default();
+                let gaps_found = count(cov.gaps.len()).saturating_add(cov.counts.gaps_cut);
+                add_line(
+                    ctx,
+                    StepKind::Check,
+                    &format!(
+                        "Completeness review: checking the answer against {}",
+                        plural(gaps_found as usize, "gap", "gaps")
+                    ),
+                )
+                .await;
+                let user = super::completeness::user(
+                    &ctx.question,
+                    &answer.plain_text(),
+                    &cov,
+                    &writer_v3::full_blocks(&studies, &full_input),
+                );
+                let outcomes = answer
+                    .answer
+                    .as_ref()
+                    .map(|w| w.outcomes.clone())
+                    .unwrap_or_default();
+                let cx = super::completeness::Context {
+                    selected: &selected,
+                    allowed: &allowed,
+                    outcomes: &outcomes,
+                    gaps_found,
+                };
+                let c = super::completeness::review(ctx, &ctx.llm, &user, &cx)
+                    .await
+                    .map_err(StepError::kind)?;
+                add_line(ctx, StepKind::Check, &c.line()).await;
+                answer.completeness = Some(c);
+            }
             // R-S2b: an answer after research stopped by a limit is done; a
             // failed research turn still marks it partial.
             let status = if research.stop == super::agent_loop::LoopStop::TurnFailed {
@@ -660,13 +710,14 @@ async fn review_phase(
     research: &Research,
     fetched: &[StudyRef],
     studies: &[StudyInput],
-    writer_reserve: i64,
+    finishing: i64,
 ) -> Result<Reviewed, Stop> {
     gate(ctx).await?;
     // Research is over: the review phase may use what research had to
-    // leave for it; only the writer stays reserved. Its wrap-up point is
-    // the time limit less the writer's allowance.
-    ctx.budget.set_finish_reserve(writer_reserve);
+    // leave for it; only the writer (and, Stage 4b, the completeness
+    // review) stays reserved. Its wrap-up point is the time limit less the
+    // writer's allowance.
+    ctx.budget.set_finish_reserve(finishing);
     let s = ctx.settings;
     ctx.budget.set_wrap_up_after(Duration::from_secs(u64::from(
         s.agent_time_limit_s

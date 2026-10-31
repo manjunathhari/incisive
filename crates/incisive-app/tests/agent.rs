@@ -943,6 +943,7 @@ fn app_state(pool: PgPool) -> AppState {
         // Phase 2 tests: Quick keeps the classic pipeline unless a test says otherwise.
         quick_engine: incisive_app::runs::QuickEngine::Classic,
         full_engine: incisive_app::runs::Engine::Classic,
+        completeness: false,
         worker: WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),
@@ -990,7 +991,8 @@ fn agent_llm(llm: &Arc<ScriptedLlm>) -> AgentLlm {
             researcher: m.clone(),
             writer: m.clone(),
             extractor: m.clone(),
-            skeptic: m,
+            skeptic: m.clone(),
+            completeness: m,
         },
     }
 }

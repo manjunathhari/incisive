@@ -623,6 +623,153 @@ impl CoverageV3 {
     }
 }
 
+// ---------- Stage 4b item 2: the completeness review ----------
+
+/// The label every addition of the completeness review carries.
+pub const ADDED_LABEL: &str = "added on completeness review";
+
+/// A new outcome row added by the completeness review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedOutcome {
+    pub outcome: String,
+    pub effect_text: String,
+    pub pmids: Vec<String>,
+    /// `None`: not graded (a sentence for a row the answer does not have,
+    /// shown as a new row).
+    pub certainty: Option<Certainty>,
+    pub why: String,
+    /// The citation check left it with no study among the given ones:
+    /// shown flagged, never removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A sentence appended to one of the writer's outcome rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeAddition {
+    /// The row's name as the review gave it.
+    pub outcome: String,
+    /// Index of the writer's outcome row it was matched to.
+    pub row: usize,
+    pub text: String,
+    pub pmids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A conflict the review found the answer does not reflect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddedConflict {
+    pub text: String,
+    pub pmids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsourced: bool,
+}
+
+/// A gap the review judged not relevant to the question, with why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotAdded {
+    pub gap: String,
+    pub reason: String,
+}
+
+/// Stage 4b item 2: what the add-only completeness review (one AI call
+/// after the writer, Full only) added. The writer's answer is stored
+/// unchanged; these are drawn beside it, each labelled [`ADDED_LABEL`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CompletenessV3 {
+    /// Why the review did not run or could not be used ("time", "cost
+    /// limit", "error", "unusable reply"); `None` when it ran. The answer
+    /// then ships exactly as the writer wrote it.
+    #[serde(default)]
+    pub skipped: Option<String>,
+    /// Gaps the coverage check gave it.
+    #[serde(default)]
+    pub gaps_found: u32,
+    #[serde(default)]
+    pub added_outcomes: Vec<AddedOutcome>,
+    #[serde(default)]
+    pub outcome_additions: Vec<OutcomeAddition>,
+    #[serde(default)]
+    pub added_conflicts: Vec<AddedConflict>,
+    #[serde(default)]
+    pub not_added: Vec<NotAdded>,
+    /// Inconsistency notes (it never changes a rating).
+    #[serde(default)]
+    pub notes: Vec<String>,
+    /// Numbers in its additions not traced to what the writer was given
+    /// (paths `added_outcomes.0.effect_text`, `outcome_additions.1.text`,
+    /// `added_conflicts.0.text`, `notes.0`, …): marked "not traced".
+    #[serde(default)]
+    pub untraced: Vec<Span>,
+    /// Citations of studies outside the given ones, removed (text kept).
+    #[serde(default)]
+    pub removed_citations: u32,
+    /// Items past the stored caps (counted, not shown).
+    #[serde(default)]
+    pub items_cut: u32,
+    /// Certainty labels it gave that were not recognised (shown "not
+    /// graded").
+    #[serde(default)]
+    pub labels_defaulted: u32,
+}
+
+impl CompletenessV3 {
+    /// A review that did not run, for `reason`.
+    pub fn skipped(reason: &str, gaps_found: u32) -> CompletenessV3 {
+        CompletenessV3 {
+            skipped: Some(reason.to_string()),
+            gaps_found,
+            ..CompletenessV3::default()
+        }
+    }
+
+    /// Additions made (rows, sentences and conflicts).
+    pub fn added(&self) -> usize {
+        self.added_outcomes.len() + self.outcome_additions.len() + self.added_conflicts.len()
+    }
+
+    /// The checks line: "Completeness: 12 gaps found; 7 added, 5 judged not
+    /// relevant (listed)", or "Completeness review skipped: time".
+    pub fn line(&self) -> String {
+        if let Some(r) = &self.skipped {
+            return format!(
+                "Completeness review skipped: {r}; the answer is as the writer wrote it"
+            );
+        }
+        let mut parts = vec![format!(
+            "{} added",
+            u32::try_from(self.added()).unwrap_or(u32::MAX)
+        )];
+        if !self.not_added.is_empty() {
+            parts.push(format!(
+                "{} judged not relevant (listed)",
+                self.not_added.len()
+            ));
+        }
+        if !self.notes.is_empty() {
+            parts.push(count_noun(
+                u32::try_from(self.notes.len()).unwrap_or(u32::MAX),
+                "note",
+                "notes",
+            ));
+        }
+        format!(
+            "Completeness: {} found; {}",
+            count_noun(self.gaps_found, "gap", "gaps"),
+            join_counts(&parts)
+        )
+    }
+
+    /// The additions of the writer's outcome row `row`, with their index.
+    pub fn additions_to(&self, row: usize) -> impl Iterator<Item = (usize, &OutcomeAddition)> {
+        self.outcome_additions
+            .iter()
+            .enumerate()
+            .filter(move |(_, a)| a.row == row)
+    }
+}
+
 /// The stored Phase 3 answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnswerV3 {
@@ -665,6 +812,10 @@ pub struct AnswerV3 {
     /// answer does not say. `None`: Quick, or answers stored before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<CoverageV3>,
+    /// Stage 4b item 2 (additive): the add-only completeness review.
+    /// `None`: Quick, `COMPLETENESS=off`, or answers stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<CompletenessV3>,
 }
 
 impl AnswerV3 {
@@ -739,6 +890,31 @@ pub fn citation_ranges(text: &str, known: impl Fn(&str) -> bool) -> Vec<(usize, 
             ids.iter().any(|i| known(i)) || ids.iter().any(|i| i.len() >= MIN_PMID_DIGITS)
         })
         .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+/// Stage 4b item 5 (doubled citations): of `pmids`, those the citation
+/// marker `text` ends with does not already cite (only spaces and `.` `,`
+/// `;` `)` may follow that marker). Drawing a text and then its PMIDs as
+/// links would otherwise show "… [4]. [4]".
+pub fn not_cited_at_end(text: &str, pmids: &[String]) -> Vec<String> {
+    let t =
+        text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ')'));
+    let known = |p: &str| pmids.iter().any(|x| x.trim() == p);
+    let tail: Vec<String> = citation_ranges(t, known)
+        .into_iter()
+        .filter(|(_, b)| *b == t.len())
+        .flat_map(|(a, b)| {
+            DIGITS
+                .find_iter(&t[a..b])
+                .map(|d| d.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    pmids
+        .iter()
+        .filter(|p| !tail.iter().any(|t| t == p.trim()))
+        .cloned()
         .collect()
 }
 
@@ -1027,6 +1203,9 @@ impl AnswerV3 {
         if let Some(c) = &self.coverage {
             notes.push(format!("{}.", c.line()));
         }
+        if let Some(c) = &self.completeness {
+            notes.push(format!("{}.", c.line()));
+        }
         notes
     }
 
@@ -1037,6 +1216,20 @@ impl AnswerV3 {
         let refs = self.ref_numbers();
         let u = &self.untraced;
         let t = |text: &str, field: &str| plain(text, &refs, field, u, "not traced");
+        // Stage 4b: the completeness review's text, with its own marks.
+        let no_spans: Vec<Span> = Vec::new();
+        let cu = self
+            .completeness
+            .as_ref()
+            .map_or(&no_spans, |c| &c.untraced);
+        let ct = |text: &str, field: &str| plain(text, &refs, field, cu, "not traced");
+        let unsourced = |flag: bool| {
+            if flag {
+                format!(" ({NO_GUIDELINE_SOURCE})")
+            } else {
+                String::new()
+            }
+        };
         let mut o = format!(
             "{}\n\nDecision support \u{2014} the clinician decides.\n",
             self.question.trim()
@@ -1148,6 +1341,31 @@ impl AnswerV3 {
                             if untraced { " (not traced)" } else { "" }
                         ));
                     }
+                    // Stage 4b: sentences the completeness review appended.
+                    if let Some(c) = &self.completeness {
+                        for (k, a) in c.additions_to(i) {
+                            o.push_str(&format!(
+                                "  Added: {}{}{} ({ADDED_LABEL})\n",
+                                ct(&a.text, &format!("outcome_additions.{k}.text")),
+                                cites(&not_cited_at_end(&a.text, &a.pmids), &refs),
+                                unsourced(a.unsourced)
+                            ));
+                        }
+                    }
+                }
+                // Stage 4b: rows the completeness review added.
+                if let Some(c) = &self.completeness {
+                    for (k, x) in c.added_outcomes.iter().enumerate() {
+                        o.push_str(&format!(
+                            "- {} ({ADDED_LABEL}; certainty {}): {}{}{}\n  Why: {}\n",
+                            ct(&x.outcome, &format!("added_outcomes.{k}.outcome")),
+                            x.certainty.map_or("not graded", Certainty::as_str),
+                            ct(&x.effect_text, &format!("added_outcomes.{k}.effect_text")),
+                            cites(&not_cited_at_end(&x.effect_text, &x.pmids), &refs),
+                            unsourced(x.unsourced),
+                            ct(&x.why, &format!("added_outcomes.{k}.why")),
+                        ));
+                    }
                 }
                 h(&mut o, "The trials");
                 for (i, s) in w.studies.iter().enumerate() {
@@ -1199,13 +1417,25 @@ impl AnswerV3 {
                     }
                 }
                 h(&mut o, "Conflicting evidence");
-                if w.conflicts.is_empty() {
+                let added_conflicts = self
+                    .completeness
+                    .as_ref()
+                    .map_or(&[][..], |c| c.added_conflicts.as_slice());
+                if w.conflicts.is_empty() && added_conflicts.is_empty() {
                     o.push_str("None identified.\n");
                 }
                 for (i, c) in w.conflicts.iter().enumerate() {
                     o.push_str(&format!(
                         "- {}\n",
                         t(&c.text, &format!("conflicts.{i}.text"))
+                    ));
+                }
+                for (k, c) in added_conflicts.iter().enumerate() {
+                    o.push_str(&format!(
+                        "- {}{}{} ({ADDED_LABEL})\n",
+                        ct(&c.text, &format!("added_conflicts.{k}.text")),
+                        cites(&not_cited_at_end(&c.text, &c.pmids), &refs),
+                        unsourced(c.unsourced)
                     ));
                 }
                 let no_spans: Vec<Span> = Vec::new();
@@ -1352,6 +1582,25 @@ impl AnswerV3 {
                 }
             }
         }
+        // Stage 4b: the completeness review's notes and what it judged not
+        // relevant (its line is with the run's notes below).
+        if let Some(c) = &self.completeness
+            && (!c.notes.is_empty() || !c.not_added.is_empty())
+        {
+            h(&mut o, "Completeness review");
+            for (k, n) in c.notes.iter().enumerate() {
+                o.push_str(&format!(
+                    "- Note ({ADDED_LABEL}): {}\n",
+                    ct(n, &format!("notes.{k}"))
+                ));
+            }
+            for n in &c.not_added {
+                o.push_str(&format!(
+                    "- Judged not relevant: {} \u{2014} {}\n",
+                    n.gap, n.reason
+                ));
+            }
+        }
         // The run's notes and the search trail's (review 7).
         let trail = self.trail_notes();
         if !self.notes.is_empty() || !trail.is_empty() {
@@ -1383,7 +1632,12 @@ impl AnswerV3 {
             }
             o.push_str(&format!("{line}\n"));
         }
-        if !self.untraced.is_empty() {
+        if !self.untraced.is_empty()
+            || self
+                .completeness
+                .as_ref()
+                .is_some_and(|c| !c.untraced.is_empty())
+        {
             o.push_str("\n(not traced): the number was not found in a verified quote, a structured number or an abstract given to the writer.\n");
         }
         o
@@ -1741,7 +1995,49 @@ mod tests {
                 spans: vec![],
             }],
             coverage: None,
+            completeness: None,
         }
+    }
+
+    /// Stage 4b: `coverage` and `completeness` are additive. An answer
+    /// stored before (without them) loads with neither, and one without
+    /// them is stored without the keys, so old answers round-trip as they
+    /// were.
+    #[test]
+    fn coverage_and_completeness_are_additive() {
+        let a = sample();
+        let mut v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("coverage").is_none() && v.get("completeness").is_none());
+        v.as_object_mut().unwrap().remove("coverage");
+        let back: AnswerV3 = serde_json::from_value(v).unwrap();
+        assert_eq!(back, a);
+        assert!(back.coverage.is_none() && back.completeness.is_none());
+        // A skipped review alone (old stored shape of its fields) loads.
+        let c: CompletenessV3 =
+            serde_json::from_value(serde_json::json!({"skipped": "time"})).unwrap();
+        assert_eq!(
+            c.line(),
+            "Completeness review skipped: time; the answer is as the writer wrote it"
+        );
+        assert_eq!(c.added(), 0);
+    }
+
+    /// Stage 4b item 5: a text that already ends with a citation gets no
+    /// second one; other PMIDs are still appended.
+    #[test]
+    fn citations_already_at_the_end_are_not_appended() {
+        let p = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        assert!(not_cited_at_end(&format!("Pain fell [{A}]."), &p(&[A])).is_empty());
+        assert!(not_cited_at_end(&format!("Pain fell [{A}; {B}]. "), &p(&[A, B])).is_empty());
+        assert_eq!(
+            not_cited_at_end(&format!("Pain fell [{A}]."), &p(&[A, B])),
+            p(&[B])
+        );
+        assert_eq!(
+            not_cited_at_end(&format!("[{A}] pain fell."), &p(&[A])),
+            p(&[A])
+        );
+        assert_eq!(not_cited_at_end("No citation.", &p(&[A])), p(&[A]));
     }
 
     /// Stage 4 item 10: Copy as text holds every section, citations as

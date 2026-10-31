@@ -25,8 +25,9 @@ use crate::agent::answer::{
     unavailable_text,
 };
 use crate::agent::answer_v3::{
-    AnswerV3, EvidenceV3, NO_GUIDELINE_SOURCE, NotableFinding, ReferenceV3, Segment, SkepticItem,
-    Span, WrittenAnswer, arm_line_text, arm_lines, marked_runs, split_citations, whole_marked,
+    ADDED_LABEL, AnswerV3, CompletenessV3, EvidenceV3, NO_GUIDELINE_SOURCE, NotableFinding,
+    ReferenceV3, Segment, SkepticItem, Span, WrittenAnswer, arm_line_text, arm_lines, marked_runs,
+    not_cited_at_end, split_citations, whole_marked,
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
@@ -106,6 +107,9 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .answer sup.flag { font-size:.68rem; color:var(--amber); margin-left:2px; white-space:nowrap; cursor:help; }
 .answer .flag-label { font-size:.75rem; color:var(--amber); font-weight:600; }
 .answer ul.unverified { padding-left:16px; margin:4px 0 0; font-size:.8rem; }
+.answer .flag-label.added { color:var(--accent); }
+.answer p.added { margin:6px 0 0; }
+.answer tr.added td { background:#f4f8fc; }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -1034,6 +1038,8 @@ impl Marks<'_> {
 /// The written part of a Phase 3 answer: bottom line, outcome table,
 /// trials table, conflicts, guidelines, applicability, what would change it.
 /// Numbers not traced to the writer's sources carry a "not traced" mark.
+// The page's parts, each drawn from its own stored field.
+#[allow(clippy::too_many_arguments)]
 fn written_v3_view(
     w: WrittenAnswer,
     refs: &std::collections::HashMap<String, u16>,
@@ -1042,8 +1048,20 @@ fn written_v3_view(
     skeptic_guidelines: Vec<(usize, SkepticItem)>,
     skeptic_spans: &[Span],
     guideline_leads: Vec<crate::agent::answer_v3::SkepticLead>,
+    completeness: Option<&CompletenessV3>,
 ) -> impl IntoView {
     let full = !evidence.is_empty();
+    // Stage 4b: the completeness review's additions, drawn in place, each
+    // labelled; its numbers not traced to the writer's sources are marked.
+    let comp = completeness.cloned().unwrap_or_default();
+    let cm = Marks {
+        refs,
+        spans: &comp.untraced,
+        mark: Mark::NotTraced,
+    };
+    let added = || view! { " " <span class="flag-label added">{ADDED_LABEL}</span> };
+    let unsourced =
+        |f: bool| f.then(|| view! { " " <span class="flag-label">{NO_GUIDELINE_SOURCE}</span> });
     let mk = Marks {
         refs,
         spans: untraced,
@@ -1217,7 +1235,7 @@ fn written_v3_view(
         {practice}
 
         <h3>"Outcome by outcome"</h3>
-        {if w.outcomes.is_empty() {
+        {if w.outcomes.is_empty() && comp.added_outcomes.is_empty() {
             view! { <p>"No outcome could be assessed from the evidence found."</p> }.into_any()
         } else {
             view! {
@@ -1246,9 +1264,46 @@ fn written_v3_view(
                                         <td>
                                             {mk.t(&o.effect_text, &format!("outcomes.{i}.effect_text"))}
                                             {arms.next().filter(|a| !a.is_empty()).map(|a| view! { <ul class="arms">{a}</ul> })}
+                                            {comp
+                                                .additions_to(i)
+                                                .map(|(k, a)| view! {
+                                                    <p class="added">
+                                                        {cm.t(&a.text, &format!("outcome_additions.{k}.text"))}
+                                                        {ref_links(&not_cited_at_end(&a.text, &a.pmids), refs)}
+                                                        {added()}
+                                                        {unsourced(a.unsourced)}
+                                                    </p>
+                                                })
+                                                .collect_view()}
                                         </td>
                                         <td><span class=o.certainty.class()>{o.certainty.as_str()}</span></td>
                                         <td>{mk.t(&o.why, &format!("outcomes.{i}.why"))}</td>
+                                    </tr>
+                                })
+                                .collect_view()}
+                            {comp
+                                .added_outcomes
+                                .iter()
+                                .enumerate()
+                                .map(|(k, x)| view! {
+                                    <tr class="added">
+                                        <td>
+                                            {cm.t(&x.outcome, &format!("added_outcomes.{k}.outcome"))}
+                                            <br />
+                                            <span class="flag-label added">{ADDED_LABEL}</span>
+                                        </td>
+                                        <td>{ref_links(&x.pmids, refs)}</td>
+                                        <td>
+                                            {cm.t(&x.effect_text, &format!("added_outcomes.{k}.effect_text"))}
+                                            {unsourced(x.unsourced)}
+                                        </td>
+                                        <td>
+                                            {match x.certainty {
+                                                Some(c) => view! { <span class=c.class()>{c.as_str()}</span> }.into_any(),
+                                                None => view! { <span class="conf">"not graded"</span> }.into_any(),
+                                            }}
+                                        </td>
+                                        <td>{cm.t(&x.why, &format!("added_outcomes.{k}.why"))}</td>
                                     </tr>
                                 })
                                 .collect_view()}
@@ -1316,7 +1371,7 @@ fn written_v3_view(
         }}
 
         <h3>"Conflicting evidence"</h3>
-        {if w.conflicts.is_empty() {
+        {if w.conflicts.is_empty() && comp.added_conflicts.is_empty() {
             view! { <p>"None identified."</p> }.into_any()
         } else {
             view! {
@@ -1325,6 +1380,19 @@ fn written_v3_view(
                         .iter()
                         .enumerate()
                         .map(|(i, x)| view! { <li>{mk.t(&x.text, &format!("conflicts.{i}.text"))}</li> })
+                        .collect_view()}
+                    {comp
+                        .added_conflicts
+                        .iter()
+                        .enumerate()
+                        .map(|(k, x)| view! {
+                            <li>
+                                {cm.t(&x.text, &format!("added_conflicts.{k}.text"))}
+                                {ref_links(&not_cited_at_end(&x.text, &x.pmids), refs)}
+                                {added()}
+                                {unsourced(x.unsourced)}
+                            </li>
+                        })
                         .collect_view()}
                 </ul>
             }
@@ -1352,6 +1420,66 @@ fn written_v3_view(
                 .collect_view()}
         </ul>
     }
+}
+
+/// The reference links of `pmids` that have references, in order.
+fn ref_links(pmids: &[String], refs: &std::collections::HashMap<String, u16>) -> AnyView {
+    let mut n: Vec<u16> = pmids
+        .iter()
+        .filter_map(|p| refs.get(p.trim()).copied())
+        .collect();
+    n.sort_unstable();
+    n.dedup();
+    n.into_iter().map(ref_link).collect_view().into_any()
+}
+
+/// Stage 4b: the completeness review's checks line, its notes and,
+/// collapsed, the gaps it judged not relevant (each with why).
+fn completeness_view(
+    c: Option<CompletenessV3>,
+    refs: &std::collections::HashMap<String, u16>,
+) -> Option<AnyView> {
+    let c = c?;
+    let cm = Marks {
+        refs,
+        spans: &c.untraced,
+        mark: Mark::NotTraced,
+    };
+    let notes: Vec<AnyView> = c
+        .notes
+        .iter()
+        .enumerate()
+        .map(|(k, n)| {
+            view! {
+                <li>
+                    {cm.t(n, &format!("notes.{k}"))}
+                    " " <span class="flag-label added">"note from the completeness review"</span>
+                </li>
+            }
+            .into_any()
+        })
+        .collect();
+    let not_added: Vec<AnyView> = c
+        .not_added
+        .iter()
+        .map(|n| view! { <li>{n.gap.clone()} " \u{2014} " {n.reason.clone()}</li> }.into_any())
+        .collect();
+    let n_not = not_added.len();
+    Some(
+        view! {
+            <section class="checks" aria-label="Completeness review">
+                <p class="hint">{c.line()}</p>
+                {(!notes.is_empty()).then(|| view! { <ul>{notes}</ul> })}
+                {(n_not > 0).then(|| view! {
+                    <details>
+                        <summary>{format!("Judged not relevant ({n_not})")}</summary>
+                        <ul>{not_added}</ul>
+                    </details>
+                })}
+            </section>
+        }
+        .into_any(),
+    )
 }
 
 /// " [n]" linking reference `n`.
@@ -1612,6 +1740,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
         .as_ref()
         .map(|k| k.spans.clone())
         .unwrap_or_default();
+    let completeness = a.completeness.clone();
     let written = a.answer.map(|w| {
         written_v3_view(
             w,
@@ -1621,8 +1750,10 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
             skeptic_guidelines,
             &skeptic_spans,
             guideline_leads,
+            completeness.as_ref(),
         )
     });
+    let checks = completeness_view(completeness.clone(), &refs);
     let skeptic = a.skeptic.map(|k| skeptic_v3_view(k, &refs));
     let run_notes = a.notes.clone();
     let empty = a.empty_reason.clone();
@@ -1643,6 +1774,7 @@ fn answer_v3_view(a: AnswerV3) -> impl IntoView {
 
             {skeptic}
             {notable}
+            {checks}
             {(!run_notes.is_empty())
                 .then(|| view! {
                     <ul class="hint">{run_notes.into_iter().map(|n| view! { <li>{n}</li> }).collect_view()}</ul>
