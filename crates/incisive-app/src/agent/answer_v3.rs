@@ -2277,9 +2277,6 @@ mod tests {
         assert_eq!(not_cited_at_end("No citation.", &p(&[A])), p(&[A]));
     }
 
-    /// Stage 4 item 10: Copy as text holds every section, citations as
-    /// reference numbers, marks as words, the arms in order and the
-    /// references; no raw PMID markers.
     /// Part A item 12: Copy as text prints "p < .001", never "p P < .001";
     /// the plain text the completeness review is given is unchanged.
     #[test]
@@ -2305,6 +2302,9 @@ mod tests {
         assert_eq!(b.plain_text(), b.copy_text());
     }
 
+    /// Stage 4 item 10: Copy as text holds every section, citations as
+    /// reference numbers, marks as words, the arms in order and the
+    /// references; no raw PMID markers.
     #[test]
     fn plain_text_has_every_section_in_page_order() {
         let t = sample().plain_text();

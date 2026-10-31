@@ -177,13 +177,9 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                     <li>
                         {g.year.map(|y| format!("({y}) "))}
                         {c.t(&g.statement, &format!("guidelines.{i}.statement"), c.wm())}
-                        {ap::writer_guideline_quotes(c.a, i)
-                            .into_iter()
-                            .filter_map(|j| c.a.skeptic.as_ref()?.guidelines[j].quote.clone())
-                            .map(|q| quote_view(&q))
-                            .collect_view()}
                         {n.map(|_| view! { " " {chips(&[g.pmid.clone().unwrap_or_default()], &c.refs, Links::Yes)} })}
                         {unsourced_label(g.pmid.is_none())}
+                        {folded_view(c, &e.folded)}
                     </li>
                 }
                 .into_any()
@@ -198,6 +194,7 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                         {g.quote.as_deref().map(quote_view)}
                         {study_ref(c, &g.pmid)}
                         {unsourced_label(g.pmid.trim().is_empty())}
+                        {folded_view(c, &e.folded)}
                     </li>
                 }
                 .into_any()
@@ -218,6 +215,38 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
         n.to_string(),
         body.into_any(),
     ))
+}
+
+/// What the lines folded into a guideline line add to it: a writer
+/// repeat's year and citation, a skeptic repeat's quote and citation.
+fn folded_view(c: &Ctx, folded: &[GuidelineSource]) -> AnyView {
+    folded
+        .iter()
+        .map(|f| match *f {
+            GuidelineSource::Writer(j) => {
+                let Some(g) = c.w.map(|w| &w.guidelines[j]) else {
+                    return ().into_any();
+                };
+                view! {
+                    {g.year.map(|y| format!(" ({y})"))}
+                    {g.pmid.as_deref().map(|p| study_ref(c, p))}
+                }
+                .into_any()
+            }
+            GuidelineSource::Skeptic(j) => {
+                let Some(g) = c.a.skeptic.as_ref().map(|k| &k.guidelines[j]) else {
+                    return ().into_any();
+                };
+                view! {
+                    {g.quote.as_deref().map(quote_view)}
+                    {study_ref(c, &g.pmid)}
+                }
+                .into_any()
+            }
+            GuidelineSource::Lead(_) => ().into_any(),
+        })
+        .collect_view()
+        .into_any()
 }
 
 fn applicability(c: &Ctx) -> Option<AnyView> {
@@ -444,7 +473,9 @@ fn trials(c: &Ctx) -> Option<AnyView> {
             let e = c.a.evidence.iter().find(|e| e.pmid == s.pmid.trim());
             let head = c.t_plain(&s.label, &format!("studies.{i}.label"), c.wm());
             let head = match n {
-                Some(r) => view! { <a href=format!("#ref-{r}") rel="external" on:click=sheet_click(r)>{head}</a> }.into_any(),
+                // The card's link: its area covers the card (CSS), so the
+                // whole card opens the sheet; no clickable <div>.
+                Some(r) => view! { <a class="ap-stretch" href=format!("#ref-{r}") rel="external" on:click=sheet_click(r)>{head}</a> }.into_any(),
                 None => head,
             };
             let line = view! {
@@ -462,11 +493,15 @@ fn trials(c: &Ctx) -> Option<AnyView> {
                 </div>
                 <div class="ap-sub">{line}</div>
                 {(!tags.is_empty()).then(|| view! { <div class="ap-tags">{tags}</div> })}
+                // The sheet's body, readable with no script (review: key
+                // results, appraisal, funding and their marks are not only
+                // in a closed <dialog>).
+                <details class="ap-study-details">
+                    <summary>"Study details"</summary>
+                    {study_body(c, &s.pmid, c.a.references.iter().find(|r| r.pmid.trim() == s.pmid.trim()))}
+                </details>
             };
-            match n {
-                Some(r) => view! { <div class="ap-trial tappable" on:click=sheet_click(r)>{body}</div> }.into_any(),
-                None => view! { <div class="ap-trial">{body}</div> }.into_any(),
-            }
+            view! { <div class="ap-trial">{body}</div> }.into_any()
         })
         .collect();
     let n = cards.len();
@@ -474,7 +509,7 @@ fn trials(c: &Ctx) -> Option<AnyView> {
         "The trials",
         n.to_string(),
         view! {
-            <p class="ap-muted">"Tap a study for its appraisal, funding and PubMed link."</p>
+            <p class="ap-muted">"Tap a study for its sheet, or open its details here."</p>
             {cards}
         }
         .into_any(),
@@ -722,9 +757,12 @@ fn sheet(c: &Ctx, r: &ReferenceV3) -> AnyView {
     let n = r.n;
     let pmid = r.pmid.trim();
     let w = c.w;
-    let si = w.and_then(|w| w.studies.iter().position(|s| s.pmid.trim() == pmid));
-    let study = si.and_then(|i| w.map(|w| (i, &w.studies[i])));
-    let e = c.a.evidence.iter().find(|e| e.pmid == pmid);
+    let study = w.and_then(|w| {
+        w.studies
+            .iter()
+            .position(|s| s.pmid.trim() == pmid)
+            .map(|i| (i, &w.studies[i]))
+    });
     let head = match study {
         Some((i, s)) => c.t_plain(&s.label, &format!("studies.{i}.label"), c.wm()),
         None => {
@@ -737,12 +775,44 @@ fn sheet(c: &Ctx, r: &ReferenceV3) -> AnyView {
             t.into_any()
         }
     };
-    let journal = match (&r.journal, r.year) {
+    let hid = format!("{}-h", sheet_id(n));
+    let labelled_by = hid.clone();
+    view! {
+        <dialog class="ap-sheet" id=sheet_id(n) aria-labelledby=labelled_by>
+            <div class="ap-sheet-top">
+                <div>
+                    <div class="ap-mono ap-sheet-ref">{format!("Reference [{n}] \u{b7} PMID {pmid}")}</div>
+                    <h3 id=hid>{head}</h3>
+                </div>
+                <form method="dialog">
+                    <button class="ap-close" aria-label="Close">"\u{2715}"</button>
+                </form>
+            </div>
+            {study_body(c, pmid, Some(r))}
+        </dialog>
+    }
+    .into_any()
+}
+
+/// A study sheet's body (no ids in it): drawn in the sheet's `<dialog>`
+/// and, readable with no script, in the trial card's "Study details".
+fn study_body(c: &Ctx, pmid: &str, r: Option<&ReferenceV3>) -> AnyView {
+    let pmid = pmid.trim();
+    let n = r.map(|r| r.n);
+    let w = c.w;
+    let study = w.and_then(|w| {
+        w.studies
+            .iter()
+            .position(|s| s.pmid.trim() == pmid)
+            .map(|i| (i, &w.studies[i]))
+    });
+    let e = c.a.evidence.iter().find(|e| e.pmid == pmid);
+    let journal = r.and_then(|r| match (&r.journal, r.year) {
         (Some(j), Some(y)) => Some(format!("{j}, {y}")),
         (Some(j), None) => Some(j.clone()),
         (None, Some(y)) => Some(y.to_string()),
         (None, None) => None,
-    };
+    });
     let row = |k: &'static str, v: AnyView| {
         view! { <div class="ap-sheet-row"><div class="ap-kicker">{k}</div><div>{v}</div></div> }
             .into_any()
@@ -860,22 +930,10 @@ fn sheet(c: &Ctx, r: &ReferenceV3) -> AnyView {
         })
         .collect();
     let pubmed = pubmed_link(pmid);
-    let doi = r.doi.as_deref().and_then(doi_link);
-    let hid = format!("{}-h", sheet_id(n));
-    let labelled_by = hid.clone();
+    let doi = r.and_then(|r| r.doi.as_deref()).and_then(doi_link);
     view! {
-        <dialog class="ap-sheet" id=sheet_id(n) aria-labelledby=labelled_by>
-            <div class="ap-sheet-top">
-                <div>
-                    <div class="ap-mono ap-sheet-ref">{format!("Reference [{n}] \u{b7} PMID {pmid}")}</div>
-                    <h3 id=hid>{head}</h3>
-                </div>
-                <form method="dialog">
-                    <button class="ap-close" aria-label="Close">"\u{2715}"</button>
-                </form>
-            </div>
-            {r.retracted.then(|| view! { <p class="retracted">"RETRACTED \u{2014} do not rely on this paper."</p> })}
-            <p class="ap-sheet-title">{r.title.clone()}</p>
+            {r.is_some_and(|r| r.retracted).then(|| view! { <p class="retracted">"RETRACTED \u{2014} do not rely on this paper."</p> })}
+            {r.map(|r| view! { <p class="ap-sheet-title">{r.title.clone()}</p> })}
             {journal.map(|j| view! { <p class="ap-muted">{j}</p> })}
             {(!tags.is_empty()).then(|| view! { <div class="ap-tags">{tags}</div> })}
             {rows}
@@ -906,14 +964,13 @@ fn sheet(c: &Ctx, r: &ReferenceV3) -> AnyView {
                 {pubmed.map(|href| view! { <a class="ap-btn dark" href=href rel="noopener noreferrer" target="_blank">"Open in PubMed"</a> })}
                 {doi.map(|href| view! { <a class="ap-btn" href=href rel="noopener noreferrer" target="_blank">"DOI"</a> })}
             </div>
-        </dialog>
     }
     .into_any()
 }
 
 /// "Cited in": close sheet `n` and open the outcome `id` (browser only;
 /// the link then scrolls to it).
-fn go_to_outcome(n: u16, id: &str) {
+fn go_to_outcome(n: Option<u16>, id: &str) {
     #[cfg(feature = "hydrate")]
     {
         use wasm_bindgen::JsCast;
@@ -921,7 +978,7 @@ fn go_to_outcome(n: u16, id: &str) {
         let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
             return;
         };
-        if let Some(d) = doc.get_element_by_id(&sheet_id(n))
+        if let Some(d) = n.and_then(|n| doc.get_element_by_id(&sheet_id(n)))
             && let Some(f) = Reflect::get(&d, &"close".into())
                 .ok()
                 .and_then(|f| f.dyn_into::<Function>().ok())

@@ -12,7 +12,7 @@
 //! `[<pmid> as <n>]` citations, the Patient-mode sentence and the plain
 //! certainty lines.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -90,10 +90,24 @@ pub const SECTION_ORDER: [Section; 12] = [
 // ---------- p values (item 12) ----------
 
 /// `p` as written, without a leading `P`/`p` or `=` (the stored "P < .001"
-/// would otherwise print as "p P < .001"). Display only.
+/// would otherwise print as "p P < .001"). The `P` is taken off only when
+/// what follows is not part of a word (a space, `<`, `>`, `=`, `.`, a digit
+/// or nothing), so "pooled 0.03" and "p-value 0.03" stay as written.
+/// Display only.
 pub fn normalise_p(p: &str) -> String {
     let t = p.trim_start();
-    let t = t.strip_prefix(['P', 'p']).map_or(t, str::trim_start);
+    let t = match t.strip_prefix(['P', 'p']) {
+        Some(rest)
+            if rest.chars().next().is_none_or(|c| {
+                c.is_whitespace()
+                    || c.is_ascii_digit()
+                    || matches!(c, '<' | '>' | '=' | '.' | '\u{2264}' | '\u{2265}')
+            }) =>
+        {
+            rest.trim_start()
+        }
+        _ => t,
+    };
     let t = t.strip_prefix('=').map_or(t, str::trim_start);
     t.trim_end().to_string()
 }
@@ -152,7 +166,11 @@ pub fn chart_kind(nums: &[&Number]) -> ChartKind {
         .iter()
         .map(|n| n.arm.as_deref().map(str::trim))
         .collect();
-    if nums.len() >= 2 && arms.len() == nums.len() && !nums.iter().any(|n| is_ratio(n)) {
+    // A difference is not an arm (review): a group holding one is text.
+    if nums.len() >= 2
+        && arms.len() == nums.len()
+        && !nums.iter().any(|n| is_ratio(n) || is_diff(n))
+    {
         return ChartKind::Pair;
     }
     ChartKind::Text
@@ -293,7 +311,7 @@ pub fn out_of_100(w: &WrittenAnswer, groups: &[NumGroup]) -> Vec<usize> {
                 && g.numbers.len() <= 3
                 && g.nums(w)
                     .iter()
-                    .all(|n| n.unit.as_deref().map(str::trim) == Some("%"))
+                    .all(|n| n.unit.as_deref().map(str::trim) == Some("%") && !is_diff(n))
         })
         .map(|(k, _)| k)
         .collect()
@@ -798,6 +816,10 @@ pub enum GuidelineSource {
 pub struct GuidelineEntry {
     pub body: String,
     pub source: GuidelineSource,
+    /// Lines that repeat this one (the same statement, or a skeptic
+    /// guideline with the PMID of this writer line), folded into it: their
+    /// year, quote and citation are drawn on this line, so nothing is lost.
+    pub folded: Vec<GuidelineSource>,
 }
 
 /// The heading of the unverified guideline leads.
@@ -812,12 +834,19 @@ pub fn skeptic_body(text: &str) -> String {
     }
 }
 
+/// A skeptic guideline's statement (its text after "body: ").
+fn skeptic_statement(text: &str) -> &str {
+    text.split_once(": ").map_or(text, |(_, s)| s)
+}
+
 /// The guideline lines, grouped by body (first-appearance order), each
-/// statement once (item 12): a later line repeating an earlier statement is
-/// left out unless it carries a mark of its own (flag, never delete).
-/// `on_rows` are the PMIDs whose leads are drawn on a trial (as today).
+/// statement once (item 12): a later line repeating an earlier statement
+/// (or a skeptic guideline with the PMID of a writer line, with a quote) is
+/// folded into the line it repeats, unless it carries a mark of its own
+/// (then it keeps its own line: flag, never delete). `on_rows` are the
+/// PMIDs whose leads are drawn on a trial (as today).
 pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<GuidelineEntry> {
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut by_key: HashMap<String, usize> = HashMap::new();
     let mut flat: Vec<GuidelineEntry> = Vec::new();
     let w = a.answer.as_ref();
     let marked = |field: &str, text: &str, spans: &[Span]| {
@@ -834,28 +863,30 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
             &g.statement,
             &a.untraced,
         ) || marked(&format!("guidelines.{i}.body"), &g.body, &a.untraced);
-        if !key.is_empty() && !seen.insert(key) && !has_marks {
+        if let Some(&k) = by_key.get(&key).filter(|_| !key.is_empty() && !has_marks) {
+            flat[k].folded.push(GuidelineSource::Writer(i));
             continue;
+        }
+        if !key.is_empty() {
+            by_key.entry(key).or_insert(flat.len());
         }
         flat.push(GuidelineEntry {
             body: g.body.trim().to_string(),
             source: GuidelineSource::Writer(i),
+            folded: Vec::new(),
         });
     }
     if let Some(k) = &a.skeptic {
         for (i, g) in k.guidelines.iter().enumerate() {
-            let statement = g.text.split_once(": ").map_or(g.text.as_str(), |(_, s)| s);
-            let keys: Vec<String> = [Some(statement), g.quote.as_deref()]
+            let keys: Vec<String> = [Some(skeptic_statement(&g.text)), g.quote.as_deref()]
                 .into_iter()
                 .flatten()
                 .map(statement_key)
                 .filter(|k| !k.is_empty())
                 .collect();
             let has_marks = marked(&format!("guidelines.{i}.text"), &g.text, &k.spans);
-            let repeat = !keys.is_empty() && keys.iter().any(|k| seen.contains(k));
-            // The writer listed this guideline (same PMID): its quote is
-            // drawn under the writer's line ([`writer_guideline_quotes`]).
-            let attached = flat.iter().any(|e| match e.source {
+            // The writer listed this guideline (same PMID) and it has a quote.
+            let attached = flat.iter().position(|e| match e.source {
                 GuidelineSource::Writer(j) => w.is_some_and(|w| {
                     g.quote.is_some()
                         && !g.pmid.trim().is_empty()
@@ -863,13 +894,18 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
                 }),
                 _ => false,
             });
-            if (repeat || attached) && !has_marks {
+            let repeat = keys.iter().find_map(|k| by_key.get(k).copied());
+            if let Some(target) = attached.or(repeat).filter(|_| !has_marks) {
+                flat[target].folded.push(GuidelineSource::Skeptic(i));
                 continue;
             }
-            seen.extend(keys);
+            for key in keys {
+                by_key.entry(key).or_insert(flat.len());
+            }
             flat.push(GuidelineEntry {
                 body: skeptic_body(&g.text),
                 source: GuidelineSource::Skeptic(i),
+                folded: Vec::new(),
             });
         }
         for (i, l) in k.leads.iter().enumerate() {
@@ -877,6 +913,7 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
                 flat.push(GuidelineEntry {
                     body: LEAD_BODY.to_string(),
                     source: GuidelineSource::Lead(i),
+                    folded: Vec::new(),
                 });
             }
         }
@@ -894,42 +931,35 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
         .collect()
 }
 
-/// The quotes of the skeptic's guidelines drawn under the writer's
-/// guideline `i` (same PMID, no mark of their own; as the earlier page,
-/// which listed the writer's line only). Indexes into `skeptic.guidelines`.
-pub fn writer_guideline_quotes(a: &AnswerV3, i: usize) -> Vec<usize> {
-    let (Some(w), Some(k)) = (a.answer.as_ref(), a.skeptic.as_ref()) else {
-        return Vec::new();
-    };
-    let Some(p) = w.guidelines.get(i).and_then(|g| g.pmid.as_deref()) else {
-        return Vec::new();
-    };
-    k.guidelines
-        .iter()
-        .enumerate()
-        .filter(|(j, g)| {
-            g.pmid.trim() == p.trim()
-                && g.quote.is_some()
-                && !marked_runs(&g.text, &format!("guidelines.{j}.text"), &k.spans)
-                    .iter()
-                    .any(|(_, m)| *m)
-        })
-        .map(|(j, _)| j)
-        .collect()
-}
-
-/// The guideline statements (writer statements, skeptic guideline
-/// statements and quotes) as keys.
+/// The statements and quotes the Guidelines section actually draws, as
+/// keys: each kept line's statement (and a skeptic line's quote), and the
+/// quote of each skeptic line folded into another.
 pub fn guideline_keys(a: &AnswerV3) -> HashSet<String> {
     let mut keys: HashSet<String> = HashSet::new();
-    if let Some(w) = &a.answer {
-        keys.extend(w.guidelines.iter().map(|g| statement_key(&g.statement)));
-    }
-    if let Some(k) = &a.skeptic {
-        for g in &k.guidelines {
-            let statement = g.text.split_once(": ").map_or(g.text.as_str(), |(_, s)| s);
-            keys.insert(statement_key(statement));
-            if let Some(q) = &g.quote {
+    let w = a.answer.as_ref();
+    let k = a.skeptic.as_ref();
+    let skeptic_quote = |i: usize| k.and_then(|k| k.guidelines[i].quote.as_deref());
+    for e in guideline_entries(a, &HashSet::new()) {
+        match e.source {
+            GuidelineSource::Writer(i) => {
+                if let Some(w) = w {
+                    keys.insert(statement_key(&w.guidelines[i].statement));
+                }
+            }
+            GuidelineSource::Skeptic(i) => {
+                if let Some(k) = k {
+                    keys.insert(statement_key(skeptic_statement(&k.guidelines[i].text)));
+                }
+                if let Some(q) = skeptic_quote(i) {
+                    keys.insert(statement_key(q));
+                }
+            }
+            GuidelineSource::Lead(_) => {}
+        }
+        for f in e.folded {
+            if let GuidelineSource::Skeptic(i) = f
+                && let Some(q) = skeptic_quote(i)
+            {
                 keys.insert(statement_key(q));
             }
         }
@@ -939,8 +969,9 @@ pub fn guideline_keys(a: &AnswerV3) -> HashSet<String> {
 }
 
 /// Per skeptic `contradicting[i]`: whether it is shown under Guidelines
-/// only (item 12: its quote is a guideline statement). An item with a mark
-/// of its own stays in "Evidence against" (flag, never delete).
+/// only (item 12: its quote is a statement or quote the Guidelines section
+/// draws). An item with a mark of its own stays in "Evidence against" (flag,
+/// never delete).
 pub fn against_moved(a: &AnswerV3) -> Vec<bool> {
     let keys = guideline_keys(a);
     a.skeptic.as_ref().map_or_else(Vec::new, |k| {
@@ -1173,6 +1204,17 @@ mod tests {
         assert_eq!(normalise_p("0.012"), "0.012");
         assert_eq!(p_label(Some("P < .001")).as_deref(), Some("p < .001"));
         assert_eq!(p_label(Some("p")), None);
+        assert_eq!(normalise_p("P<.001"), "<.001");
+        assert_eq!(normalise_p("p.03"), ".03");
+        assert_eq!(normalise_p("p \u{2264} 0.05"), "\u{2264} 0.05");
+        // Only a P that stands alone is taken off.
+        assert_eq!(normalise_p("pooled 0.03"), "pooled 0.03");
+        assert_eq!(normalise_p("p-value 0.03"), "p-value 0.03");
+        assert_eq!(normalise_p("Pinteraction 0.2"), "Pinteraction 0.2");
+        assert_eq!(
+            p_label(Some("p-value 0.03")).as_deref(),
+            Some("p p-value 0.03")
+        );
         assert_eq!(p_label(Some("  ")), None);
         assert_eq!(p_label(None), None);
     }
@@ -1215,6 +1257,11 @@ mod tests {
         // A ratio among arms makes it text.
         let r = num("Discharge", 1.2, Some("RR"), Some("pooled"), "1");
         assert_eq!(chart_kind(&[&a, &r]), ChartKind::Text);
+        // A difference among arms is not a pair (nor an Out-of-100 arm).
+        let d = num("Discharge", 14.4, Some("%"), Some("difference"), "1");
+        assert_eq!(chart_kind(&[&a, &d]), ChartKind::Text);
+        let md = num("Discharge", 14.4, Some("%"), Some("MD"), "1");
+        assert_eq!(chart_kind(&[&a, &b, &md]), ChartKind::Text);
         assert_eq!(chart_kind(&[&a]), ChartKind::Text);
         assert_eq!(chart_kind(&[]), ChartKind::Text);
     }
@@ -1307,6 +1354,10 @@ mod tests {
                     ],
                 ),
                 outcome("One arm", vec![p(44.0, "POEM")]),
+                outcome(
+                    "With a difference",
+                    vec![p(44.0, "POEM"), p(30.0, "LHM"), p(14.0, "risk difference")],
+                ),
             ],
             vec![],
         );
@@ -1613,27 +1664,102 @@ mod tests {
             ],
             "the repeated statements are listed once, grouped by body"
         );
+        // Nothing of a repeat is lost: it is folded into the line it repeats
+        // (its year, quote and citation are drawn there).
+        assert_eq!(
+            e[0].folded,
+            vec![GuidelineSource::Writer(1), GuidelineSource::Skeptic(0)]
+        );
         assert_eq!(e[1].body, "HerniaSurge");
         assert_eq!(e[2].body, LEAD_BODY);
         // The quote equals a guideline statement: shown under Guidelines
         // only; the item with a mark of its own stays.
         assert_eq!(against_moved(&a), vec![true, false, false]);
-        // A skeptic guideline with a writer guideline's PMID: its quote is
-        // drawn under the writer's line, not as a line of its own.
+        // A skeptic guideline with a writer guideline's PMID: folded into
+        // the writer's line, not a line of its own.
         let mut b = a.clone();
         b.skeptic.as_mut().unwrap().guidelines[1].pmid = "1".into();
-        let sources: Vec<GuidelineSource> = guideline_entries(&b, &HashSet::new())
-            .iter()
-            .map(|x| x.source)
-            .collect();
+        let eb = guideline_entries(&b, &HashSet::new());
+        let sources: Vec<GuidelineSource> = eb.iter().map(|x| x.source).collect();
         assert_eq!(
             sources,
             vec![GuidelineSource::Writer(0), GuidelineSource::Lead(0)]
         );
-        assert_eq!(writer_guideline_quotes(&b, 0), vec![1]);
+        assert_eq!(
+            eb[0].folded,
+            vec![
+                GuidelineSource::Writer(1),
+                GuidelineSource::Skeptic(0),
+                GuidelineSource::Skeptic(1)
+            ]
+        );
         // A lead drawn on a trial row is not listed here (as today).
         let on_rows: HashSet<String> = ["8".to_string()].into();
         assert_eq!(guideline_entries(&a, &on_rows).len(), 2);
+    }
+
+    /// Review: an evidence-against item moves to Guidelines only when its
+    /// quote is drawn there; the keys are built from what is drawn.
+    #[test]
+    fn evidence_against_moves_only_to_a_quote_the_guidelines_draw() {
+        use crate::agent::answer_v3::{GuidelineV3, SkepticItem, SkepticV3};
+        let mut w = written(vec![], vec![]);
+        w.guidelines = vec![GuidelineV3 {
+            pmid: Some("1".into()),
+            body: "EHS".into(),
+            year: Some(2023),
+            statement: "Use mesh.".into(),
+            pmid_removed: false,
+        }];
+        let mut a = answer_with(Some(w));
+        let item = |pmid: &str, text: &str, quote: Option<&str>| SkepticItem {
+            pmid: pmid.into(),
+            text: text.into(),
+            quote: quote.map(String::from),
+        };
+        a.skeptic = Some(SkepticV3 {
+            verdict: "holds".into(),
+            must_mention: vec![],
+            contradicting: vec![
+                // Quotes the folded repeat's quote: drawn under the writer's
+                // line, so it moves.
+                item(
+                    "3",
+                    "Mesh for all",
+                    Some("Mesh is recommended for all adults."),
+                ),
+                // Quotes nothing the section draws: stays.
+                item("4", "Another claim", Some("Not a guideline quote.")),
+            ],
+            missed_rcts: vec![],
+            guidelines: vec![item(
+                "6",
+                "EHS: use mesh",
+                Some("Mesh is recommended for all adults."),
+            )],
+            overlaps: vec![],
+            ma_notes: vec![],
+            spans: vec![],
+            leads: vec![],
+            dropped_unseen: 0,
+            dropped_quotes: 0,
+            extract_next: vec![],
+        });
+        let e = guideline_entries(&a, &HashSet::new());
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].folded, vec![GuidelineSource::Skeptic(0)]);
+        let keys = guideline_keys(&a);
+        let want: HashSet<String> = [
+            "use mesh".to_string(),
+            "mesh is recommended for all adults".to_string(),
+        ]
+        .into();
+        assert_eq!(keys, want, "only what is drawn");
+        assert_eq!(against_moved(&a), vec![true, false]);
+        // Without that skeptic guideline the quote is drawn nowhere: the
+        // item stays in "Evidence against".
+        a.skeptic.as_mut().unwrap().guidelines.clear();
+        assert_eq!(against_moved(&a), vec![false, false]);
     }
 
     #[test]

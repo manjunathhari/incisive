@@ -431,20 +431,17 @@ fn glance_view(c: &Ctx) -> Option<AnyView> {
                 c.wm(),
             );
             let src = c.study_link(&k.pmid, "ap-tile-src");
-            match c.ref_of(&k.pmid) {
-                Some(n) => view! {
-                    <div class="ap-tile tappable" on:click=sheet_click(n)>
-                        {label}
-                        <span class="ap-tile-value">{value}</span>
-                        {src}
-                    </div>
-                }
-                .into_any(),
-                None => view! {
-                    <div class="ap-tile">{label} <span class="ap-tile-value">{value}</span> {src}</div>
-                }
-                .into_any(),
+            // The source link's area covers the tile (CSS), so the whole
+            // tile opens the sheet; the tile itself is not clickable.
+            let class = if c.ref_of(&k.pmid).is_some() {
+                "ap-tile tappable"
+            } else {
+                "ap-tile"
+            };
+            view! {
+                <div class=class>{label} <span class="ap-tile-value">{value}</span> {src}</div>
             }
+            .into_any()
         })
         .collect();
     Some(
@@ -922,6 +919,8 @@ fn group_view(c: &Ctx, g: &NumGroup) -> AnyView {
                 .iter()
                 .zip(&nums)
                 .map(|(&j, n)| {
+                    // Coloured by source type, as in the main forest.
+                    let src = ap::src_type_of(w, &n.pmid).class();
                     let (a, b, v) = (
                         ap::log_pos(n.ci_low.unwrap_or(n.value)),
                         ap::log_pos(n.ci_high.unwrap_or(n.value)),
@@ -936,8 +935,8 @@ fn group_view(c: &Ctx, g: &NumGroup) -> AnyView {
                             <span class="ap-track-axis">
                                 <span class="ap-line"></span>
                                 <span class="ap-ref-line" style=format!("left:{:.2}%", ap::log_pos(1.0))></span>
-                                <span class="ap-ci src-ma" style=format!("left:{a:.2}%;width:{:.2}%", (b - a).max(0.5))></span>
-                                <span class="ap-pt src-ma" style=format!("left:{v:.2}%")></span>
+                                <span class=format!("ap-ci {src}") style=format!("left:{a:.2}%;width:{:.2}%", (b - a).max(0.5))></span>
+                                <span class=format!("ap-pt {src}") style=format!("left:{v:.2}%")></span>
                             </span>
                         </div>
                     }
@@ -1034,6 +1033,15 @@ fn bar_row(c: &Ctx, i: usize, j: usize, n: &Number, idx: usize, max: f64) -> Any
             <span class="ap-arm">{n.arm.clone().unwrap_or_default()}</span>
             <span class="ap-bar"><span class=format!("ap-fill arm{}", idx % 4) style=fill></span>{whisk}</span>
             <span class="ap-mono">{ap::with_unit(n.value, n.unit.as_deref())} {c.num_mark(i, j)}</span>
+            {ap::has_ci(n).then(|| view! {
+                <span class="ap-sub ap-bar-ci">
+                    {format!(
+                        "95% CI {} to {}",
+                        ap::fmt_value(n.ci_low.unwrap_or(0.0)),
+                        ap::fmt_value(n.ci_high.unwrap_or(0.0))
+                    )}
+                </span>
+            })}
         </div>
     }
     .into_any()
