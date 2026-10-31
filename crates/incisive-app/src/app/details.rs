@@ -177,6 +177,11 @@ fn guidelines(c: &Ctx, on_rows: &HashSet<String>) -> Option<AnyView> {
                     <li>
                         {g.year.map(|y| format!("({y}) "))}
                         {c.t(&g.statement, &format!("guidelines.{i}.statement"), c.wm())}
+                        {ap::writer_guideline_quotes(c.a, i)
+                            .into_iter()
+                            .filter_map(|j| c.a.skeptic.as_ref()?.guidelines[j].quote.clone())
+                            .map(|q| quote_view(&q))
+                            .collect_view()}
                         {n.map(|_| view! { " " {chips(&[g.pmid.clone().unwrap_or_default()], &c.refs, Links::Yes)} })}
                         {unsourced_label(g.pmid.is_none())}
                     </li>

@@ -975,9 +975,9 @@ fn group_view(c: &Ctx, g: &NumGroup) -> AnyView {
                         <span class="ap-pt diff round" style=format!("left:{v:.2}%")></span>
                     </span>
                     <div class="ap-scale" aria-hidden="true">
-                        <span>{format!("\u{2212}{}", ap::fmt_value(m))}</span>
+                        <span>{format!("\u{2212}{}", ap::fmt_axis(m))}</span>
                         <span>"0 \u{b7} no difference"</span>
-                        <span>{format!("+{}", ap::fmt_value(m))}</span>
+                        <span>{format!("+{}", ap::fmt_axis(m))}</span>
                     </div>
                 </div>
             }

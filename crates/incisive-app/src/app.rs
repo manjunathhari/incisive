@@ -229,8 +229,8 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .ap-main a.ap-study { flex:none; font-size:.72rem; padding:5px 8px; border-radius:6px; border:1px solid #B9CBEA; background:#fff; color:#143F8C; max-width:160px; text-align:right; text-decoration:none; }
 .ap-main a.ap-study.big { font-size:.82rem; padding:8px 12px; border-color:var(--ink); color:var(--ink); min-height:44px; max-width:none; display:inline-flex; align-items:center; }
 .ap-bars { display:flex; flex-direction:column; gap:7px; }
-.ap-bar-row { display:grid; grid-template-columns:minmax(0,96px) minmax(0,1fr) auto; gap:8px; align-items:center; }
-.ap-arm { font-size:.75rem; font-weight:600; line-height:1.25; overflow-wrap:anywhere; color:var(--ink); }
+.ap-bar-row { display:grid; grid-template-columns:minmax(0,112px) minmax(0,1fr) auto; gap:8px; align-items:center; }
+.ap-arm { font-size:.75rem; font-weight:600; line-height:1.25; overflow-wrap:break-word; min-width:0; color:var(--ink); }
 .ap-bar { position:relative; display:block; height:18px; background:#E3E7EB; border-radius:4px; overflow:hidden; }
 .ap-bar.big { height:24px; border-radius:6px; }
 .ap-fill { position:absolute; left:0; top:0; bottom:0; border-radius:4px; }
@@ -283,7 +283,7 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 .ap-original { margin-top:18px; border:1px dashed #B9C2CB; border-radius:14px; padding:6px 14px; background:#fff; }
 .ap-original > summary { cursor:pointer; font-weight:600; min-height:44px; display:flex; align-items:center; color:var(--accent); }
 .ap-debug { font-family:var(--mono); font-size:.72rem; margin:8px 0 0; }
-@media (max-width:480px) { .ap-dl { grid-template-columns:1fr; } .ap-bar-row { grid-template-columns:minmax(0,72px) minmax(0,1fr) auto; } }
+@media (max-width:480px) { .ap-dl { grid-template-columns:1fr; } .ap-bar-row { grid-template-columns:minmax(0,96px) minmax(0,1fr) auto; } }
 "#;
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {

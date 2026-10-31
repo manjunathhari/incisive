@@ -384,8 +384,11 @@ impl SrcType {
 static OBSERVATIONAL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)observational|cohort|registr").expect("valid"));
 static MODEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)model").expect("valid"));
-static META: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)meta-analysis|systematic review").expect("valid"));
+/// The mockup's rule, widened to the researcher's labels (`SR/MA`,
+/// `SR_MA`) and plurals ("meta-analyses"), which the stored rows use.
+static META: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)meta-analy|systematic review|\bSR[/_]MA\b|\bNMA\b").expect("valid")
+});
 
 /// The mockup's `srcType`: observational, then models, then meta-analyses,
 /// otherwise trials.
@@ -436,6 +439,12 @@ pub fn fmt_value(v: f64) -> String {
     } else {
         body
     }
+}
+
+/// An axis label (a computed scale, not a stored value): two decimals at
+/// most.
+pub fn fmt_axis(v: f64) -> String {
+    fmt_value((v * 100.0).round() / 100.0)
 }
 
 /// A value with its unit: "44%", "RR 0.4", "80.3 min".
@@ -844,7 +853,17 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
                 .collect();
             let has_marks = marked(&format!("guidelines.{i}.text"), &g.text, &k.spans);
             let repeat = !keys.is_empty() && keys.iter().any(|k| seen.contains(k));
-            if repeat && !has_marks {
+            // The writer listed this guideline (same PMID): its quote is
+            // drawn under the writer's line ([`writer_guideline_quotes`]).
+            let attached = flat.iter().any(|e| match e.source {
+                GuidelineSource::Writer(j) => w.is_some_and(|w| {
+                    g.quote.is_some()
+                        && !g.pmid.trim().is_empty()
+                        && w.guidelines[j].pmid.as_deref().map(str::trim) == Some(g.pmid.trim())
+                }),
+                _ => false,
+            });
+            if (repeat || attached) && !has_marks {
                 continue;
             }
             seen.extend(keys);
@@ -872,6 +891,30 @@ pub fn guideline_entries(a: &AnswerV3, on_rows: &HashSet<String>) -> Vec<Guideli
     bodies
         .iter()
         .flat_map(|b| flat.iter().filter(move |e| &e.body == b).cloned())
+        .collect()
+}
+
+/// The quotes of the skeptic's guidelines drawn under the writer's
+/// guideline `i` (same PMID, no mark of their own; as the earlier page,
+/// which listed the writer's line only). Indexes into `skeptic.guidelines`.
+pub fn writer_guideline_quotes(a: &AnswerV3, i: usize) -> Vec<usize> {
+    let (Some(w), Some(k)) = (a.answer.as_ref(), a.skeptic.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(p) = w.guidelines.get(i).and_then(|g| g.pmid.as_deref()) else {
+        return Vec::new();
+    };
+    k.guidelines
+        .iter()
+        .enumerate()
+        .filter(|(j, g)| {
+            g.pmid.trim() == p.trim()
+                && g.quote.is_some()
+                && !marked_runs(&g.text, &format!("guidelines.{j}.text"), &k.spans)
+                    .iter()
+                    .any(|(_, m)| *m)
+        })
+        .map(|(j, _)| j)
         .collect()
 }
 
@@ -1299,9 +1342,11 @@ mod tests {
         );
         assert_eq!(
             src_type("SR/MA"),
-            SrcType::Trials,
-            "the mockup's rule, as written"
+            SrcType::MetaAnalyses,
+            "the researcher's label"
         );
+        assert_eq!(src_type("SR_MA"), SrcType::MetaAnalyses);
+        assert_eq!(src_type("Network meta-analyses"), SrcType::MetaAnalyses);
         assert_eq!(src_type("Retrospective cohort"), SrcType::Observational);
         assert_eq!(
             src_type("National registry analysis"),
@@ -1341,6 +1386,7 @@ mod tests {
         assert_eq!(log_pos(1000.0), 100.0);
         assert!((diff_pos(0.0, diff_scale(&n)) - 50.0).abs() < 1e-9);
         assert_eq!(study_short("ROGER (2025), Br J Surg"), "ROGER (2025)");
+        assert_eq!(fmt_axis(diff_scale(&n)), "0.81", "0.7 × 1.15, two decimals");
     }
 
     #[test]
@@ -1572,6 +1618,19 @@ mod tests {
         // The quote equals a guideline statement: shown under Guidelines
         // only; the item with a mark of its own stays.
         assert_eq!(against_moved(&a), vec![true, false, false]);
+        // A skeptic guideline with a writer guideline's PMID: its quote is
+        // drawn under the writer's line, not as a line of its own.
+        let mut b = a.clone();
+        b.skeptic.as_mut().unwrap().guidelines[1].pmid = "1".into();
+        let sources: Vec<GuidelineSource> = guideline_entries(&b, &HashSet::new())
+            .iter()
+            .map(|x| x.source)
+            .collect();
+        assert_eq!(
+            sources,
+            vec![GuidelineSource::Writer(0), GuidelineSource::Lead(0)]
+        );
+        assert_eq!(writer_guideline_quotes(&b, 0), vec![1]);
         // A lead drawn on a trial row is not listed here (as today).
         let on_rows: HashSet<String> = ["8".to_string()].into();
         assert_eq!(guideline_entries(&a, &on_rows).len(), 2);
