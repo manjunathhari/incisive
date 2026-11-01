@@ -553,7 +553,10 @@ pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
     }
     // Temporal T3: stale pending expert opinions fail, and their (or any
     // leaked) reservations are released.
-    super::temporal::recover_stale(pool).await?;
+    // Never fails run recovery: an error is logged and retried next sweep.
+    if super::temporal::recover_stale(pool).await.is_err() {
+        tracing::warn!("temporal recovery failed; will retry");
+    }
     Ok(marked.len())
 }
 

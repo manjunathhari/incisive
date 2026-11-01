@@ -562,9 +562,20 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
   job's own request id (spend purpose `temporal`); the real cost is charged and the rest released.
   A user at their limit gets `cap_blocked`. Audit events `temporal_done`, `temporal_failed`,
   `temporal_skipped`, `temporal_cap_blocked` carry ids, a reason kind, paise and a flag count only.
-- **Never fails a run.** A refused schema, an API error, the 180 s time limit, an unusable reply or
+- **Never fails a run.** A refused schema, an API error, the time limit, an unusable reply or
   short money ends the row `failed` with a reason, and nothing else. A `pending` row older than
-  10 minutes is failed by recovery and its reservation released.
+  10 minutes is failed by recovery and its reservation released; a recovery error is logged and
+  retried at the next sweep, never failing run recovery.
+- **One attempt, 180 s.** The writer has its own Claude client: one HTTP attempt (no retry on a
+  timeout, an overload or a 5xx, so a slow reply never starts a second full Opus generation) with a
+  180 s per-attempt timeout, which is also the job's time limit. Every other step keeps the shared
+  client (120 s per attempt, with retries).
+- **Spend rows.** The reservation's purpose is `temporal`. The charge row's purpose reads
+  `run:<request_id>`, where `request_id` is `run_temporal.request_id` (the job's own id, never the
+  run's id): the existing charge path labels every budgeted call this way. The run's `cost_paise` is
+  never changed; the job's cost is `run_temporal.cost_paise`.
+- **A timed-out call** is still charged when it returns; the row's `cost_paise` is then raised to
+  the booked amount (it is 0 at the moment the job records `failed`, `time`).
 - **Checks in code** (flags only, stored with the board): numbers not traced to the answer or the
   table, cost or country words, unknown reference numbers or table ids, a meta-analysis called a
   trial, and an At a glance line stronger than the opinion.

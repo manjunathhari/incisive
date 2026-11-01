@@ -26,3 +26,6 @@ CREATE TABLE incisive.run_temporal (
 
 CREATE INDEX run_temporal_topic_idx ON incisive.run_temporal (topic);
 CREATE INDEX run_temporal_evidence_year_idx ON incisive.run_temporal (evidence_year);
+-- Recovery looks for pending rows older than 10 minutes.
+CREATE INDEX run_temporal_pending_idx ON incisive.run_temporal (created_at)
+    WHERE status = 'pending';

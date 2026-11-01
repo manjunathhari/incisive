@@ -40,6 +40,7 @@ fn identity_state() -> incisive_app::server::AppState {
         full_engine: incisive_app::runs::Engine::Classic,
         completeness: false,
         temporal: Default::default(),
+        temporal_client: None,
         worker: incisive_app::runs::worker::WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

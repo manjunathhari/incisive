@@ -30,9 +30,8 @@
 //!   check, prints the results and writes `DIR/<name>-board.json`.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use incisive_app::agent::answer_v3::AnswerV3;
 use incisive_app::agent::llm::AgentModels;
 use incisive_app::agent::temporal_writer::{self as writer, CheckContext};
 use incisive_app::spend::{Prices, cost_paise};
@@ -88,17 +87,14 @@ async fn main() {
 async fn run(args: &[String]) -> Result<(), String> {
     let out = PathBuf::from(arg(args, "--out").unwrap_or_else(|| "temporal-smoke".into()));
     std::fs::create_dir_all(&out).map_err(|_| "cannot create the output directory")?;
-    let max_tokens: u32 = match arg(args, "--max-tokens") {
-        Some(v) => v.parse().map_err(|_| "--max-tokens must be a number")?,
-        None => writer::DEFAULT_MAX_TOKENS,
-    };
+    let max_tokens = max_tokens(args)?;
     let only = arg(args, "--only");
     let key = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
         .ok_or("missing ANTHROPIC_API_KEY")?;
-    let client = claude_client::Client::new(SecretString::from(key.trim().to_string()))
-        .with_request_timeout(writer::TIME_LIMIT + Duration::from_secs(10));
+    // Exactly the production client: one attempt, the production timeout.
+    let client = writer::client(SecretString::from(key.trim().to_string()));
     let model = match std::env::var("AGENT_MODELS") {
         Ok(j) if !j.trim().is_empty() => AgentModels::from_json(&j)?.temporal,
         _ => AgentModels::default().temporal,
@@ -124,10 +120,7 @@ async fn run(args: &[String]) -> Result<(), String> {
             serde_json::from_str(&json_text).map_err(|_| "bad fixture")?;
         let input = TemporalInput::from_json(&json_text).map_err(|_| "bad fixture")?;
         let table = build(&input);
-        let answer_text = match serde_json::from_value::<AnswerV3>(body.clone()) {
-            Ok(a) => a.plain_text(),
-            Err(_) => writer::render_input(&input),
-        };
+        let answer_text = writer::answer_text(&body, &input);
         let user = writer::user(&answer_text, &table, &input);
         let req = writer::request(&model, &user, max_tokens);
         println!(
@@ -165,9 +158,13 @@ async fn run(args: &[String]) -> Result<(), String> {
             .map(|p| format!("\u{20b9}{:.2}", p as f64 / 100.0))
             .unwrap_or_else(|_| "unpriced".into());
         println!(
-            "tokens: {} in, {} out · {secs:.0}s · cost about {cost} · stop {:?}",
-            u.input_tokens, u.output_tokens, resp.stop_reason
+            "tokens: {} in, {} out · {secs:.0}s of {}s · cost about {cost} · stop {:?}",
+            u.input_tokens,
+            u.output_tokens,
+            writer::ATTEMPT_TIMEOUT.as_secs(),
+            resp.stop_reason
         );
+        warn_slow(secs);
         let board = match writer::read_board(&resp) {
             Ok(b) => b,
             Err(kind) => {
@@ -180,7 +177,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         let flags = writer::check(
             &board,
             &CheckContext {
-                answer_text: &answer_text,
+                answer_text: &writer::shown_answer(&answer_text),
                 table: &table,
                 references: &refs,
                 marker_references: &markers,
@@ -255,10 +252,7 @@ fn names(args: &[String]) -> Vec<&'static str> {
 fn emit_requests(args: &[String], dir: &std::path::Path) -> Result<(), String> {
     use incisive_app::runs::budget::RunBudget;
     std::fs::create_dir_all(dir).map_err(|_| "cannot create the output directory")?;
-    let max_tokens: u32 = match arg(args, "--max-tokens") {
-        Some(v) => v.parse().map_err(|_| "--max-tokens must be a number")?,
-        None => writer::DEFAULT_MAX_TOKENS,
-    };
+    let max_tokens = max_tokens(args)?;
     let model = model()?;
     let (prices, usd_inr) = prices_and_rate()?;
     let budget = RunBudget::new(uuid::Uuid::nil(), 0, 0, Instant::now(), prices, usd_inr);
@@ -278,7 +272,7 @@ fn emit_requests(args: &[String], dir: &std::path::Path) -> Result<(), String> {
         let meta = json!({
             "fixture": name, "body": kind, "model": model, "max_tokens": max_tokens,
             "reserve_paise": reserve,
-            "answer_text": answer_text,
+            "answer_text": writer::shown_answer(&answer_text),
             "table": table,
             "reference_numbers": writer::reference_numbers(&input),
             "marker_reference_numbers": writer::marker_reference_numbers(&input, &table),
@@ -414,4 +408,33 @@ fn check_responses(args: &[String], dir: &std::path::Path) -> Result<(), String>
         println!("saved {}", out.display());
     }
     Ok(())
+}
+
+/// `--max-tokens`, within the production range (`TEMPORAL_MAX_TOKENS`).
+fn max_tokens(args: &[String]) -> Result<u32, String> {
+    match arg(args, "--max-tokens") {
+        None => Ok(writer::DEFAULT_MAX_TOKENS),
+        Some(v) => v
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|n| writer::MAX_TOKENS_RANGE.contains(n))
+            .ok_or_else(|| {
+                format!(
+                    "--max-tokens must be a whole number from {} to {}",
+                    writer::MAX_TOKENS_RANGE.start(),
+                    writer::MAX_TOKENS_RANGE.end()
+                )
+            }),
+    }
+}
+
+/// Warn when a call took more than 80% of the production timeout.
+fn warn_slow(secs: f64) {
+    let limit = writer::ATTEMPT_TIMEOUT.as_secs_f64();
+    if secs > 0.8 * limit {
+        println!(
+            "WARNING: {secs:.0}s is over 80% of the production timeout ({limit:.0}s); production may time out"
+        );
+    }
 }

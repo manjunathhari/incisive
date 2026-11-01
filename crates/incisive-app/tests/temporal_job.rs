@@ -68,6 +68,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         full_engine: incisive_app::runs::Engine::Classic,
         completeness: false,
         temporal,
+        temporal_client: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: Some(llm),
         lit: offline_literature(),
@@ -528,20 +529,37 @@ async fn job_timeout_fails_and_the_late_charge_is_still_booked() {
         time_limit: Duration::from_millis(100),
         ..TemporalSettings::on()
     };
-    let (_, status, v, _) = job_with(&pool, uid, llm, settings, BIG).await;
+    let (run, status, v, _) = job_with(&pool, uid, llm, settings, BIG).await;
     assert_eq!(
         (status, v.reason.as_deref()),
         (JobStatus::Failed, Some("time"))
     );
     assert!(v.board.is_none());
-    // The call finishes in its own task: charged, and the kept hold released.
+    let cost_now: i64 =
+        sqlx::query_scalar("SELECT cost_paise FROM incisive.run_temporal WHERE run_id = $1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(cost_now, 0, "nothing booked yet when the job gives up");
+    // The call finishes in its own task: charged, the kept hold released,
+    // and the row's cost brought up to date (review fix 2).
     for _ in 0..300 {
-        if charges(&pool, uid).await.len() == 1 && reservations(&pool, uid).await == 0 {
+        let cost: i64 =
+            sqlx::query_scalar("SELECT cost_paise FROM incisive.run_temporal WHERE run_id = $1")
+                .bind(run)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if charges(&pool, uid).await.len() == 1
+            && reservations(&pool, uid).await == 0
+            && cost == 528
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("late charge not booked or reservation not released");
+    panic!("late charge not booked, reservation not released or cost not updated");
 }
 
 #[tokio::test]
@@ -873,5 +891,64 @@ async fn the_smoke_request_is_the_jobs_request_byte_for_byte() {
     assert_eq!(
         serde_json::to_vec(&smoke.body()).unwrap(),
         serde_json::to_vec(&sent.body()).unwrap()
+    );
+}
+
+/// Review nit: the run is checked before any money is reserved; a run
+/// deleted since it ended makes no call and reserves nothing.
+#[tokio::test]
+async fn job_reserves_nothing_for_a_run_deleted_in_the_meantime() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let run = finished_run(&pool, uid).await;
+    let req = Uuid::new_v4();
+    insert_pending(&pool, run, req).await.unwrap();
+    assert!(store::delete_run(&pool, uid, run).await.unwrap());
+    let llm = Arc::new(ScriptedLlm::new().reply_json(board_json(), usage()));
+    let st = state(
+        pool.clone(),
+        agent_llm(llm.clone(), MODEL),
+        TemporalSettings::on(),
+        BIG,
+    );
+    let s = run_job(&st, st.llm.as_ref().unwrap(), run, uid, req, &hernia_body()).await;
+    assert_eq!(s, JobStatus::Skipped);
+    assert!(llm.requests().is_empty());
+    assert_eq!(reservations(&pool, uid).await, 0);
+    assert!(charges(&pool, uid).await.is_empty());
+}
+
+/// Review nits: the job uses the writer's own client when one is set (the
+/// agent's client is never called), and migration 0012 carries the
+/// partial index recovery uses.
+#[tokio::test]
+async fn job_uses_the_writers_own_client_and_the_pending_index_exists() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let run = finished_run(&pool, uid).await;
+    let agent = Arc::new(ScriptedLlm::new());
+    let own = Arc::new(ScriptedLlm::new().reply_json(board_json(), usage()));
+    let mut st = state(
+        pool.clone(),
+        agent_llm(agent.clone(), MODEL),
+        TemporalSettings::on(),
+        BIG,
+    );
+    st.temporal_client = Some(own.clone());
+    let req = Uuid::new_v4();
+    insert_pending(&pool, run, req).await.unwrap();
+    let s = run_job(&st, st.llm.as_ref().unwrap(), run, uid, req, &hernia_body()).await;
+    assert_eq!(s, JobStatus::Done);
+    assert_eq!(own.requests().len(), 1);
+    assert!(agent.requests().is_empty());
+    let def: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE indexname = 'run_temporal_pending_idx'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        def.contains("(created_at)") && def.contains("'pending'"),
+        "{def}"
     );
 }

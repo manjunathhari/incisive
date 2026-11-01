@@ -163,6 +163,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         full_engine: Engine::Team,
         completeness: false,
         temporal: Default::default(),
+        temporal_client: None,
         worker: WorkerHandle::default(),
         llm: None,
         lit,

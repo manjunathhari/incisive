@@ -846,6 +846,12 @@ impl Reply {
         }
     }
 
+    /// The reply a response gives, as a step sees it (the temporal smoke
+    /// reads a saved raw response the way the job reads a live one).
+    pub fn of_response(resp: &MessagesResponse) -> Reply {
+        Reply::of(resp)
+    }
+
     /// Characters of the reply text (diagnostics).
     pub fn chars(&self) -> usize {
         self.text.chars().count()

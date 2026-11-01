@@ -44,7 +44,7 @@ use uuid::Uuid;
 
 use super::budget::RunBudget;
 use super::worker::CancelFlag;
-use super::{RunMode, RunStatus, TemporalView};
+use super::{RunMode, RunStatus, TemporalView, store};
 use crate::agent::AgentLlm;
 use crate::agent::llm::{LlmCall, StepError, read_structured};
 use crate::agent::temporal_writer::{
@@ -108,6 +108,7 @@ pub mod reason {
     pub const STORE: &str = "store";
     pub const PANIC: &str = "panic";
     pub const STALE: &str = "stale";
+    pub const GONE: &str = "run deleted";
 }
 
 // ---------- store ----------
@@ -165,6 +166,19 @@ pub async fn finish(
     .execute(pool)
     .await?;
     Ok(r.rows_affected() > 0)
+}
+
+/// Raise the row's cost to `paise` (a late charge, booked after the job
+/// gave its call up, has settled). Never lowers it.
+pub async fn set_cost(pool: &PgPool, run_id: Uuid, paise: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE incisive.run_temporal SET cost_paise = GREATEST(cost_paise, $2) WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .bind(paise.max(0))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// The run's expert opinion, only if the run belongs to `user_id`:
@@ -420,6 +434,8 @@ async fn job_inner(
     }
     let answer_text = writer::answer_text(body, &input);
     let user_msg = writer::user(&answer_text, &table, &input);
+    // The checks compare the board with the text the writer was shown.
+    let shown = writer::shown_answer(&answer_text);
     let settings: TemporalSettings = state.temporal;
     let model = llm.models.temporal.clone();
 
@@ -436,6 +452,12 @@ async fn job_inner(
     let Some(estimate) = writer::reserve(&probe, &model, &user_msg, settings.max_tokens) else {
         return fail(f, JobStatus::Failed, reason::UNPRICED);
     };
+    // The run may have been deleted since it ended: reserve nothing then.
+    match store::run_exists(&state.pool, run_id).await {
+        Ok(true) => {}
+        Ok(false) => return fail(f, JobStatus::Skipped, reason::GONE),
+        Err(_) => return fail(f, JobStatus::Failed, reason::STORE),
+    }
     let user = match identity::find_user_by_id(&state.pool, user_id).await {
         Ok(Some(u)) => u,
         _ => return fail(f, JobStatus::Failed, reason::STORE),
@@ -462,8 +484,13 @@ async fn job_inner(
         state.prices.clone(),
         state.usd_inr,
     ));
+    // The writer's own client (one attempt, no retry), else the agent's.
+    let client = state
+        .temporal_client
+        .clone()
+        .unwrap_or_else(|| llm.client.clone());
     let call = LlmCall::new(
-        llm.client.clone(),
+        client,
         budget.clone(),
         state.pool.clone(),
         CancelFlag::default(),
@@ -472,16 +499,31 @@ async fn job_inner(
     );
     let schema = writer::output_schema();
     let started = Instant::now();
-    let reply = tokio::time::timeout(
-        settings.time_limit,
-        call.reply(
-            writer::SYSTEM,
-            &user_msg,
-            Some(&schema),
-            settings.max_tokens,
-        ),
-    )
-    .await;
+    // The call and its charge run in their own task (booked whatever happens
+    // here); the job waits for it at most the time limit.
+    let started_call = call.start(
+        writer::SYSTEM,
+        &user_msg,
+        Some(&schema),
+        settings.max_tokens,
+    );
+    let mut handle = match started_call {
+        Ok(c) => tokio::spawn(c.wait()),
+        Err(e) => {
+            let _ = spend::release(&state.pool, user_id, request_id).await;
+            let r = if e == StepError::OverBudget {
+                reason::COST
+            } else {
+                reason::API
+            };
+            return fail(f, JobStatus::Failed, r);
+        }
+    };
+    let reply = match tokio::time::timeout(settings.time_limit, &mut handle).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(_)) => Ok(Err(StepError::Unrecorded)),
+        Err(_) => Err(()),
+    };
     // The job ends here either way: release the reservation except what a
     // call still in flight holds (its late charge releases the rest).
     let keep = budget.finish();
@@ -493,7 +535,18 @@ async fn job_inner(
     }
     f.cost_paise = budget.spent();
     let reply = match reply {
-        Err(_) => return fail(f, JobStatus::Failed, reason::TIME),
+        Err(()) => {
+            // Timed out: the call still finishes and books its charge in its
+            // own task; the row's cost is then brought up to date.
+            let (pool, budget) = (state.pool.clone(), budget.clone());
+            tokio::spawn(async move {
+                let _ = handle.await;
+                if set_cost(&pool, run_id, budget.spent()).await.is_err() {
+                    tracing::error!(%run_id, "temporal late cost could not be stored");
+                }
+            });
+            return fail(f, JobStatus::Failed, reason::TIME);
+        }
         Ok(Err(StepError::OverBudget)) => return fail(f, JobStatus::Failed, reason::COST),
         Ok(Err(StepError::Unrecorded)) => return fail(f, JobStatus::Failed, reason::UNRECORDED),
         Ok(Err(e)) => {
@@ -520,7 +573,7 @@ async fn job_inner(
     let flags = writer::check(
         &board,
         &CheckContext {
-            answer_text: &answer_text,
+            answer_text: &shown,
             table: &table,
             references: &refs,
             marker_references: &markers,

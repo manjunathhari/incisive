@@ -114,6 +114,13 @@ async fn main() {
             Arc::new(OfflineClassifier)
         }
     };
+    // Temporal T2/T3: its own client (one attempt, no retry, its own
+    // timeout), so no other step's client changes.
+    let temporal_client: Option<Arc<dyn incisive_app::agent::llm::LlmClient>> =
+        config.anthropic_api_key.clone().map(|key| {
+            Arc::new(incisive_app::agent::temporal_writer::client(key))
+                as Arc<dyn incisive_app::agent::llm::LlmClient>
+        });
     let llm = claude.map(|client| {
         Arc::new(AgentLlm {
             client,
@@ -157,6 +164,7 @@ async fn main() {
         full_engine: config.full_engine,
         completeness: config.completeness,
         temporal: config.temporal,
+        temporal_client,
         worker: WorkerHandle::default(),
         llm,
         lit,
