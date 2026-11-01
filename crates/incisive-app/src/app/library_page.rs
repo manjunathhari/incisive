@@ -144,7 +144,7 @@ pub fn LibraryPage() -> impl IntoView {
                                 <For
                                     each=move || on_day(day)
                                     key=|g| (g.newest().id, g.runs.len())
-                                    children=move |g| library_card(g, on_delete)
+                                    children=move |g| library_card(g, on_delete).into_any()
                                 />
                             </div>
                         </section>
