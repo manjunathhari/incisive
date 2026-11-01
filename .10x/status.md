@@ -2,7 +2,7 @@
 
 | Feature | Phase | Updated |
 |---|---|---|
-| memory-layer | Phase 0: spec written, awaiting owner review | 2026-11-01 |
+| memory-layer | Phase 1 strategy complete; Phase 2–3 (ADR, plan) in progress | 2026-11-01 |
 
 ## Open questions for owner
 1. ~~Retention~~ — decided A (de-identified permanent library copy).

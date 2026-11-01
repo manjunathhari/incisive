@@ -15,3 +15,12 @@
 - **D9 Update in v1 (2026-11-01, owner chose A):** "Update with newer evidence" runs a normal Full run; the engine stays frozen. The new record joins the topic and the ledger merges studies (duplicates by PMID counted once). Date-limited search deferred to its own approved engine change.
 - **Design Section 1 (tables + flows) accepted 2026-11-01.**
 - **D10 Authorship and training (2026-11-01, owner agreed):** keep all Claude-written answers and Expert Opinions in full; add owner-reviewed versions in his own words (stored separately); tag every text by author. Claude text is for retrieval, not training targets, unless Anthropic grants written permission (owner may ask).
+
+## Success criteria (v1)
+- Every Full run with a done Expert Opinion produces exactly one evidence record within 5 minutes (MEMORY=on).
+- Records survive run deletion; their link to the asker is cleared.
+- Gate: on the gold-set paraphrase test, paraphrases find their own topic and unrelated questions do not (thresholds fixed in M6).
+- Owner can set verdicts, write owner revisions, merge/split/undo topics.
+- No run's status, timing, answer or cost changes because of memory (verified by existing test suite unchanged).
+
+**Spec approved by owner 2026-11-01 22:46 IST.**
