@@ -2,10 +2,13 @@
 //! "Answer | Expert opinion" option, the `/run/:id/temporal` board page and
 //! their scoping, rendered by the real router (SSR).
 //!
-//! The run page with no temporal row is compared with the markup captured
-//! on main d2a4c16 before T4 (`tests/fixtures/temporal/ui/before_t4.json`):
-//! the length and FNV-1a fingerprint of the page's markup with its scripts
-//! taken out, the run id and today's header date replaced by fixed tokens.
+//! The run page with no temporal row is compared with the page captured on
+//! main d2a4c16 before T4 (`tests/fixtures/temporal/ui/before_t4.json`):
+//! the length and FNV-1a fingerprint of the page's markup outside its
+//! scripts *with* Leptos's hydration markers (`<!>`), the number of those
+//! markers, and each `<script>` block's kind, the hydration payload's by
+//! the shape of every serialized resource (the run id, today's header date
+//! and the nonce replaced by fixed tokens).
 
 use std::sync::Arc;
 
@@ -135,9 +138,9 @@ async fn full_run(pool: &PgPool, uid: i64, name: &str) -> Uuid {
     run
 }
 
-/// The page's markup: scripts out, Leptos's `<!>` markers out, the run id
-/// and today's header date replaced by fixed tokens, nonces blanked and each
-/// streamed chunk back in its slot.
+/// The page's markup for the content checks: scripts out, Leptos's `<!>`
+/// markers out, the run id and today's header date replaced by fixed
+/// tokens, nonces blanked and each streamed chunk back in its slot.
 fn markup(html: &str, run: Uuid) -> String {
     let mut m = String::new();
     let mut rest = html;
@@ -148,20 +151,125 @@ fn markup(html: &str, run: Uuid) -> String {
             .map_or("", |j| &rest[i + j + "</script>".len()..]);
     }
     m.push_str(rest);
-    let date = incisive_app::library::header_date(incisive_app::library::now_utc());
-    // The per-request nonce of the hydration links.
-    let nonce = regex::Regex::new(r#"(crossorigin|nonce)="[^"]*""#).unwrap();
-    let m = nonce.replace_all(&m, "$1=\"NONCE\"").into_owned();
-    let mut m = m
-        .replace("<!>", "")
-        .replace(&run.to_string(), "RUN-ID")
-        .replace(&date, "HEADER-DATE");
     // Out-of-order streaming: a Suspense that resolves after the shell is
     // flushed sends its content as `<template id="N-f">` after `</html>`,
     // and its slot (`<!--s-N-o-->` … `<!--s-N-c-->`) holds the fallback;
     // one that resolves in time is drawn in its slot. Each template is put
     // back into its slot and the slot markers dropped (an inline draw has
     // none), so both give the same markup.
+    tokens(&m, run).replace("<!>", "")
+}
+
+/// The no-row comparison's view of a page.
+struct PageShape {
+    /// The markup outside the scripts, `<!>` markers kept (tokens as in
+    /// [`markup`]).
+    markup: String,
+    /// The number of `<!>` markers.
+    markers: usize,
+    /// Each `<script>` block's kind, in page order, except the scripts that
+    /// move a streamed chunk into its slot: how many Suspense chunks miss
+    /// the shell's flush depends on timing (the chunks' content is in
+    /// `markup`, put back in its slot).
+    scripts: Vec<String>,
+}
+
+/// A page's markup outside its scripts with the hydration markers kept, the
+/// marker count and the scripts' kinds ([`script_kind`]).
+fn page_shape(html: &str, run: Uuid) -> PageShape {
+    let mut outside = String::new();
+    let mut scripts = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<script") {
+        outside.push_str(&rest[..i]);
+        let end = rest[i..].find("</script>").expect("script end") + i + "</script>".len();
+        let kind = script_kind(&rest[i..end], run);
+        if !kind.ends_with(SWAP) {
+            scripts.push(kind);
+        }
+        rest = &rest[end..];
+    }
+    outside.push_str(rest);
+    let markup = tokens(&outside, run);
+    PageShape {
+        markers: markup.matches("<!>").count(),
+        markup,
+        scripts,
+    }
+}
+
+/// The kind of the scripts that move a streamed chunk into its slot.
+const SWAP: &str = "swap a streamed chunk";
+
+/// A `<script>` block's kind: its opening tag (nonce blanked) and what it
+/// does; the resolved-resources script lists each resource's id and the
+/// FNV-1a of its payload's JSON shape ([`json_shape`]), so a resource whose
+/// type changes (a tuple, an extra field) shows.
+fn script_kind(s: &str, run: Uuid) -> String {
+    let nonce = regex::Regex::new(r#"nonce="[^"]*""#).unwrap();
+    let open_end = s.find('>').unwrap() + 1;
+    let tag = nonce.replace_all(&s[..open_end], r#"nonce="NONCE""#);
+    let body = &s[open_end..s.len() - "</script>".len()];
+    let what = if body.contains("mod.hydrate()") {
+        "hydrate".to_string()
+    } else if body.starts_with("(function() { let id = ") {
+        SWAP.to_string()
+    } else if body.contains("__RESOLVED_RESOURCES[") {
+        let mut parts = Vec::new();
+        let mut rest = body;
+        while let Some(i) = rest.find("__RESOLVED_RESOURCES[") {
+            rest = &rest[i + "__RESOLVED_RESOURCES[".len()..];
+            let close = rest.find(']').unwrap();
+            let id = rest[..close].to_string();
+            rest = rest[close..]
+                .trim_start_matches(']')
+                .trim_start_matches(" = ");
+            let mut it = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+            let payload = it.next().expect("a payload").expect("a JSON string");
+            rest = &rest[it.byte_offset()..];
+            let v: Value = serde_json::from_str(&payload).expect("payload JSON");
+            parts.push(format!("{id}:{}", fnv1a(&json_shape(&v))));
+        }
+        format!("resolved {}", parts.join(" "))
+    } else {
+        tokens(body, run)
+    };
+    format!("{tag} {what}")
+}
+
+/// A JSON value's shape: object keys (sorted) and value kinds, recursively;
+/// array elements in order.
+fn json_shape(v: &Value) -> String {
+    match v {
+        Value::Null => "z".into(),
+        Value::Bool(_) => "b".into(),
+        Value::Number(_) => "n".into(),
+        Value::String(_) => "s".into(),
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(json_shape).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(o) => {
+            let mut k: Vec<_> = o.iter().collect();
+            k.sort_by(|a, b| a.0.cmp(b.0));
+            let f: Vec<String> = k
+                .iter()
+                .map(|(k, v)| format!("{k}:{}", json_shape(v)))
+                .collect();
+            format!("{{{}}}", f.join(","))
+        }
+    }
+}
+
+/// The run id, today's header date and the nonces replaced by fixed tokens;
+/// each streamed chunk put back in its slot (see [`markup`]).
+fn tokens(m: &str, run: Uuid) -> String {
+    let date = incisive_app::library::header_date(incisive_app::library::now_utc());
+    let nonce = regex::Regex::new(r#"(crossorigin|nonce)="[^"]*""#).unwrap();
+    let m = nonce.replace_all(m, "$1=\"NONCE\"").into_owned();
+    let mut m = m
+        .replace(&run.to_string(), "RUN-ID")
+        .replace(&date, "HEADER-DATE");
     let tpl = regex::Regex::new(r#"<template id="(\d+)-f">"#).unwrap();
     while let Some(c) = tpl.captures(&m) {
         let n = c[1].to_string();
@@ -199,8 +307,9 @@ fn fnv1a(s: &str) -> String {
 const BEFORE: &str = "tests/fixtures/temporal/ui/before_t4.json";
 
 /// The run page of each fixture's Full run with no temporal row (`TEMPORAL`
-/// off, an older run): its markup's length and fingerprint. With `T4_CAPTURE=1` the markup is written
-/// to [`BEFORE`] (done once, on main d2a4c16, before any T4 change).
+/// off, an older run): its [`page_shape`]. With `T4_CAPTURE=1` it is
+/// written to [`BEFORE`] instead (done on a clean checkout of main d2a4c16,
+/// with this test and its helpers copied in).
 async fn no_row_pages(pool: &PgPool) -> serde_json::Map<String, Value> {
     let st = state(pool.clone());
     let (uid, email) = new_user(pool).await;
@@ -209,11 +318,16 @@ async fn no_row_pages(pool: &PgPool) -> serde_json::Map<String, Value> {
         let run = full_run(pool, uid, name).await;
         let (s, html) = send(router(st.clone()), &format!("/runs/{run}"), &email).await;
         assert_eq!(s, StatusCode::OK, "{name}");
-        let m = markup(&html, run);
-        dump(&format!("noRow-{name}"), &m);
+        let shape = page_shape(&html, run);
+        dump(&format!("noRow-{name}"), &shape.markup);
         out.insert(
             name.to_string(),
-            serde_json::json!({"len": m.len(), "fnv1a": fnv1a(&m)}),
+            serde_json::json!({
+                "len": shape.markup.len(),
+                "fnv1a": fnv1a(&shape.markup),
+                "markers": shape.markers,
+                "scripts": shape.scripts,
+            }),
         );
     }
     out
@@ -346,13 +460,25 @@ async fn t4_each_status_renders_its_option() {
             &format!("status-{}", status.map_or("pending", |s| s.as_str())),
             &m,
         );
-        let bar = option_markup(&m);
+        let bar = option_markup(&m).replace("<!---->", "");
+        let bar = bar.as_str();
         assert!(bar.contains(">Answer</a>"), "{bar}");
         assert!(bar.contains(&format!("{text}</")), "{text}: {bar}");
         assert_eq!(bar.contains("rx-dot"), ready, "{text}");
         // Selectable: a link to #expert; otherwise a disabled button.
         assert_eq!(bar.contains(r##"href="#expert""##), ready, "{text}");
         assert_eq!(bar.contains("disabled"), !ready, "{text}");
+        // The Expert opinion tab labels the view's panel.
+        assert!(bar.contains(r#"id="rx-tab-expert""#), "{text}");
+        // The SSR page never says polling gave up.
+        assert!(!m.contains("Taking longer than usual"), "{text}");
+        let i = m.find(r#"id="expert""#).unwrap();
+        let open_tag = &m[m[..i].rfind('<').unwrap()..i + m[i..].find('>').unwrap()];
+        assert!(
+            open_tag.contains(r#"role="tabpanel""#)
+                && open_tag.contains(r#"aria-labelledby="rx-tab-expert""#),
+            "{open_tag}"
+        );
         // The Answer view is shown first (the server never sees the hash).
         assert!(bar.contains(r#"class="rx-tab on""#) || bar.contains(r#"class="on rx-tab""#));
         assert_eq!(
@@ -383,11 +509,24 @@ async fn t4_each_status_renders_its_option() {
             let ask = &v[at("Ask this evidence") - 200..at("Ask this evidence")];
             assert!(ask.contains("disabled"), "{ask}");
             assert!(v.contains(">Later<"));
-            // Citations link to the study sheets on the page.
-            assert!(
-                v.contains(r##"<a href="#ref-"##)
-                    && v.contains(r#"rel="external" class="rx-cite">"#)
-            );
+            // Citations link to the study sheets on the page, and each
+            // carries the mark of the handler that switches to the Answer
+            // view before opening the sheet (the sheets sit in the answer,
+            // hidden in this view); before hydration the plain `#ref-n`
+            // link ends `#expert`'s `:target`, showing the answer.
+            let section = &v[..v.find("</section>").unwrap()];
+            let links: Vec<&str> = section
+                .match_indices(r##"<a href="#ref-"##)
+                .map(|(i, _)| &section[i..i + section[i..].find('>').unwrap() + 1])
+                .collect();
+            assert!(!links.is_empty());
+            for l in links {
+                assert!(
+                    l.contains(r#"data-view="answer""#) && l.contains(r#"class="rx-cite""#),
+                    "{l}"
+                );
+            }
+            assert_eq!(incisive_app::app::ANSWER_VIEW, "answer");
             // Hidden until chosen: the view and the answer wrapper.
             let sec = &m[m[..m.find(r#"id="expert""#).unwrap()]
                 .rfind("<section")
@@ -538,9 +677,10 @@ async fn t4_board_text_is_escaped() {
     for path in [format!("/run/{run}/temporal"), format!("/runs/{run}")] {
         let (s, html) = send(router(st.clone()), &path, &email).await;
         assert_eq!(s, StatusCode::OK, "{path}");
+        // On the raw page: the scripts (the hydration payload) included.
+        assert!(!html.contains("<script>alert(1)"), "{path}");
+        assert!(!html.contains("<img src=x"), "{path}");
         let m = markup(&html, run);
-        assert!(!m.contains("<script>alert(1)"), "{path}");
-        assert!(!m.contains("<img src=x"), "{path}");
         assert!(
             m.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
             "{path}"
@@ -627,6 +767,24 @@ async fn t4_board_page_of_another_users_run_is_not_found() {
 
 // ---------- the owner's static preview ----------
 
+/// A long unbroken word (a DOI-like id and a URL with no break points).
+const LONG_WORD: &str = "doi:10.1016/j.jamcollsurg.2019.04.031-supplementary-appendix-table-S7-https://example.org/very/long/path/without/any/break/points/at/all";
+
+/// The hernia smoke board with [`LONG_WORD`] in its opinion, debate, ledger
+/// and scenario text.
+fn long_word_board() -> Value {
+    let mut b = board_fixture("hernia")["board"].clone();
+    b["opinion"]["verdict"] = Value::String(format!("Verdict {LONG_WORD} [1]."));
+    b["opinion"]["why"] = Value::String(format!("Why {LONG_WORD}"));
+    b["debate"][0]["points"][0] = Value::String(format!("Point {LONG_WORD}"));
+    b["ledger"]["rows"][0]["cells"][0] = Value::String(LONG_WORD.into());
+    b["at_a_glance"]["today"] = Value::String(LONG_WORD.into());
+    if let Some(d) = b["decisions"].get_mut(0) {
+        d["reason"] = Value::String(LONG_WORD.into());
+    }
+    b
+}
+
 /// A rendered page made static for the preview: no hydration links, the
 /// fonts and the links between the preview's pages made relative.
 fn static_page(m: &str, name: &str) -> String {
@@ -708,6 +866,27 @@ async fn t4_write_the_static_preview() {
             .map_or(i + m[i..].find("</div>").unwrap() + 6, |j| i + j);
         bars.push((label.to_string(), m[i..end].to_string()));
     }
+    // Long unbroken words (a DOI, a URL, an id) in the board text: they wrap
+    // inside the view and the board at phone width (checked in a browser at
+    // 390 px: no horizontal page scroll).
+    let run = full_run(&pool, uid, "hernia").await;
+    temporal_row(
+        &pool,
+        run,
+        "hernia",
+        Some(JobStatus::Done),
+        Some(long_word_board()),
+    )
+    .await;
+    let (_, html) = send(router(st.clone()), &format!("/run/{run}/temporal"), &email).await;
+    let board_page = static_page(&markup(&html, run), "longword");
+    assert!(board_page.contains(LONG_WORD));
+    write("board-longword.html", &board_page);
+    let (_, html) = send(router(st.clone()), &format!("/runs/{run}"), &email).await;
+    write(
+        "run-longword-done.html",
+        &static_page(&markup(&html, run), "longword"),
+    );
     let plain = full_run(&pool, uid, "hernia").await;
     let (_, html) = send(router(st.clone()), &format!("/runs/{plain}"), &email).await;
     write(
@@ -744,7 +923,8 @@ async fn t4_write_the_static_preview() {
 <ul><li><a href="option-states.html">The option in all five states, side by side</a></li>
 <li>Ready: <a href="run-hernia-done.html">hernia</a> (<a href="run-hernia-done.html#expert">Expert opinion view</a>), <a href="run-achalasia-done.html#expert">achalasia</a>, <a href="run-cholecystitis-done.html#expert">cholecystitis</a></li>
 <li><a href="run-hernia-pending.html">Being written</a> · <a href="run-hernia-skipped.html">Not enough studies</a> · <a href="run-hernia-failed.html">Unavailable</a> · <a href="run-hernia-cap_blocked.html">Not run (daily limit)</a></li>
-<li><a href="run-hernia-no-row.html">No expert opinion row</a> (the page exactly as before T4)</li></ul>
+<li><a href="run-hernia-no-row.html">No expert opinion row</a> (the page exactly as before T4)</li>
+<li>Long unbroken words in the board text: <a href="board-longword.html">board</a> · <a href="run-longword-done.html#expert">Expert opinion view</a></li></ul>
 </main></body></html>"#
         ),
     );

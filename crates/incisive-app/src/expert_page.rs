@@ -312,6 +312,35 @@ pub const POLL_EVERY_SECS: u64 = 15;
 /// At most this many polls (10 minutes, the job's stale limit).
 pub const POLL_MAX: u32 = 40;
 
+/// The note on the option once the page has stopped asking (the opinion is
+/// still being written after [`POLL_MAX`] polls).
+pub const POLL_GAVE_UP_NOTE: &str = "Taking longer than usual \u{2014} reload later";
+
+/// What the run page does at a poll tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poll {
+    /// Ask again.
+    Continue,
+    /// Stop: the opinion is no longer being written.
+    Stop,
+    /// Stop: still being written after [`POLL_MAX`] polls (10 minutes);
+    /// the option says to reload later.
+    GiveUp,
+}
+
+/// The poll decision after `ticks` polls with the option in `state`: ask
+/// again only while the opinion is being written and fewer than
+/// [`POLL_MAX`] polls (every [`POLL_EVERY_SECS`] s) have been made.
+pub fn next_poll(ticks: u32, state: OptionState) -> Poll {
+    if !state.polls() {
+        Poll::Stop
+    } else if ticks >= POLL_MAX {
+        Poll::GiveUp
+    } else {
+        Poll::Continue
+    }
+}
+
 /// The hint under the option once the opinion is ready.
 pub const READY_HINT: &str =
     "Expert opinion ready: how this evidence moved over time, and what to conclude today.";
@@ -808,14 +837,34 @@ pub fn status_class(status: &str) -> &'static str {
 
 // ---------- SVG geometry ----------
 
-/// Rounded to 0.1 for the SVG attributes.
+/// Rounded to 0.1 for the SVG attributes (`0` for a value that is not a
+/// finite number, so no `NaN` or `inf` reaches the markup).
 pub fn px(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".into();
+    }
     let r = (v * 10.0).round() / 10.0;
-    if r == r.trunc() {
+    if r == 0.0 {
+        "0".into()
+    } else if r == r.trunc() {
         format!("{r:.0}")
     } else {
         format!("{r:.1}")
     }
+}
+
+/// At most this many year ticks on the timeline.
+pub const MAX_YEAR_TICKS: i32 = 12;
+
+/// The timeline's year step for a span of `span` years: the smallest of
+/// 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000 that gives at most [`MAX_YEAR_TICKS`]
+/// ticks.
+pub fn year_step(span: i32) -> i32 {
+    let span = span.max(1);
+    [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000]
+        .into_iter()
+        .find(|step| (span + step - 1) / step <= MAX_YEAR_TICKS)
+        .unwrap_or((span + MAX_YEAR_TICKS - 1) / MAX_YEAR_TICKS)
 }
 
 /// `s` cut to `max` characters with an ellipsis.
@@ -1009,9 +1058,9 @@ pub fn gantt(t: &TemporalTable) -> Option<Gantt> {
         })
         .collect();
     let axis_y = GANTT_T + rows.len() as f64 * GANTT_ROW + 12.0;
-    let step = if to - from > 12 { 2 } else { 1 };
+    let step = year_step(to - from);
     let ticks = (from..to)
-        .filter(|y| (y % step) == 0)
+        .filter(|y| y.rem_euclid(step) == 0)
         .map(|y| (x(f64::from(y)), y))
         .collect();
 
@@ -1678,5 +1727,60 @@ mod tests {
             ..Round::default()
         };
         assert_eq!(round_heading(&r), "Round 2 \u{b7} Tested");
+    }
+
+    #[test]
+    fn poll_ticks_stop_when_ready_or_after_ten_minutes() {
+        use OptionState::*;
+        assert_eq!(next_poll(0, Pending), Poll::Continue);
+        assert_eq!(next_poll(POLL_MAX - 1, Pending), Poll::Continue);
+        assert_eq!(next_poll(POLL_MAX, Pending), Poll::GiveUp);
+        assert_eq!(next_poll(POLL_MAX + 5, Pending), Poll::GiveUp);
+        for s in [Ready, Skipped, Failed, CapBlocked] {
+            assert_eq!(next_poll(0, s), Poll::Stop, "{s:?}");
+            assert_eq!(next_poll(POLL_MAX, s), Poll::Stop, "{s:?}");
+        }
+        // Every tick from the first to the last asks: 40 polls, 15 s apart.
+        let asks = (0..1000)
+            .take_while(|t| next_poll(*t, Pending) == Poll::Continue)
+            .count();
+        assert_eq!(asks as u64 * POLL_EVERY_SECS, 600);
+        assert!(POLL_GAVE_UP_NOTE.contains("reload later"));
+    }
+
+    #[test]
+    fn px_writes_zero_for_values_that_are_not_finite() {
+        assert_eq!(px(f64::NAN), "0");
+        assert_eq!(px(f64::INFINITY), "0");
+        assert_eq!(px(f64::NEG_INFINITY), "0");
+        assert_eq!(px(12.34), "12.3");
+        assert_eq!(px(12.0), "12");
+        assert_eq!(px(-0.04), "0");
+    }
+
+    #[test]
+    fn year_step_keeps_the_timeline_to_twelve_ticks() {
+        assert_eq!(year_step(0), 1);
+        assert_eq!(year_step(1), 1);
+        assert_eq!(year_step(12), 1);
+        assert_eq!(year_step(13), 2);
+        assert_eq!(year_step(24), 2);
+        assert_eq!(year_step(25), 5);
+        assert_eq!(year_step(60), 5);
+        assert_eq!(year_step(61), 10);
+        assert_eq!(year_step(130), 20);
+        assert_eq!(year_step(290), 25);
+        assert_eq!(year_step(5000), 500);
+        assert_eq!(year_step(100_000), 8334);
+        for span in 1..3000 {
+            let step = year_step(span);
+            // Ticks over any `span` consecutive years.
+            for from in [-7, 0, 1993, 2001] {
+                let n = (from..from + span)
+                    .filter(|y: &i32| y.rem_euclid(step) == 0)
+                    .count();
+                assert!(n <= 12, "{span}: step {step}, {n} ticks");
+            }
+        }
     }
 }

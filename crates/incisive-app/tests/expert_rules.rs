@@ -535,6 +535,19 @@ fn expert_styles_are_scoped_away_from_the_answer() {
                 })
             });
             assert!(scoped, "unscoped selector: {sel}");
+            // The run page's wrapper (`.rx`, `.rx-pre`) holds the answer
+            // too: a rule under it must name one of the option's or the
+            // view's own `rx-*` elements.
+            let mut parts = sel.split_whitespace();
+            let first = parts.next().unwrap();
+            let base = first.split([':', '[']).next().unwrap();
+            if base == ".rx" || base == ".rx-pre" {
+                let next = parts.next().unwrap_or("");
+                assert!(
+                    next.starts_with(".rx-") || next.contains(".rx-"),
+                    "a rule under the run page wrapper reaches the answer: {sel}"
+                );
+            }
         }
     }
     assert!(n > 50, "{n}");
@@ -545,4 +558,38 @@ fn expert_styles_are_scoped_away_from_the_answer() {
         assert!(t.starts_with("rx-ok") || t.starts_with("rt-"), "{t}");
     }
     assert!(style.contains("var(--iv-accent)") && style.contains("var(--iv-font)"));
+}
+
+/// The scope check rejects a bare wrapper rule (the review's case).
+#[test]
+fn a_bare_wrapper_rule_would_fail_the_scope_check() {
+    let bad = [".rx a:focus-visible", ".rx button", ".rx-pre p", ".rx > a"];
+    let good = [
+        ".rx .rx-tab",
+        ".rx-pre .rx-expert:target",
+        ".rx-pre:has(.rx-expert) a.rx-tab",
+    ];
+    let reaches = |sel: &str| {
+        let mut parts = sel.split_whitespace();
+        let base = parts.next().unwrap().split([':', '[']).next().unwrap();
+        (base == ".rx" || base == ".rx-pre") && !parts.next().unwrap_or("").contains(".rx-")
+    };
+    for s in bad {
+        assert!(reaches(s), "{s}");
+    }
+    for s in good {
+        assert!(!reaches(s), "{s}");
+    }
+}
+
+/// Long unbroken words (DOIs, URLs, ids) wrap inside the Expert Opinion
+/// view and the board instead of widening the page.
+#[test]
+fn long_words_wrap_in_the_view_and_the_board() {
+    let style = incisive_app::app::EXPERT_STYLE;
+    for class in ["\n.rx-expert {", "\n.rt {"] {
+        let i = style.find(class).unwrap_or_else(|| panic!("{class}"));
+        let rule = &style[i..i + style[i..].find('}').unwrap()];
+        assert!(rule.contains("overflow-wrap:anywhere"), "{class}");
+    }
 }

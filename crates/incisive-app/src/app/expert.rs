@@ -24,7 +24,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use uuid::Uuid;
 
-use super::page::sheet_click;
+use super::page::open_sheet;
 use super::{error_text, get_my_run_temporal};
 use crate::expert_page::{self as xp, Board, Opened, OptionState, Piece};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, TemporalView};
@@ -42,12 +42,13 @@ pub const EXPERT_STYLE: &str = r##"
 .rx-answer[hidden], .rx-expert[hidden], .rx-hint[hidden] { display:none; }
 .rx-seg, .rx-hint, .rx-expert { font-family:var(--iv-font); }
 .rx-seg { display:grid; grid-template-columns:1fr 1fr; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:999px; padding:4px; gap:4px; margin:4px 0 10px; max-width:560px; }
-.rx .rx-tab { font:inherit; font-size:.86rem; font-weight:700; border:0; border-radius:999px; padding:6px 10px; min-height:44px; background:none; color:var(--iv-muted); cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; text-align:center; text-decoration:none; line-height:1.25; }
+.rx .rx-tab { font:inherit; font-size:.86rem; font-weight:700; border:0; border-radius:999px; padding:6px 10px; min-height:44px; background:none; color:var(--iv-muted); cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:2px 6px; text-align:center; text-decoration:none; line-height:1.25; }
 .rx .rx-tab.on { background:var(--iv-tint); color:var(--iv-accent); }
 .rx .rx-tab[disabled] { cursor:default; opacity:1; font-weight:600; }
+.rx-late { flex-basis:100%; font-size:.72rem; font-weight:500; color:var(--rt-warn); }
 .rx-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--rx-ok); }
 .rx-hint { border:1px dashed var(--iv-accent); background:var(--iv-tint); border-radius:14px; padding:10px 12px; font-size:.84rem; color:var(--iv-accent); display:flex; gap:8px; align-items:flex-start; margin:0 0 10px; max-width:560px; }
-.rx-expert { display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; }
+.rx-expert { display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
 .rx-op { background:var(--iv-tint); border-radius:16px; padding:12px 14px; display:flex; flex-direction:column; gap:6px; }
 .rx-who { font-size:.72rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--iv-accent); }
 .rx-verdict { margin:0; color:var(--iv-ink); font-weight:600; font-size:.98rem; line-height:1.45; }
@@ -68,15 +69,15 @@ pub const EXPERT_STYLE: &str = r##"
 .rx .rx-btn[disabled] { cursor:default; opacity:1; }
 .rx-btn small { display:block; font-weight:500; font-size:.76rem; opacity:.85; }
 .rx-soon, .rt-soon { flex:none; font-size:.66rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; background:var(--iv-tint); color:var(--iv-accent); border-radius:999px; padding:2px 8px; }
-.rx a.rx-cite, .rt a.rt-cite { color:var(--iv-accent); font-weight:600; }
-.rx a:focus-visible, .rx button:focus-visible, .rt a:focus-visible, .rt summary:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
+.rx-expert a.rx-cite, .rt a.rt-cite { color:var(--iv-accent); font-weight:600; }
+.rx-seg a:focus-visible, .rx-seg button:focus-visible, .rx-expert a:focus-visible, .rx-expert button:focus-visible, .rt a:focus-visible, .rt summary:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
 /* Before hydration: #expert opens a ready view (CSS :target) and hides the answer. */
 .rx-pre .rx-expert:target:not(:empty)[hidden] { display:flex; }
 .rx-pre:has(.rx-expert:target:not(:empty)) .rx-answer, .rx-pre:has(.rx-expert:target:not(:empty)) .rx-hint { display:none; }
 .rx-pre:has(.rx-expert:target:not(:empty)) .rx-tab.on { background:none; color:var(--iv-muted); }
 .rx-pre:has(.rx-expert:target:not(:empty)) a.rx-tab[href="#expert"] { background:var(--iv-tint); color:var(--iv-accent); }
 /* ---- the Temporal board ---- */
-.rt { font-family:var(--iv-font); color:var(--iv-ink); font-size:15px; line-height:1.55; display:flex; flex-direction:column; gap:30px; min-width:0; }
+.rt { font-family:var(--iv-font); color:var(--iv-ink); font-size:15px; line-height:1.55; display:flex; flex-direction:column; gap:30px; min-width:0; overflow-wrap:anywhere; }
 .rt p { margin:0; max-width:68ch; }
 .rt h1 { font-size:1.5rem; line-height:1.2; margin:0; font-weight:700; text-wrap:balance; }
 .rt h2 { font-size:1.15rem; margin:0; font-weight:700; text-wrap:balance; }
@@ -157,8 +158,10 @@ details.rt-checks[open] { display:flex; flex-direction:column; gap:12px; padding
 /// How a reference number in board text links.
 #[derive(Clone, Copy)]
 enum Cite {
-    /// On the run page: the study sheet on the same page (`#ref-n`).
-    Sheet,
+    /// On the run page's Expert Opinion view: the study sheet on the same
+    /// page (`#ref-n`), opened after switching to the Answer view (the
+    /// sheets sit in the answer, which this view hides).
+    Sheet(Expert),
     /// On the board page: the run page's study sheet.
     RunPage(Uuid),
 }
@@ -170,8 +173,10 @@ fn cited(text: &str, known: &BTreeSet<u16>, how: Cite) -> AnyView {
         .into_iter()
         .map(|p| match (p, how) {
             (Piece::Text(t), _) => t.into_any(),
-            (Piece::Ref(n), Cite::Sheet) => view! {
-                <a class="rx-cite" href=format!("#ref-{n}") rel="external" on:click=sheet_click(n)>{n.to_string()}</a>
+            (Piece::Ref(n), Cite::Sheet(x)) => view! {
+                <a class="rx-cite" href=format!("#ref-{n}") rel="external" data-view=ANSWER_VIEW on:click=x.sheet_click(n)>
+                    {n.to_string()}
+                </a>
             }
             .into_any(),
             (Piece::Ref(n), Cite::RunPage(id)) => view! {
@@ -184,6 +189,22 @@ fn cited(text: &str, known: &BTreeSet<u16>, how: Cite) -> AnyView {
 }
 
 // ---------- the run page ----------
+
+/// The `data-view` of the Expert Opinion view's study-sheet links: a click
+/// shows the Answer view first, then opens the sheet ([`Expert::sheet_click`]).
+pub const ANSWER_VIEW: &str = "answer";
+
+/// Show the answer wrapper now (browser only), before the reactive update
+/// that also does it, so a study sheet opened in the same click is visible.
+fn reveal_answer() {
+    #[cfg(feature = "hydrate")]
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".rx-answer").ok().flatten())
+    {
+        let _ = el.remove_attribute("hidden");
+    }
+}
 
 /// The run page's Expert Opinion state (signals; copied into views).
 #[derive(Clone, Copy)]
@@ -198,6 +219,8 @@ pub(super) struct Expert {
     option: Memo<OptionState>,
     /// The browser has taken over (the `:target` fallback is off).
     hydrated: RwSignal<bool>,
+    /// The page stopped asking while the opinion was still being written.
+    gave_up: RwSignal<bool>,
     /// The answer's reference numbers (their sheets are on the page).
     answer_refs: StoredValue<BTreeSet<u16>>,
 }
@@ -262,6 +285,7 @@ impl Expert {
             opened,
             option,
             hydrated: RwSignal::new(false),
+            gave_up: RwSignal::new(false),
             answer_refs: StoredValue::new(answer_refs),
         };
         // Effects run in the browser only: the server renders the Answer
@@ -295,7 +319,8 @@ impl Expert {
     }
 
     /// While pending: ask again every [`xp::POLL_EVERY_SECS`] seconds, at
-    /// most [`xp::POLL_MAX`] times; stop once the row is no longer pending.
+    /// most [`xp::POLL_MAX`] times ([`xp::next_poll`]); stop once the row is
+    /// no longer pending, and say so on the option if it never is.
     fn poll(self) {
         type Timer = Option<leptos::leptos_dom::helpers::IntervalHandle>;
         let timer: StoredValue<Timer, LocalStorage> = StoredValue::new_local(None);
@@ -306,35 +331,58 @@ impl Expert {
             }
         };
         Effect::new(move |_| {
-            if !self.option.get().polls() {
-                stop();
-                return;
+            match xp::next_poll(count.get_value(), self.option.get()) {
+                xp::Poll::Continue => {}
+                xp::Poll::Stop => return stop(),
+                xp::Poll::GiveUp => {
+                    stop();
+                    return self.gave_up.set(true);
+                }
             }
             if timer.with_value(|t| t.is_some()) {
                 return;
             }
             let h = leptos::leptos_dom::helpers::set_interval_with_handle(
-                move || {
-                    let n = count.get_value() + 1;
-                    count.set_value(n);
-                    if n > xp::POLL_MAX {
+                move || match xp::next_poll(count.get_value(), self.option.get_untracked()) {
+                    xp::Poll::Stop => stop(),
+                    xp::Poll::GiveUp => {
                         stop();
-                        return;
+                        self.gave_up.set(true);
                     }
-                    let id = self.run_id;
-                    leptos::task::spawn_local(async move {
-                        // A transient error keeps the last state; the next
-                        // tick asks again.
-                        if let Ok(Some(v)) = get_my_run_temporal(id).await {
-                            self.state.set(v);
-                        }
-                    });
+                    xp::Poll::Continue => {
+                        count.update_value(|n| *n += 1);
+                        let id = self.run_id;
+                        leptos::task::spawn_local(async move {
+                            // A transient error keeps the last state; the
+                            // next tick asks again.
+                            if let Ok(Some(v)) = get_my_run_temporal(id).await {
+                                self.state.set(v);
+                            }
+                        });
+                    }
                 },
                 std::time::Duration::from_secs(xp::POLL_EVERY_SECS),
             );
             timer.set_value(h.ok());
         });
         on_cleanup(stop);
+    }
+
+    /// A study-sheet link's click in the Expert Opinion view: switch to the
+    /// Answer view (signal, address and the wrapper's `hidden` at once),
+    /// then open sheet `n`. With no sheet the link is followed to `#ref-n`
+    /// in the answer, now shown. Before hydration the plain link does the
+    /// same: `#ref-n` ends `#expert`'s `:target`, so the answer shows.
+    fn sheet_click(self, n: u16) -> impl FnMut(leptos::ev::MouseEvent) + Clone + 'static {
+        move |ev: leptos::ev::MouseEvent| {
+            self.expert.set(false);
+            set_hash(false);
+            reveal_answer();
+            if open_sheet(n) {
+                ev.prevent_default();
+                ev.stop_propagation();
+            }
+        }
     }
 
     /// The `class` of the wrapper (`rx-pre` until the browser takes over).
@@ -356,6 +404,9 @@ impl Expert {
             .collect()
     }
 }
+
+/// The id of the option's Expert opinion tab (labels the view's panel).
+const EXPERT_TAB_ID: &str = "rx-tab-expert";
 
 /// The "Answer | Expert opinion" option, and the ready hint under it
 /// (Answer view only). Before hydration both are links (`#answer`,
@@ -379,6 +430,7 @@ pub(super) fn option_bar(x: Expert) -> AnyView {
             view! {
                 <a
                     class="rx-tab"
+                    id=EXPERT_TAB_ID
                     class:on=move || x.expert.get()
                     role="tab"
                     aria-selected=move || x.expert.get().to_string()
@@ -394,8 +446,12 @@ pub(super) fn option_bar(x: Expert) -> AnyView {
             .into_any()
         } else {
             view! {
-                <button class="rx-tab" type="button" role="tab" aria-selected="false" disabled=true>
+                <button class="rx-tab" id=EXPERT_TAB_ID type="button" role="tab" aria-selected="false" disabled=true>
                     {s.text()}
+                    {move || {
+                        (x.gave_up.get() && x.option.get().polls())
+                            .then(|| view! { <small class="rx-late">{xp::POLL_GAVE_UP_NOTE}</small> })
+                    }}
                 </button>
             }
             .into_any()
@@ -433,18 +489,23 @@ pub(super) fn option_bar(x: Expert) -> AnyView {
 /// hidden while the Answer view is shown.
 pub(super) fn expert_view(x: Expert) -> AnyView {
     view! {
-        <section class="rx-expert" id="expert" aria-label="Expert opinion" hidden=move || !x.expert.get()>
-            {move || {
-                x.opened.with(|o| o.as_ref().map(|o| expert_body(x.run_id, o, &x.known_refs(o))))
-            }}
+        <section
+            class="rx-expert"
+            id="expert"
+            role="tabpanel"
+            aria-labelledby=EXPERT_TAB_ID
+            hidden=move || !x.expert.get()
+        >
+            {move || x.opened.with(|o| o.as_ref().map(|o| expert_body(x, o, &x.known_refs(o))))}
         </section>
     }
     .into_any()
 }
 
-fn expert_body(run_id: Uuid, o: &Opened, known: &BTreeSet<u16>) -> AnyView {
+fn expert_body(x: Expert, o: &Opened, known: &BTreeSet<u16>) -> AnyView {
+    let run_id = x.run_id;
     let b = &o.board;
-    let c = |t: &str| cited(t, known, Cite::Sheet);
+    let c = |t: &str| cited(t, known, Cite::Sheet(x));
     let g = &b.at_a_glance;
     let line = |k: &'static str, t: &str, class: &'static str| {
         view! {
