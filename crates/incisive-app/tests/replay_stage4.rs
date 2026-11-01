@@ -2308,3 +2308,51 @@ fn folding_keeps_every_mark_and_the_copy_text() {
         );
     }
 }
+
+/// FNV-1a (64-bit) of `s`, as hex: a fixed fingerprint of rendered HTML
+/// (test only; no extra crate).
+fn fnv1a(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The answer content's fingerprints: the whole answer, `.ap-main` and
+/// the original run view (each with its length).
+fn ivory_fingerprints(a: &AnswerV3) -> serde_json::Value {
+    let html = incisive_app::app::render_answer_v3(a.clone());
+    let main_start = html.find(r#"<div class="ap-main">"#).unwrap();
+    let (page, original) = split_page(&html);
+    let ap_main = &page[main_start..];
+    serde_json::json!({
+        "html": {"len": html.len(), "fnv1a": fnv1a(&html)},
+        "ap_main": {"len": ap_main.len(), "fnv1a": fnv1a(ap_main)},
+        "original": {"len": original.len(), "fnv1a": fnv1a(original)},
+    })
+}
+
+/// Ivory redesign (owner decision 2): the answer content is byte-identical.
+/// The whole answer, its `.ap-main` and the original run view, rendered
+/// from the replay answers, match the fingerprints captured on main 420f0bb
+/// before the redesign (`tests/fixtures/part_a/before_ivory.json`), and
+/// Copy as text matches the folding fixture.
+#[test]
+fn ivory_redesign_keeps_the_answer_content_byte_identical() {
+    let before: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/part_a/before_ivory.json")).unwrap();
+    let copy: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/part_a/before_folding.json")).unwrap();
+    let answers = part_a_answers();
+    assert_eq!(answers.len(), before.as_object().unwrap().len());
+    for (name, a) in answers {
+        assert_eq!(ivory_fingerprints(&a), before[name], "{name}");
+        assert_eq!(
+            a.copy_text(),
+            copy[name]["copy_text"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+}

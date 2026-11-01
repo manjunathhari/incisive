@@ -1,0 +1,44 @@
+{
+  "enriched": {
+    "ap_main": {
+      "fnv1a": "f9dd5863b6cdd406",
+      "len": 158225
+    },
+    "html": {
+      "fnv1a": "f8e7d9eec81f294b",
+      "len": 216271
+    },
+    "original": {
+      "fnv1a": "8ef519b731af68a3",
+      "len": 58030
+    }
+  },
+  "replay": {
+    "ap_main": {
+      "fnv1a": "21fe27c70738f67e",
+      "len": 138483
+    },
+    "html": {
+      "fnv1a": "15a48a246494e7c1",
+      "len": 194513
+    },
+    "original": {
+      "fnv1a": "d9c2359714c53b55",
+      "len": 56014
+    }
+  },
+  "replay run 1 with review": {
+    "ap_main": {
+      "fnv1a": "bdace12d054171d6",
+      "len": 136602
+    },
+    "html": {
+      "fnv1a": "25d464f1bfb3e6f0",
+      "len": 191973
+    },
+    "original": {
+      "fnv1a": "139ef4bd45e03176",
+      "len": 55355
+    }
+  }
+}

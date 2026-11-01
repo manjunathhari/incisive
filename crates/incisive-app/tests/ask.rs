@@ -1314,7 +1314,7 @@ async fn home_page_renders_question_box() {
     let body =
         String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains("Incisive"));
-    assert!(body.contains("Cut to the evidence."));
+    assert!(body.contains("Medical literature \u{2014} searched, checked, summarised"));
     assert!(body.contains("<textarea"), "{body}");
-    assert!(body.contains("Send"));
+    assert!(body.contains("Read the evidence"));
 }

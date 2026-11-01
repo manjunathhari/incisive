@@ -141,7 +141,7 @@ async fn home_page_shows_name_and_tagline() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Incisive"));
-    assert!(body.contains("Cut to the evidence."));
+    assert!(body.contains("Medical literature \u{2014} searched, checked, summarised"));
 }
 
 #[tokio::test]
@@ -193,4 +193,55 @@ async fn browser_code_is_revalidated_on_every_load() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Ivory redesign: Figtree is served by the app from the site root (copied
+/// there by cargo-leptos from `public/`, `assets-dir`), as `font/woff2`;
+/// the page asks Google Fonts for nothing.
+#[tokio::test]
+async fn figtree_is_self_hosted_and_google_fonts_are_never_requested() {
+    let public = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
+    let opts = LeptosOptions::builder()
+        .output_name("incisive-app")
+        .site_root(public)
+        .build();
+    for w in ["400", "500", "600", "700"] {
+        for set in ["latin", "latin-ext"] {
+            let path = format!("/fonts/figtree/figtree-{set}-{w}-normal.woff2");
+            let res = build_router(Arc::new(AlwaysUp), identity_state(), opts.clone())
+                .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                res.headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .map(|v| v.to_str().unwrap()),
+                Some("font/woff2"),
+                "{path}"
+            );
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&bytes[..4], b"wOF2", "{path}");
+        }
+    }
+    // The OFL licence sits next to the files.
+    let licence = std::fs::read_to_string(format!("{public}/fonts/figtree/LICENSE.txt")).unwrap();
+    assert!(licence.contains("SIL Open Font License, Version 1.1"));
+
+    let (status, body) = get(
+        build_router(Arc::new(AlwaysUp), identity_state(), opts),
+        "/",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("/fonts/figtree/figtree-latin-400-normal.woff2"));
+    assert!(body.contains("font-display:swap"));
+    assert!(!body.contains("fonts.googleapis.com"), "{body}");
+    assert!(!body.contains("fonts.gstatic.com"));
+    let style = incisive_app::app::IVORY_STYLE;
+    assert!(!style.contains("googleapis"));
+    // The ivory styles never reach the answer content.
+    for sel in [".ap-main", ".ap ", ".ap{", ".ap-original", ".answer"] {
+        assert!(!style.contains(sel), "{sel}");
+    }
 }

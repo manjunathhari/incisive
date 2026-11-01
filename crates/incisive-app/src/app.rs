@@ -14,15 +14,14 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
 use leptos_router::{
     components::{A, Route, Router, Routes},
-    hooks::{use_navigate, use_params_map},
+    hooks::use_params_map,
     path,
 };
 
 use crate::agent::answer::{
     self, Answer, DECISION_SUPPORT, INSUFFICIENT, PARTIAL_MARK, Reference, check_text, date_ist,
-    duration_text, empty_bottom_line, exclusions_text, initial_mode, key_study_text, mode_hint,
-    mode_label, render_text, rerun_href, screened_text, show_insufficient, stopped_text,
-    unavailable_text,
+    duration_text, empty_bottom_line, exclusions_text, key_study_text, mode_label, render_text,
+    rerun_href, screened_text, show_insufficient, stopped_text, unavailable_text,
 };
 use crate::agent::answer_v3::{
     ADDED_LABEL, AnswerV3, CompletenessV3, EvidenceV3, FOUND_BY_SKEPTIC, NO_GUIDELINE_SOURCE,
@@ -31,9 +30,16 @@ use crate::agent::answer_v3::{
 };
 use crate::ask::{ActivityView, AskOutcome, MeView};
 // Part A: the interactive answer page (Phase 3 answers).
+// The ivory redesign: header and tokens, the Ask page and the Library.
+mod ask_page;
 mod details;
+mod ivory;
+mod library_page;
 mod page;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
+/// The ivory styles (exported for the scope test: none of them reach the
+/// answer content).
+pub use ivory::IVORY_STYLE;
 use uuid::Uuid;
 
 const STYLE: &str = r#"
@@ -42,12 +48,6 @@ const STYLE: &str = r#"
   --green:#1b6b3a; --green-bg:#e9f7ee; --accent:#1f4e79; }
 * { box-sizing:border-box; }
 body { margin:0; font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--fg); background:var(--bg); }
-header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 16px; }
-.top { max-width:860px; margin:0 auto; display:flex; flex-wrap:wrap; gap:8px 24px; align-items:baseline; justify-content:space-between; }
-h1 { margin:0; font-size:1.4rem; color:var(--accent); }
-.tagline { margin:0; color:var(--muted); font-size:.95rem; }
-.banner { margin:0; font-size:.9rem; color:var(--muted); }
-nav a { margin-right:16px; color:var(--accent); }
 main { max-width:860px; margin:24px auto; padding:0 16px; }
 label { display:block; font-weight:600; margin-bottom:6px; }
 textarea { width:100%; padding:10px; font:inherit; border:1px solid var(--line); border-radius:6px; resize:vertical; }
@@ -321,6 +321,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <style>{STYLE}</style>
+                <style>{ivory::IVORY_STYLE}</style>
                 <AutoReload options=options.clone() />
                 <HydrationScripts options />
                 <MetaTags />
@@ -406,6 +407,37 @@ pub async fn list_my_runs() -> Result<Vec<RunSummary>, ServerFnError> {
     })?;
     // My questions shows the most recent 100 (the API's maximum).
     crate::runs::api::list_view(&state, &user, Some(crate::runs::api::MAX_LIMIT))
+        .await
+        .map_err(run_api_error)
+}
+
+/// The signed-in user's runs as Library cards, newest first (read-only;
+/// the same scoping and 100-run limit as [`list_my_runs`]). Nothing here
+/// logs question or answer text.
+#[server(prefix = "/api/fn", endpoint = "my_library")]
+pub async fn list_my_library() -> Result<Vec<crate::library::LibraryCard>, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::library_view(&state, &user, Some(crate::runs::api::MAX_LIMIT))
+        .await
+        .map_err(run_api_error)
+}
+
+/// The Ask page's latest answers and Today counts for the signed-in user
+/// (read-only; their own runs only; no spend).
+#[server(prefix = "/api/fn", endpoint = "my_ask_overview")]
+pub async fn get_my_ask_overview() -> Result<crate::library::AskOverview, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::ask_overview(&state, &user)
         .await
         .map_err(run_api_error)
 }
@@ -515,164 +547,26 @@ fn error_text(e: &ServerFnError) -> String {
 pub fn App() -> impl IntoView {
     provide_meta_context();
     let me: MeResource = Resource::new(|| (), |_| get_me());
-    // The Ask page reads the depth limits from it (one `/api/fn/me` per load).
+    // The header reads it (one `/api/fn/me` per load).
     provide_context(me);
     view! {
         <Title text="Incisive" />
         <Router>
-            <header>
-                <div class="top">
-                    <div>
-                        <h1>"Incisive"</h1>
-                        <p class="tagline">"Cut to the evidence."</p>
-                    </div>
-                    <Suspense fallback=|| view! { <p class="banner">"Checking sign-in…"</p> }>
-                        {move || {
-                            me.get()
-                                .map(|r| match r {
-                                    Ok(m) => {
-                                        let owner = m.role == "owner";
-                                        view! {
-                                            <div>
-                                                <p class="banner">"Signed in as " {m.display_name}</p>
-                                                <nav>
-                                                    <A href="/">"Ask"</A>
-                                                    <A href="/history">"My questions"</A>
-                                                    {owner.then(|| view! { <A href="/activity">"Activity"</A> })}
-                                                </nav>
-                                            </div>
-                                        }
-                                            .into_any()
-                                    }
-                                    Err(e) => view! { <p class="banner">{error_text(&e)}</p> }.into_any(),
-                                })
-                        }}
-                    </Suspense>
-                </div>
-            </header>
-            <main>
+            <ivory::SiteHeader />
+            <ivory::PageMain>
                 <Routes fallback=|| view! { <p>"Page not found. Go back to the question box."</p> }>
-                    <Route path=path!("") view=AskPage />
+                    <Route path=path!("") view=ask_page::AskPage />
                     <Route path=path!("runs/:id") view=RunPage />
-                    <Route path=path!("history") view=HistoryPage />
+                    <Route path=path!("history") view=library_page::LibraryPage />
                     <Route path=path!("activity") view=ActivityPage />
                 </Routes>
-            </main>
+            </ivory::PageMain>
         </Router>
     }
 }
 
-/// Who is signed in, and the depth limits (provided by [`App`]).
+/// Who is signed in (provided by [`App`]; the header reads it).
 type MeResource = Resource<Result<MeView, ServerFnError>>;
-
-#[component]
-fn AskPage() -> impl IntoView {
-    let (question, set_question) = signal(String::new());
-    // Focused until the browser says otherwise (the server always renders Focused).
-    let mode = RwSignal::new(RunMode::default());
-    let action = ServerAction::<AskQuestion>::new();
-    let pending = action.pending();
-    let navigate = use_navigate();
-    // Edit & re-run arrives as `/#q=<question>&mode=<mode>`. The fragment never
-    // reaches the server; after hydration (effects run in the browser only)
-    // it fills the box and is removed from the address bar. Its mode wins for
-    // this page load (and is not remembered); otherwise the browser's saved
-    // choice applies. The question box is only ever filled here, client-side.
-    Effect::new(move |_| {
-        let rerun = take_rerun_fragment();
-        let rerun_mode = rerun.as_ref().map(|(_, m)| *m);
-        if let Some((q, _)) = rerun {
-            set_question.set(q);
-        }
-        mode.set(initial_mode(rerun_mode, load_mode().as_deref()));
-    });
-    // Once the question is accepted, follow its run.
-    Effect::new(move |_| {
-        if let Some(Ok(AskOutcome::RunStarted { run_id, .. })) = action.value().get() {
-            navigate(&format!("/runs/{run_id}"), Default::default());
-        }
-    });
-    let on_submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        action.dispatch(AskQuestion {
-            question: question.get_untracked(),
-            mode: mode.get_untracked(),
-        });
-    };
-    view! {
-        <form on:submit=on_submit>
-            <label for="question">"Your clinical question"</label>
-            <textarea
-                id="question"
-                name="question"
-                rows="6"
-                maxlength="4000"
-                placeholder="e.g. 52 y/o M, robotic LAR: does ICG angiography reduce anastomotic leak?"
-                prop:value=question
-                on:input=move |ev| set_question.set(event_target_value(&ev))
-            ></textarea>
-            <p class="hint">
-                "Leave out names, phone numbers, exact dates, addresses and hospital IDs. Ages, sex and post-op day are fine."
-            </p>
-            <DepthToggle mode />
-            <button
-                type="submit"
-                disabled=move || pending.get() || question.with(|q| q.trim().is_empty())
-            >
-                {move || if pending.get() { "Checking…" } else { "Send" }}
-            </button>
-        </form>
-        {move || action.value().get().map(outcome_view)}
-    }
-}
-
-/// Quick or Full (stored as `focused`): two radio buttons drawn as a segmented control, each
-/// with its cost limit from config. The choice is remembered in this browser.
-#[component]
-fn DepthToggle(mode: RwSignal<RunMode>) -> impl IntoView {
-    let me = use_context::<MeResource>();
-    let option = move |m: RunMode| {
-        let hint = move || match me.and_then(|r| r.get()) {
-            Some(Ok(v)) => mode_hint(
-                m,
-                match m {
-                    RunMode::Quick => v.quick_limit_paise,
-                    RunMode::Focused => v.focused_limit_paise,
-                },
-            ),
-            _ => mode_label(m).to_string(),
-        };
-        view! {
-            <label>
-                <input
-                    type="radio"
-                    name="mode"
-                    value=m.as_str()
-                    // `checked` is what the server renders; `prop:checked` follows the signal.
-                    checked=m == RunMode::default()
-                    prop:checked=move || mode.get() == m
-                    on:change=move |_| {
-                        mode.set(m);
-                        save_mode(m);
-                    }
-                />
-                <span>
-                    <Suspense fallback=move || mode_label(m)>{hint}</Suspense>
-                </span>
-            </label>
-        }
-    };
-    view! {
-        // The hint is announced with the group (and so with each choice).
-        <fieldset class="depth" aria-describedby="depth-hint">
-            <legend>"Depth"</legend>
-            <div class="seg">{option(RunMode::Quick)} {option(RunMode::Focused)}</div>
-            <p class="hint" id="depth-hint">
-                "Quick reads abstracts only. Full reads more papers, with free full text where available, and checks the evidence more deeply. The amount is each run's cost limit."
-            </p>
-        </fieldset>
-    }
-}
 
 /// The depth this browser last chose (`None` when storage is absent, blocked
 /// or throws; browser only).
@@ -735,7 +629,8 @@ fn outcome_view(r: Result<AskOutcome, ServerFnError>) -> AnyView {
         .into_any(),
         Ok(AskOutcome::RunStarted { message, alert, .. }) => view! {
             <div class="box green" role="status">
-                <p>{message}</p>
+                // The API text names "My questions"; the page is now the Library.
+                <p>{message.replace("in My questions.", "in your Library.")}</p>
                 {alert.map(|a| view! { <p>{a}</p> })}
             </div>
         }
@@ -825,8 +720,8 @@ fn RunPage() -> impl IntoView {
     on_cleanup(stop);
 
     view! {
-        <p>
-            <A href="/history">"\u{2190} My questions"</A>
+        <p class="run-back">
+            <A href="/history">"\u{2190} Library"</A>
         </p>
         <Transition fallback=|| view! { <p>"Loading…"</p> }>
             {move || {
@@ -884,12 +779,15 @@ fn run_view(v: RunView) -> impl IntoView {
             Body::V3(a) => a.question.clone(),
         });
     view! {
-        <h2 class="run-question">{heading}</h2>
-        <p>
-            {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
-            <span class="meta">{rupees(v.summary.cost_paise)}</span>
-        </p>
-        {progress_view(status, answer.is_some(), v.steps)}
+        // Page chrome (ivory redesign): Figtree; the answer below is untouched.
+        <div class="run-chrome">
+            <h1 class="run-question">{heading}</h1>
+            <p>
+                {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
+                <span class="meta">{rupees(v.summary.cost_paise)}</span>
+            </p>
+            {progress_view(status, answer.is_some(), v.steps)}
+        </div>
         {answer
             .map(|a| match a {
                 Some(Body::V2(a)) => answer_view(a).into_any(),
@@ -1037,6 +935,22 @@ fn copy_text(text: &str) {
     }
     #[cfg(not(feature = "hydrate"))]
     let _ = text;
+}
+
+/// A stored answer's existing Copy-as-text (the Library's Copy): Phase 3
+/// answers' `copy_text`, Phase 2 answers' `render_text`. `None` when the
+/// run has no readable answer.
+fn copy_text_of(v: RunView) -> Option<String> {
+    let a = v.answer?;
+    if v.answer_version == crate::agent::answer_v3::ANSWER_VERSION {
+        serde_json::from_value::<AnswerV3>(a)
+            .ok()
+            .map(|a| a.copy_text())
+    } else {
+        serde_json::from_value::<Answer>(a)
+            .ok()
+            .map(|a| render_text(&a))
+    }
 }
 
 /// The answer, in the §4 order, as escaped text and links only.
@@ -2363,132 +2277,10 @@ fn notable_view(
 }
 
 #[component]
-fn HistoryPage() -> impl IntoView {
-    let refresh = RwSignal::new(0u32);
-    let runs = Resource::new(move || refresh.get(), |_| list_my_runs());
-    let confirming = RwSignal::new(false);
-    // A failed delete's message is cleared by the next action.
-    let delete_one = Action::new(move |id: &Uuid| {
-        let id = *id;
-        async move {
-            let r = delete_my_run(id).await;
-            refresh.update(|n| *n += 1);
-            r
-        }
-    });
-    let delete_all = Action::new(move |_: &()| async move {
-        let r = delete_my_runs().await;
-        confirming.set(false);
-        refresh.update(|n| *n += 1);
-        r.map(|_| ())
-    });
-    let clear_errors = move || {
-        delete_one.value().set(None);
-        delete_all.value().set(None);
-    };
-    let failure = move || {
-        let e = match (delete_one.value().get(), delete_all.value().get()) {
-            (Some(Err(e)), _) | (_, Some(Err(e))) => Some(e),
-            _ => None,
-        };
-        e.map(|e| view! { <p class="box amber" role="alert">{error_text(&e)}</p> })
-    };
-    view! {
-        <h2>"My questions"</h2>
-        <p class="hint">"Only you can see these. They are kept for 12 months."</p>
-        {failure}
-        <Suspense fallback=|| view! { <p>"Loading your questions…"</p> }>
-            {move || {
-                runs.get()
-                    .map(|r| match r {
-                        Ok(list) if list.is_empty() => {
-                            view! { <p>"No questions yet. Ask one on the Ask page."</p> }.into_any()
-                        }
-                        Ok(list) => {
-                            view! {
-                                <ul class="runs">
-                                    {list
-                                        .into_iter()
-                                        .map(|r| {
-                                            let id = r.id;
-                                            view! {
-                                                <li>
-                                                    <span>
-                                                        <A href=format!("/runs/{id}")>{r.title}</A>
-                                                        <br />
-                                                        <span class="meta">
-                                                            {r.created_at.format("%Y-%m-%d %H:%M UTC").to_string()}
-                                                            " \u{b7} " {rupees(r.cost_paise)}
-                                                        </span>
-                                                    </span>
-                                                    <span>
-                                                        {status_badge(r.status)} " "
-                                                        <button
-                                                            class="secondary small"
-                                                            on:click=move |_| {
-                                                                clear_errors();
-                                                                delete_one.dispatch(id);
-                                                            }
-                                                        >
-                                                            "Delete"
-                                                        </button>
-                                                    </span>
-                                                </li>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </ul>
-                            }
-                                .into_any()
-                        }
-                        Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
-                    })
-            }}
-        </Suspense>
-        {move || {
-            if confirming.get() {
-                view! {
-                    <div class="box amber" role="alertdialog">
-                        <p>"Delete all? This cannot be undone."</p>
-                        <button
-                            class="danger"
-                            disabled=move || delete_all.pending().get()
-                            on:click=move |_| {
-                                clear_errors();
-                                delete_all.dispatch(());
-                            }
-                        >
-                            "Yes, delete all"
-                        </button>
-                        <button class="secondary" on:click=move |_| confirming.set(false)>
-                            "Cancel"
-                        </button>
-                    </div>
-                }
-                    .into_any()
-            } else {
-                view! {
-                    <button
-                        class="secondary"
-                        on:click=move |_| {
-                            clear_errors();
-                            confirming.set(true);
-                        }
-                    >
-                        "Delete all my history"
-                    </button>
-                }
-                    .into_any()
-            }
-        }}
-    }
-}
-
-#[component]
 fn ActivityPage() -> impl IntoView {
     let data = Resource::new(|| (), |_| get_activity());
     view! {
-        <h2>"Activity"</h2>
+        <h1 class="activity-title">"Activity"</h1>
         <Suspense fallback=|| view! { <p>"Loading the activity log…"</p> }>
             {move || {
                 data.get()

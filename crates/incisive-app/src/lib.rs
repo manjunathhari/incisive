@@ -24,8 +24,12 @@ pub mod gate;
 pub mod health;
 #[cfg(feature = "ssr")]
 pub mod identity;
+/// The ivory redesign's card, Library and header rules (no Leptos).
+pub mod library;
 #[cfg(feature = "ssr")]
 pub mod lit;
+/// The Ask page's advisory Question check and PICO helper (no Leptos).
+pub mod question_check;
 pub mod runs;
 #[cfg(feature = "ssr")]
 pub mod server;
