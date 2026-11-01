@@ -366,10 +366,29 @@ async fn execute(state: &AppState, run_id: Uuid, cancel: CancelFlag, pipeline: P
             PipelineOutcome::Failed("hard_stop")
         }
     };
+    // Temporal T3: the saved body, kept only when the job may run.
+    let body = match &outcome {
+        PipelineOutcome::Done(b)
+        | PipelineOutcome::Partial(b)
+        | PipelineOutcome::PartialKind(b, _)
+            if state.temporal.on =>
+        {
+            Some(b.clone())
+        }
+        _ => None,
+    };
     let end = decide(pool, &ctx, outcome).await;
+    // Only a run whose answer was saved ends with this status.
+    let saved = match &end {
+        End::Status(s @ (RunStatus::Done | RunStatus::Partial), _) => Some(*s),
+        _ => None,
+    };
     // Calls dropped mid-flight (hard stop) still charge from their own task.
     let keep = ctx.budget.finish();
     finish(pool, run_id, user_id, end, ctx.budget.spent(), keep).await;
+    // Temporal T3: after the run has ended (status, release and audit
+    // done), the expert opinion runs detached; it never touches the run.
+    super::temporal::maybe_start(state, run_id, user_id, mode, saved, body).await;
 }
 
 /// Turn the pipeline's outcome into how the run ends, storing the answer.
@@ -532,6 +551,9 @@ pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
         tracing::info!(%run_id, "orphaned run reservation released");
         spend::release(pool, user_id, run_id).await?;
     }
+    // Temporal T3: stale pending expert opinions fail, and their (or any
+    // leaked) reservations are released.
+    super::temporal::recover_stale(pool).await?;
     Ok(marked.len())
 }
 

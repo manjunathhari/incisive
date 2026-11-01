@@ -15,6 +15,8 @@ pub mod budget;
 #[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]
+pub mod temporal;
+#[cfg(feature = "ssr")]
 pub mod worker;
 
 /// Shown for a missing run, or one that belongs to someone else. Shared with
@@ -495,4 +497,20 @@ pub struct RunView {
 
 fn phase2_version() -> i16 {
     2
+}
+
+/// Temporal T3: a run's expert opinion as its owner reads it (T4 draws it).
+/// `status` is `pending`, `done`, `failed`, `skipped` or `cap_blocked`;
+/// `reason` is a fixed reason kind. `board` is the writer's
+/// `ExpertBoardV1`, `table` the code-built `TemporalTable`, `flags` the
+/// code checks (`BoardFlags`), each as stored JSON.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemporalView {
+    pub status: String,
+    pub reason: Option<String>,
+    pub topic: Option<String>,
+    pub evidence_year: Option<i32>,
+    pub board: Option<serde_json::Value>,
+    pub table: Option<serde_json::Value>,
+    pub flags: Option<serde_json::Value>,
 }

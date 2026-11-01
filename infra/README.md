@@ -545,3 +545,34 @@ it, as described for Phase 2 in section 11. This works only because every migrat
 is additive (new tables, nullable or defaulted columns, indexes); keep it so. Phase 3
 answers are stored with `answer_version = 3` and are shown by the Phase 3 answer
 view; Phase 2 answers keep `answer_version = 2` and their own view.
+
+## 13. Temporal expert opinion (T2/T3, Full only)
+
+After a Full answer is saved, Incisive can write an **Expert Opinion**: code (no AI) builds the
+temporal evidence table from the stored answer (eras, pooled estimates, trajectory labels), then one
+structured call on the `temporal` model (Opus by default; `AGENT_MODELS` key `temporal`) writes the
+Temporal Evidence Board as JSON. It runs **after** the run has ended, in its own task, and never
+touches the run: the run's row, status, timing, cost and answer bytes are the same with it on or off.
+
+- **Stored** in `incisive.run_temporal` (migration 0012, additive), one row per run, cascading on
+  the run's delete and the 12-month retention. Status `pending`, `done`, `failed`, `skipped` (fewer
+  than two independent primary studies) or `cap_blocked`.
+- **Money.** The call's worst-case hold (its prompt at about 3 bytes a token plus `max_tokens` of
+  output) is reserved against the **user's** daily and monthly caps and the global cap, under the
+  job's own request id (spend purpose `temporal`); the real cost is charged and the rest released.
+  A user at their limit gets `cap_blocked`. Audit events `temporal_done`, `temporal_failed`,
+  `temporal_skipped`, `temporal_cap_blocked` carry ids, a reason kind, paise and a flag count only.
+- **Never fails a run.** A refused schema, an API error, the 180 s time limit, an unusable reply or
+  short money ends the row `failed` with a reason, and nothing else. A `pending` row older than
+  10 minutes is failed by recovery and its reservation released.
+- **Checks in code** (flags only, stored with the board): numbers not traced to the answer or the
+  table, cost or country words, unknown reference numbers or table ids, a meta-analysis called a
+  trial, and an At a glance line stronger than the opinion.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `TEMPORAL` | no | `off` or `on`. Deploy dark with `off`, run the owner's probe and smoke, then set `on`. With `off` no job runs and nothing changes. | `off` |
+| `TEMPORAL_MAX_TOKENS` | no | `max_tokens` of the writer's call, 2000–32000 (the test boards ran 5–7k output tokens) | `9000` |
+
+Both are checked like `COMPLETENESS` (only the ends trimmed) before the build, and the app refuses
+any other value at startup. The `temporal` model, default or set, must be priced in `MODEL_PRICES`.

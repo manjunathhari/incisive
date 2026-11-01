@@ -456,6 +456,23 @@ pub async fn get_my_run(run_id: Uuid) -> Result<RunView, ServerFnError> {
         .map_err(run_api_error)
 }
 
+/// Temporal T3: the expert opinion of one of the user's runs (`None`: not
+/// run). Read-only; someone else's run is "not found". No UI yet (T4).
+#[server(prefix = "/api/fn", endpoint = "my_run_temporal")]
+pub async fn get_my_run_temporal(
+    run_id: Uuid,
+) -> Result<Option<crate::runs::TemporalView>, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::temporal_view(&state, &user, run_id)
+        .await
+        .map_err(run_api_error)
+}
+
 /// Delete one of the user's runs (cancelling it if active). Same as `DELETE /api/runs/{id}`.
 #[server(prefix = "/api/fn", endpoint = "delete_my_run")]
 pub async fn delete_my_run(run_id: Uuid) -> Result<(), ServerFnError> {
