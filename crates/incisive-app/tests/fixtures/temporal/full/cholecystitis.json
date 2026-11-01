@@ -1,0 +1,1625 @@
+{
+ "mode": "focused",
+ "notes": [],
+ "answer": {
+  "studies": [
+   {
+    "n": 143717,
+    "pmid": "41521240",
+    "label": "Acute cholecystitis MA 2026, J Robot Surg",
+    "design": "Systematic review and meta-analysis of 7 observational studies",
+    "setting": "Emergency surgery for acute cholecystitis, multiple centres",
+    "appraisal": "Only observational studies were pooled, with no RCTs; ROBINS-I rated 6 of 7 at moderate to serious risk of bias. Operative time and stay could not be pooled. The included studies overlap with other database studies and meta-analyses.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy",
+    "key_results": "Conversion RR 0.61 (0.50-0.75), robotic vs laparoscopic. Bile duct injury RR 0.97 (0.77-1.21). There was no difference in complications, readmission or 30-day mortality [41521240]."
+   },
+   {
+    "n": 1073587,
+    "pmid": "41417656",
+    "label": "Non-elective MA 2026, J Trauma Acute Care Surg",
+    "design": "Systematic review and meta-analysis of 9 retrospective cohorts",
+    "setting": "Non-elective cholecystectomy, multiple centres",
+    "appraisal": "All nine studies were retrospective cohorts, and the conversion benefit was lost in the low risk-of-bias subgroup. The population is not restricted to acute cholecystitis, and the pool overlaps with US databases.",
+    "comparison": "Robotic vs laparoscopic non-elective cholecystectomy",
+    "key_results": "Conversion OR 0.66 (0.54-0.80), robotic vs laparoscopic; OR 0.69 in the adjusted studies. No other outcome differed [41417656]."
+   },
+   {
+    "n": null,
+    "pmid": "41540300",
+    "label": "Comprehensive MA 2026, J Robot Surg",
+    "design": "Systematic review and meta-analysis of RCTs and cohorts (38 studies)",
+    "setting": "International, all cholecystectomy indications",
+    "appraisal": "Mixed designs dominated by administrative data, mostly elective cases, with no separate acute cholecystitis analysis. The bile duct injury signal may reflect learning curve or coding. The pool overlaps with NIS, NSQIP and Medicare studies.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy",
+    "key_results": "Bile duct injury 0.72% robotic vs 0.23% laparoscopic (RR 3.12). Serious complications OR 0.82 and conversion OR 0.44, robotic vs laparoscopic. Cost $5000-6000 robotic vs $2000-3000 laparoscopic per case [41540300]."
+   },
+   {
+    "n": null,
+    "pmid": "40397430",
+    "label": "Acute care cohort 2025, JAMA Surg",
+    "design": "Retrospective propensity-matched claims cohort",
+    "setting": "US commercial claims database, 2016-2021",
+    "appraisal": "Claims data with no severity detail; matching cannot remove unmeasured confounding. Covers acute care surgery broadly, and the database overlaps with other US claims studies.",
+    "comparison": "Robotic vs laparoscopic acute care cholecystectomy",
+    "key_results": "Bile duct injury 0.37% robotic vs 0.39% laparoscopic (OR 0.93). Major complications 8.37% robotic vs 5.50% laparoscopic (OR 1.57). Median stay 3 days robotic vs 2 days laparoscopic [40397430]."
+   },
+   {
+    "n": 384617,
+    "pmid": "42803467",
+    "label": "HCUP acute cholecystitis 2026, J Am Coll Surg",
+    "design": "Retrospective HCUP cohort",
+    "setting": "New York and Florida inpatients, 2012-2021",
+    "appraisal": "Administrative data; robotic cases were only 4% of the cohort, and confounding by indication is likely. The bailout subgroup is small, and the data overlap with other HCUP studies.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy for acute cholecystitis",
+    "key_results": "Bailout 1.7% robotic vs 1.4% laparoscopic (adjusted OR 1.38). Conversion OR 1.61 and subtotal cholecystectomy OR 2.02, robotic vs laparoscopic. Bile duct injury 1.6% in both groups. One-year cost $29,702 robotic vs $24,483 laparoscopic [42803467]."
+   },
+   {
+    "n": null,
+    "pmid": "38446451",
+    "label": "Emergency general surgery cohort 2024, JAMA Surg",
+    "design": "Retrospective propensity-matched all-payer database cohort",
+    "setting": "829 US hospitals, 2013-2021",
+    "appraisal": "Administrative data covering emergent or urgent cholecystectomy broadly, with confounding by indication. The database overlaps with other US database studies.",
+    "comparison": "Robotic vs laparoscopic emergent or urgent cholecystectomy",
+    "key_results": "Conversion 1.7% robotic vs 3.0% laparoscopic (OR 0.55) [38446451]."
+   },
+   {
+    "n": null,
+    "pmid": "38189678",
+    "label": "ROBOCOP 2024, J Trauma Acute Care Surg",
+    "design": "Retrospective IPTW-adjusted database cohort",
+    "setting": "US hospitals, 2020-2022",
+    "appraisal": "Manufacturer (Intuitive) database; IPTW cannot remove confounding; outcomes are code-based. Groups were unequal (26,786 laparoscopic vs 3,151 robotic).",
+    "comparison": "Robotic vs laparoscopic emergent cholecystectomy",
+    "key_results": "Conversion OR 0.68 and subtotal cholecystectomy OR 1.64, robotic vs laparoscopic. Bile duct injury, stay, mortality and cost were similar [38189678]."
+   },
+   {
+    "n": 592,
+    "pmid": "41936770",
+    "label": "AAST-graded cohort 2026, Surgery",
+    "design": "Single-centre retrospective cohort",
+    "setting": "Single hospital, acute cholecystitis",
+    "appraisal": "Single centre and retrospective; most patients had grade I disease; the grade II-V subgroup was small, and the study was not powered for rare events.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy by AAST grade",
+    "key_results": "No difference in intraoperative complications at any grade. Crude stay in grade II-V was 1 day robotic vs 2 days laparoscopic, but approach was not an independent predictor of prolonged stay [41936770]."
+   },
+   {
+    "n": null,
+    "pmid": "37728932",
+    "label": "Medicare safety 2023, JAMA Surg",
+    "design": "Retrospective claims cohort with instrumental-variable analysis",
+    "setting": "US Medicare, 2010-2019",
+    "appraisal": "Medicare patients aged 66-99 with mixed elective and urgent cases; robotic patients were more often elective. Code-based data, but full text was read and an instrumental-variable analysis was done. The database overlaps with other Medicare studies.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy",
+    "key_results": "Bile duct injury needing repair 0.7% robotic vs 0.2% laparoscopic (RR 3.16); RR 1.88 on instrumental-variable analysis. Cholecystitis subgroup 0.5% robotic vs 0.2% laparoscopic (RR 2.29) [37728932]."
+   },
+   {
+    "n": 60733,
+    "pmid": "37856059",
+    "label": "Florida emergency surgery 2023, J Robot Surg",
+    "design": "Retrospective propensity-matched statewide cohort",
+    "setting": "181 Florida hospitals, 2018-2020",
+    "appraisal": "Covers four emergency procedures with no cholecystectomy-specific figures; administrative data.",
+    "comparison": "Robotic vs laparoscopic emergency general surgery",
+    "key_results": "Total cost was higher with robotic surgery because of surgical cost. There were no differences in mortality, complications or stay for most procedures [37856059]."
+   },
+   {
+    "n": null,
+    "pmid": "40884599",
+    "label": "Robotic emergency surgery SR 2025, J Robot Surg",
+    "design": "Systematic review of 20 mostly retrospective studies",
+    "setting": "Mostly Western centres",
+    "appraisal": "Mostly retrospective cohorts, with no pooled estimates; covers emergency surgery broadly and overlaps with other reviews.",
+    "comparison": "Robotic vs laparoscopic or open emergency surgery",
+    "key_results": "Conversion was low and complications similar or reduced, but operative times were longer and costs consistently higher with robotic surgery [40884599]."
+   },
+   {
+    "n": 4040555,
+    "pmid": "38918109",
+    "label": "NIS emergency surgery 2024, Surgery",
+    "design": "Retrospective National Inpatient Sample cohort",
+    "setting": "US hospitals, 2008-2020",
+    "appraisal": "NIS administrative data, with only 1.6% robotic cases; not specific to acute cholecystitis. The database overlaps with other NIS studies.",
+    "comparison": "Robotic vs laparoscopic non-elective surgery",
+    "key_results": "Cholecystectomy transfusion adjusted OR 0.66, robotic vs laparoscopic. Costs were up to $4,900 higher with robotic surgery [38918109]."
+   },
+   {
+    "n": 322,
+    "pmid": "42223833",
+    "label": "Acute care surgery cohort 2026, J Robot Surg",
+    "design": "Retrospective cohort",
+    "setting": "Acute care surgery service, including gangrenous cases",
+    "appraisal": "Small (107 robotic vs 215 laparoscopic) retrospective cohort with no adjustment described; underpowered for rare events.",
+    "comparison": "Robotic vs laparoscopic cholecystectomy for acute cholecystitis",
+    "key_results": "Operative time 78 min robotic vs 77 min laparoscopic. Early complications 10.3% robotic vs 12.6% laparoscopic. One laparoscopic conversion (0.5%) and none robotic [42223833]."
+   }
+  ],
+  "outcomes": [
+   {
+    "why": "Observational and confounded, inconsistent across sources (one cohort shows the opposite direction), the benefit was lost in low risk-of-bias studies, and the databases overlap.",
+    "pmids": [
+     "41521240",
+     "41417656",
+     "38446451",
+     "38189678",
+     "42803467"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41521240",
+      "unit": "RR",
+      "label": "RR conversion, acute cholecystitis meta-analysis",
+      "value": 0.61,
+      "ci_low": 0.5,
+      "ci_high": 0.75
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41417656",
+      "unit": "OR",
+      "label": "OR conversion, non-elective meta-analysis",
+      "value": 0.66,
+      "ci_low": 0.54,
+      "ci_high": 0.8
+     },
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "38446451",
+      "unit": "%",
+      "label": "Conversion, emergent cholecystectomy",
+      "value": 1.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "38446451",
+      "unit": "%",
+      "label": "Conversion, emergent cholecystectomy",
+      "value": 3.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.035",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "38189678",
+      "unit": "OR",
+      "label": "OR conversion, IPTW cohort",
+      "value": 0.68,
+      "ci_low": 0.49,
+      "ci_high": 0.93
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "42803467",
+      "unit": "OR",
+      "label": "OR conversion, HCUP acute cholecystitis",
+      "value": 1.61,
+      "ci_low": 1.28,
+      "ci_high": 2.03
+     }
+    ],
+    "outcome": "Conversion to open surgery",
+    "certainty": "Very low",
+    "effect_text": "Pooled observational data show lower conversion with robotic surgery: RR 0.61 (95% CI 0.50-0.75) robotic vs laparoscopic in acute cholecystitis (7 observational studies) [41521240]. In non-elective cholecystectomy the OR was 0.66 (0.54-0.80) robotic vs laparoscopic (9 retrospective cohorts), not significant in the low risk-of-bias subgroup [41417656]. Emergent cholecystectomy conversion was 1.7% robotic vs 3.0% laparoscopic (OR 0.55) [38446451], and the IPTW-adjusted OR was 0.68 [38189678]. In contrast, the HCUP acute cholecystitis cohort found higher conversion odds with robotic surgery (OR 1.61, 1.28-2.03) [42803467].",
+    "rct_evidence": "No RCTs. Evidence comes from two meta-analyses of observational studies and three large database cohorts, which overlap in patients.",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Retrospective data with no severity grading, confounding by indication, and a manufacturer-run database for one of the two cohorts.",
+    "pmids": [
+     "42803467",
+     "38189678"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "42803467",
+      "unit": "%",
+      "label": "Bailout rate",
+      "value": 1.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "42803467",
+      "unit": "%",
+      "label": "Bailout rate",
+      "value": 1.4,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "42803467",
+      "unit": "OR",
+      "label": "Adjusted OR bailout",
+      "value": 1.38,
+      "ci_low": 1.21,
+      "ci_high": 1.58
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "42803467",
+      "unit": "OR",
+      "label": "OR subtotal cholecystectomy, HCUP",
+      "value": 2.02,
+      "ci_low": 1.68,
+      "ci_high": 2.43
+     },
+     {
+      "p": "0.037",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "38189678",
+      "unit": "OR",
+      "label": "OR subtotal cholecystectomy, IPTW cohort",
+      "value": 1.64,
+      "ci_low": 1.03,
+      "ci_high": 2.6
+     }
+    ],
+    "outcome": "Bailout procedures and subtotal cholecystectomy",
+    "certainty": "Very low",
+    "effect_text": "Bailout procedures were more frequent with robotic surgery in acute cholecystitis: 1.7% robotic vs 1.4% laparoscopic (adjusted OR 1.38). This included more subtotal cholecystectomies (OR 2.02) but fewer cholecystostomy tubes (OR 0.42) [42803467]. In the IPTW cohort, subtotal cholecystectomy odds were higher with robotic surgery (OR 1.64, 1.03-2.60) [38189678].",
+    "rct_evidence": "No RCTs; two administrative database cohorts only.",
+    "evidence_type": "other"
+   },
+   {
+    "why": "Results are inconsistent (no difference vs about 3-fold higher), the higher estimates are indirect (elective or mixed cases, coded data), and there is residual confounding.",
+    "pmids": [
+     "41521240",
+     "40397430",
+     "42803467",
+     "38189678",
+     "41540300",
+     "37728932"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41521240",
+      "unit": "RR",
+      "label": "RR bile duct injury, acute cholecystitis meta-analysis",
+      "value": 0.97,
+      "ci_low": 0.77,
+      "ci_high": 1.21
+     },
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "40397430",
+      "unit": "%",
+      "label": "Bile duct injury, matched acute care cohort",
+      "value": 0.37,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "40397430",
+      "unit": "%",
+      "label": "Bile duct injury, matched acute care cohort",
+      "value": 0.39,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "40397430",
+      "unit": "OR",
+      "label": "OR bile duct injury, matched acute care cohort",
+      "value": 0.93,
+      "ci_low": 0.73,
+      "ci_high": 1.18
+     },
+     {
+      "p": "p < 0.001",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41540300",
+      "unit": "RR",
+      "label": "RR bile duct injury, broad meta-analysis",
+      "value": 3.12,
+      "ci_low": 2.34,
+      "ci_high": 3.91
+     },
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "37728932",
+      "unit": "%",
+      "label": "Bile duct injury, Medicare cholecystitis subgroup",
+      "value": 0.5,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "37728932",
+      "unit": "%",
+      "label": "Bile duct injury, Medicare cholecystitis subgroup",
+      "value": 0.2,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "37728932",
+      "unit": "RR",
+      "label": "RR bile duct injury, Medicare cholecystitis subgroup",
+      "value": 2.29,
+      "ci_low": 1.79,
+      "ci_high": 2.79
+     }
+    ],
+    "outcome": "Bile duct injury",
+    "certainty": "Very low",
+    "effect_text": "In acute cholecystitis, bile duct injury was similar: RR 0.97 (0.77-1.21) robotic vs laparoscopic [41521240]. Rates were 0.37% robotic vs 0.39% laparoscopic (OR 0.93) in the matched acute care cohort [40397430] and 1.6% in both groups in the HCUP cohort [42803467]. In mixed or mostly elective data, injury was higher with robotic surgery: 0.72% robotic vs 0.23% laparoscopic (RR 3.12) [41540300]. In Medicare, 0.7% robotic vs 0.2% laparoscopic needed repair (RR 3.16), and in the cholecystitis subgroup the rates were 0.5% robotic vs 0.2% laparoscopic (RR 2.29) [37728932].",
+    "rct_evidence": "No RCTs; observational meta-analyses and claims cohorts.",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Results conflict in direction, heterogeneity is high (I2 95% for overall complications), and all data are observational.",
+    "pmids": [
+     "40397430",
+     "37728932",
+     "41540300",
+     "41521240",
+     "42223833",
+     "38189678"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "40397430",
+      "unit": "%",
+      "label": "Major complications, matched acute care cohort",
+      "value": 8.37,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "40397430",
+      "unit": "%",
+      "label": "Major complications, matched acute care cohort",
+      "value": 5.5,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "<.001",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "40397430",
+      "unit": "OR",
+      "label": "OR major complications",
+      "value": 1.57,
+      "ci_low": 1.48,
+      "ci_high": 1.67
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41540300",
+      "unit": "OR",
+      "label": "OR serious complications, broad meta-analysis",
+      "value": 0.82,
+      "ci_low": 0.69,
+      "ci_high": 0.98
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41521240",
+      "unit": "RR",
+      "label": "RR overall complications, acute cholecystitis meta-analysis",
+      "value": 1.1,
+      "ci_low": 0.8,
+      "ci_high": 1.52
+     },
+     {
+      "p": "0.97",
+      "arm": "robotic",
+      "pmid": "42223833",
+      "unit": "%",
+      "label": "Early complications",
+      "value": 10.3,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.97",
+      "arm": "laparoscopic",
+      "pmid": "42223833",
+      "unit": "%",
+      "label": "Early complications",
+      "value": 12.6,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "41521240",
+      "unit": "OR",
+      "label": "OR 30-day mortality",
+      "value": 1.28,
+      "ci_low": 0.86,
+      "ci_high": 1.9
+     }
+    ],
+    "outcome": "Postoperative complications and mortality",
+    "certainty": "Very low",
+    "effect_text": "Major complications were higher with robotic surgery in the matched acute care cohort: 8.37% robotic vs 5.50% laparoscopic (OR 1.57) [40397430]. Medicare serious complications were 9.3% robotic vs 8.6% laparoscopic [37728932]. In contrast, the broad meta-analysis found fewer serious complications with robotic surgery (OR 0.82) [41540300]. Overall complications did not differ in acute cholecystitis (RR 1.10, 0.80-1.52) [41521240], and early complications were 10.3% robotic vs 12.6% laparoscopic in a 322-patient cohort [42223833]. Thirty-day mortality was not significantly different (OR 1.28, 0.86-1.90) [41521240].",
+    "rct_evidence": "No RCTs.",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Results are inconsistent, the studies are small or administrative, and confounding is likely.",
+    "pmids": [
+     "40397430",
+     "41936770",
+     "38189678"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "40397430",
+      "unit": "days",
+      "label": "Median length of stay, matched cohort",
+      "value": 3.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "<.001",
+      "arm": "laparoscopic",
+      "pmid": "40397430",
+      "unit": "days",
+      "label": "Median length of stay, matched cohort",
+      "value": 2.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "41936770",
+      "unit": "days",
+      "label": "Median length of stay, grade II-V",
+      "value": 1.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "41936770",
+      "unit": "days",
+      "label": "Median length of stay, grade II-V",
+      "value": 2.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic vs robotic",
+      "pmid": "41936770",
+      "unit": "OR",
+      "label": "OR prolonged hospitalisation",
+      "value": 1.079,
+      "ci_low": 0.682,
+      "ci_high": 1.707
+     }
+    ],
+    "outcome": "Length of stay",
+    "certainty": "Very low",
+    "effect_text": "Median length of stay was longer with robotic surgery in the matched acute care cohort: 3 days robotic vs 2 days laparoscopic [40397430]. In a single-centre cohort, stay in grade II-V disease was 1 day robotic vs 2 days laparoscopic (p value not verified against the paper's wording), but approach was not an independent predictor (OR 1.079 for laparoscopic) [41936770]. Stay was similar in the IPTW cohort [38189678].",
+    "rct_evidence": "No RCTs.",
+    "evidence_type": "other"
+   },
+   {
+    "why": "Inconsistent across settings, indirect (mixed elective data), and based on a small single cohort for acute cholecystitis.",
+    "pmids": [
+     "42223833",
+     "41540300",
+     "40884599"
+    ],
+    "numbers": [
+     {
+      "p": "0.31",
+      "arm": "robotic",
+      "pmid": "42223833",
+      "unit": "min",
+      "label": "Median operative time, acute cholecystitis",
+      "value": 78.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.31",
+      "arm": "laparoscopic",
+      "pmid": "42223833",
+      "unit": "min",
+      "label": "Median operative time, acute cholecystitis",
+      "value": 77.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "p < 0.001",
+      "arm": "robotic",
+      "pmid": "41540300",
+      "unit": "min",
+      "label": "Operative time, Western centres",
+      "value": 75.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "p < 0.001",
+      "arm": "laparoscopic",
+      "pmid": "41540300",
+      "unit": "min",
+      "label": "Operative time, Western centres",
+      "value": 60.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Operative time",
+    "certainty": "Very low",
+    "effect_text": "In acute cholecystitis, median operative time was 78 min robotic vs 77 min laparoscopic (p = 0.31) [42223833]. In mixed cholecystectomy it was 75 min robotic vs 60 min laparoscopic in Western centres, but 22 min robotic vs 33 min laparoscopic in some Asian institutions [41540300]. Times were generally longer with robotic surgery in emergency surgery [40884599].",
+    "rct_evidence": "No RCTs.",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Consistent direction across most sources, but observational, from US and European health systems, and indirect for India.",
+    "pmids": [
+     "41540300",
+     "42803467",
+     "38918109",
+     "37856059",
+     "40884599",
+     "38189678"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "41540300",
+      "unit": "EUR",
+      "label": "Cost per case, European centres",
+      "value": 2088.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "41540300",
+      "unit": "EUR",
+      "label": "Cost per case, European centres",
+      "value": 1726.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.002",
+      "arm": "robotic",
+      "pmid": "42803467",
+      "unit": "USD",
+      "label": "Median 1-year cost, acute cholecystitis",
+      "value": 29702.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.002",
+      "arm": "laparoscopic",
+      "pmid": "42803467",
+      "unit": "USD",
+      "label": "Median 1-year cost, acute cholecystitis",
+      "value": 24483.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "38918109",
+      "unit": "USD",
+      "label": "Maximum cost increment, emergency surgery",
+      "value": 4900.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Cost",
+    "certainty": "Low",
+    "effect_text": "Robotic surgery cost more: $5000-6000 robotic vs $2000-3000 laparoscopic per case, and €2088 robotic vs €1726 laparoscopic in European centres [41540300]. Median 1-year cost was $29,702 robotic vs $24,483 laparoscopic in acute cholecystitis [42803467]. Costs were up to $4,900 higher in US emergency surgery [38918109], higher because of surgical cost in Florida [37856059], and consistently higher in a systematic review [40884599]. One manufacturer-database cohort found no significant difference [38189678].",
+    "rct_evidence": "No RCTs; observational cost analyses.",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Single observational database, high risk of confounding, and not specific to acute cholecystitis.",
+    "pmids": [
+     "38918109"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic vs laparoscopic",
+      "pmid": "38918109",
+      "unit": "OR",
+      "label": "Adjusted OR perioperative transfusion",
+      "value": 0.66,
+      "ci_low": 0.55,
+      "ci_high": 0.81
+     }
+    ],
+    "outcome": "Perioperative blood transfusion",
+    "certainty": "Very low",
+    "effect_text": "Robotic cholecystectomy was associated with lower odds of perioperative transfusion (adjusted OR 0.66, 0.55-0.81, robotic vs laparoscopic) in non-elective NIS data [38918109].",
+    "rct_evidence": "No RCTs; a single administrative database study.",
+    "evidence_type": "other"
+   }
+  ],
+  "conflicts": [
+   {
+    "text": "Conversion: three of these sources report lower conversion with robotic surgery (RR 0.61; OR 0.66; OR 0.55) [41521240; 41417656; 38446451], and an IPTW-adjusted cohort agrees (OR 0.68) [38189678]. The HCUP acute cholecystitis cohort instead found higher odds of conversion (OR 1.61) and of subtotal cholecystectomy (OR 2.02) with robotic surgery [42803467]. The Intuitive-database cohort also found more subtotal cholecystectomies (OR 1.64) [38189678]. The non-elective meta-analysis lost significance in its low risk-of-bias subgroup [41417656]. A possible reason is that robotic surgeons may convert less but bail out by subtotal cholecystectomy instead; the studies also differ in case selection and coding.",
+    "pmids": [
+     "41521240",
+     "41417656",
+     "38446451",
+     "38189678",
+     "42803467"
+    ]
+   },
+   {
+    "text": "Bile duct injury: the Medicare cohort (RR 3.16, and 1.88 on instrumental-variable analysis) [37728932] and the broad meta-analysis (RR 3.12) [41540300] report about 2-3 times more injuries with robotic surgery. The acute-cholecystitis meta-analysis (RR 0.97) [41521240], the matched acute care cohort (OR 0.93) [40397430], the HCUP cohort (1.6% in both groups) [42803467] and the Intuitive cohort [38189678] show similar rates. The higher estimates come from mixed or mostly elective, older (Medicare) and coded administrative data, possibly reflecting learning curve or coding artefacts.",
+    "pmids": [
+     "37728932",
+     "41540300",
+     "41521240",
+     "40397430",
+     "42803467",
+     "38189678"
+    ]
+   },
+   {
+    "text": "Complications and stay: the matched acute care cohort found more major complications and a longer stay with robotic surgery [40397430]. The broad meta-analysis found fewer serious complications and less hospitalisation of 24 h or more [41540300]. The NIS study found modest reductions in stay [38918109], and the single-centre cohort found a shorter crude stay with robotic surgery in grade II-V disease [41936770]. These results come from differing populations and unmeasured confounding.",
+    "pmids": [
+     "40397430",
+     "41540300",
+     "41936770",
+     "38918109"
+    ]
+   }
+  ],
+  "guidelines": [],
+  "at_a_glance": {
+   "verdict": "Robotic cholecystectomy is not shown to be better than laparoscopic surgery for acute cholecystitis; the evidence is all observational and conflicting, and robotic surgery costs more.",
+   "key_numbers": [
+    {
+     "pmid": "",
+     "label": "Conversion to open",
+     "value_text": "RR 0.61 robotic vs laparoscopic (observational meta-analysis) [41521240], but adjusted OR 1.61 for conversion in a 384,617-patient acute cholecystitis cohort [42803467]"
+    },
+    {
+     "pmid": "",
+     "label": "Bile duct injury",
+     "value_text": "RR 0.97 robotic vs laparoscopic in acute cholecystitis [41521240]; 0.5% robotic vs 0.2% laparoscopic in the Medicare cholecystitis subgroup [37728932]"
+    },
+    {
+     "pmid": "",
+     "label": "Major complications",
+     "value_text": "8.37% robotic vs 5.50% laparoscopic (propensity-matched acute care cohort) [40397430]"
+    }
+   ],
+   "main_caveat": "No randomised trials exist, and the large databases overlap, so selection bias cannot be excluded."
+  },
+  "bottom_line": {
+   "text": "No randomised trial has compared robotic with laparoscopic cholecystectomy for acute cholecystitis, and the observational evidence does not show that robotic surgery is better. Some meta-analyses suggest less conversion to open surgery, but large cohorts report more bailout procedures, more complications and longer stays with robotic surgery, and bile duct injury findings conflict [41521240; 41417656; 42803467; 40397430; 37728932]. Robotic surgery consistently costs more, and the WSES guideline keeps early laparoscopic cholecystectomy as the standard of care [41540300; 42803467; 33153472].",
+   "certainty": "Very low",
+   "certainty_reason": "Only observational, mostly administrative data exist; the results conflict for conversion, bile duct injury and complications; the databases overlap; and much of the evidence is indirect (non-elective or mixed cases)."
+  },
+  "would_change": [
+   "A multicentre randomised trial of robotic vs laparoscopic cholecystectomy in acute cholecystitis, stratified by severity grade (Tokyo or AAST), reporting bile duct injury, bailout procedures and complications.",
+   "Prospective registry data with clinical severity grading and surgeon experience (past the learning curve) to resolve the bile duct injury conflict.",
+   "Cost-effectiveness data from Indian or other low- and middle-income health systems.",
+   "Independent (non-overlapping, non-manufacturer) cohorts confirming a consistent reduction in conversion without more subtotal cholecystectomies."
+  ],
+  "applicability": {
+   "case_mix": "The evidence is almost entirely US, observational and administrative. Only a few sources are restricted to acute cholecystitis [41521240; 42803467; 41936770; 42223833]. The others cover non-elective or emergency cholecystectomy broadly [41417656; 40397430; 38446451; 38189678], all emergency general surgery [37856059; 38918109; 40884599], or mixed elective and urgent cases [41540300; 37728932]. Severity grading is mostly absent. The one severity-graded cohort was 80.4% AAST grade I, with only 116 grade II-V patients [41936770]. Data on severe or gangrenous cholecystitis are thin, and the gangrenous cases sit within a 322-patient cohort [42223833].",
+   "training": "Bile duct injury signals in mixed and elective data may reflect early learning-curve effects [41540300; 37728932]. Surgeon experience was not assessed in the acute cholecystitis studies [41521240]. Training programmes should keep laparoscopic emergency cholecystectomy, with its bailout strategies, as the core competency. Any robotic emergency cholecystectomy programme should be introduced with structured training and outcome audit; the review of robotic emergency surgery noted staged training and institutional expertise [40884599].",
+   "india_cost_context": "No study comes from India or a low- or middle-income health system, and no Indian cost data exist in this evidence. Every source that reported cost found robotic surgery more expensive, or at best no different [41540300; 42803467; 37856059; 38918109; 40884599; 38189678]. Without a proven clinical benefit, robotic cholecystectomy for acute cholecystitis cannot be justified on outcomes in Indian practice. Laparoscopic cholecystectomy remains the guideline standard [33153472]. Whether robotic surgery is cost-effective in Indian centres is not known."
+  },
+  "notable_findings": [
+   {
+    "text": "The ROBOtic Care Outcomes Project used the robotic manufacturer's own (Intuitive) hospital analytics database [38189678].",
+    "pmids": [
+     "38189678"
+    ]
+   },
+   {
+    "text": "The conversion benefit in the non-elective meta-analysis disappeared in the low risk-of-bias subgroup; 6 of 7 studies in the acute cholecystitis meta-analysis were at moderate to serious risk of bias [41417656; 41521240].",
+    "pmids": [
+     "41417656",
+     "41521240"
+    ]
+   },
+   {
+    "text": "Robotic cases were a small minority in most databases: 4% of the HCUP cohort, 8.7% of the non-elective pool and 1.6% of NIS emergency surgery, which suggests selected and lower-volume use [42803467; 41417656; 38918109].",
+    "pmids": [
+     "42803467",
+     "41417656",
+     "38918109"
+    ]
+   },
+   {
+    "text": "Among patients needing a bailout, robotic surgery was followed by fewer endoscopic biliary interventions (3.1% vs 7.7%) and fewer surgical interventions (2.3% vs 7.5%), although overall bailout rates were higher [42803467].",
+    "pmids": [
+     "42803467"
+    ]
+   },
+   {
+    "text": "The Medicare bile duct injury excess persisted on instrumental-variable analysis, and it was also seen in urgent or emergent procedures (RR 1.87) [37728932].",
+    "pmids": [
+     "37728932"
+    ]
+   }
+  ],
+  "clinical_practice": {
+   "counselling": "Both approaches appear to have broadly similar safety in acute gallbladder infection, but this comes only from non-randomised studies; robotic surgery is not proven better and usually costs more [41521240; 41540300].",
+   "cost_per_case": "Robotic surgery cost about USD 2000-4000 more per case ($5000-6000 vs $2000-3000) and EUR 362 more in European centres (€2088 vs €1726) [41540300]; in US emergency surgery it was up to $4,900 more [38918109]; 1-year cumulative cost in US acute cholecystitis was $29,702 robotic vs $24,483 laparoscopic [42803467]; one manufacturer-database cohort found no significant hospital cost difference [38189678]; Indian costs are not known.",
+   "default_choice": "Early laparoscopic cholecystectomy, which is the WSES standard of care; robotic surgery has not been shown to be superior in acute cholecystitis [33153472; 41521240].",
+   "who_may_benefit": "The evidence does not identify any patient group that benefits; any conversion advantage is inconsistent across studies and lost in low risk-of-bias analyses [41417656; 42803467]."
+  }
+ },
+ "skeptic": {
+  "leads": [
+   {
+    "kind": "contradicting study",
+    "pmid": "41798427"
+   },
+   {
+    "kind": "contradicting study",
+    "pmid": "40767931"
+   }
+  ],
+  "spans": [
+   {
+    "len": 4,
+    "field": "ma_notes.1.text",
+    "start": 43
+   }
+  ],
+  "verdict": "holds with caveats",
+  "ma_notes": [
+   {
+    "pmid": "41521240",
+    "text": "The pool is 7 observational studies (143,717 patients), with no randomised trials, and ROBINS-I rated 6 of 7 at moderate to serious risk of bias.",
+    "quote": null
+   },
+   {
+    "pmid": "41417656",
+    "text": "The pool is 9 retrospective cohorts (about 1.07M patients), so it is non-randomised, and the conversion benefit lost significance in the low risk-of-bias subgroup.",
+    "quote": null
+   },
+   {
+    "pmid": "41540300",
+    "text": "The pool of 38 studies is mostly observational and includes elective cases and administrative data, so the bile duct injury signal may reflect learning curve and coding artefacts. It is not specific to acute cholecystitis.",
+    "quote": null
+   }
+  ],
+  "overlaps": [
+   {
+    "note": "Large US administrative or claims database cohorts (NIS, HCUP, commercial claims) likely share patients and feed the same meta-analyses.",
+    "pmids": [
+     "38446451",
+     "42803467",
+     "40397430",
+     "38918109",
+     "37728932",
+     "41521240",
+     "41417656",
+     "41540300"
+    ]
+   },
+   {
+    "note": "Several systematic reviews of robotic emergency or acute care surgery pool the same observational cohorts.",
+    "pmids": [
+     "40767931",
+     "40884599",
+     "41521240",
+     "41417656"
+    ]
+   }
+  ],
+  "guidelines": [
+   {
+    "pmid": "33153472",
+    "text": "World Society of Emergency Surgery (WSES), 2020 update",
+    "quote": "Early laparoscopic cholecystectomy (ELC) should be the standard of care whenever possible"
+   }
+  ],
+  "missed_rcts": [],
+  "extract_next": [
+   {
+    "pmid": "40884599",
+    "text": "Systematic review of robotic emergency general surgery that reports consistently higher costs and limited high-quality evidence.",
+    "quote": null
+   },
+   {
+    "pmid": "38918109",
+    "text": "National Inpatient Sample study of emergency general surgery with cholecystectomy-specific transfusion and cost results.",
+    "quote": null
+   },
+   {
+    "pmid": "42223833",
+    "text": "2026 acute care surgery cohort of acute cholecystitis that includes gangrenous cases and shows equivalence.",
+    "quote": null
+   }
+  ],
+  "must_mention": [
+   "No randomised trial of robotic versus laparoscopic cholecystectomy in acute cholecystitis was found, so all evidence is observational and confounded by selection of cases and surgeons.",
+   "Robotic surgery is not shown to be better: the conversion benefit is inconsistent across sources, with one large cohort reporting higher conversion and subtotal cholecystectomy, and the benefit lost significance in the low risk-of-bias subgroup.",
+   "Bile duct injury results conflict: two sources report higher injury with robotic surgery, but the acute-cholecystitis cohorts and meta-analysis show similar rates. The higher estimates come from mostly elective or administrative data.",
+   "Robotic surgery consistently costs more, and the WSES guideline sets early laparoscopic cholecystectomy as standard without endorsing robotics.",
+   "The large database studies and the meta-analyses built on them overlap in patients, so they are not independent confirmation."
+  ],
+  "contradicting": [
+   {
+    "pmid": "41521240",
+    "text": "The pooled analysis in acute cholecystitis found a consistent reduction in conversion to open surgery and no excess bile duct injury, which opposes the claim that robotic surgery is not better",
+    "quote": "Meta-analysis demonstrated a significantly lower risk of conversion to open surgery with robotic cholecystectomy (RR 0.61, 95% CI 0.50-0.75; I² = 44%)."
+   },
+   {
+    "pmid": "41417656",
+    "text": "The non-elective meta-analysis reported lower conversion, including in the adjusted studies",
+    "quote": "Robotic-assisted cholecystectomy was associated with lower rates of conversion to open surgery (odds ratio, 0.66; 95% confidence interval, 0.54-0.80; I2 = 15.2%)."
+   }
+  ],
+  "dropped_quotes": 0,
+  "dropped_unseen": 0
+ },
+ "version": 3,
+ "coverage": {
+  "gaps": [
+   {
+    "kind": "outcome",
+    "pmid": "40397430",
+    "text": "Postoperative drain use higher with robotic: 0.63% (219/35,037) vs 0.48% (132/35,037); OR 1.66 (95% CI 1.34-2.07), P<.001. (Drain use = 0.63 % (robotic); Drain use = 0.48 % (laparoscopic); Odds ratio = 1.66, CI 1.34 to 2.07, p <.001)",
+    "numbers": [
+     0.63,
+     0.48,
+     1.66,
+     1.34,
+     2.07
+    ],
+    "outcome": "Postoperative drain use"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "38189678",
+    "text": "Surgical site infection, readmission, length of stay, hospital acquired conditions, bile duct injury or leak, and hospital mortality were similar in both groups (no numbers given).",
+    "numbers": [],
+    "outcome": "Complications, bile duct injury, mortality, length of stay"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "38189678",
+    "text": "No significant difference in hospital cost between approaches.",
+    "numbers": [],
+    "outcome": "Hospital cost"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "37856059",
+    "text": "Total cost of the four robotic procedures was significantly higher than laparoscopic equivalents, before and after propensity matching, due to higher surgical cost; non-operative costs did not differ.",
+    "numbers": [],
+    "outcome": "Hospital cost"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "37856059",
+    "text": "No differences in mortality, individual complications, or length of stay for most of the four procedures.",
+    "numbers": [],
+    "outcome": "Mortality, complications, length of stay"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40884599",
+    "text": "Robotic approaches showed low conversion rates, comparable or shorter length of stay, and similar or reduced complication and ICU admission rates versus laparoscopic or open techniques; no numbers given.",
+    "numbers": [],
+    "outcome": "Safety and clinical outcomes (conversion, length of stay, complications)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40884599",
+    "text": "Operative times were generally longer and hospital costs were consistently higher with robotic surgery; no numbers given.",
+    "numbers": [],
+    "outcome": "Operative time and cost"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "41417656",
+    "text": "I2 = 15.2 %",
+    "numbers": [
+     15.2
+    ],
+    "outcome": "Conversion to open surgery"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "41417656",
+    "text": "I2 = 50.1 %",
+    "numbers": [
+     50.1
+    ],
+    "outcome": "Conversion to open surgery, adjusted studies subgroup"
+   },
+   {
+    "kind": "skeptic_item",
+    "pmid": "40767931",
+    "text": "Not independent (the skeptic): Several systematic reviews of robotic emergency or acute care surgery pool the same observational cohorts.",
+    "numbers": [],
+    "outcome": ""
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "Bile duct injury (IV analysis) = 0.4 % (robotic)",
+    "numbers": [
+     0.4
+    ],
+    "outcome": "Bile duct injury, instrumental variable analysis"
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "Biliary interventions = 7.4 % (robotic)",
+    "numbers": [
+     7.4
+    ],
+    "outcome": "Biliary interventions and serious complications"
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "RR biliary interventions = 1.25 RR, CI 1.16 to 1.33",
+    "numbers": [
+     1.25,
+     1.16,
+     1.33
+    ],
+    "outcome": "Biliary interventions and serious complications"
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "RR serious complications = 1.08 RR, CI 1.03 to 1.13",
+    "numbers": [
+     1.08,
+     1.03,
+     1.13
+    ],
+    "outcome": "Biliary interventions and serious complications"
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "30-day overall complications = 20.5 % (robotic)",
+    "numbers": [
+     20.5
+    ],
+    "outcome": "30-day overall complications"
+   },
+   {
+    "kind": "number",
+    "pmid": "37728932",
+    "text": "30-day overall complications = 20.6 % (laparoscopic)",
+    "numbers": [
+     20.6
+    ],
+    "outcome": "30-day overall complications"
+   },
+   {
+    "kind": "number",
+    "pmid": "38918109",
+    "text": "robotic emergency general surgery cases = 65853 patients (robotic)",
+    "numbers": [
+     65853.0
+    ],
+    "outcome": "Robotic uptake in emergency general surgery"
+   }
+  ],
+  "counts": {
+   "gaps_cut": 0,
+   "pooled_missing": 2,
+   "numbers_checked": 76,
+   "numbers_missing": 12,
+   "skeptic_checked": 8,
+   "skeptic_missing": 1,
+   "outcomes_checked": 41,
+   "outcomes_missing": 7
+  }
+ },
+ "evidence": [
+  {
+   "pmid": "41521240",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41417656",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "PROSPERO CRD420251090396"
+  },
+  {
+   "pmid": "41540300",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40397430",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42803467",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "38446451",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "38189678",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41936770",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "37728932",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "37856059",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40884599",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "found_by_skeptic": true,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "38918109",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "found_by_skeptic": true,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42223833",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "found_by_skeptic": true,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  }
+ ],
+ "question": "Robotic surgery is better option than Laprascopic surgery in acute gallbladder infection ?",
+ "searches": [
+  {
+   "hits": 161,
+   "query": "robotic cholecystectomy AND (acute cholecystitis OR emergency OR urgent) AND laparoscopic",
+   "source": "PubMed"
+  },
+  {
+   "hits": 85,
+   "query": "robotic cholecystectomy laparoscopic randomized[tiab] OR (robot*[ti] AND cholecystectomy[ti] AND (meta-analysis[pt] OR randomized controlled trial[pt]))",
+   "source": "PubMed"
+  },
+  {
+   "hits": 4,
+   "query": "robot*[tiab] AND cholecystitis[tiab] AND (randomized[tiab] OR randomised[tiab] OR trial[tiab])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 16,
+   "query": "(robotic[tiab]) AND (acute cholecystitis[tiab] OR emergency general surgery[tiab]) AND (cost*[tiab]) AND cholecystectomy",
+   "source": "PubMed"
+  },
+  {
+   "hits": 89,
+   "query": "(acute cholecystitis OR emergency surgery) AND robotic AND (\"practice guideline\"[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 4,
+   "query": "robotic cholecystectomy bile duct injury Medicare laparoscopic",
+   "source": "PubMed"
+  },
+  {
+   "hits": 20,
+   "query": "related to PMID 40397430",
+   "source": "PubMed related"
+  }
+ ],
+ "untraced": [
+  {
+   "len": 4,
+   "field": "clinical_practice.cost_per_case",
+   "start": 36
+  },
+  {
+   "len": 3,
+   "field": "clinical_practice.cost_per_case",
+   "start": 90
+  },
+  {
+   "len": 1,
+   "field": "outcomes.0.effect_text",
+   "start": 267
+  },
+  {
+   "len": 1,
+   "field": "studies.1.design",
+   "start": 39
+  }
+ ],
+ "elapsed_s": 234,
+ "integrity": {
+  "dropped_unseen": 0,
+  "dropped_numbers": 0,
+  "dropped_studies": 0,
+  "numbers_checked": 282,
+  "labels_defaulted": 0,
+  "numbers_untraced": 4,
+  "dropped_unfetched": 0,
+  "removed_citations": 0,
+  "numbers_unverified": 5,
+  "outcomes_unverified": 0
+ },
+ "cost_paise": 13773,
+ "created_at": "2026-10-31T12:11:44.965305439Z",
+ "references": [
+  {
+   "n": 1,
+   "doi": "10.1007/s11701-026-03145-7",
+   "pmid": "41521240",
+   "year": 2026,
+   "title": "Is robotic surgery ready for emergency cholecystectomy? A systematic review and meta-analysis of robotic versus laparoscopic approach in acute cholecystitis",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 2,
+   "doi": "10.1097/ta.0000000000004851",
+   "pmid": "41417656",
+   "year": 2026,
+   "title": "Clinical outcomes of robotic-assisted versus laparoscopic cholecystectomy in nonelective procedures: A systematic review and meta-analysis",
+   "journal": "The journal of trauma and acute care surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 3,
+   "doi": "10.1007/s11701-025-02863-8",
+   "pmid": "41540300",
+   "year": 2026,
+   "title": "Comparative effectiveness, safety, and cost of laparoscopic versus robotic minimally invasive cholecystectomy: a systematic review and meta-analysis.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 4,
+   "doi": "10.1001/jamasurg.2025.1291",
+   "pmid": "40397430",
+   "year": 2025,
+   "title": "Clinical Outcomes of Laparoscopic vs Robotic-Assisted Cholecystectomy in Acute Care Surgery.",
+   "journal": "JAMA surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 5,
+   "doi": "10.1097/XCS.0000000000002206",
+   "pmid": "42803467",
+   "year": 2026,
+   "title": "Bailout Procedures, Downstream Outcomes, and Cost After Robotic vs Laparoscopic Cholecystectomy for Acute Cholecystitis.",
+   "journal": "Journal of the American College of Surgeons",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 6,
+   "doi": "10.1001/jamasurg.2024.0016",
+   "pmid": "38446451",
+   "year": 2024,
+   "title": "Robotic Technology in Emergency General Surgery Cases in the Era of Minimally Invasive Surgery.",
+   "journal": "JAMA surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 7,
+   "doi": "10.1097/TA.0000000000004240",
+   "pmid": "38189678",
+   "year": 2024,
+   "title": "ROBOtic Care Outcomes Project for acute gallbladder pathology.",
+   "journal": "The journal of trauma and acute care surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 8,
+   "doi": "10.1016/j.surg.2026.110170",
+   "pmid": "41936770",
+   "year": 2026,
+   "title": "Outcomes are equivalent between robotic and laparoscopic cholecystectomy in all grades of acute cholecystitis.",
+   "journal": "Surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 9,
+   "doi": "10.1001/jamasurg.2023.4389",
+   "pmid": "37728932",
+   "year": 2023,
+   "title": "Comparative Safety of Robotic-Assisted vs Laparoscopic Cholecystectomy.",
+   "journal": "JAMA surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 10,
+   "doi": "10.1007/s11701-023-01739-z",
+   "pmid": "37856059",
+   "year": 2023,
+   "title": "Patient outcomes and cost in robotic emergency general surgery.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 11,
+   "doi": "10.1007/s11701-025-02696-5",
+   "pmid": "40884599",
+   "year": 2025,
+   "title": "Current evidence and reported experiences for robot-assisted emergency general surgery: systematic review.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 12,
+   "doi": "10.1016/j.surg.2024.05.002",
+   "pmid": "38918109",
+   "year": 2024,
+   "title": "National trends and outcomes of robotic emergency general surgery in the United States.",
+   "journal": "Surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 13,
+   "doi": "10.1007/s11701-026-03530-2",
+   "pmid": "42223833",
+   "year": 2026,
+   "title": "Acute cholecystitis in the robotic era: comparative safety and feasibility of robotic and laparoscopic cholecystectomy in an acute care surgery service.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 14,
+   "doi": "10.1186/s13017-020-00336-x",
+   "pmid": "33153472",
+   "year": 2020,
+   "title": "2020 World Society of Emergency Surgery updated guidelines for the diagnosis and treatment of acute calculus cholecystitis.",
+   "journal": "World journal of emergency surgery : WJES",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 15,
+   "doi": "10.1007/s11701-025-02630-9",
+   "pmid": "40767931",
+   "year": 2025,
+   "title": "Safety and feasibility of robotic surgery in acute care setting: a systematic review.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  }
+ ],
+ "completeness": {
+  "notes": [
+   "Cost is rated Low while every source is observational and the answer rates all other outcomes Very low, which is a minor inconsistency in rating basis.",
+   "The answer lists the single-centre length-of-stay p value as not verified, whereas the evidence row also marks P = .048 as not verified, so this is consistent."
+  ],
+  "skipped": null,
+  "untraced": [
+   {
+    "len": 6,
+    "field": "added_outcomes.0.effect_text",
+    "start": 101
+   },
+   {
+    "len": 6,
+    "field": "added_outcomes.0.effect_text",
+    "start": 131
+   },
+   {
+    "len": 3,
+    "field": "notes.1",
+    "start": 116
+   }
+  ],
+  "items_cut": 0,
+  "not_added": [
+   {
+    "gap": "Complications, bile duct injury, mortality, length of stay similar (ROBOCOP, no numbers)",
+    "reason": "The answer already says bile duct injury, stay, mortality and cost were similar in this cohort; no numbers exist to add."
+   },
+   {
+    "gap": "Hospital cost no significant difference (PMID 38189678)",
+    "reason": "Already stated in the Cost row and the trials table."
+   },
+   {
+    "gap": "Florida cost higher; no differences in mortality, complications, stay (PMID 37856059)",
+    "reason": "Already stated in the Cost row and the trials table."
+   },
+   {
+    "gap": "Systematic review of robotic emergency surgery: low conversion, similar complications (PMID 40884599)",
+    "reason": "Already reflected in the trials table and operative time and cost rows; no numbers given."
+   },
+   {
+    "gap": "Operative time and cost, systematic review (PMID 40884599)",
+    "reason": "Already stated in the Operative time and Cost rows."
+   },
+   {
+    "gap": "I2 = 15.2% for non-elective conversion",
+    "reason": "Minor heterogeneity detail; it does not change interpretation, and the pooled estimate is already given."
+   },
+   {
+    "gap": "I2 = 50.1% for adjusted-studies conversion subgroup",
+    "reason": "Minor heterogeneity detail; the adjusted OR 0.69 is already mentioned in the trials table."
+   },
+   {
+    "gap": "Skeptic item: systematic reviews pool the same cohorts (PMID 40767931)",
+    "reason": "Already listed under 'Not independent' in the skeptic section."
+   },
+   {
+    "gap": "Medicare IV-analysis bile duct injury 0.4% robotic",
+    "reason": "The IV RR 1.88 is already stated, and this rate adds little."
+   },
+   {
+    "gap": "Medicare biliary interventions 7.4% robotic and RR 1.25",
+    "reason": "Not a question outcome; it is a mixed elective and urgent Medicare population, and the safety signal is already covered."
+   },
+   {
+    "gap": "Medicare serious complications RR 1.08",
+    "reason": "The 9.3% vs 8.6% rates are already given; the RR adds little."
+   },
+   {
+    "gap": "Medicare 30-day overall complications 20.5% vs 20.6%",
+    "reason": "Mixed elective and urgent population with a null result; it is not essential for the acute cholecystitis question."
+   },
+   {
+    "gap": "Robotic emergency general surgery cases 65,853 (NIS)",
+    "reason": "The 1.6% uptake is already stated; the case count is context only."
+   }
+  ],
+  "gaps_found": 17,
+  "added_outcomes": [
+   {
+    "why": "Single claims cohort, observational, not specific to acute cholecystitis",
+    "pmids": [
+     "40397430"
+    ],
+    "outcome": "Postoperative drain use",
+    "certainty": "Very low",
+    "effect_text": "Postoperative drain use was higher with robotic surgery in the matched acute care cohort: 0.63% (219/35,037) robotic vs 0.48% (132/35,037) laparoscopic; OR 1.66 (95% CI 1.34-2.07), P<.001 [40397430]."
+   }
+  ],
+  "added_conflicts": [],
+  "labels_defaulted": 0,
+  "outcome_additions": [],
+  "removed_citations": 0
+ },
+ "empty_reason": null,
+ "notable_code": [
+  {
+   "text": "Not independent evidence (the skeptic): Large US administrative or claims database cohorts (NIS, HCUP, commercial claims) likely share patients and feed the same meta-analyses.",
+   "pmids": [
+    "38446451",
+    "42803467",
+    "40397430",
+    "38918109",
+    "37728932",
+    "41521240",
+    "41417656",
+    "41540300"
+   ]
+  },
+  {
+   "text": "Not independent evidence (the skeptic): Several systematic reviews of robotic emergency or acute care surgery pool the same observational cohorts.",
+   "pmids": [
+    "40767931",
+    "40884599",
+    "41521240",
+    "41417656"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool is 7 observational studies (143,717 patients), with no randomised trials, and ROBINS-I rated 6 of 7 at moderate to serious risk of bias.",
+   "pmids": [
+    "41521240"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool is 9 retrospective cohorts (about 1.07M patients), so it is non-randomised, and the conversion benefit lost significance in the low risk-of-bias subgroup.",
+   "pmids": [
+    "41417656"
+   ],
+   "spans": [
+    {
+     "len": 4,
+     "field": "text",
+     "start": 86
+    }
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool of 38 studies is mostly observational and includes elective cases and administrative data, so the bile duct injury signal may reflect learning curve and coding artefacts. It is not specific to acute cholecystitis.",
+   "pmids": [
+    "41540300"
+   ]
+  },
+  {
+   "text": "The extractor could not match 5 numbers to the papers' wording; they are kept and labelled “not verified” in the trials table.",
+   "pmids": [
+    "41521240",
+    "40397430",
+    "38189678",
+    "37728932",
+    "42223833"
+   ]
+  }
+ ],
+ "stopped_early": null
+}
