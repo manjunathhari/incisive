@@ -1,7 +1,7 @@
 # Handoff
 
-**From:** Discovery → **To:** Brainstorming (all roles)
+**From:** Planning (EM + Senior Engineer) → **To:** SDE (builder) + independent reviewer
 
-Feature `memory-layer`: a hybrid memory over stored Incisive runs (verbatim Full answer + Expert Opinion pairs, topic index, claim ledger from the temporal era table, gate before runs, owner's expert layer). Design principles agreed in chat 1 Nov 2026: MemPalace-style verbatim storage, Waku-style gate, built natively in Rust + Postgres; no code reused from either.
-
-Key facts for design: runs cascade-delete at 365 days (conflicts with long-term memory); PICO exists at framing but is not stored; table_json already holds the era table; no RLS; pgvector extension enabled but unused.
+Read: spec `docs/superpowers/specs/2026-11-01-incisive-memory-layer-design.md`, ADR-001, plan `docs/superpowers/plans/2026-11-01-incisive-memory-layer.md`.
+Start with Tasks 1–8 (back end, PR A). Do not touch UI files until the temporal T4 UI is merged to main. MEMORY stays off in deploy until Task 13.
+Owner action before Task 8 smoke: create Secret Manager secret `gemma-auth` (commands in plan Task 8).

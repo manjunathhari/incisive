@@ -9,3 +9,10 @@
 - **A3 Topic key:** the team engine does not frame a PICO (only the classic pipeline did). Topic matching uses the Expert Opinion `board.topic` label + intervention–comparator pairs from the era table + meaning-vectors; no extra LLM call.
 - **A4 Tables (migration 0013, additive):** topics, evidence_records (no cascade from runs; source_run_id SET NULL), ledger_studies, ledger_claims, topic_verdicts (append-only), topic_changes (merge/split log).
 - **A5 Memory job:** after the temporal job, post-run, can never fail or alter a run. Embeddings filled asynchronously; FTS fallback.
+
+## Design (Phase 2, accepted with ADR-001)
+- Module `src/memory/`: settings, extract (pure), matcher (pure), store (SQL), job (queue + loop), embed (HTTP), topics (owner domain), gate.
+- Trigger: `runs/temporal.rs` after `finish(.., Done)` → `enqueue_job` (only if MEMORY on). Loop every 30 s claims 5 jobs with FOR UPDATE SKIP LOCKED (Cloud Run up to 3 instances).
+- Score: with embeddings 0.5·cos + 0.3·pair-Jaccard + 0.2·FTS; without 0.6·Jaccard + 0.4·FTS. Defaults topic 0.80, gate 0.85 until M6 calibration.
+- Failure modes: VPS down → NULL embeddings, sweep later; run deleted mid-job → `run_gone`; non-V3 body → skipped with code; merged chains resolved (≤16 hops).
+- Spec amended: `evidence_records.topic_label`, `fts_extra` columns feed the generated `fts`.

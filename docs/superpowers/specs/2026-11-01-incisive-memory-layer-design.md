@@ -56,7 +56,8 @@ All tables in schema `incisive`. No existing table changes.
 - `answer JSONB NOT NULL` (AnswerV3, byte-identical copy), `answer_version SMALLINT NOT NULL`
 - `board JSONB NOT NULL`, `era_table JSONB NOT NULL` (copies from `run_temporal`)
 - `evidence_through DATE NOT NULL`: the run's date (the latest the search could have seen)
-- `fts tsvector GENERATED ALWAYS AS (...) STORED` over question, topic label, verdict line and outcome names; GIN index
+- `topic_label TEXT NOT NULL` (copied at insert) and `fts_extra TEXT NOT NULL DEFAULT ''` (outcome names + first At a glance line)
+- `fts tsvector GENERATED ALWAYS AS (to_tsvector('english', question || ' ' || topic_label || ' ' || fts_extra)) STORED`; GIN index
 - `embedding vector(768) NULL`, `embed_model TEXT NULL`, `embedded_at TIMESTAMPTZ NULL`
 - `created_at`
 - Records are immutable. Corrections are new versions.
