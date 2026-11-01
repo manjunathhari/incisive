@@ -1,0 +1,326 @@
+{
+  "board": {
+    "at_a_glance": {
+      "expert": "Moderate certainty: in expert hands POEM and LHM with Dor give similar swallowing relief to 5 years, and POEM carries a persistent excess of reflux and acid exposure. The serious-complication advantage of POEM rests on low-certainty data, and the subtype advantages on observational data.",
+      "original_quote": "In treatment-naive adults, POEM is non-inferior to laparoscopic Heller myotomy with Dor fundoplication for Eckardt-defined success at 2 and 5 years (83.0% vs 81.7%; 75.0% vs 70.8%) and had fewer serious adverse events.",
+      "today": "In an expert unit offering both, choose by shared decision on reflux. Favour LHM+Dor when avoiding reflux matters most, and POEM for type III (conditional) or after a failed LHM. A unit early in its POEM series should not assume the trial results apply to it."
+    },
+    "debate": [
+      {
+        "points": [
+          "Inherited belief going into 2021–26: POEM was non-inferior to LHM+Dor for 2-year success (83.0% vs 81.7%, difference 1.4, -8.7 to 11.4) and had fewer serious adverse events (2.7% vs 7.3%), at the price of more oesophagitis (44% vs 29%) [1]. POEM beat a single pneumatic dilation series at 2 years (92% vs 54%) [4]. Pneumatic dilation matched LHM at 2 years (86% vs 90%) [6].",
+          "What changed in the latest five years was knowledge, not treatment. No new POEM vs LHM trial was treated in 2021–26, and the table labels this comparison no_recent_data and one_era_only. The new information is long follow-up of older cohorts, plus one trial after failed LHM [8].",
+          "What held: 5-year success stayed similar (75.0% vs 70.8%) [2]. Both arms lost ground: POEM by 8.0 points (derived) and LHM by 10.9 points (derived). The reflux trade-off persisted: oesophagitis 41% vs 31%, LA B–D 14% vs 7%, abnormal acid exposure 62% vs 31% [2]. The table labels reflux a persistent_tradeoff, but flags it points_only, so this is an observation argued here, not a computed trend.",
+          "Against dilation, POEM's lead held at 5 years (81% vs 40%, adjusted difference 41%, 25 to 57) [5]. LHM and dilation stayed level at 10 years (74% vs 74%) [7].",
+          "What will the patient live with over time, and does it persist? Researcher: about three in four have lasting swallowing relief with either operation. The reflux burden after POEM had not faded by 5 years, and PPI use was higher (46% vs 13% against dilation) [2, 5]."
+        ],
+        "round": 1,
+        "speaker": "researcher",
+        "title": "Inherited belief, what changed, what held"
+      },
+      {
+        "points": [
+          "H1, intrinsic technique trade-off: POEM divides the sphincter with no anti-reflux barrier, while LHM adds a Dor wrap. Test: the excess reflux appears in every comparison with a different design. Oesophagitis was 44% vs 29% at 2 years [1]. Reflux by GerdQ was 64.6% vs 11.1% [3]. Against dilation, oesophagitis was 41% vs 7% [4]. After failed LHM it was 34.3% vs 15%, not significant [8]. The pooled RR for oesophagitis was 3.10 (2.17–4.41) [14]. Consistent.",
+          "H2, ascertainment and attrition: pH testing was done in 37% of patients, 20% were lost by 5 years, and the trial was open-label [2]. Endoscopy after POEM vs dilation was done only in patients still in remission [4, 5]. Test: this could change the size of the gap but cannot explain why the direction is the same across all trials.",
+          "H3, surgeon experience: the trials were run in expert centres, and the 40-patient trial used one highly experienced POEM operator [3]. Test: this may explain the low serious-event rate after POEM (2.7%) [1]. No data by operator experience exist to test it.",
+          "H4, comparator protocol: the dilation arm allowed one series in the POEM trial [5] but a series of dilations in the LHM trial [6, 7]. Test: this fits a dilation result that is far below POEM (40% vs 81%) yet equal to LHM (74% vs 74%).",
+          "H5, recency mistaken for reliability: the meta-analyses of 2021–26 re-pool the same randomised trials [9, 10, 11, 13, 14]. Test: the RR of 3.10 [14] adds one propensity-matched cohort to 3 RCTs. It adds few new randomised patients.",
+          "H6, case mix and subtype: the trial populations were mostly type II (64.8% in one network) [10]. A type III benefit (observational OR 3.50, 1.39–8.77) [12] could be averaged away. This is untested by randomised data.",
+          "Leading explanation: H1 for the persistent reflux gap. H4 is accepted alongside it for the dilation discrepancy."
+        ],
+        "round": 2,
+        "speaker": "researcher",
+        "title": "Competing explanations tested"
+      },
+      {
+        "points": [
+          "Against H1: the 5-year endoscopic gap was 10.2 points (-7.0 to 26.8), which is not significant [2]. Reflux symptom scores were similar (1.3 vs 1.1) [2]. One network found no significant POEM vs LHM difference in reflux or oesophagitis [9]. The long-term pool reached significance only after excluding outlier studies [11]. The acid exposure figure of 62% vs 31% rests on 37% of patients [2].",
+          "Against the opposite reading, that the reflux gap is an artefact: different trials, comparators and measures all point the same way [1, 3, 4, 8, 14]. Selection bias would have to act in the same direction in every one of them, which is unlikely.",
+          "Duplicates: [1] and [2] are one trial, [4] and [5] are one trial, and [6] and [7] are one trial. Direct POEM vs LHM evidence is one multicentre trial plus 40 patients [3]. The newest network meta-analysis likely counts 2-year and 5-year reports as separate trials [13].",
+          "Time is confounded with design. The only primary trial treated in 2021–26 studied previously operated patients over 1 year [8], so the latest era cannot test any change in primary POEM vs LHM results.",
+          "The 10-year LHM vs dilation result has heavy attrition (40 vs 36 analysed) [7]. Its type II and type III subgroup findings are exploratory.",
+          "What will the patient live with over time, and does it persist? Skeptic: what the patient feels may differ less than the endoscopy suggests, since symptom scores were similar [2]. Nothing beyond 5 years is known for POEM, so persistence after that is unmeasured, and so are Barrett's oesophagus and stricture."
+        ],
+        "round": 3,
+        "speaker": "skeptic",
+        "title": "Attack on H1 and its opposite"
+      },
+      {
+        "points": [
+          "On H1: not reaching significance at 5 years with 20% attrition is a power problem. LA B–D oesophagitis still doubled (14% vs 7%) [2], and pH testing showed a 31.7-point excess (9.8 to 50.5) even in the tested subset [2].",
+          "Similar symptom scores do not settle the matter. Acid exposure without symptoms still needs PPI and surveillance, and POEM needed more PPI against dilation (46% vs 13%) [5].",
+          "Possible convergence: LHM+Dor oesophagitis rose from 29% to 31% between 2 and 5 years [1, 2]. A slowly loosening wrap could narrow the gap over time (own inference, unresolved).",
+          "On H3: the trial was not run early on the learning curve, so the owner's concern runs the other way here. The trial may show the best a unit can achieve rather than hide a signal. An expert-centre result supports POEM for expert operators only.",
+          "On the next study: the predictive range for a new trial of 2-year success is 1.4 points (-8.65 to 11.45) in the table. Parity in success is the expected result, not a certainty.",
+          "What will the patient live with over time, and does it persist? Researcher: swallowing relief persists to 5 years in about three quarters of patients with either operation. The reflux cost of POEM persists to 5 years on pH and endoscopy. The patient should weigh a lower serious-complication rate up front against the long-term reflux."
+        ],
+        "round": 4,
+        "speaker": "researcher",
+        "title": "Reply"
+      },
+      {
+        "points": [
+          "H1, intrinsic trade-off: hold. The decisive study is the 5-year report of the multicentre trial [2]. It persists in direction, but its size is uncertain because pH testing was incomplete.",
+          "H2, ascertainment and attrition: partial. It weakens the size of the gap, not its direction. Decisive: [2] (37% pH tested) and [5] (remission-only endoscopy).",
+          "H3, surgeon experience: unresolved. No outcome-by-operator data exist. Decisive: [3], with a single expert operator, which limits transfer to less experienced units.",
+          "H4, dilation protocol: hold. Decisive: [5] against [7].",
+          "H5, re-pooled meta-analyses mistaken for new evidence: concede. The researcher accepts that the 2021–26 pools add almost no new randomised POEM vs LHM patients [13, 14].",
+          "H6, subtype masking: unresolved. The only support is observational [12], and the conditional guideline rests on it [16].",
+          "What will the patient live with over time, and does it persist? Skeptic's close: to 5 years, similar swallowing and more acid after POEM. Beyond 5 years nothing is measured, so neither side can claim the answer."
+        ],
+        "round": 5,
+        "speaker": "skeptic",
+        "title": "Closing each explanation"
+      }
+    ],
+    "decisions": [
+      {
+        "choice": "Either POEM or LHM+Dor, by shared decision on the reflux trade-off.",
+        "reason": "Success was similar at 2 and 5 years (75.0% vs 70.8%). POEM had fewer serious adverse events (2.7% vs 7.3%) but more acid exposure (62% vs 31%) [1, 2].",
+        "scenario": "Routine treatment-naive type II achalasia in a unit expert in both operations"
+      },
+      {
+        "choice": "LHM with Dor fundoplication.",
+        "reason": "The reflux excess after POEM is consistent across studies (pooled RR for oesophagitis 3.10, abnormal pH 1.94) and persisted at 5 years (LA B–D 14% vs 7%) [2, 14].",
+        "scenario": "Patient for whom avoiding reflux or long-term PPI matters most"
+      },
+      {
+        "choice": "POEM favoured, with a plan for reflux surveillance.",
+        "reason": "Observational success was 93% vs 71% (OR 3.50) [12], and the guideline recommendation is conditional [16]. No randomised subtype data exist.",
+        "scenario": "Type III (spastic) achalasia"
+      },
+      {
+        "choice": "Lean to POEM, held loosely.",
+        "reason": "The only support is observational (OR 2.97, 1.09–8.03) [12].",
+        "scenario": "Type I achalasia"
+      },
+      {
+        "choice": "POEM rather than repeat dilation.",
+        "reason": "Success at 1 year was 62.2% vs 26.7%. Oesophagitis was 34.3% vs 15%, not significant, and follow-up is 1 year only [8].",
+        "scenario": "Persistent or recurrent symptoms after LHM"
+      },
+      {
+        "choice": "Pneumatic dilation, given as a series with repeats planned.",
+        "reason": "A series of dilations matched LHM at 10 years (74% vs 74%) and did better in type II on exploratory analysis [7]. A single series fell well short of POEM (40% vs 81%) [5].",
+        "scenario": "Patient accepting repeat procedures who wants to avoid an operation"
+      },
+      {
+        "choice": "LHM+Dor, or refer for POEM until the unit has built its own outcome record.",
+        "reason": "The trial results come from expert centres, one with a single highly experienced operator [1, 3]. Outcomes early in a series are not reported.",
+        "scenario": "Surgeon or unit early in a POEM series"
+      },
+      {
+        "choice": "POEM is reasonable, with PPI and endoscopic follow-up planned.",
+        "reason": "Non-inferior success to 5 years, shorter procedure time in one trial (95.7 vs 218.75 min), and more PPI use [2, 3, 5].",
+        "scenario": "Expert POEM operator, treatment-naive patient who accepts acid suppression"
+      }
+    ],
+    "eras": [
+      {
+        "era_id": "e-2006-2010",
+        "going_in": "This evidence set holds no earlier randomised data. The open question was whether pneumatic dilation could match LHM.",
+        "knowledge_after": "By 2011, a series of dilations was known to match LHM at 2 years. POEM was not yet in this randomised evidence. The 10-year report came later, in 2024. Treatment years are assumed.",
+        "showed": "One multicentre trial of dilation vs LHM+Dor (n=201): 2-year success 86% vs 90%, perforation 4% with dilation, mucosal tears 12% with LHM [6]. Its 10-year report showed 74% vs 74%, with heavy attrition. Exploratory subgroups found dilation better in type II (p=0.03) and a trend to LHM in type III (p=0.05) [7]."
+      },
+      {
+        "era_id": "e-2011-2015",
+        "going_in": "Dilation was roughly equal to LHM at 2 years [6].",
+        "knowledge_after": "Unchanged. The early (Idea, Development, Exploration) stages of POEM are not represented in this evidence set.",
+        "showed": "No primary study in this era."
+      },
+      {
+        "era_id": "e-2016-2020",
+        "going_in": "Dilation was roughly equal to LHM. There was no randomised POEM data.",
+        "knowledge_after": "POEM was non-inferior to LHM+Dor for swallowing to 5 years, with a persistent reflux trade-off, and superior to a single dilation series. The results became known between 2019 and 2025, and treatment years are assumed.",
+        "showed": "Multicentre trial [1], with its 5-year report [2]: 2-year success 83.0% vs 81.7% (difference 1.4, -8.7 to 11.4); serious adverse events 2.7% vs 7.3%; oesophagitis 44% vs 29%. At 5 years: success 75.0% vs 70.8%, oesophagitis 41% vs 31%, acid exposure 62% vs 31% (37% tested), 20% attrition. Single-centre trial of 40 patients: GerdQ reflux 64.6% vs 11.1%, procedure time 95.7 vs 218.75 min [3]. POEM vs dilation trial: success 92% vs 54% at 2 years [4] and 81% vs 40% at 5 years [5]; oesophagitis 41% vs 7%; PPI use 46% vs 13%."
+      },
+      {
+        "era_id": "e-2021-2026",
+        "going_in": "POEM was non-inferior to LHM+Dor at 2 years with fewer serious adverse events and more oesophagitis [1], and superior to single-series dilation [4].",
+        "knowledge_after": "The direction is unchanged. The table labels this comparison no_recent_data, and labels reflux a persistent_tradeoff that rests on points only. No new primary POEM vs LHM trial was treated in this era.",
+        "showed": "One primary trial, treated after failed LHM: POEM 62.2% vs dilation 26.7% at 1 year; oesophagitis 34.3% vs 15%, not significant [8]. Meta-analyses re-pooled earlier trials: success RR 1.09 (0.86–1.39) [10]; success OR 1.43 (0.96–2.13) in mixed designs [11]; oesophagitis RR 3.10 and abnormal pH RR 1.94 [14]. The guideline gave a conditional preference for POEM in type III [16]."
+      }
+    ],
+    "ledger": {
+      "label_mode": "known_by",
+      "rows": [
+        {
+          "cells": [
+            "No POEM data",
+            "Yes at 2 years, 83.0% vs 81.7% [1]",
+            "Pooled RR 1.09, not different [10]",
+            "Yes at 5 years, 75.0% vs 70.8% [2]"
+          ],
+          "question": "Does POEM match LHM for swallowing?"
+        },
+        {
+          "cells": [
+            "No POEM data",
+            "No, oesophagitis 44% vs 29% [1]",
+            "No, PPI 46% vs 13% against dilation [5]",
+            "No, acid exposure 62% vs 31%; RR 3.10 [2, 14]"
+          ],
+          "question": "Less reflux with POEM?"
+        },
+        {
+          "cells": [
+            "Dilation perforation 4% [6]",
+            "Yes, 2.7% vs 7.3%, one trial [1]",
+            "Pooled 1.4% vs 6.7% [10]",
+            "Overall adverse events not different, RR 1.15 [14]"
+          ],
+          "question": "Fewer serious complications with POEM?"
+        },
+        {
+          "cells": [
+            "Not known",
+            "Not known",
+            "POEM beats dilation at 5 years; LHM equals dilation at 10 years [5, 7]",
+            "POEM vs LHM known to 5 years only [2]"
+          ],
+          "question": "Durable beyond 5 years?"
+        },
+        {
+          "cells": [
+            "No",
+            "Observational type III OR 3.50 [12]",
+            "Dilation better than LHM in type II, exploratory [7]",
+            "Conditional guideline for POEM in type III [16]"
+          ],
+          "question": "Does subtype guide the choice?"
+        },
+        {
+          "cells": [
+            "No data",
+            "No data",
+            "POEM 62.2% vs dilation 26.7% at 1 year [8]",
+            "Unchanged, 1-year data only [8]"
+          ],
+          "question": "Best option after a failed LHM?"
+        }
+      ]
+    },
+    "linked_note": "Success and reflux moved together. Both arms lost swallowing success between 2 and 5 years (POEM by 8.0 points, LHM by 10.9 points, both derived), while the reflux gap held: endoscopic oesophagitis 15 then 10 points, acid exposure 31.7 points, and more PPI use [1, 2, 5]. Serious adverse events favoured POEM, but overall adverse events did not differ in pooling [1, 14]. Shorter operative time came from a single expert operator [3]. Dilation success depends on whether repeat dilations count as failure [5, 7]. Same trial, counted once: [1] and [2]; [4] and [5]; [6] and [7]. The meta-analyses [9, 10, 11, 13, 14] re-pool overlapping trials.",
+    "opinion": {
+      "curve_reading": "For POEM vs LHM, the evidence is at IDEAL stage 3 (Assessment): one multicentre trial and one 40-patient trial. Five-year follow-up moves it toward stage 4 (Long-term), but nothing beyond 5 years is reported. The trials ran in expert centres, late on their operators' learning curves, so they likely show best-case results rather than hide an early-curve signal. Subtype evidence remains at observational stages [12]. Treatment years are assumed throughout.",
+      "did_not_improve": "Reflux after POEM did not improve with time: oesophagitis was 41% and acid exposure 62% at 5 years [2]. Swallowing success fell in both arms between 2 and 5 years [1, 2]. No POEM vs LHM trial was treated in 2021–26, and there are no randomised subtype data. Follow-up beyond 5 years, and data on Barrett's oesophagus or stricture, are missing. Single-series dilation lost ground against POEM by 5 years [5].",
+      "verdict": "Moderate certainty: POEM and LHM+Dor give similar swallowing relief to 5 years in expert hands, and POEM carries more reflux and acid exposure that persist to 5 years. Low certainty that POEM has fewer serious adverse events. Very low certainty for subtype advantages. Moderate certainty that POEM beats single-series dilation, both in treatment-naive patients and after failed LHM.",
+      "why": "My view: the reflux gap is built into the technique, because POEM leaves no anti-reflux barrier, and it is seen across every comparator [1, 3, 4, 8, 14]. The competing reading is that incomplete pH testing, attrition and open-label assessment exaggerate the gap, since symptom scores were similar and the 5-year endoscopic difference was not significant [2, 9, 11]. The two readings agree on direction and differ on size."
+    },
+    "scoreboard": [
+      {
+        "against": "5-year endoscopic gap not significant, symptoms similar, one network found no difference [2, 9]",
+        "code": "H1",
+        "for": "Excess reflux in every comparison and design [1, 3, 4, 8, 14]",
+        "name": "Intrinsic technique trade-off (no anti-reflux barrier after POEM)",
+        "status": "leading"
+      },
+      {
+        "against": "Cannot explain why the direction is the same across trials",
+        "code": "H2",
+        "for": "pH in 37% of patients, 20% attrition, open-label, remission-only endoscopy [2, 5]",
+        "name": "Ascertainment, attrition and open-label bias",
+        "status": "partial"
+      },
+      {
+        "against": "No outcome-by-operator data",
+        "code": "H3",
+        "for": "Expert centres; single highly experienced operator in [3]",
+        "name": "Surgeon experience and learning curve",
+        "status": "unresolved"
+      },
+      {
+        "against": "Different trials and populations",
+        "code": "H4",
+        "for": "Dilation 40% vs POEM 81% with a single series [5], but 74% vs LHM 74% with a series allowed [7]",
+        "name": "Dilation protocol and comparator design",
+        "status": "hold"
+      },
+      {
+        "against": "The newest pool adds one cohort [14]",
+        "code": "H5",
+        "for": "Overlapping pools; probable double-counting of trial reports [13]",
+        "name": "Recent meta-analyses mistaken for new evidence",
+        "status": "concede"
+      },
+      {
+        "against": "No randomised subtype analysis; confounded series",
+        "code": "H6",
+        "for": "Mostly type II in trials (64.8%) [10]; observational type III OR 3.50 [12]",
+        "name": "Case mix and subtype masking a type III benefit",
+        "status": "unresolved"
+      }
+    ],
+    "settle": [
+      "A second independent multicentre randomised trial of POEM vs LHM+Dor, with blinded outcome assessment and complete pH monitoring.",
+      "Follow-up beyond 5 years of the multicentre POEM vs LHM cohort [1, 2], with complete endoscopy and pH testing.",
+      "A randomised POEM vs LHM trial stratified by subtype, powered for type III.",
+      "A randomised trial of an anti-reflux modification of POEM (for example POEM with fundoplication) against LHM+Dor.",
+      "A prospective study of POEM outcomes by operator experience, from the start of a series.",
+      "A randomised trial of POEM vs on-demand repeated dilation series, with long follow-up."
+    ],
+    "topic": "POEM vs laparoscopic Heller myotomy with Dor for idiopathic achalasia, with the place of pneumatic dilation",
+    "triggers": [
+      {
+        "if": "the next independent randomised trial shows similar success with blinded, complete pH testing and no acid-exposure excess after POEM",
+        "then": "H1 is weakened, the reflux trade-off shrinks, and POEM becomes the default in expert units."
+      },
+      {
+        "if": "follow-up beyond 5 years shows POEM success falling faster than LHM+Dor",
+        "then": "Durability favours LHM+Dor, especially in younger patients."
+      },
+      {
+        "if": "long-term data show Barrett's oesophagus or peptic stricture after POEM",
+        "then": "LHM+Dor is favoured for patients with long life expectancy."
+      },
+      {
+        "if": "a randomised subtype analysis confirms better success with POEM in type III",
+        "then": "The conditional type III preference becomes a firm one."
+      },
+      {
+        "if": "a trial of POEM with an anti-reflux procedure shows reflux close to LHM+Dor",
+        "then": "The main trade-off is removed for that technique."
+      },
+      {
+        "if": "outcome-by-experience data show worse results early in a POEM series",
+        "then": "Units early in a series should refer or choose LHM+Dor until they reach proficiency."
+      }
+    ]
+  },
+  "fixture": "achalasia",
+  "flags": {
+    "cost_country": [
+      {
+        "field": "debate.0.points.0",
+        "text": "price"
+      },
+      {
+        "field": "debate.3.points.5",
+        "text": "cost"
+      }
+    ],
+    "derived": [
+      {
+        "field": "debate.0.points.2",
+        "text": "10.9"
+      }
+    ],
+    "glance_stronger": [],
+    "meta_called_trial": [],
+    "not_traced": [
+      {
+        "field": "linked_note",
+        "text": "10.9"
+      }
+    ],
+    "shape": [],
+    "unknown_ids": [],
+    "unknown_references": []
+  },
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 45039,
+    "output_tokens": 14736
+  }
+}

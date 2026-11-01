@@ -33,10 +33,14 @@ use crate::ask::{ActivityView, AskOutcome, MeView};
 // The ivory redesign: header and tokens, the Ask page and the Library.
 mod ask_page;
 mod details;
+// Temporal T4: the Expert Opinion option, view and board page.
+mod expert;
 mod ivory;
 mod library_page;
 mod page;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
+/// The Expert Opinion screens' styles (exported for the scope test).
+pub use expert::{ANSWER_VIEW, EXPERT_STYLE};
 /// The ivory styles (exported for the scope test: none of them reach the
 /// answer content).
 pub use ivory::IVORY_STYLE;
@@ -457,7 +461,8 @@ pub async fn get_my_run(run_id: Uuid) -> Result<RunView, ServerFnError> {
 }
 
 /// Temporal T3: the expert opinion of one of the user's runs (`None`: not
-/// run). Read-only; someone else's run is "not found". No UI yet (T4).
+/// run). Read-only; someone else's run is "not found". The run page's
+/// Expert opinion option and the board page (`/run/:id/temporal`) read it.
 #[server(prefix = "/api/fn", endpoint = "my_run_temporal")]
 pub async fn get_my_run_temporal(
     run_id: Uuid,
@@ -574,6 +579,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| view! { <p>"Page not found. Go back to the question box."</p> }>
                     <Route path=path!("") view=ask_page::AskPage />
                     <Route path=path!("runs/:id") view=RunPage />
+                    <Route path=path!("run/:id/temporal") view=expert::TemporalPage />
                     <Route path=path!("history") view=library_page::LibraryPage />
                     <Route path=path!("activity") view=ActivityPage />
                 </Routes>
@@ -697,7 +703,7 @@ fn RunPage() -> impl IntoView {
         move || (run_id(), tick.get()),
         |(id, _)| async move {
             match id {
-                Some(id) => get_my_run(id).await,
+                Some(id) => run_with_temporal(id).await,
                 None => Err(ServerFnError::new(RUN_NOT_FOUND_MESSAGE)),
             }
         },
@@ -709,7 +715,7 @@ fn RunPage() -> impl IntoView {
     // browser, so the server never starts a timer.
     let timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage> =
         StoredValue::new_local(None);
-    let last_good: RwSignal<Option<RunView>> = RwSignal::new(None);
+    let last_good: RwSignal<Option<RunPageData>> = RwSignal::new(None);
     let stop = move || {
         if let Some(h) = timer.try_update_value(|t| t.take()).flatten() {
             h.clear();
@@ -726,7 +732,7 @@ fn RunPage() -> impl IntoView {
     };
     Effect::new(move |_| match data.get() {
         Some(Ok(v)) => {
-            let active = v.summary.status.is_active();
+            let active = v.run.summary.status.is_active();
             last_good.set(Some(v));
             if active { start() } else { stop() }
         }
@@ -744,16 +750,16 @@ fn RunPage() -> impl IntoView {
             {move || {
                 data.get()
                     .map(|r| match r {
-                        Ok(v) => run_view(v).into_any(),
+                        Ok(RunPageData { run, temporal }) => run_view(run, temporal).into_any(),
                         Err(e) if is_not_found(&e) => {
                             view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
                         }
                         Err(e) => match last_good.get() {
-                            Some(v) => view! {
+                            Some(RunPageData { run, temporal }) => view! {
                                 <p class="hint" role="status">
                                     "Connection problem \u{2014} retrying. " {error_text(&e)}
                                 </p>
-                                {run_view(v)}
+                                {run_view(run, temporal)}
                             }
                                 .into_any(),
                             None => view! {
@@ -769,13 +775,85 @@ fn RunPage() -> impl IntoView {
     }
 }
 
+/// A run and, once it has ended, its expert opinion row (Temporal T4).
+///
+/// On the wire (the run resource's hydration payload) a run with no row is
+/// the bare `RunView`, exactly as before T4; one with a row is
+/// `{"t4_run": RunView, "t4_temporal": TemporalView}`.
+#[derive(Clone)]
+struct RunPageData {
+    run: RunView,
+    temporal: Option<crate::runs::TemporalView>,
+}
+
+impl serde::Serialize for RunPageData {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct With<'a> {
+            t4_run: &'a RunView,
+            t4_temporal: &'a crate::runs::TemporalView,
+        }
+        match &self.temporal {
+            None => self.run.serialize(s),
+            Some(t) => With {
+                t4_run: &self.run,
+                t4_temporal: t,
+            }
+            .serialize(s),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RunPageData {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            With {
+                t4_run: RunView,
+                t4_temporal: crate::runs::TemporalView,
+            },
+            Plain(RunView),
+        }
+        Ok(match Wire::deserialize(d)? {
+            Wire::With {
+                t4_run,
+                t4_temporal,
+            } => RunPageData {
+                run: t4_run,
+                temporal: Some(t4_temporal),
+            },
+            Wire::Plain(run) => RunPageData {
+                run,
+                temporal: None,
+            },
+        })
+    }
+}
+
+/// The run, and its temporal row once the run has ended (an error reading
+/// the row reads as no row: the page shows the answer as before).
+async fn run_with_temporal(id: Uuid) -> Result<RunPageData, ServerFnError> {
+    let v = get_my_run(id).await?;
+    let t = if v.summary.status.is_active() || v.summary.mode != RunMode::Focused {
+        None
+    } else {
+        get_my_run_temporal(id).await.ok().flatten()
+    };
+    Ok(RunPageData {
+        run: v,
+        temporal: t,
+    })
+}
+
 /// The run is gone (or someone else's): polling stops.
 fn is_not_found(e: &ServerFnError) -> bool {
     error_text(e) == RUN_NOT_FOUND_MESSAGE
 }
 
-fn run_view(v: RunView) -> impl IntoView {
+fn run_view(v: RunView, temporal: Option<crate::runs::TemporalView>) -> AnyView {
     let status = v.summary.status;
+    let run_id = v.summary.id;
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw: Phase 3
     // answers (version 3) with their own view, everything else as Phase 2.
@@ -795,34 +873,74 @@ fn run_view(v: RunView) -> impl IntoView {
             Body::V2(a) => a.question.clone(),
             Body::V3(a) => a.question.clone(),
         });
-    view! {
-        // Page chrome (ivory redesign): Figtree; the answer below is untouched.
-        <div class="run-chrome">
-            <h1 class="run-question">{heading}</h1>
-            <p>
-                {status_badge(status)} " " <span class="badge mode">{mode_label(v.summary.mode)}</span> " "
-                <span class="meta">{rupees(v.summary.cost_paise)}</span>
+    // Temporal T4: the reference numbers whose study sheets the answer draws.
+    let answer_refs: std::collections::BTreeSet<u16> =
+        match answer.as_ref().and_then(Option::as_ref) {
+            Some(Body::V3(a)) => a.references.iter().map(|r| r.n).collect(),
+            _ => Default::default(),
+        };
+    let has_answer = answer.is_some();
+    let answer_block = answer.map(|a| match a {
+        Some(Body::V2(a)) => answer_view(a).into_any(),
+        Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
+        None => view! {
+            <p class="box amber" role="status">
+                "This answer can't be shown. Please ask the question again."
             </p>
-            {progress_view(status, answer.is_some(), v.steps)}
-        </div>
-        {answer
-            .map(|a| match a {
-                Some(Body::V2(a)) => answer_view(a).into_any(),
-                Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
-                None => view! {
-                    <p class="box amber" role="status">
-                        "This answer can't be shown. Please ask the question again."
-                    </p>
-                }
-                    .into_any(),
-            })}
-        {ended_without_answer
-            .then(|| view! {
-                <p class="box amber" role="status">
-                    "This question ended without an answer. You can ask it again from the Ask page."
+        }
+        .into_any(),
+    });
+    let ended = ended_without_answer.then(|| {
+        view! {
+            <p class="box amber" role="status">
+                "This question ended without an answer. You can ask it again from the Ask page."
+            </p>
+        }
+    });
+    let (mode, cost) = (v.summary.mode, v.summary.cost_paise);
+    let progress = progress_view(status, has_answer, v.steps);
+    let Some(t) = temporal else {
+        // No expert opinion row: the page exactly as before T4 (the same
+        // elements and the same view structure, so the same markup and
+        // hydration markers).
+        return view! {
+            // Page chrome (ivory redesign): Figtree; the answer below is untouched.
+            <div class="run-chrome">
+                <h1 class="run-question">{heading}</h1>
+                <p>
+                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
+                    <span class="meta">{rupees(cost)}</span>
                 </p>
-            })}
+                {progress}
+            </div>
+            {answer_block}
+            {ended}
+        }
+        .into_any();
+    };
+    let x = expert::Expert::new(run_id, t, answer_refs);
+    // The answer is drawn unchanged inside a wrapper the Expert opinion view
+    // hides (outside `.ap-main`).
+    view! {
+        <div class=x.wrapper_class()>
+            <style>{expert::EXPERT_STYLE}</style>
+            <div class="run-chrome">
+                <h1 class="run-question">{heading}</h1>
+                <p>
+                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
+                    <span class="meta">{rupees(cost)}</span>
+                </p>
+                {expert::option_bar(x)}
+                {progress}
+            </div>
+            {expert::expert_view(x)}
+            <div class="rx-answer" hidden=move || x.expert.get()>
+                {answer_block}
+                {ended}
+            </div>
+        </div>
     }
+    .into_any()
 }
 
 /// Progress. While the run is queued or running, or when it ended with no

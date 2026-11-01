@@ -1,0 +1,304 @@
+{
+  "board": {
+    "at_a_glance": {
+      "expert": "Robotic repair has not been shown to give patients less pain, fewer complications, fewer recurrences or better quality of life than laparoscopic repair. A shorter-time and fewer-complication signal with very experienced robotic surgeons rests on one open-label trial (low certainty).",
+      "original_quote": "Randomised trials show no consistent benefit of robotic over laparoscopic inguinal hernia repair for pain, complications, recurrence, quality of life or return to activity, while robotic repair ... usually takes longer [1, 2, 3, 6, 9].",
+      "today": "For routine primary hernias, laparoscopic TAPP or TEP remains the default. Robotic TAPP is a reasonable alternative for a surgeon past the learning curve, but early in a series expect longer operations without a proven patient benefit."
+    },
+    "debate": [
+      {
+        "points": [
+          "Inherited belief: going into 2021-26, the only randomised comparison was RIVAL, a pilot with no primary outcome. Robotic TAPP took longer (median 75.5 vs 40.5 min) and showed no difference in pain, SF-36, wound events or readmissions at 30 days [1]. Its later report found 1 recurrence per arm at 2 years, with 77 of 102 patients followed [2].",
+          "What changed: the operative-time gap no longer points one way. It stayed longer in ROGER (80.3 vs 64.2 min, comparator TEP) [3] and in VOLTAIRE (64.9 vs 31.7 min) [7]. A blinded TAPP trial found no difference (p=0.142) [6], and ROLAIS was shorter with the robot (-13.4 min) [4]. The table marks this era cell as split and the trend as inconclusive, so this is an observation to argue, not a computed trend.",
+          "Second change: one open-label trial reported fewer complications (23.0% vs 41.5%), fewer haematomas (6.8% vs 18.5%) and more same-day discharge (95.9% vs 81.5%) [4]. These are single-trial points without a CI and were never pooled.",
+          "What held: pain and quality of life. Median NRS on coughing at 24 h was 4 vs 5 (P=0.431) [3]. VAS mean difference at 3 h was 0.28 (-0.34 to 0.90) [6]. EQ-5D-5L at 12 months was 0.95 vs 0.96 [3]. Pooled complications were RR 0.76 (0.49-1.17) [9].",
+          "Linked outcomes: in ROLAIS, shorter time, fewer complications and more same-day discharge all come from one trial and one surgical team [4, 5]. Conversion showed no bailout signal (RR 1.00, 0.09-10.91) [10].",
+          "What will the patient live with over time, and does it persist? Through 2 years in RIVAL, pain, quality of life and physical activity were similar [2]. The pooled chronic pain estimate (RR 0.53, 0.20-1.39) fits benefit, no effect or harm [9]."
+        ],
+        "round": 1,
+        "speaker": "researcher",
+        "title": "Inherited belief, what changed, what held"
+      },
+      {
+        "points": [
+          "H1 Surgeon robotic experience. For: ROLAIS surgeons had at least 100 r-TAPP each, and the robot was faster in simple (51 vs 60 min) and complex hernias (72 vs 92 min) [4, 5]. RIVAL, the earliest trial, had the widest gap (+35 min) [1]. ROGER's authors say some rTAPP surgeons may not have completed the learning curve [3]. Against: VOLTAIRE, in the same era, had a gap of 33.2 min (derived), with surgeon experience not reported [7].",
+          "H2 Comparator and platform choice. ROGER compared against TEP, the institutional standard, in which its surgeons were more proficient [3]. VOLTAIRE used an open-console robot [7]. This may explain part of ROGER's gap. It does not explain RIVAL, which was TAPP vs TAPP and still showed +35 min [1].",
+          "H3 Open-label design and outcome assessment. ROLAIS was open-label with CRP as its primary outcome and 11 unbalanced withdrawals (74 vs 65 analysed) [4]. In DIRECT, timing was unblinded and complexity was classified after allocation [5]. The blinded trials found no complication difference (9 vs 10 patients in ROGER) [3] and no pain difference [3, 6].",
+          "H4 An underperforming laparoscopic arm. The 41.5% laparoscopic complication rate in ROLAIS is described as unusually high [4]. The TEP arm in ROGER had 11% [3]. A high control rate alone could create the gap.",
+          "H5 Small-trial noise. Trials enrolled 60 to 182 patients. Pooled operative time had I2 97.7% [10]. Recurrence events were 1 vs 1 [2].",
+          "H6 Robot generation (own inference, unresolved). Newer platforms might shorten set-up. Yet a pool restricted to Da Vinci Xi trials still gave MD 0.59 min (-23.67 to 24.85; I2 98%) [14], so no clear platform effect is visible.",
+          "Leading: H1 for operative time. For complications, H1 cannot be separated from H3 and H4, because only one trial carries the signal."
+        ],
+        "round": 2,
+        "speaker": "researcher",
+        "title": "Competing explanations tested against the numbers"
+      },
+      {
+        "points": [
+          "Against H1: the only trial with documented high robotic experience is ROLAIS, and DIRECT reports the same patients. One trial counts once [4, 5]. In that trial, experience is confounded with open-label design, a single centre and an unusual control arm.",
+          "Recency is not reliability. The 2025-26 meta-analyses re-pool the same few trials [9, 10, 14, 15]. One supplemented ROLAIS with DIRECT data [15]. Another counts 7 RCTs in 9 publications [9]. None adds new patients.",
+          "Time is confounded with design. The shift between eras also shifts sites, comparator (TEP), robot type (open-console) and blinding. Every study's treatment years are assumed as publication year minus 2.",
+          "Against the opposite reading, that the robot is inherently slower with no learning effect: one trial found no time difference (p=0.142) [6], ROLAIS was shorter [4], and the Xi pool gave MD 0.59 min [14]. A fixed time penalty does not fit these results.",
+          "Attrition and selected subsets: RIVAL followed 77 of 102 patients to 2 years [2]. ROLAIS had unbalanced withdrawals [4]. DIRECT's simple and complex subsets were defined after allocation [5].",
+          "Observational and mixed pools: the recurrence RR 0.32 (0.17-0.59) comes from 17 of 18 observational cohorts [11]. The same pool gives complications RR 1.68 (1.00-2.84) against the robot [11]. The pain MD -1.59 comes from a sensitivity analysis that probably includes non-randomised studies [13], and the blinded ROGER trial contradicts it [3].",
+          "What will the patient live with over time, and does it persist? No trial reports beyond 2 years. Recurrence and chronic pain are underpowered, so equivalence cannot be claimed [9]. No difference at 2 years does not prove no difference later."
+        ],
+        "round": 3,
+        "speaker": "skeptic",
+        "title": "Attacking the leading explanation and its opposite"
+      },
+      {
+        "points": [
+          "Conceded: ROLAIS is one trial. But a trial run early in the learning curve can hide a signal. RIVAL was a pilot [1], and ROGER acknowledges an incomplete learning curve in some rTAPP surgeons [3]. Across trials, the direction of the time gap fits experience better than a fixed penalty.",
+          "On complications, I accept H3 and H4 as at least as plausible as H1. The pooled RR 0.76 (0.49-1.17) leaves room in both directions [9].",
+          "On recurrence, observational data are not weak by default. Here, though, the technique is already at randomised assessment. The observational signal is open to selection, and the RCTs show 1 vs 1 at 2 years [2, 11]. I hold it as a hypothesis, not a finding.",
+          "Workload is mixed. Frustration was higher with the robot in RIVAL (32.7 vs 20.1) [1]. NASA-TLX was lower with rTAPP than TEP in ROGER (18.4 vs 34.0) [3]. REBA was 3 vs 5 in VOLTAIRE [7]. The table labels this inconclusive. It may also track experience (own inference, unresolved).",
+          "What will the patient live with over time, and does it persist? At 1 to 2 years, pain, quality of life and physical activity show no difference [2, 3]. Whether that persists is not known from any trial."
+        ],
+        "round": 4,
+        "speaker": "researcher",
+        "title": "Reply"
+      },
+      {
+        "points": [
+          "H1 surgeon experience: unresolved. It stays the leading reading for operative time, but rests on one trial. Decisive study: ROLAIS with DIRECT [4, 5], pending independent replication.",
+          "H2 comparator and platform: partial. It explains part of ROGER's gap, not RIVAL's. Decisive study: ROGER [3].",
+          "H3 open-label design: hold. The blinded trials show no complication or pain difference. Decisive studies: ROGER [3] against ROLAIS [4].",
+          "H4 underperforming control arm: unresolved. Decisive study: ROLAIS [4].",
+          "H5 small-trial noise: hold for recurrence and chronic pain. Decisive studies: RIVAL 2-year [2] and the RCT pool [9].",
+          "H6 robot generation: weakened. Decisive study: the Xi-only pool [14].",
+          "What will the patient live with over time, and does it persist? Unresolved beyond 2 years. Neither side can claim benefit or equivalence for recurrence and chronic pain [2, 9]."
+        ],
+        "round": 5,
+        "speaker": "skeptic",
+        "title": "Closing each explanation"
+      }
+    ],
+    "decisions": [
+      {
+        "choice": "Laparoscopic TAPP or TEP as default; robotic TAPP acceptable if the surgeon is experienced with it",
+        "reason": "Pain, complications and quality of life did not differ in blinded trials [3, 6]. Pooled complications RR 0.76 (0.49-1.17) [9]. Operative time was longer with the robot in most trials [1, 3, 7].",
+        "scenario": "Routine elective primary unilateral hernia, surgeon competent in both approaches"
+      },
+      {
+        "choice": "Laparoscopic repair for the patient; build robotic experience on simple cases under supervision",
+        "reason": "The early pilot showed +35 min with no patient benefit [1]. ROGER notes some robotic surgeons may not have completed the learning curve [3]. No RCT has studied the learning curve [9].",
+        "scenario": "Surgeon early in a robotic series"
+      },
+      {
+        "choice": "Robotic TAPP reasonable; do not promise fewer complications",
+        "reason": "With at least 100 r-TAPP per surgeon, time was shorter (-13.4 min) and complications fewer (23.0% vs 41.5%) [4, 5]. That trial was open-label and is unreplicated, and blinded trials show no complication difference [3].",
+        "scenario": "Expert robotic surgeon past the learning curve"
+      },
+      {
+        "choice": "The approach the surgeon performs best; no randomised basis to prefer the robot",
+        "reason": "There are no RCT data for obese patients or for recurrent or bilateral hernias [9]. ROGER excluded recurrent hernias [3]. The lower recurrence with the robot comes from observational data [11].",
+        "scenario": "Recurrent, bilateral or complex hernia, or obese patient"
+      },
+      {
+        "choice": "Counsel that recovery is likely similar with either approach",
+        "reason": "VOLTAIRE favoured the robot at 14 days (15 vs 1 patients) [7], but a blinded trial found no difference (p=0.180) [6]. The same-day discharge gain comes from one open-label trial [4].",
+        "scenario": "Patient who prioritises a fast return to activity or same-day discharge"
+      },
+      {
+        "choice": "Explain that long-term differences are unknown with either approach",
+        "reason": "Chronic pain RR 0.53 (0.20-1.39) is imprecise [9]. RIVAL had 1 vs 1 recurrences at 2 years, with 25% lost to follow-up [2].",
+        "scenario": "Patient worried about chronic pain or recurrence years later"
+      }
+    ],
+    "eras": [
+      {
+        "era_id": "e-2016-2020",
+        "going_in": "Laparoscopic TAPP or TEP was the minimally invasive standard. This evidence set holds no earlier randomised comparison with robotic repair.",
+        "knowledge_after": "The robot took longer and showed no patient benefit in the short term. The trial was too small to judge recurrence or chronic pain.",
+        "showed": "RIVAL, a pilot RCT (n=113; treatment years assumed), found median operative time 75.5 vs 40.5 min with the robot (+35 min). There was no difference in pain, SF-36, wound events or readmissions at 30 days, and frustration was higher with the robot (32.7 vs 20.1) [1]. Its 2-year report, known in 2023, found 1 vs 1 recurrences and similar pain, quality of life and activity, with 77 of 102 followed [2]."
+      },
+      {
+        "era_id": "e-2021-2026",
+        "going_in": "The robot was slower and not better for patients, on the basis of one pilot trial.",
+        "knowledge_after": "Still no proven patient benefit (low certainty). Operative time now varies with team and design. One unreplicated open-label complication signal remains, and there are no data beyond 2 years.",
+        "showed": "ROGER (n=182) found NRS 4 vs 5 (P=0.431), complications 9 vs 10 patients, time 80.3 vs 64.2 min against TEP, and EQ-5D-5L 0.95 vs 0.96 [3]. ROLAIS (n=150, open-label) found complications 23.0% vs 41.5%, time -13.4 min and same-day discharge 95.9% vs 81.5% [4]. Its DIRECT report gave 51 vs 60 and 72 vs 92 min [5]. A blinded TAPP trial found VAS MD 0.28, rescue analgesia 20.6% vs 17.9%, and no time or activity difference [6]. VOLTAIRE found 64.9 vs 31.7 min and 15 vs 1 patients active at 14 days [7]. Thermal injury was 60% vs 49% of samples (p=0.548) [8]. Pooled data: complications RR 0.76 (0.49-1.17) and chronic pain RR 0.53 (0.20-1.39) [9]; time MD +18.5 min (-8.4 to 45.5) [10]. The table marks the time cell as split."
+      }
+    ],
+    "ledger": {
+      "label_mode": "treatment",
+      "rows": [
+        {
+          "cells": [
+            "No difference at 30 days [1]",
+            "No: NRS 4 vs 5 [3]; VAS MD 0.28 [6]"
+          ],
+          "question": "Less early pain?"
+        },
+        {
+          "cells": [
+            "No wound-event difference [1]",
+            "Not shown: RR 0.76 pooled [9]; one open-label trial favours the robot [4]"
+          ],
+          "question": "Fewer complications?"
+        },
+        {
+          "cells": [
+            "1 vs 1 at 2 years; too few events [2]",
+            "Unknown; underpowered [3, 4, 9]"
+          ],
+          "question": "Fewer recurrences?"
+        },
+        {
+          "cells": [
+            "Similar at 1-2 years [2]",
+            "Imprecise: RR 0.53 (0.20-1.39) [9]"
+          ],
+          "question": "Less chronic pain?"
+        },
+        {
+          "cells": [
+            "Similar physical activity [2]",
+            "Conflicting [6, 7]"
+          ],
+          "question": "Faster return to activity?"
+        },
+        {
+          "cells": [
+            "No SF-36 difference [1, 2]",
+            "No: EQ-5D-5L 0.95 vs 0.96 [3]"
+          ],
+          "question": "Better quality of life?"
+        },
+        {
+          "cells": [
+            "No: +35 min [1]",
+            "Split: longer in three trials, shorter in one expert trial [3, 4, 6, 7]"
+          ],
+          "question": "Shorter operation?"
+        },
+        {
+          "cells": [
+            "Not reported",
+            "One open-label trial: 95.9% vs 81.5% [4]"
+          ],
+          "question": "More same-day discharge?"
+        },
+        {
+          "cells": [
+            "No: frustration higher [1]",
+            "Mixed: lower vs TEP [3], better ergonomics [7]"
+          ],
+          "question": "Lower surgeon workload?"
+        }
+      ]
+    },
+    "linked_note": "Operative time, complications and same-day discharge improved together only in ROLAIS, a single team whose surgeons had at least 100 r-TAPP each [4, 5]. In the other trials, longer time came with no change in complications [1, 3]. Conversion did not differ (RR 1.00, 0.09-10.91), and seroma (RR 0.40) and haematoma (RR 0.65) were imprecise [10]. Pain, quality of life and activity moved together as null through 2 years [2, 3]. Same trial: RIVAL 2020 and its 2-year report count once [1, 2]. ROLAIS and DIRECT count once [4, 5]. The meta-analyses re-pool the same trials and are not independent confirmations [9, 10, 13, 14, 15].",
+    "opinion": {
+      "curve_reading": "Robotic inguinal repair sits at IDEAL Assessment, with small single-centre RCTs. Long-term follow-up has not been reached, since no trial reports beyond 2 years [2]. The learning-curve stage of the trials varies. RIVAL was an early pilot [1]. ROGER's robotic surgeons were more proficient in TEP, and some may not have completed the robotic learning curve [3]. ROLAIS surgeons were at plateau, with at least 100 r-TAPP each [4]. For the others, experience was not reported [6, 7]. No study has measured the learning curve itself [9]. The Exploration step for complex hernias and obese patients was skipped (own inference, unresolved).",
+      "did_not_improve": "Pain, quality of life and return to activity did not improve in blinded trials [3, 6]. Recurrence and chronic pain are not shown to improve and remain underpowered [2, 9]. Operative time is still longer with the robot in most trials [1, 3, 7]. Blinded trials show no fall in complications [3]. Surgeon workload findings are mixed [1, 3, 7].",
+      "verdict": "No proven patient benefit of robotic over laparoscopic inguinal repair for pain, complications, recurrence, activity or quality of life (low certainty; very low for recurrence and activity). Equivalence for rare and late outcomes cannot be claimed.",
+      "why": "My view is that operative time tracks robotic experience: the gap is widest in the early pilot and reverses with expert surgeons [1, 4, 5]. The competing reading sits beside it. The reversal and the complication benefit come from one open-label trial with an unusually high laparoscopic complication rate, so they may reflect design and comparator, not skill [3, 4]."
+    },
+    "scoreboard": [
+      {
+        "against": "Rests on one trial (ROLAIS/DIRECT); VOLTAIRE still showed a 33.2 min (derived) gap in the same era [4, 5, 7]",
+        "code": "H1",
+        "for": "Gap of +35 min in the early pilot; -13.4 min with at least 100 r-TAPP per surgeon; ROGER notes an incomplete learning curve [1, 3, 4]",
+        "name": "Surgeon robotic experience",
+        "status": "leading"
+      },
+      {
+        "against": "RIVAL was TAPP vs TAPP and still showed +35 min [1]",
+        "code": "H2",
+        "for": "ROGER used TEP, the surgeons' standard; VOLTAIRE used an open-console robot [3, 7]",
+        "name": "Comparator and platform choice",
+        "status": "partial"
+      },
+      {
+        "against": "The CRP primary outcome is objective; the effect size is large [4]",
+        "code": "H3",
+        "for": "Open-label, unblinded timing, unbalanced withdrawals; blinded trials null [3, 4, 5]",
+        "name": "Open-label design and assessment",
+        "status": "hold"
+      },
+      {
+        "against": "No independent trial to test it",
+        "code": "H4",
+        "for": "41.5% laparoscopic complications described as unusually high, vs 11% in ROGER's TEP arm [3, 4]",
+        "name": "Underperforming laparoscopic arm",
+        "status": "unresolved"
+      },
+      {
+        "against": "Pain and quality-of-life nulls are consistent across trials [2, 3, 6]",
+        "code": "H5",
+        "for": "Trials of 60-182 patients; I2 97.7% for time; 1 vs 1 recurrences [2, 10]",
+        "name": "Small-trial noise",
+        "status": "hold"
+      },
+      {
+        "against": "Xi-only pool gave MD 0.59 min (-23.67 to 24.85) [14]",
+        "code": "H6",
+        "for": "Plausible shorter set-up with newer robots (own inference, unresolved)",
+        "name": "Robot generation",
+        "status": "weakened"
+      }
+    ],
+    "settle": [
+      "A multicentre, patient- and assessor-blinded RCT of robotic vs laparoscopic TAPP, powered for chronic pain and recurrence, with at least 2-3 years of follow-up.",
+      "An independent RCT replicating ROLAIS with surgeons past the robotic learning curve and blinded complication assessment.",
+      "A prospective learning-curve study with operative time and complications reported by case number for both approaches.",
+      "RCTs in obese patients and in recurrent or bilateral hernias.",
+      "Long-term follow-up of ROGER and ROLAIS for chronic pain and recurrence."
+    ],
+    "topic": "Robotic vs laparoscopic inguinal hernia repair (elective, mostly primary unilateral)",
+    "triggers": [
+      {
+        "if": "The next independent blinded trial with expert robotic surgeons shows fewer complications or haematomas",
+        "then": "H1 gains over H3 and H4, and robotic TAPP becomes a preferred option in expert hands."
+      },
+      {
+        "if": "It shows no complication or time difference even with expert robotic surgeons",
+        "then": "The ROLAIS signal is treated as design or control-arm effect, and laparoscopic repair stays the default in every scenario."
+      },
+      {
+        "if": "Randomised follow-up beyond 2 years shows lower recurrence or chronic pain with the robot",
+        "then": "The observational recurrence signal [11] gains causal support, and patient counselling changes."
+      },
+      {
+        "if": "A learning-curve study shows the time gap closing after a defined case number",
+        "then": "The scenario split by surgeon experience is confirmed and training pathways can be defined."
+      },
+      {
+        "if": "An RCT in recurrent, bilateral or obese-patient hernias shows a difference",
+        "then": "A scenario-specific recommendation becomes possible where none exists today."
+      }
+    ]
+  },
+  "fixture": "hernia",
+  "flags": {
+    "cost_country": [],
+    "derived": [
+      {
+        "field": "debate.1.points.0",
+        "text": "33.2"
+      },
+      {
+        "field": "scoreboard.0.against",
+        "text": "33.2"
+      }
+    ],
+    "glance_stronger": [
+      {
+        "field": "at_a_glance.expert",
+        "text": "fewer"
+      }
+    ],
+    "meta_called_trial": [],
+    "not_traced": [],
+    "shape": [],
+    "unknown_ids": [],
+    "unknown_references": []
+  },
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 36190,
+    "output_tokens": 15012
+  }
+}

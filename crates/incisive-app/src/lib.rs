@@ -18,6 +18,8 @@ pub mod config;
 #[cfg(feature = "ssr")]
 pub mod db;
 pub mod deid;
+/// Temporal T4: the Expert Opinion screens' rules (no Leptos).
+pub mod expert_page;
 #[cfg(feature = "ssr")]
 pub mod gate;
 #[cfg(feature = "ssr")]
@@ -36,8 +38,8 @@ pub mod server;
 #[cfg(feature = "ssr")]
 pub mod spend;
 /// The temporal evidence table (T1): eras, linked reports and effect
-/// trajectories from a stored answer (pure code).
-#[cfg(feature = "ssr")]
+/// trajectories from a stored answer (pure code). Built for the browser too:
+/// the Expert Opinion screens (T4) read its types.
 pub mod temporal;
 
 #[cfg(feature = "hydrate")]

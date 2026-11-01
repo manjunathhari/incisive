@@ -1,0 +1,281 @@
+{
+  "board": {
+    "at_a_glance": {
+      "expert": "Robotic cholecystectomy is not shown to be better than laparoscopic cholecystectomy for acute cholecystitis, and certainty is very low. The steadiest signal across eras is more subtotal cholecystectomy with robotic surgery. The signals for conversion and bile duct injury changed with the database studied, not clearly with time.",
+      "original_quote": "No randomised trial has compared robotic with laparoscopic cholecystectomy for acute cholecystitis, and the observational evidence does not show that robotic surgery is better.",
+      "today": "Early laparoscopic cholecystectomy stays the default for routine and difficult cases, and for surgeons early in a robotic series [14]. An experienced robotic team may offer robotic surgery under audit that records bailout procedures and bile duct injury [1, 5, 7]."
+    },
+    "debate": [
+      {
+        "points": [
+          "Inherited belief going into 2021–26: the earliest era came from an older-patient mixed elective and urgent claims cohort. Its cholecystitis subgroup had more bile duct injury with robotic surgery (0.5% vs 0.2%, RR 2.29) [9]. The 2016–20 acute-care cohorts then showed more conversion (OR 1.61) [5], more subtotal cholecystectomy (OR 2.02) [5], more major complications (OR 1.57) and a longer stay (3 vs 2 days) [4], while bile duct injury was similar (OR 0.93) [4].",
+          "What changed in 2021–26: the one cohort with a conversion ratio found lower conversion with robotic surgery (OR 0.68). The table codes this as direction_flipped, with Z -4.28 against the earlier era [7]. In a small cohort, early complications were 10.3% vs 12.6% (code-derived OR 0.80, not significant) [13]. Crude stay in grade II–V disease was 1 vs 2 days, but approach did not predict prolonged stay [8]. These are observations from single studies, not a pooled trend.",
+          "What held: subtotal cholecystectomy stayed more frequent with robotic surgery (OR 2.02 in 2016–20, OR 1.64 in 2021–26) [5, 7]. Code labels this stable and a persistent trade-off, with a random-effects OR of 1.96 (1.65–2.33).",
+          "No bile duct injury figures fall in the latest era, so the fading of the early harm signal rests on the 2016–20 cohort [4] and on 2026 meta-analyses that re-pool older data [1].",
+          "Patient question, researcher side: What will the patient live with over time, and does it persist? A subtotal cholecystectomy is a different operation to live with than a complete one. Yet among patients who needed a bailout, robotic surgery was followed by fewer endoscopic biliary interventions (3.1% vs 7.7%) and fewer surgical interventions (2.3% vs 7.5%) [5]."
+        ],
+        "round": 1,
+        "speaker": "researcher",
+        "title": "Inherited belief, what changed, what held"
+      },
+      {
+        "points": [
+          "H1, surgeon experience: robotic teams moved past their early learning curve, so the early bile duct injury excess faded and conversion fell. For: injury went from RR 2.29 [9] to OR 0.93 [4], and conversion went from OR 1.61 [5] to OR 0.68 [7]. Against: no acute cholecystitis study measured surgeon experience [1], and the cohorts' calendar years overlap (2012–2021 vs 2020–2022), so the eras are not clean time steps.",
+          "H2, database and population differ by era: each era rests on a different source. These are an older mixed elective and urgent claims cohort [9], commercial and state administrative data [4, 5], and a manufacturer database [7]. For: the conversion flip is one study per era from two different databases. The dynamic model shows a robotic advantage in the latest era only when drift is allowed (estimate 1.20 at tau 0, 0.70 at tau 1). Against: the 2026 meta-analyses pooling several sources also show lower conversion (RR 0.61, OR 0.66) [1, 2].",
+          "H3, case selection: robotic surgery was offered to selected, often lower-acuity patients. For: robotic cases were 4% of one cohort [5], 1.6% of NIS emergency surgery [12] and 8.7% of the non-elective pool [2]. The graded cohort was 80.4% AAST grade I [8]. Against: the bile duct injury excess in older patients persisted on instrumental-variable analysis (RR 1.88) and in urgent or emergent cases (RR 1.87) [9], which selection alone does not explain.",
+          "H4, bailout substitution: robotic surgeons may convert less because they finish with a subtotal cholecystectomy instead. For: the same manufacturer-database cohort shows lower conversion (OR 0.68) and more subtotal cholecystectomy (OR 1.64) [7]. Subtotal was raised in both eras [5, 7]. Against: in the 384,617-patient cohort, conversion and subtotal were both higher [5], so substitution does not explain that cohort.",
+          "H5, small-study noise: the latest-era complication and stay signals come from cohorts of 322 and 592 patients [8, 13]. For: the complication OR 0.80 has a wide interval (0.38–1.68). Against: the conversion signal comes from a cohort with 3,151 robotic cases [7], so noise alone does not explain it.",
+          "H6, platform or instrument change over the decade (own inference, unresolved). No study reports platform generation, so it cannot be tested.",
+          "Leading choice: H2, with H4 as a partial mechanism for conversion. What looks like change over time is mostly change of source and case mix, and conversion and subtotal must be read together."
+        ],
+        "round": 2,
+        "speaker": "researcher",
+        "title": "Competing explanations tested"
+      },
+      {
+        "points": [
+          "Against H2 (leading): if the shift were only a change of database, the meta-analyses mixing sources should disagree. Yet the acute cholecystitis meta-analysis found lower conversion (RR 0.61) and similar bile duct injury (RR 0.97) [1].",
+          "Recency is not reliability. Those 2026 meta-analyses re-pool the same administrative cohorts that feed this table [1, 2, 3, 11, 15]. They add no new patients. Rated 6 of 7 studies at moderate to serious risk of bias [1]. The non-elective conversion benefit was lost in the low risk-of-bias subgroup [2]. They are markers, not independent confirmation.",
+          "Against the opposite (H1, real progress): no study counted robotic cases per surgeon [1]. The early harm signal was not a fluke of selection, because it held on instrumental-variable analysis (RR 1.88) and in urgent cases (RR 1.87) [9]. The latest era holds no bile duct injury figures at all, so 'fixed by experience' is untested where it matters most.",
+          "Duplicates and overlap: there are no linked reports of a single study here. But the large administrative cohorts [4, 5, 6, 9, 12] likely share patients and feed the same meta-analyses. The statewide emergency surgery cohort [10] may also share patients with the state inpatient data in [5] (own inference, unresolved).",
+          "Selected subsets: the bailout subgroup in [5] is small. The graded cohort had only 116 grade II–V patients [8]. The latest-era complication figure comes from 107 robotic patients [13].",
+          "Patient question, skeptic side: What will the patient live with over time, and does it persist? No study here follows patients beyond one year. Bile duct injury is the lifelong harm, and its latest-era data are missing. Fewer downstream interventions after a bailout [5] is a one-cohort observation, not a durable result."
+        ],
+        "round": 3,
+        "speaker": "skeptic",
+        "title": "Attack on the leading explanation and its opposite"
+      },
+      {
+        "points": [
+          "I concede that the meta-analyses cannot arbitrate, because they re-pool the cohorts behind H2. That is why I weight the single cohorts by source and do not treat 2026 publication as new evidence.",
+          "On H1, the skeptic is right that experience was never measured. The owner's lens says early observational signals often show real progress. But here the 'progress' signal and the 'harm' signal come from different populations, so I keep H1 unresolved rather than leading.",
+          "On H4, the strongest single fact is internal to one study: lower conversion and more subtotal cholecystectomy in the same patients [7]. Conversion therefore cannot be read alone as a quality gain.",
+          "On the patient question, I hold that a lower conversion rate does not tell the patient what they live with. A subtotal remnant, a drain (0.63% vs 0.48%, OR 1.66) [4] and the rare bile duct injury do. Today's data answer only the first year."
+        ],
+        "round": 4,
+        "speaker": "researcher",
+        "title": "Researcher answers"
+      },
+      {
+        "points": [
+          "H1 surgeon experience: unresolved. Decisive study: a prospective registry recording surgeon robotic case volume; none exists. The early harm signal comes from [9].",
+          "H2 database and population differ by era: hold. Decisive comparison: [5] vs [7], conflicting conversion from overlapping calendar years in different databases.",
+          "H3 case selection: partial. Decisive study: [9], where the excess persisted on instrumental-variable analysis, so selection explains some but not all.",
+          "H4 bailout substitution: partial. Decisive study: [7] (lower conversion with more subtotal). It is contradicted by [5], where both were higher.",
+          "H5 small-study noise: concede for complications and stay [8, 13]. Weakened for conversion, where [7] is large.",
+          "H6 platform change: unresolved (own inference). No study reports it.",
+          "Closing on the patient question: What will the patient live with over time, and does it persist? Neither side can answer beyond one year with these data, and that gap belongs in the verdict."
+        ],
+        "round": 5,
+        "speaker": "skeptic",
+        "title": "Closing: concede, hold or unresolved"
+      }
+    ],
+    "decisions": [
+      {
+        "choice": "Early laparoscopic cholecystectomy.",
+        "reason": "It is the guideline standard [14]. In grade I-dominated cohorts, robotic outcomes were similar but not better [8, 13], and pooled complications did not differ (RR 1.10) [1].",
+        "scenario": "Routine mild acute cholecystitis (AAST grade I or Tokyo grade I)"
+      },
+      {
+        "choice": "Laparoscopic cholecystectomy with a planned bailout strategy as the default. Robotic surgery only by an established robotic team.",
+        "reason": "Severe-grade data are thin: 116 grade II–V patients [8] and the gangrenous cases within a 322-patient cohort [13]. Robotic surgery was linked to more subtotal cholecystectomy [5, 7], but to fewer downstream interventions after a bailout [5].",
+        "scenario": "Difficult or severe cholecystitis (grade II–V, gangrenous)"
+      },
+      {
+        "choice": "Laparoscopic. Do not climb the robotic learning curve on acute cholecystitis.",
+        "reason": "Bile duct injury excesses in older and mixed data may reflect early learning-curve effects [3, 9]. Surgeon experience was not assessed in the acute studies [1].",
+        "scenario": "Surgeon early in a robotic series"
+      },
+      {
+        "choice": "Robotic cholecystectomy is a reasonable option under prospective audit of conversion, subtotal cholecystectomy and bile duct injury.",
+        "reason": "Pooled observational data show lower conversion (RR 0.61, OR 0.66) [1, 2]. The non-elective benefit was lost in the low risk-of-bias subgroup [2], and subtotal cholecystectomy rose [7].",
+        "scenario": "Experienced robotic surgeon or team past the learning curve"
+      },
+      {
+        "choice": "Laparoscopic unless an experienced robotic team is operating.",
+        "reason": "In patients aged 66–99, cholecystitis-subgroup bile duct injury was 0.5% robotic vs 0.2% laparoscopic (RR 2.29) [9]. Later acute-care data showed no excess (OR 0.93) [4].",
+        "scenario": "Older patient with cholecystitis"
+      }
+    ],
+    "eras": [
+      {
+        "era_id": "e-2011-2015",
+        "going_in": "Laparoscopic cholecystectomy was the established approach. Robotic cholecystectomy in acute disease was rare and unstudied.",
+        "knowledge_after": "An early bile duct injury harm signal with robotic surgery, from older and mixed populations. No acute-specific conversion or complication data.",
+        "showed": "Two database cohorts, placed in this era by midpoint, although their years run to 2019–2020. In an older-patient claims cohort, cholecystitis-subgroup bile duct injury was 0.5% vs 0.2% (RR 2.29), and the overall repair rate was 0.7% vs 0.2% (RR 3.16; 1.88 on instrumental-variable analysis) [9]. In non-elective NIS data, transfusion was lower with robotic surgery (adjusted OR 0.66) [12]."
+      },
+      {
+        "era_id": "e-2016-2020",
+        "going_in": "Robotic surgery might carry more bile duct injury, especially in early use.",
+        "knowledge_after": "Robotic surgery in acute care looked no safer, with more subtotal cholecystectomy, more major complications and conflicting conversion. The early bile duct injury excess was not seen in this acute-care data.",
+        "showed": "Four database cohorts. In the 384,617-patient cohort, conversion was higher (OR 1.61), subtotal cholecystectomy higher (OR 2.02), bailout 1.7% vs 1.4%, and bile duct injury 1.6% in both groups [5]. Emergent conversion was 1.7% vs 3.0%, shown as points only [6]. In the matched acute-care cohort, bile duct injury was 0.37% vs 0.39% (OR 0.93; Z -5.40 against the earlier era), major complications 8.37% vs 5.50% (OR 1.57), and median stay 3 vs 2 days [4]. The statewide emergency cohort gave no cholecystectomy-specific figures [10]."
+      },
+      {
+        "era_id": "e-2021-2026",
+        "going_in": "Robotic surgery was no better in acute care, with more bailouts and conflicting safety signals.",
+        "knowledge_after": "Possible lower conversion, offset by persistent extra subtotal cholecystectomy. Similar complications and operative time in small cohorts. Still no bile duct injury figures and no randomised trial. The 2026 meta-analyses re-pool earlier data [1, 2, 3].",
+        "showed": "Three cohorts; two have assumed treatment years [8, 13]. In the manufacturer database, conversion was lower (OR 0.68; Z -4.28 against the earlier era) but subtotal cholecystectomy was higher (OR 1.64) [7]. Early complications were 10.3% vs 12.6% (code-derived OR 0.80, not significant) and operative time 78 vs 77 min [13]. Crude grade II–V stay was 1 vs 2 days, but approach was not an independent predictor [8]. No bile duct injury figures fall in this era."
+      }
+    ],
+    "ledger": {
+      "label_mode": "treatment",
+      "rows": [
+        {
+          "cells": [
+            "No data",
+            "No: OR 1.61 in one cohort [5]; 1.7% vs 3.0% in another, points only [6]",
+            "Lower in one manufacturer-database cohort: OR 0.68 [7]"
+          ],
+          "question": "Less conversion to open?"
+        },
+        {
+          "cells": [
+            "No data",
+            "Yes: OR 2.02 [5]",
+            "Yes: OR 1.64 [7]"
+          ],
+          "question": "More subtotal cholecystectomy?"
+        },
+        {
+          "cells": [
+            "Yes in older mixed patients: RR 2.29 [9]",
+            "No: OR 0.93 [4]",
+            "No figures this era"
+          ],
+          "question": "More bile duct injury?"
+        },
+        {
+          "cells": [
+            "No data",
+            "Yes: OR 1.57 [4]",
+            "Not shown: OR 0.80, small cohort [13]"
+          ],
+          "question": "More major complications?"
+        },
+        {
+          "cells": [
+            "No data",
+            "No: 3 vs 2 days [4]",
+            "Observation only: 1 vs 2 days, not independent [8]"
+          ],
+          "question": "Shorter hospital stay?"
+        },
+        {
+          "cells": [
+            "No data",
+            "No data",
+            "Similar: 78 vs 77 min [13]"
+          ],
+          "question": "Shorter operation?"
+        },
+        {
+          "cells": [
+            "Fewer: OR 0.66, non-elective data [12]",
+            "No data",
+            "No data"
+          ],
+          "question": "Fewer transfusions?"
+        }
+      ]
+    },
+    "linked_note": "Conversion and bailout must be read together. In the manufacturer-database cohort, robotic surgery converted less (OR 0.68) but ended in subtotal cholecystectomy more often (OR 1.64) [7]. In the 384,617-patient cohort, both conversion (OR 1.61) and subtotal cholecystectomy (OR 2.02) were higher, with fewer cholecystostomy tubes (OR 0.42) and fewer downstream interventions after a bailout [5]. Major complications rose with longer stay and more drains in one acute-care cohort [4]. No study is reported twice, but the large administrative cohorts [4, 5, 6, 9, 12] likely share patients. The meta-analyses and reviews [1, 2, 3, 11, 15] re-pool those same cohorts, so they count as markers, not new patients.",
+    "opinion": {
+      "curve_reading": "Robotic cholecystectomy for acute cholecystitis sits at IDEAL Exploration, short of Assessment: no randomised trial exists, and all data are retrospective databases or single-centre cohorts. Robotic cases are a small minority (4% [5], 1.6% [12], 8.7% [2]). Surgeon experience was never reported [1], so many operations likely came from surgeons early in their robotic curve. At this stage an observational signal is not weak by default. Here, however, the signals conflict, and the more favourable ones come from the most selected or least independent sources [2, 7].",
+      "did_not_improve": "Subtotal cholecystectomy stayed more frequent with robotic surgery in both eras (OR 2.02, then 1.64) [5, 7]. Bile duct injury has no latest-era figures, so its improvement is unconfirmed. Pooled complications (RR 1.10) and 30-day mortality (OR 1.28) showed no gain [1]. Operative time was not shorter (78 vs 77 min) [13]. Severity grading, surgeon experience and follow-up beyond one year are still missing. No randomised trial appeared.",
+      "verdict": "Robotic cholecystectomy is not shown to be better than laparoscopic cholecystectomy for acute cholecystitis. Certainty is very low. The early bile duct injury excess is not seen in later acute-care data, and conversion may now be lower, but each of these rests on one study per era. The persistent finding is more subtotal cholecystectomy.",
+      "why": "My view is that what looks like change over time is mostly change of database and case mix (H2). Part of the conversion gain likely reflects robotic surgeons choosing subtotal cholecystectomy over conversion (H4) [7]. The competing reading is real progress as robotic teams pass their learning curve (H1), consistent with the drop from RR 2.29 to OR 0.93 for bile duct injury [9, 4]. Untested experience data keep that reading open."
+    },
+    "scoreboard": [
+      {
+        "against": "Experience never measured [1]; cohort years overlap; no latest-era bile duct injury figures",
+        "code": "H1",
+        "for": "Bile duct injury RR 2.29 then OR 0.93 [9, 4]; conversion OR 1.61 then 0.68 [5, 7]",
+        "name": "Surgeon experience past the learning curve",
+        "status": "unresolved"
+      },
+      {
+        "against": "Meta-analyses mixing sources also show lower conversion [1, 2], though they re-pool the same cohorts",
+        "code": "H2",
+        "for": "One study per era from different databases; the latest-era advantage appears only when model drift is allowed",
+        "name": "Database and population differ by era",
+        "status": "leading"
+      },
+      {
+        "against": "Bile duct injury excess persisted on instrumental-variable analysis (RR 1.88) and in urgent cases (RR 1.87) [9]",
+        "code": "H3",
+        "for": "Robotic cases a small minority [2, 5, 12]; graded cohort 80.4% grade I [8]",
+        "name": "Case selection",
+        "status": "partial"
+      },
+      {
+        "against": "In [5], conversion and subtotal were both higher",
+        "code": "H4",
+        "for": "Lower conversion with more subtotal in the same cohort [7]; subtotal raised in both eras [5, 7]",
+        "name": "Bailout substitution for conversion",
+        "status": "partial"
+      },
+      {
+        "against": "The conversion signal comes from a cohort with 3,151 robotic cases [7]",
+        "code": "H5",
+        "for": "Complication and stay signals from cohorts of 322 and 592 patients, with wide intervals [8, 13]",
+        "name": "Small-study noise",
+        "status": "weakened"
+      },
+      {
+        "against": "No study reports platform or instrument generation",
+        "code": "H6",
+        "for": "A decade-long span of data (own inference, unresolved)",
+        "name": "Platform or instrument change",
+        "status": "unresolved"
+      }
+    ],
+    "settle": [
+      "A multicentre randomised trial of robotic vs laparoscopic cholecystectomy in acute cholecystitis, stratified by Tokyo or AAST grade, reporting bile duct injury, conversion and subtotal cholecystectomy together.",
+      "A prospective registry with clinical severity grading and each surgeon's robotic case volume, to test the learning-curve explanation.",
+      "An independent, non-manufacturer cohort that does not overlap the existing administrative databases.",
+      "Follow-up beyond one year after subtotal cholecystectomy, comparing robotic and laparoscopic, for remnant-related problems and re-intervention.",
+      "An individual-patient analysis that removes duplicate patients across the large databases before pooling."
+    ],
+    "topic": "Robotic vs laparoscopic cholecystectomy for acute cholecystitis",
+    "triggers": [
+      {
+        "if": "The next independent, non-manufacturer cohort with severity grading shows lower conversion without more subtotal cholecystectomy",
+        "then": "Conversion would become a genuine technical gain rather than bailout substitution, and the case for robotic surgery in difficult cases would strengthen."
+      },
+      {
+        "if": "Latest-era cohorts report bile duct injury above laparoscopic rates",
+        "then": "The early harm signal would be revived, and robotic surgery would be discouraged in acute disease outside expert teams."
+      },
+      {
+        "if": "Studies stratified by surgeon robotic volume show bile duct injury and conversion falling with experience",
+        "then": "H1 would gain support, and robotic surgery would be restricted to surgeons past a defined case threshold."
+      },
+      {
+        "if": "A randomised trial stratified by severity shows equivalent bile duct injury and bailout rates",
+        "then": "Robotic surgery would become an accepted alternative for experienced teams, with laparoscopic still the default."
+      },
+      {
+        "if": "Long-term follow-up shows more remnant-related problems after robotic subtotal cholecystectomy",
+        "then": "The persistent subtotal excess would become a reason to prefer laparoscopic surgery with conversion when needed."
+      }
+    ]
+  },
+  "fixture": "cholecystitis",
+  "flags": {
+    "cost_country": [],
+    "derived": [],
+    "glance_stronger": [],
+    "meta_called_trial": [],
+    "not_traced": [],
+    "shape": [],
+    "unknown_ids": [],
+    "unknown_references": []
+  },
+  "usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 49215,
+    "output_tokens": 14093
+  }
+}
