@@ -59,7 +59,7 @@ use crate::temporal::{StudyKind, TemporalInput, TemporalTable, build};
 /// The spend purpose of the job's reservation.
 pub const PURPOSE: &str = "temporal";
 /// A pending row older than this is failed by recovery (the job takes at
-/// most its 180 s time limit plus its charge).
+/// most its 300 s time limit plus its charge).
 pub const STALE_AFTER_MIN: i32 = 10;
 /// The job skips under this many independent primary studies.
 pub const MIN_PRIMARY: usize = 2;

@@ -858,7 +858,7 @@ fn the_reserve_on_the_three_fixtures_is_bounded() {
             job::primary_count(&t)
         );
         assert!(job::primary_count(&t) >= 2, "{name} must not skip");
-        assert!((1_000..=4_500).contains(&hold), "{name}: {hold}");
+        assert!((3_000..=6_500).contains(&hold), "{name}: {hold}");
     }
     // The ceiling: both parts at their caps.
     let worst = writer::SYSTEM.len() + writer::MAX_ANSWER_BYTES + writer::MAX_TABLE_BYTES + 6_000;
@@ -869,7 +869,7 @@ fn the_reserve_on_the_three_fixtures_is_bounded() {
         )
         .unwrap();
     println!("ceiling: about {worst} bytes, {cap} paise");
-    assert!(cap <= 7_000, "{cap}");
+    assert!(cap <= 8_000, "{cap}");
 }
 
 /// The smoke's request (`temporal_writer::request`, emitted offline for the

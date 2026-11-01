@@ -566,9 +566,11 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
   short money ends the row `failed` with a reason, and nothing else. A `pending` row older than
   10 minutes is failed by recovery and its reservation released; a recovery error is logged and
   retried at the next sweep, never failing run recovery.
-- **One attempt, 180 s.** The writer has its own Claude client: one HTTP attempt (no retry on a
+- **One attempt, 300 s.** The writer has its own Claude client: one HTTP attempt (no retry on a
   timeout, an overload or a 5xx, so a slow reply never starts a second full Opus generation) with a
-  180 s per-attempt timeout, which is also the job's time limit. Every other step keeps the shared
+  300 s per-attempt timeout, which is also the job's time limit (owner, 1 Nov: high effort and 20,000
+  `max_tokens`, after the first smoke at medium effort and 9,000 took 82–86 s per board and was cut
+  off at `max_tokens` on all three). Every other step keeps the shared
   client (120 s per attempt, with retries).
 - **Spend rows.** The reservation's purpose is `temporal`. The charge row's purpose reads
   `run:<request_id>`, where `request_id` is `run_temporal.request_id` (the job's own id, never the
@@ -583,7 +585,7 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
 | Variable | Required? | What it is | Default |
 |---|---|---|---|
 | `TEMPORAL` | no | `off` or `on`. Deploy dark with `off`, run the owner's probe and smoke, then set `on`. With `off` no job runs and nothing changes. | `off` |
-| `TEMPORAL_MAX_TOKENS` | no | `max_tokens` of the writer's call, 2000–32000 (the test boards ran 5–7k output tokens) | `9000` |
+| `TEMPORAL_MAX_TOKENS` | no | `max_tokens` of the writer's call, 2000–32000. Thinking (high effort) counts toward it; 9000 cut every board off in the first smoke | `20000` |
 
 Both are checked like `COMPLETENESS` (only the ends trimmed) before the build, and the app refuses
 any other value at startup. The `temporal` model, default or set, must be priced in `MODEL_PRICES`.

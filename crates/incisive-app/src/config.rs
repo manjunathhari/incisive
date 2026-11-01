@@ -53,7 +53,7 @@ pub struct Config {
     pub completeness: bool,
     /// Temporal T2/T3: the expert writer after a saved Full answer
     /// (`TEMPORAL`: `off`, the default, or `on`; `TEMPORAL_MAX_TOKENS`
-    /// optional, 2,000–32,000, default 9,000).
+    /// optional, 2,000–32,000, default 20,000).
     pub temporal: crate::agent::temporal_writer::TemporalSettings,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
@@ -911,7 +911,7 @@ mod tests {
     fn temporal_switch() {
         let c = Config::from_lookup(lookup(&full())).unwrap();
         assert!(!c.temporal.on, "off by default");
-        assert_eq!(c.temporal.max_tokens, 9_000);
+        assert_eq!(c.temporal.max_tokens, 20_000);
         assert_eq!(c.agent_models.temporal, "claude-opus-5-5");
         for (v, want) in [("on", true), (" on ", true), ("off", false), ("  ", false)] {
             let mut pairs = full();

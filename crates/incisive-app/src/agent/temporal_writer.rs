@@ -42,15 +42,17 @@ use crate::temporal::{StudyKind, TemporalInput, TemporalTable};
 /// The step name on its Claude call (not a finishing step: the job's own
 /// budget has no finish reserve).
 pub const STEP: &str = "temporal";
-/// Default `max_tokens` of the call (`TEMPORAL_MAX_TOKENS` changes it). The
-/// test boards ran 5–7k output tokens.
-pub const DEFAULT_MAX_TOKENS: u32 = 9_000;
+/// Default `max_tokens` of the call (`TEMPORAL_MAX_TOKENS` changes it).
+/// Thinking counts toward it: the owner's first smoke at 9,000 (medium
+/// effort) was cut off on all three boards after 2.2–4k thinking tokens, so
+/// the owner set 20,000 with high effort (1 Nov).
+pub const DEFAULT_MAX_TOKENS: u32 = 20_000;
 /// The accepted range of `TEMPORAL_MAX_TOKENS`.
 pub const MAX_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 2_000..=32_000;
 /// The writer's own client's per-attempt timeout ([`client`]): one HTTP
 /// attempt, no retry, so a slow reply never starts a second full Opus
 /// generation with one estimate booked.
-pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(180);
+pub const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// The job gives the call up after this long (its charge is still booked
 /// when it returns). Never longer than [`ATTEMPT_TIMEOUT`].
 pub const TIME_LIMIT: Duration = ATTEMPT_TIMEOUT;
@@ -66,9 +68,9 @@ pub fn client(key: secrecy::SecretString) -> claude_client::Client {
             ..claude_client::RetryPolicy::default()
         })
 }
-/// The call's effort: thinking counts toward `max_tokens`, and medium keeps
-/// it short enough to leave the board its room.
-pub const EFFORT: Effort = Effort::Medium;
+/// The call's effort (owner, 1 Nov): high, with [`DEFAULT_MAX_TOKENS`] large
+/// enough for its thinking and the whole board.
+pub const EFFORT: Effort = Effort::High;
 
 /// Bytes of the answer's text shown.
 pub const MAX_ANSWER_BYTES: usize = 60_000;
@@ -1609,7 +1611,9 @@ mark if you use them",
     #[test]
     fn the_writer_client_is_one_attempt_within_the_timeout() {
         assert!(TIME_LIMIT <= ATTEMPT_TIMEOUT);
-        assert_eq!(ATTEMPT_TIMEOUT, Duration::from_secs(180));
+        assert_eq!(ATTEMPT_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(TIME_LIMIT, Duration::from_secs(300));
+        assert_eq!((DEFAULT_MAX_TOKENS, EFFORT), (20_000, Effort::High));
         let c = client(secrecy::SecretString::from("sk-test".to_string()));
         assert!(format!("{c:?}").contains("[redacted]"));
     }
