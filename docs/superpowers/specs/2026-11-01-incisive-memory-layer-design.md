@@ -28,11 +28,12 @@ It also lets a repeat question open a stored answer for free, and gives the owne
 | D7 | Expert layer: owner verdict (adopt / selective / not yet) plus a note, per topic, dated and versioned. |
 | D8 | Full-text and meaning-search both in v1. |
 | D9 | "Update" in v1 is a normal Full run; the engine stays frozen. A date-limited search is a later, separately approved engine change. |
+| D10 | Every Claude-written answer and Expert Opinion is kept in full. The owner can add an owner-reviewed version in his own words, stored separately. Every stored text carries its author (`claude` or `owner`) so a training set can be extracted cleanly. Claude-written text is used for retrieval (memory, gate, future chat), not as a training target, unless Anthropic gives written permission. |
 | A1/A2 | Embeddings: `embeddinggemma` (768 dimensions) on the owner's Hostinger VPS (Mumbai), via Ollama behind Traefik: `https://ollama-s9os.srv2117610.hstgr.cloud/api/embed`, basic auth, only `/api/embed` and `/api/chat` routed. Verified 1 Nov 2026. |
 
 ## 3. Scope
 
-**In v1:** Full runs only (only they have an Expert Opinion). Topics, evidence records, ledger, gate on the Ask page, owner Topics area (list, topic page, verdicts, merge/split), full-text + meaning search, backfill of existing Full runs that have a temporal row.
+**In v1:** Full runs only (only they have an Expert Opinion). Topics, evidence records, ledger, gate on the Ask page, owner Topics area (list, topic page, verdicts, owner-reviewed versions, merge/split), full-text + meaning search, backfill of existing Full runs that have a temporal row.
 
 **Not in v1:** Quick runs; date-limited "update" search (D9); "Ask this evidence" chat; any Gemma training; per-surgeon private notes; changes to the run engine, its prompts, schemas, money or time logic.
 
@@ -72,6 +73,16 @@ All tables in schema `incisive`. No existing table changes.
 **`topic_verdicts`**: the expert layer, append-only
 - `id`, `topic_id`, `verdict TEXT CHECK IN ('adopt','selective','not_yet')`, `note TEXT`, `based_on_record_id BIGINT NULL`, `author_user_id BIGINT`, `created_at`
 - The current verdict is the newest row. Nothing is updated or deleted.
+
+**`owner_revisions`**: owner-reviewed versions (D10), append-only
+- `id BIGSERIAL PK`, `record_id BIGINT NOT NULL REFERENCES evidence_records(id)`
+- `part TEXT CHECK IN ('answer_bottom_line','answer_section','opinion','opinion_part')`, `part_key TEXT NULL` (which section or part, e.g. an outcome name or opinion part number)
+- `claude_text TEXT NOT NULL` (the exact Claude passage being revised, copied at edit time)
+- `owner_text TEXT NOT NULL` (the owner's own words), `author TEXT NOT NULL DEFAULT 'owner'`
+- `author_user_id BIGINT`, `created_at`; a newer row for the same part supersedes the older, nothing is overwritten.
+- The stored answer view shows the newest owner version where one exists, labelled "Reviewed by the owner", with the original Claude text one tap away.
+
+**Authorship:** every stored text is tagged by source. Claude-written: `evidence_records.answer`, `board`; owner-written: `topic_verdicts`, `owner_revisions.owner_text`; code-made: `era_table`, ledger rows. A training export (later) reads owner-written text only, unless written permission from Anthropic is recorded.
 
 **`topic_changes`**: merge/split log
 - `id`, `kind TEXT CHECK IN ('merge','split','rename','undo')`, `payload JSONB` (enough to reverse it), `author_user_id`, `created_at`
@@ -158,7 +169,7 @@ Read in `config.rs` with the existing strict style:
 | M1 | `extract` + `matcher` (pure) with fixture tests | No |
 | M2 | `store` + `job` + backfill of existing runs | No |
 | M3 | `embed` client + Secret Manager wiring + embedding sweep | No |
-| M4 | Owner Topics area (list, topic page, verdicts, merge/split) | Owner only |
+| M4 | Owner Topics area (list, topic page, verdicts, owner-reviewed versions, merge/split) | Owner only |
 | M5 | Gate on the Ask page + stored-answer view | Everyone, when on |
 | M6 | Gate calibration on the gold set, threshold defaults | — |
 
@@ -169,4 +180,4 @@ Each stage is its own PR, behind `MEMORY=off` until M6 is accepted.
 - Sign-up notice wording for D1 (owner to approve before inviting users).
 - Date-limited "update" search (D9), as a separate engine change.
 - "Ask this evidence" chat on Gemma, reading only stored records.
-- Training-data export of owner verdicts + notes (human-written only; Claude-written answers are not training targets under Anthropic's terms).
+- Training-data export of owner-written text (verdicts, notes, owner revisions). Claude-written answers are not training targets under Anthropic's terms; the owner may request written permission from Anthropic for a narrow surgical explanation model, and if granted, the export can include reviewed Claude text.

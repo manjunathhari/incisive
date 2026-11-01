@@ -14,3 +14,4 @@
 - **D8 Search (2026-11-01, owner):** full-text and meaning-search (embeddings + pgvector) both in v1.
 - **D9 Update in v1 (2026-11-01, owner chose A):** "Update with newer evidence" runs a normal Full run; the engine stays frozen. The new record joins the topic and the ledger merges studies (duplicates by PMID counted once). Date-limited search deferred to its own approved engine change.
 - **Design Section 1 (tables + flows) accepted 2026-11-01.**
+- **D10 Authorship and training (2026-11-01, owner agreed):** keep all Claude-written answers and Expert Opinions in full; add owner-reviewed versions in his own words (stored separately); tag every text by author. Claude text is for retrieval, not training targets, unless Anthropic grants written permission (owner may ask).
