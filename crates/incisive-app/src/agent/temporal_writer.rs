@@ -716,6 +716,29 @@ static STRONG: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("strong pattern")
 });
+/// A negation that scopes over the rest of its clause ("has not been
+/// shown to give less pain, fewer complications or better …").
+static CLAUSE_NEGATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:not|no|never|nor|without|unproven|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|doesn't|don't|didn't|won't|neither)\b",
+    )
+    .expect("clause negation pattern")
+});
+/// Where a clause ends: a sentence or clause stop (`.` `;` `:` `!` `?`
+/// followed by a space or the end; a decimal point never matches) or a
+/// contrasting conjunction that starts a new clause.
+static CLAUSE_BREAK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)[.;:!?](?:\s|$)|\b(?:but|however|whereas|although|though)\b")
+        .expect("clause break pattern")
+});
+
+/// Whether the strong word at `start` is negated earlier in its clause.
+fn negated_in_clause(t: &str, start: usize) -> bool {
+    let head = &t[..start];
+    let from = CLAUSE_BREAK.find_iter(head).last().map_or(0, |m| m.end());
+    CLAUSE_NEGATION.is_match(&head[from..])
+}
+
 static NEGATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:not|no|never|nor|without|neither|isn't|aren't|hasn't|haven't)\b")
         .expect("negation pattern")
@@ -1025,8 +1048,10 @@ pub fn check(board: &ExpertBoardV1, cx: &CheckContext<'_>) -> BoardFlags {
     f
 }
 
-/// Strong words in the At a glance lines (not negated within the three
-/// words before them) while the opinion hedges.
+/// Strong words in the At a glance lines while the opinion hedges. A word
+/// is not flagged when a negation occurs earlier in its clause or sentence
+/// ("has not been shown to give … fewer complications … or better …",
+/// "is not shown to be better"), or right after it ("should not").
 pub fn glance_flags(board: &ExpertBoardV1) -> Vec<Flag> {
     let o = &board.opinion;
     let opinion = format!(
@@ -1043,9 +1068,8 @@ pub fn glance_flags(board: &ExpertBoardV1) -> Vec<Flag> {
         ("at_a_glance.today", &g.today),
     ] {
         for m in STRONG.find_iter(t) {
-            let before: Vec<&str> = t[..m.start()].split_whitespace().rev().take(3).collect();
             let after = t[m.end()..].split_whitespace().next().unwrap_or("");
-            if before.iter().any(|w| NEGATION.is_match(w)) || NEGATION.is_match(after) {
+            if negated_in_clause(t, m.start()) || NEGATION.is_match(after) {
                 continue;
             }
             out.push(Flag {
@@ -1616,5 +1640,67 @@ mark if you use them",
         assert_eq!((DEFAULT_MAX_TOKENS, EFFORT), (20_000, Effort::High));
         let c = client(secrecy::SecretString::from("sk-test".to_string()));
         assert!(format!("{c:?}").contains("[redacted]"));
+    }
+
+    /// Owner smoke (1 Nov): a strong word negated earlier in its clause or
+    /// sentence is not flagged; the two real At a glance sentences pass, and
+    /// an unnegated claim against a hedging opinion still flags.
+    #[test]
+    fn negation_earlier_in_the_clause_is_respected() {
+        let (_, t) = hernia();
+        let hedged = |expert: &str| {
+            let mut b = clean(&t);
+            b.opinion = Opinion {
+                verdict: "Low certainty.".into(),
+                ..Opinion::default()
+            };
+            b.at_a_glance.expert = expert.into();
+            b.at_a_glance.today = String::new();
+            glance_flags(&b)
+                .into_iter()
+                .map(|f| f.text)
+                .collect::<Vec<_>>()
+        };
+        // The two real sentences from the smoke: no flag.
+        assert!(
+            hedged(
+                "Robotic repair has not been shown to give patients less pain, fewer complications, \
+                 fewer recurrences or better quality of life than laparoscopic repair."
+            )
+            .is_empty()
+        );
+        assert!(
+            hedged(
+                "Robotic cholecystectomy is not shown to be better than laparoscopic cholecystectomy \
+                 for acute cholecystitis, and certainty is very low."
+            )
+            .is_empty()
+        );
+        // Positive control.
+        assert_eq!(hedged("Robotic repair reduces recurrence."), ["reduces"]);
+        // Each listed negation scopes over its clause.
+        for neg in [
+            "Robotic is not better",
+            "There is no evidence it is better",
+            "It has never proved better",
+            "Neither safer nor better",
+            "Without proof it is better",
+            "Unproven that it is better",
+            "Trials cannot show it is better",
+        ] {
+            assert!(hedged(neg).is_empty(), "{neg}");
+        }
+        // The scope ends at the clause or sentence: the next claim flags.
+        assert_eq!(
+            hedged("Pain is not different. Robotic gives fewer complications."),
+            ["fewer"]
+        );
+        assert_eq!(
+            hedged("Pain is not different, but robotic is superior for time."),
+            ["superior"]
+        );
+        assert_eq!(hedged("No pain gain; robotic is better."), ["better"]);
+        // A decimal point is not a sentence end.
+        assert!(hedged("Not shown at OR 0.57 to be better.").is_empty());
     }
 }
