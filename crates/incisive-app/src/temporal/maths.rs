@@ -8,11 +8,67 @@ use serde::{Deserialize, Serialize};
 
 /// 1.959964: the two-sided 95% normal quantile.
 pub const Z95: f64 = 1.959_964;
-/// The drift scales of the dynamic model.
+/// The drift scales of the dynamic model, in units of [`Scale::tau_unit`]
+/// (log units for ratios; the median row SE for differences).
 pub const TAUS: [f64; 4] = [0.0, 0.25, 0.5, 1.0];
-/// The dynamic model's starting prior: N(0, 1²) on the pooling scale.
+/// The dynamic model's starting prior: N(0, PRIOR_SD²) on the log scale
+/// for ratios. Differences use [`Scale`] instead (raw units).
 pub const PRIOR_MEAN: f64 = 0.0;
 pub const PRIOR_SD: f64 = 1.0;
+/// For differences: the prior SD is this many median row SEs.
+pub const DIFF_PRIOR_SES: f64 = 10.0;
+
+/// The dynamic model's scale for one group.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Scale {
+    pub prior_sd: f64,
+    /// τ = TAUS × this.
+    pub tau_unit: f64,
+}
+
+impl Scale {
+    /// Ratios: N(0, 1²) and τ in log units. Differences: prior SD = 10 ×
+    /// the median row SE and τ in median SEs, so the prior is weak in the
+    /// data's own units. `None` for differences with no usable SE.
+    pub fn for_family(ratio: bool, ses: &[f64]) -> Option<Scale> {
+        if ratio {
+            return Some(Scale {
+                prior_sd: PRIOR_SD,
+                tau_unit: 1.0,
+            });
+        }
+        let m = median(ses.iter().copied().filter(|s| s.is_finite() && *s > 0.0))?;
+        Some(Scale {
+            prior_sd: DIFF_PRIOR_SES * m,
+            tau_unit: m,
+        })
+    }
+}
+
+/// The median of `xs` (`None` when empty).
+pub fn median(xs: impl IntoIterator<Item = f64>) -> Option<f64> {
+    let mut v: Vec<f64> = xs.into_iter().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    })
+}
+
+/// A finite stand-in for a non-finite result (NaN → 0, ±∞ → ±f64::MAX), so
+/// every number the table stores serialises and reads back.
+pub fn finite(x: f64) -> f64 {
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(-f64::MAX, f64::MAX)
+    }
+}
 /// A typical within-study SE for a large study, added to the predictive
 /// range (a log-scale constant; negligible for differences).
 pub const PRED_SE: f64 = 0.15;
@@ -89,13 +145,19 @@ impl Posterior {
     }
 }
 
-/// The local-level Kalman filter θ_k ~ N(θ_{k−1}, τ²), from N(0, 1²), over
-/// era steps (`None`: no data that era; the drift is still added). Returns
-/// the posterior after each step and the log-likelihood of the data.
-pub fn kalman(steps: &[Option<Obs>], tau: f64) -> (Vec<Posterior>, f64) {
+/// The local-level Kalman filter θ_k ~ N(θ_{k−1}, τ²), from N(0,
+/// prior_sd²), over era steps (`None`: no data that era; the drift is
+/// still added). Returns the posterior after each step and the
+/// log-likelihood of the data.
+pub fn kalman(steps: &[Option<Obs>], tau: f64, prior_sd: f64) -> (Vec<Posterior>, f64) {
     let tau2 = if tau.is_finite() { tau * tau } else { 0.0 };
+    let prior_sd = if prior_sd.is_finite() && prior_sd > 0.0 {
+        prior_sd
+    } else {
+        PRIOR_SD
+    };
     let mut m = PRIOR_MEAN;
-    let mut v = PRIOR_SD * PRIOR_SD;
+    let mut v = prior_sd * prior_sd;
     let mut ll = 0.0;
     let mut out = Vec::with_capacity(steps.len());
     for (i, o) in steps.iter().enumerate() {
@@ -272,8 +334,8 @@ mod tests {
             Some(Obs { y: 0.1, se: 0.4 }),
         ];
         let rev: Vec<Option<Obs>> = obs.iter().rev().copied().collect();
-        let (a, lla) = kalman(&obs, 0.0);
-        let (b, llb) = kalman(&rev, 0.0);
+        let (a, lla) = kalman(&obs, 0.0, PRIOR_SD);
+        let (b, llb) = kalman(&rev, 0.0, PRIOR_SD);
         let (fa, fb) = (a.last().unwrap(), b.last().unwrap());
         assert!(close(fa.mean, fb.mean, 1e-12) && close(fa.var, fb.var, 1e-12));
         assert!(close(lla, llb, 1e-9), "{lla} {llb}");
@@ -289,7 +351,7 @@ mod tests {
 
     #[test]
     fn kalman_drift_and_empty_steps() {
-        let (p, ll) = kalman(&[None, None], 0.5);
+        let (p, ll) = kalman(&[None, None], 0.5, PRIOR_SD);
         assert_eq!(
             p[0],
             Posterior {
@@ -299,15 +361,15 @@ mod tests {
         );
         assert!(close(p[1].var, 1.25, 1e-12));
         assert_eq!(ll, 0.0);
-        let (p, _) = kalman(&[], 0.5);
+        let (p, _) = kalman(&[], 0.5, PRIOR_SD);
         assert!(p.is_empty());
         // With drift, the latest era counts more.
         let obs = [
             Some(Obs { y: 1.0, se: 0.1 }),
             Some(Obs { y: -1.0, se: 0.1 }),
         ];
-        let (p0, _) = kalman(&obs, 0.0);
-        let (p1, _) = kalman(&obs, 1.0);
+        let (p0, _) = kalman(&obs, 0.0, PRIOR_SD);
+        let (p1, _) = kalman(&obs, 1.0, PRIOR_SD);
         assert!(p1[1].mean < p0[1].mean);
     }
 
@@ -363,5 +425,17 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn scale_for_differences_is_in_data_units() {
+        let r = Scale::for_family(true, &[]).unwrap();
+        assert_eq!((r.prior_sd, r.tau_unit), (PRIOR_SD, 1.0));
+        let d = Scale::for_family(false, &[8.0, 2.0, 4.0]).unwrap();
+        assert_eq!((d.prior_sd, d.tau_unit), (40.0, 4.0));
+        assert!(Scale::for_family(false, &[]).is_none());
+        assert_eq!(median([1.0, 3.0, 2.0, 4.0]), Some(2.5));
+        assert_eq!(finite(f64::INFINITY), f64::MAX);
+        assert_eq!(finite(f64::NAN), 0.0);
     }
 }

@@ -19,9 +19,10 @@
 //! 5. **Effect rows**: measure, direction (turned round to intervention
 //!    first), pairs of arm values, counts derived only from known arm
 //!    sizes, scale and SE.
-//! 6. **Maths** per outcome × measure family ([`maths`]): era pools, Z
-//!    against the earlier eras, a Kalman dynamic model per τ, DL random
-//!    effects and the predictive range.
+//! 6. **Maths** per outcome × comparison × measure family ([`maths`]): era
+//!    pools, Z against the fixed pool of the earlier eras, a Kalman dynamic
+//!    model per τ (prior and τ in log units for ratios, in median-SE units
+//!    for differences), DL random effects and the predictive range.
 //! 7. **Trajectory label** ([`Label`], precedence in [`LABEL_PRECEDENCE`]).
 //!
 //! Every assumption made is written to [`TemporalTable::notes`].
@@ -49,6 +50,12 @@ pub const TEMPORAL_VERSION: u32 = 1;
 
 /// |Z| at or above which an era counts as a shift.
 pub const Z_SHIFT: f64 = 2.0;
+
+/// The years the table accepts (publication, treatment, run).
+pub const YEARS: std::ops::RangeInclusive<i32> = 1900..=2100;
+
+/// The smallest relative drop that counts as a narrowing gap.
+pub const NARROWING_MIN_DROP: f64 = 0.25;
 
 // ---- Output types --------------------------------------------------------
 
@@ -183,12 +190,13 @@ pub struct Est {
 impl Est {
     fn new(o: Obs, family: Family) -> Est {
         let n = |x| effects::natural(x, family);
+        let f = maths::finite;
         Est {
-            y: o.y,
-            se: o.se,
-            est: n(o.y),
-            lo: n(o.y - Z95 * o.se),
-            hi: n(o.y + Z95 * o.se),
+            y: f(o.y),
+            se: f(o.se),
+            est: f(n(o.y)),
+            lo: f(n(o.y - Z95 * o.se)),
+            hi: f(n(o.y + Z95 * o.se)),
         }
     }
     /// The 95% CI excludes the null.
@@ -219,16 +227,19 @@ pub struct EraCell {
     /// The fixed-effect pool of the rows with an SE.
     pub pooled: Option<Est>,
     /// The mean of the rows with no SE (on the pooling scale, shown on the
-    /// natural scale); never pooled.
+    /// natural scale); never pooled. `None` when the points sit on both
+    /// sides of the null (`split`).
     pub point_mean: Option<f64>,
+    /// The era's points (rows with no SE) sit on both sides of the null:
+    /// they are never averaged into one value.
+    #[serde(default)]
+    pub split: bool,
     /// `pooled.est` if any, else `point_mean`.
     pub estimate: Option<f64>,
-    /// (era pool − earlier posterior mean) / sqrt(se² + earlier posterior
-    /// variance), against the τ = 0 posterior before this era (the first
-    /// pooled era is compared with the N(0, 1²) prior).
+    /// (era pool − μ) / sqrt(se² + σ²), where μ and σ² are the fixed-effect
+    /// pool of every earlier era's rows with an SE. `None` for the first
+    /// era with a pool.
     pub z: Option<f64>,
-    /// An earlier era has a pool: only then does `z` count as a shift.
-    pub after_earlier: bool,
     pub favours: Option<bool>,
     /// The pooled CI excludes the null (`None`: no pool).
     pub significant: Option<bool>,
@@ -252,6 +263,9 @@ pub struct DynamicEra {
 /// The dynamic model at one τ.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicFit {
+    /// The grid value (0, 0.25, 0.5, 1).
+    pub tau_grid: f64,
+    /// The drift SD on the pooling scale (grid × `tau_unit`).
     pub tau: f64,
     pub log_likelihood: f64,
     pub eras: Vec<DynamicEra>,
@@ -290,31 +304,37 @@ pub struct Predictive {
 pub enum Label {
     /// No primary row with an estimate.
     NotAssessable,
-    /// The earliest era with a pool is unfavourable and significant; a
-    /// later era's pool is null (its CI includes the null).
+    /// The earliest era with a pool is unfavourable and significant; the
+    /// latest pooled era includes the null; no era after the first is
+    /// significantly unfavourable.
     EarlyHarmNotSeenLater,
-    /// Two consecutive pooled eras sit on opposite sides of the null and
-    /// the later one has |Z| ≥ 2.
+    /// Two consecutive pooled eras sit on opposite sides of the null, the
+    /// earlier one's CI excludes the null, and the later one has |Z| ≥ 2.
     DirectionFlipped,
     /// The latest pooled era has |Z| ≥ 2 toward the intervention.
     ShiftingToward,
     /// The latest pooled era has |Z| ≥ 2 against the intervention.
     ShiftingAgainst,
-    /// A difference measure whose absolute era estimate shrinks from era
-    /// to era (never grows), ending smaller than it began.
+    /// A difference measure whose era values are all on one side of the
+    /// null (no split era), never grow in size from era to era, and end at
+    /// least 25% smaller than they began.
     GapNarrowing,
-    /// At least two eras with data, at least one Z after an earlier pooled
-    /// era, every such |Z| < 2, and every era estimate on one side.
+    /// At least two eras with data and no split era, at least one Z (an era
+    /// pool against the earlier eras' pool), every |Z| < 2, and every era
+    /// estimate on one side.
     Stable,
-    /// Unfavourable in every era with data and at the latest durability
-    /// point, over at least two time points.
+    /// Unfavourable in every era with data (no split era) and at the latest
+    /// durability point, over at least two time points.
     PersistentTradeoff,
-    /// The run's era is empty while an earlier era has data.
+    /// The run's era has no rows while an earlier era has data.
     NoRecentData,
     /// Only one era has data.
     OneEraOnly,
     /// None of the above.
     Inconclusive,
+    /// A flag, never a label: no era of the group has a pooled CI, so
+    /// every era value is a point without uncertainty.
+    PointsOnly,
 }
 
 /// The label precedence: the first rule that holds wins.
@@ -341,14 +361,20 @@ pub const LABEL_PRECEDENCE: [Label; 11] = [
     Label::Inconclusive,
 ];
 
-/// One outcome × measure family × unit × polarity.
+/// One outcome × comparison × measure family × unit × polarity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupResult {
-    /// `g-<outcome>-<family>-<unit>-<polarity>`, e.g. `g-o0-ratio--higher_worse`.
+    /// `g-<outcome>-<intervention>-<comparator>-<family>-<unit>-<polarity>`,
+    /// e.g. `g-o0-robotic-laparoscopic-ratio--higher_worse`.
     pub id: String,
+    /// Canonical arms (`?` when a row does not name its arms).
+    pub intervention: String,
+    pub comparator: String,
     pub family: Family,
     pub unit_key: String,
     pub polarity: Polarity,
+    /// The dynamic model's prior SD and τ unit (`None`: no pooled era).
+    pub scale: Option<maths::Scale>,
     pub row_ids: Vec<String>,
     pub durability_row_ids: Vec<String>,
     pub cells: Vec<EraCell>,
@@ -394,11 +420,21 @@ impl Notes {
 /// skipped with a note.
 pub fn build(input: &TemporalInput) -> TemporalTable {
     let mut notes = Notes(Vec::new());
-    let ref_year: HashMap<&str, i32> = input
-        .references
-        .iter()
-        .filter_map(|r| Some((r.pmid.trim(), r.year?)))
-        .collect();
+    let mut ref_year: HashMap<&str, i32> = HashMap::new();
+    for r in &input.references {
+        match r.year {
+            Some(y) if YEARS.contains(&y) => {
+                ref_year.insert(r.pmid.trim(), y);
+            }
+            Some(y) => notes.add(format!(
+                "Reference {} has publication year {y}, outside {}–{}; ignored.",
+                r.pmid.trim(),
+                YEARS.start(),
+                YEARS.end()
+            )),
+            None => {}
+        }
+    }
     let ref_skeptic: HashSet<&str> = input
         .references
         .iter()
@@ -411,7 +447,11 @@ pub fn build(input: &TemporalInput) -> TemporalTable {
     let caveats = link_and_inherit(input, &mut entries, &mut notes);
 
     // Step 4.
-    let run_year = input.run_year().or_else(|| {
+    let stated_run = input.run_year();
+    if stated_run.is_some_and(|y| !YEARS.contains(&y)) {
+        notes.add("The run's date is outside 1900–2100; ignored.");
+    }
+    let run_year = stated_run.filter(|y| YEARS.contains(y)).or_else(|| {
         let y = entries.iter().filter_map(|s| s.pub_year).max();
         if y.is_some() {
             notes
@@ -529,12 +569,14 @@ fn build_studies(
         }
         let kind = studies::study_kind(&s.design);
         let pub_year = ref_year.get(pmid.as_str()).copied();
-        let (start, end, from, assumed) = match studies::stated_years(s) {
+        let stated =
+            studies::stated_years(s).filter(|&(a, b, _)| YEARS.contains(&a) && YEARS.contains(&b));
+        let (start, end, from, assumed) = match stated {
             Some((a, b, f)) => (Some(a), Some(b), f, false),
             None => match pub_year {
                 Some(y) => (
-                    Some(y - 2),
-                    Some(y - 2),
+                    Some(y.saturating_sub(2)),
+                    Some(y.saturating_sub(2)),
                     YearsFrom::PublicationMinusTwo,
                     true,
                 ),
@@ -567,7 +609,7 @@ fn build_studies(
             treatment_end: end,
             years_from: from,
             assumed,
-            midpoint: start.zip(end).map(|(a, b)| f64::from(a + b) / 2.0),
+            midpoint: start.zip(end).map(|(a, b)| midpoint(a, b)),
             era_id: None,
             parent_id: None,
             child_ids: Vec::new(),
@@ -620,13 +662,18 @@ fn link_and_inherit(
         ch.treatment_end = pe;
         ch.assumed = pa;
         ch.years_from = YearsFrom::Parent;
-        ch.midpoint = ps.zip(pe).map(|(a, b)| f64::from(a + b) / 2.0);
+        ch.midpoint = ps.zip(pe).map(|(a, b)| midpoint(a, b));
         notes.add(format!(
             "{} is a later report of the same trial as {pl}: it takes that trial's treatment years and adds a durability point at its own publication year; it is not counted as a second study.",
             ch.label
         ));
     }
     caveats
+}
+
+/// The midpoint of two years (no overflow).
+fn midpoint(a: i32, b: i32) -> f64 {
+    (f64::from(a) + f64::from(b)) / 2.0
 }
 
 fn assign_eras(entries: &mut [StudyEntry], run_year: Option<i32>, notes: &mut Notes) -> Vec<Era> {
@@ -1077,10 +1124,39 @@ pub fn endpoint_key(label: &str) -> String {
         .join(" ")
 }
 
-type GroupKey = (Family, String, Polarity);
+/// (intervention, comparator, family, unit, polarity).
+type GroupKey = (String, String, Family, String, Polarity);
+
+/// A row's canonical comparison (`?` for an arm it does not name).
+fn comparison(r: &Row) -> (String, String) {
+    let c = |a: &Option<String>| {
+        a.as_deref()
+            .map(canon_arm)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "?".into())
+    };
+    (c(&r.intervention), c(&r.comparator))
+}
+
+fn id_part(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn group_slug(oi: usize, k: &GroupKey) -> String {
+    format!(
+        "o{oi}-{}-{}-{}-{}-{}",
+        id_part(&k.0),
+        id_part(&k.1),
+        k.2.as_str(),
+        k.3,
+        k.4.as_str()
+    )
+}
 
 fn group_id(oi: usize, k: &GroupKey) -> String {
-    format!("g-o{oi}-{}-{}-{}", k.0.as_str(), k.1, k.2.as_str())
+    format!("g-{}", group_slug(oi, k))
 }
 
 fn build_outcomes(
@@ -1099,8 +1175,9 @@ fn build_outcomes(
                 continue;
             }
             if let Some(f) = r.family {
+                let (i, c) = comparison(r);
                 groups
-                    .entry((f, r.unit_key.clone(), r.polarity))
+                    .entry((i, c, f, r.unit_key.clone(), r.polarity))
                     .or_default()
                     .push(ri);
             }
@@ -1150,7 +1227,7 @@ fn build_outcomes(
         }
         let results: Vec<GroupResult> = groups
             .keys()
-            .map(|k| group_result(oi, k, rows, eras))
+            .map(|k| group_result(oi, k, rows, eras, &o.outcome, notes))
             .collect();
         let lead = results
             .iter()
@@ -1192,9 +1269,18 @@ fn favours_p(pol: Polarity, mean: f64, sd: f64) -> f64 {
     }
 }
 
-fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupResult {
-    let (fam, pol) = (key.0, key.2);
+fn group_result(
+    oi: usize,
+    key: &GroupKey,
+    rows: &[Row],
+    eras: &[Era],
+    outcome: &str,
+    notes: &mut Notes,
+) -> GroupResult {
+    let (fam, pol) = (key.2, key.4);
     let gid = group_id(oi, key);
+    let slug = group_slug(oi, key);
+    let nat = |y: f64| maths::finite(effects::natural(y, fam));
     let mine: Vec<&Row> = rows
         .iter()
         .filter(|r| r.group_id.as_deref() == Some(gid.as_str()))
@@ -1209,26 +1295,20 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
         .copied()
         .filter(|r| r.role == RowRole::Durability)
         .collect();
+    let obs_of = |r: &Row| Some(Obs { y: r.y?, se: r.se? }).filter(|o| o.usable());
 
-    // Era cells. Z is against the τ = 0 filtered posterior before the era
-    // (the N(0, 1²) prior updated by every earlier era's pool).
+    // Era cells. Z compares an era's pool with the fixed-effect pool of
+    // every earlier era's rows (μ, σ²): data against data, in the data's
+    // own units, with no prior.
     let mut cells = Vec::new();
-    let mut prev = maths::Posterior {
-        mean: maths::PRIOR_MEAN,
-        var: maths::PRIOR_SD * maths::PRIOR_SD,
-    };
-    let mut seen_pool = false;
+    let mut earlier: Vec<Obs> = Vec::new();
     for e in eras {
         let in_era: Vec<&Row> = primary
             .iter()
             .copied()
             .filter(|r| r.era_id.as_deref() == Some(e.id.as_str()))
             .collect();
-        let obs: Vec<Obs> = in_era
-            .iter()
-            .filter_map(|r| Some(Obs { y: r.y?, se: r.se? }))
-            .filter(|o| o.usable())
-            .collect();
+        let obs: Vec<Obs> = in_era.iter().filter_map(|r| obs_of(r)).collect();
         let pooled = maths::fixed_pool(&obs);
         let points: Vec<f64> = in_era
             .iter()
@@ -1236,15 +1316,26 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
             .filter_map(|r| r.y)
             .filter(|y| y.is_finite())
             .collect();
-        let point_y =
-            (!points.is_empty()).then(|| points.iter().sum::<f64>() / points.len() as f64);
-        let z = pooled.and_then(|p| maths::z_vs_prior(p, prev));
-        let after_earlier = pooled.is_some() && seen_pool;
-        if let Some(p) = pooled {
-            let (post, _) = maths::kalman_step(prev, p);
-            prev = post;
-            seen_pool = true;
+        let split = points.iter().any(|&y| y > 0.0) && points.iter().any(|&y| y < 0.0);
+        if split {
+            notes.add(format!(
+                "{outcome}: in {} the studies without a CI point in opposite directions; they are not averaged (split era).",
+                e.label
+            ));
         }
+        let point_y = (!points.is_empty() && !split)
+            .then(|| points.iter().sum::<f64>() / points.len() as f64);
+        let z = pooled.and_then(|p| {
+            let prev = maths::fixed_pool(&earlier)?;
+            maths::z_vs_prior(
+                p,
+                maths::Posterior {
+                    mean: prev.y,
+                    var: prev.se * prev.se,
+                },
+            )
+        });
+        earlier.extend(obs.iter().copied());
         let est_y = pooled.map(|p| p.y).or(point_y);
         let durability = durable
             .iter()
@@ -1254,27 +1345,20 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
                     row_id: r.id.clone(),
                     knowledge_year: r.knowledge_year,
                     horizon_months: r.horizon_months,
-                    value: effects::natural(r.y?, fam),
+                    value: nat(r.y?),
                     favours: pol.favours(r.y?),
                 })
             })
             .collect();
         cells.push(EraCell {
-            id: format!(
-                "c-o{oi}-{}-{}-{}-{}-{}",
-                fam.as_str(),
-                key.1,
-                pol.as_str(),
-                e.start,
-                e.end
-            ),
+            id: format!("c-{slug}-{}-{}", e.start, e.end),
             era_id: e.id.clone(),
             row_ids: in_era.iter().map(|r| r.id.clone()).collect(),
             pooled: pooled.map(|p| Est::new(p, fam)),
-            point_mean: point_y.map(|y| effects::natural(y, fam)),
-            estimate: est_y.map(|y| effects::natural(y, fam)),
+            point_mean: point_y.map(nat),
+            split,
+            estimate: est_y.map(nat),
             z,
-            after_earlier,
             favours: est_y.and_then(|y| pol.favours(y)),
             significant: pooled.map(|p| Est::new(p, fam).significant()),
             empty: in_era.is_empty(),
@@ -1282,34 +1366,53 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
         });
     }
 
-    // Dynamic model over the era pools.
+    // Dynamic model over the era pools, on a scale fitted to the family.
     let steps: Vec<Option<Obs>> = cells
         .iter()
         .map(|c| c.pooled.map(|p| Obs { y: p.y, se: p.se }))
         .collect();
-    let has_pool = steps.iter().any(Option::is_some);
-    let dynamic: Vec<DynamicFit> = if has_pool {
-        maths::TAUS
+    let ses: Vec<f64> = primary
+        .iter()
+        .filter_map(|r| obs_of(r))
+        .map(|o| o.se)
+        .collect();
+    let scale = steps
+        .iter()
+        .any(Option::is_some)
+        .then(|| maths::Scale::for_family(fam == Family::Ratio, &ses))
+        .flatten();
+    if let Some(sc) = scale.filter(|_| fam == Family::Difference) {
+        notes.add(format!(
+            "{outcome}: the dynamic model for differences uses a prior SD of {} ({} × the median row SE) and τ in units of that SE ({}).",
+            round2(sc.prior_sd),
+            maths::DIFF_PRIOR_SES,
+            round2(sc.tau_unit)
+        ));
+    }
+    let dynamic: Vec<DynamicFit> = match scale {
+        Some(sc) => maths::TAUS
             .iter()
-            .map(|&tau| {
-                let (post, ll) = maths::kalman(&steps, tau);
+            .map(|&grid| {
+                let tau = grid * sc.tau_unit;
+                let (post, ll) = maths::kalman(&steps, tau, sc.prior_sd);
                 let eras_out: Vec<DynamicEra> = post
                     .iter()
                     .zip(eras)
                     .map(|(p, e)| DynamicEra {
                         era_id: e.id.clone(),
-                        mean: p.mean,
-                        sd: p.sd(),
-                        est: effects::natural(p.mean, fam),
-                        lo: effects::natural(p.mean - Z95 * p.sd(), fam),
-                        hi: effects::natural(p.mean + Z95 * p.sd(), fam),
-                        p_favours: favours_p(pol, p.mean, p.sd()),
+                        mean: maths::finite(p.mean),
+                        sd: maths::finite(p.sd()),
+                        est: nat(p.mean),
+                        lo: nat(p.mean - Z95 * p.sd()),
+                        hi: nat(p.mean + Z95 * p.sd()),
+                        p_favours: maths::finite(favours_p(pol, p.mean, p.sd())),
                     })
                     .collect();
                 let p_fav = eras_out.last().map_or(0.5, |e| e.p_favours);
                 DynamicFit {
+                    tau_grid: grid,
                     tau,
-                    log_likelihood: ll,
+                    log_likelihood: maths::finite(ll),
                     eras: eras_out,
                     p_favours: p_fav,
                     direction: if p_fav > maths::ROBUST_P {
@@ -1321,46 +1424,66 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
                     },
                 }
             })
-            .collect()
-    } else {
-        Vec::new()
+            .collect(),
+        None => Vec::new(),
     };
-    let robust = has_pool.then(|| {
+    let robust = scale.map(|_| {
         let d0 = dynamic.first().and_then(|d| d.direction);
         d0.is_some() && dynamic.iter().all(|d| d.direction == d0)
     });
 
-    // Random effects and the predictive range over all primary rows with an SE.
+    // Random effects and the predictive range over the primary rows with an
+    // SE and an era (a row with no era is outside the table's time frame).
+    let no_era: Vec<&str> = primary
+        .iter()
+        .filter(|r| r.era_id.is_none() && obs_of(r).is_some())
+        .map(|r| r.label.as_str())
+        .collect();
+    for l in &no_era {
+        notes.add(format!(
+            "{outcome}: \"{l}\" has no era (no usable treatment or publication year); left out of the random-effects pool."
+        ));
+    }
     let all: Vec<Obs> = primary
         .iter()
-        .filter_map(|r| Some(Obs { y: r.y?, se: r.se? }))
+        .filter(|r| r.era_id.is_some())
+        .filter_map(|r| obs_of(r))
         .collect();
     let re = maths::dersimonian_laird(&all);
     let random_effects = re.map(|re| RandomEffects {
         k: re.k,
         est: Est::new(Obs { y: re.y, se: re.se }, fam),
-        tau: re.tau2.sqrt(),
-        i2: re.i2,
-        p_favours: favours_p(pol, re.y, re.se),
+        tau: maths::finite(re.tau2.sqrt()),
+        i2: maths::finite(re.i2),
+        p_favours: maths::finite(favours_p(pol, re.y, re.se)),
     });
     let predictive = re.map(|re| {
         let sd = maths::predictive_sd(&re);
         Predictive {
-            sd,
-            est: effects::natural(re.y, fam),
-            lo: effects::natural(re.y - Z95 * sd, fam),
-            hi: effects::natural(re.y + Z95 * sd, fam),
-            p_next_favours: favours_p(pol, re.y, sd),
+            sd: maths::finite(sd),
+            est: nat(re.y),
+            lo: nat(re.y - Z95 * sd),
+            hi: nat(re.y + Z95 * sd),
+            p_next_favours: maths::finite(favours_p(pol, re.y, sd)),
         }
     });
 
     let flags = trajectory_flags(fam, pol, &cells);
+    if flags.contains(&Label::PointsOnly) {
+        notes.add(format!(
+            "{outcome} ({} vs {}): no era has a pooled CI; the trajectory rests on point values without uncertainty (points only).",
+            key.0, key.1
+        ));
+    }
     let label = pick_label(&flags);
     GroupResult {
         id: gid,
+        intervention: key.0.clone(),
+        comparator: key.1.clone(),
         family: fam,
-        unit_key: key.1.clone(),
+        unit_key: key.3.clone(),
         polarity: pol,
+        scale,
         row_ids: primary.iter().map(|r| r.id.clone()).collect(),
         durability_row_ids: durable.iter().map(|r| r.id.clone()).collect(),
         cells,
@@ -1375,6 +1498,7 @@ fn group_result(oi: usize, key: &GroupKey, rows: &[Row], eras: &[Era]) -> GroupR
 
 /// The first label of [`LABEL_PRECEDENCE`] among `flags`.
 pub fn pick_label(flags: &[Label]) -> Label {
+    // `PointsOnly` is not in the precedence: it is never a label.
     LABEL_PRECEDENCE
         .iter()
         .copied()
@@ -1382,9 +1506,9 @@ pub fn pick_label(flags: &[Label]) -> Label {
         .unwrap_or(Label::Inconclusive)
 }
 
-/// A cell's Z when it counts as a shift (an earlier era has a pool).
+/// A cell's Z (against the earlier eras' pool; `None` for the first).
 fn shift_z(c: &EraCell) -> Option<f64> {
-    c.z.filter(|_| c.after_earlier)
+    c.z.filter(|z| z.is_finite())
 }
 
 /// Step 7: every trajectory rule that holds for a group's era cells
@@ -1397,25 +1521,33 @@ pub fn trajectory_flags(fam: Family, pol: Polarity, cells: &[EraCell]) -> Vec<La
     };
     let data: Vec<&EraCell> = cells.iter().filter(|c| c.estimate.is_some()).collect();
     let pooled: Vec<&EraCell> = cells.iter().filter(|c| c.pooled.is_some()).collect();
+    // Eras with data: a value, or a split era (rows that point both ways).
+    let covered = cells
+        .iter()
+        .filter(|c| c.estimate.is_some() || c.split)
+        .count();
+    let any_split = cells.iter().any(|c| c.split);
     let mut f = Vec::new();
-    if data.is_empty() {
+    if covered == 0 {
         return vec![Label::NotAssessable];
     }
-    // Early harm not seen later.
-    if let Some(first) = pooled.first().and_then(|c| c.pooled)
-        && first.significant()
-        && unfav(first.y)
-        && pooled
-            .iter()
-            .skip(1)
-            .any(|c| c.pooled.is_some_and(|p| !p.significant()))
+    let pools: Vec<Est> = pooled.iter().filter_map(|c| c.pooled).collect();
+    // Early harm not seen later: the first pool is a significant harm, the
+    // latest pool includes the null, and no later pool is a significant
+    // harm.
+    if pools.len() >= 2
+        && pools[0].significant()
+        && unfav(pools[0].y)
+        && !pools[pools.len() - 1].significant()
+        && !pools[1..].iter().any(|p| p.significant() && unfav(p.y))
     {
         f.push(Label::EarlyHarmNotSeenLater);
     }
-    // Direction flipped.
+    // Direction flipped: a significant era followed by one on the other side
+    // of the null with |Z| ≥ 2.
     if pooled.windows(2).any(|w| {
         let (a, b) = (w[0].pooled.expect("pooled"), w[1].pooled.expect("pooled"));
-        a.y * b.y < 0.0 && shift_z(w[1]).is_some_and(|z| z.abs() >= Z_SHIFT)
+        a.significant() && a.y * b.y < 0.0 && shift_z(w[1]).is_some_and(|z| z.abs() >= Z_SHIFT)
     }) {
         f.push(Label::DirectionFlipped);
     }
@@ -1432,14 +1564,18 @@ pub fn trajectory_flags(fam: Family, pol: Polarity, cells: &[EraCell]) -> Vec<La
             Label::ShiftingAgainst
         });
     }
-    // Gap narrowing.
-    if fam == Family::Difference && data.len() >= 2 {
-        let abs: Vec<f64> = data
-            .iter()
-            .filter_map(|c| c.estimate)
-            .map(f64::abs)
-            .collect();
-        if abs.windows(2).all(|w| w[1] <= w[0]) && abs[abs.len() - 1] < abs[0] {
+    // Gap narrowing: a difference, every era value on one side of the null
+    // with no split era, never growing, and at least 25% smaller at the end.
+    if fam == Family::Difference && data.len() >= 2 && !any_split {
+        let vals: Vec<f64> = data.iter().filter_map(|c| c.estimate).collect();
+        let same_side = vals.iter().all(|&v| v > 0.0) || vals.iter().all(|&v| v < 0.0);
+        let abs: Vec<f64> = vals.iter().map(|v| v.abs()).collect();
+        let (first, last) = (abs[0], abs[abs.len() - 1]);
+        if same_side
+            && abs.windows(2).all(|w| w[1] <= w[0])
+            && first > 0.0
+            && (first - last) / first >= NARROWING_MIN_DROP
+        {
             f.push(Label::GapNarrowing);
         }
     }
@@ -1447,7 +1583,12 @@ pub fn trajectory_flags(fam: Family, pol: Polarity, cells: &[EraCell]) -> Vec<La
     let zs: Vec<f64> = pooled.iter().filter_map(|c| shift_z(c)).collect();
     let ys: Vec<f64> = data.iter().filter_map(|c| c.estimate).map(to_y).collect();
     let one_side = ys.iter().all(|&y| y > 0.0) || ys.iter().all(|&y| y < 0.0);
-    if data.len() >= 2 && !zs.is_empty() && zs.iter().all(|z| z.abs() < Z_SHIFT) && one_side {
+    if data.len() >= 2
+        && !any_split
+        && !zs.is_empty()
+        && zs.iter().all(|z| z.abs() < Z_SHIFT)
+        && one_side
+    {
         f.push(Label::Stable);
     }
     // Persistent trade-off.
@@ -1459,20 +1600,28 @@ pub fn trajectory_flags(fam: Family, pol: Polarity, cells: &[EraCell]) -> Vec<La
     });
     let n_points = data.len() + cells.iter().map(|c| c.durability.len()).sum::<usize>();
     if n_points >= 2
+        && !any_split
         && ys.iter().all(|&y| unfav(y))
         && latest_dur.is_none_or(|d| d.favours == Some(false))
     {
         f.push(Label::PersistentTradeoff);
     }
     // Coverage.
-    if cells.last().is_some_and(|c| c.estimate.is_none()) {
+    if cells
+        .last()
+        .is_some_and(|c| c.estimate.is_none() && !c.split)
+    {
         f.push(Label::NoRecentData);
     }
-    if data.len() == 1 {
+    if covered == 1 {
         f.push(Label::OneEraOnly);
     }
     if f.is_empty() {
         f.push(Label::Inconclusive);
+    }
+    // A flag only (never chosen as the label): no era has a pooled CI.
+    if pooled.is_empty() && cells.iter().any(|c| c.estimate.is_some() || c.split) {
+        f.push(Label::PointsOnly);
     }
     f
 }

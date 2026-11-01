@@ -93,8 +93,22 @@ fn temporal_golden_hernia() {
         "only the meta-analyses note is a caveat"
     );
 
+    // Not the prototype's `gap_narrowing`: the 2016–20 era is RIVAL +35 min
+    // (75.5 vs 40.5), but the 2021–26 era is ROGER +16.1 (80.3 vs 64.2) and
+    // ROLAIS −13.4 (reported difference): points without CIs in opposite
+    // directions. The era is split (not averaged), so no narrowing can be
+    // claimed; every era value is a point (points_only).
     let ot = outcome(&t, "Operative time");
-    assert_eq!(ot.label, Label::GapNarrowing);
+    assert_eq!(ot.label, Label::Inconclusive);
+    assert!(ot.flags.contains(&Label::PointsOnly));
+    let lead = ot
+        .groups
+        .iter()
+        .find(|g| Some(&g.id) == ot.lead_group_id.as_ref())
+        .unwrap();
+    assert!(lead.cells.last().unwrap().split);
+    assert_eq!(lead.intervention, "robotic");
+    assert_eq!(lead.comparator, "laparoscopic");
     // The pooled MD is a marker row.
     assert_eq!(ot.marker_row_ids.len(), 1);
     assert!(
@@ -130,6 +144,19 @@ fn temporal_golden_achalasia() {
 
     let reflux = outcome(&t, "Gastro-oesophageal reflux");
     assert_eq!(reflux.label, Label::PersistentTradeoff);
+    assert!(reflux.flags.contains(&Label::PointsOnly));
+
+    // POEM vs PD success: +38 points at 2 years (Ponds 2019), +35.5 after
+    // failed LHM (Dutch 2023): a 7% drop, below the 25% narrowing bar, so
+    // no trajectory label (was `gap_narrowing` before the review).
+    let pd = outcome(&t, "Place of pneumatic dilation");
+    assert_eq!(pd.label, Label::Inconclusive);
+    // Each comparison is its own group: POEM−PD never pools with LHM−PD.
+    assert!(
+        pd.groups
+            .iter()
+            .all(|g| g.intervention == "poem" && g.comparator == "pd")
+    );
 }
 
 /// The same answer read twice gives the same table (ids included).

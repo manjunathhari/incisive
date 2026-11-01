@@ -22,7 +22,7 @@ pub enum StudyKind {
 }
 
 static MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)meta[- ]?analy|systematic\s+review|network\s+meta|\bNMA\b|umbrella\s+review")
+    Regex::new(r"(?i)meta[- ]?analy|systematic\s+review|network\s+meta|\bNMA\b|umbrella\s+review|pooled\s+analysis|individual[- ]patient[- ]data|\bIPD\b|literature\s+review")
         .expect("marker regex")
 });
 static GUIDELINE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -192,7 +192,7 @@ pub fn study_id(pmid: &str, row: usize) -> String {
 
 static LINK_PHRASE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\bsame\s+(?:[a-z-]+\s+)?(?:trial|cohort|patients|population)\b|\bsecondary\s+analysis\s+of\b|\bpost[- ]hoc\s+analysis\s+of\b|\bfollow[- ]?up\s+(?:report\s+)?of\b|\b\d{1,2}\s*-?\s*(?:years?|yrs?)\s+follow[- ]?up\b|\blong[- ]term\s+follow[- ]?up\b|\bextension\s+of\b",
+        r"(?i)\bsame\s+(?:[a-z-]+\s+)?(?:trial|cohort|patients|population)\b|\bsecondary\s+analysis\s+of\b|\bpost[- ]hoc\s+analysis\s+of\b|\bfollow[- ]?up\s+(?:report\s+)?of\b|\bextension\s+of\b",
     )
     .expect("link phrase regex")
 });
@@ -201,10 +201,8 @@ static OVERLAP_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("overlap link regex")
 });
 static OVERLAP_HEDGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\blikely\b|\bmay\b|\bmight\b|\bpossibl|\bprobabl|\bcould\b|\bshare|\bpool|\bfeed",
-    )
-    .expect("overlap hedge regex")
+    Regex::new(r"(?i)\blikely\b|\bmay\b|\bmight\b|\bpossibly\b|\bprobably\b|\bcould\b")
+        .expect("overlap hedge regex")
 });
 
 /// Words that never name a trial on their own.
@@ -452,10 +450,10 @@ const MAX_ERAS: usize = 30;
 /// years before it; earlier ones are five-year windows, back to the one
 /// holding `earliest`.
 pub fn era_bounds(run_year: i32, earliest: i32) -> Vec<(i32, i32)> {
-    let mut v = vec![(run_year - 5, run_year)];
+    let mut v = vec![(run_year.saturating_sub(5), run_year)];
     while v.len() < MAX_ERAS && earliest < v[v.len() - 1].0 {
-        let end = v[v.len() - 1].0 - 1;
-        v.push((end - 4, end));
+        let end = v[v.len() - 1].0.saturating_sub(1);
+        v.push((end.saturating_sub(4), end));
     }
     v.reverse();
     v
@@ -515,6 +513,13 @@ mod tests {
             StudyKind::Marker
         );
         assert_eq!(study_kind("NMA"), StudyKind::Marker);
+        assert_eq!(study_kind("Pooled analysis of two RCTs"), StudyKind::Marker);
+        assert_eq!(
+            study_kind("Individual patient data analysis"),
+            StudyKind::Marker
+        );
+        assert_eq!(study_kind("IPD meta"), StudyKind::Marker);
+        assert_eq!(study_kind("Narrative literature review"), StudyKind::Marker);
         assert_eq!(study_kind("SAGES guideline"), StudyKind::Guideline);
         assert_eq!(study_kind("multicentre RCT"), StudyKind::Primary);
         assert_eq!(
@@ -668,5 +673,72 @@ mod tests {
         assert_eq!(era_of(&b, 2030.0), Some(2));
         assert_eq!(era_of(&b, 2000.0), None);
         assert_eq!(era_of(&b, f64::NAN), None);
+    }
+
+    #[test]
+    fn bare_follow_up_horizon_does_not_link() {
+        let mut roger = st("2", "ROGER 2025", "Single-centre RCT");
+        roger.appraisal = "Comparator TEP as in RIVAL; 1-year follow-up.".into();
+        let studies = vec![st("1", "RIVAL 2020", "Pilot RCT"), roger];
+        let (links, _) = link_reports(
+            &studies,
+            &[Some(2020), Some(2025)],
+            &TemporalInput::default(),
+        );
+        assert!(links.is_empty(), "{links:?}");
+        // "follow-up of <name>" still links.
+        let mut r2 = st("3", "RIVAL 2-year", "2-year follow-up");
+        r2.appraisal = "Long-term follow-up of RIVAL.".into();
+        let studies = vec![st("1", "RIVAL 2020", "Pilot RCT"), r2];
+        let (links, _) = link_reports(
+            &studies,
+            &[Some(2020), Some(2023)],
+            &TemporalInput::default(),
+        );
+        assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn only_modal_words_hedge_a_skeptic_link() {
+        let studies = vec![
+            st("1", "A", "RCT"),
+            st("2", "B", "RCT"),
+            st("3", "C", "RCT"),
+        ];
+        let mk = |note: &str| TemporalInput {
+            skeptic: Some(InSkeptic {
+                overlaps: vec![InOverlap {
+                    pmids: vec!["1".into(), "2".into()],
+                    note: note.into(),
+                }],
+            }),
+            ..TemporalInput::default()
+        };
+        let years = [Some(2020), Some(2022), Some(2023)];
+        for note in [
+            "These share the same trial population.",
+            "Both report the same cohort; pooled in later reviews.",
+        ] {
+            let (links, caveats) = link_reports(&studies, &years, &mk(note));
+            assert_eq!(links.len(), 1, "{note}");
+            assert!(caveats.is_empty(), "{note}");
+        }
+        for note in [
+            "These may be the same trial.",
+            "Probably the same cohort.",
+            "Likely the same patients.",
+        ] {
+            let (links, caveats) = link_reports(&studies, &years, &mk(note));
+            assert!(links.is_empty(), "{note}");
+            assert_eq!(caveats.len(), 1, "{note}");
+        }
+    }
+
+    #[test]
+    fn era_bounds_never_overflow() {
+        let b = era_bounds(i32::MIN + 2, i32::MIN);
+        assert!(!b.is_empty());
+        let b = era_bounds(i32::MAX, i32::MAX);
+        assert_eq!(b.len(), 1);
     }
 }

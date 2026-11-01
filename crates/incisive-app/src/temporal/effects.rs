@@ -190,10 +190,15 @@ pub fn canon_arm(arm: &str) -> String {
     if L_ARM_RE.is_match(&s) {
         return "laparoscopic".into();
     }
-    s.split(|c: char| !c.is_alphanumeric())
+    let first = s
+        .split(|c: char| !c.is_alphanumeric())
         .find(|t| !t.is_empty())
-        .unwrap_or("")
-        .to_string()
+        .unwrap_or("");
+    match first {
+        // Laparoscopic (Heller) myotomy, with or without a fundoplication.
+        "lm" | "hm" | "lhm" => "lhm".into(),
+        _ => first.to_string(),
+    }
 }
 
 /// How a two-arm number was oriented.
@@ -444,7 +449,7 @@ static BENEFIT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Harms named alongside a benefit word ("PPI use in remission") that
 /// still decide the direction.
 static STRONG_HARM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\breflux|o?esophagitis|\bacid\b|\bger\b|\bgerd|\bppi\b|\bproton\s+pump|\bcomplication|\badverse|\bmortality|\bdeath|\binjur")
+    Regex::new(r"(?i)\breflux|o?esophagitis|\bacid\b|\bger\b|\bgerd|\bppi\b|\bproton\s+pump|\bcomplication|\badverse|\bmortality|\bdeath|\binjur|\breadmi|\bre-admi|\breoperat|\bre-operat|\breturn(?:ed)?\s+to\s+(?:the\s+)?(?:theatre|theater|OR|operating\s+room)\b|\bre-?interven")
         .expect("strong harm")
 });
 static HARM_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -463,11 +468,31 @@ pub fn polarity(label: &str, outcome: &str) -> Polarity {
         .unwrap_or(Polarity::HigherWorse)
 }
 
-/// The polarity a text names, if any: strong harms (reflux, PPI use,
-/// complications, death) first, then benefit words ("success after failed
-/// LHM" is a success), then other harms.
+/// "<harm>-free" (and "free of"): higher is better.
+static FREE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b[a-z]+-free\b|\bfree\s+of\b|\bfreedom\s+from\b").expect("free")
+});
+/// Times and durations: higher is worse ("time to return to work", "days
+/// to discharge", "duration of stay").
+static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\btime\s+to\b|\bdays?\s+to\b|\bweeks?\s+to\b|\bduration\b").expect("duration")
+});
+/// A time to a harmful event: higher (later) is better ("time to
+/// recurrence").
+static TIME_TO_HARM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:time|days?|weeks?|months?)\s+to\s+(?:first\s+)?(?:recurren|relapse|failure|death|progression|reoperat|re-?interven|readmi)").expect("time to harm")
+});
+
+/// The polarity a text names, if any, in this order: "<harm>-free" and a
+/// time to a harmful event (higher is better); then times and durations
+/// and strong harms (reflux, PPI use, complications, death, readmission,
+/// reoperation, return to theatre, re-intervention: higher is worse); then
+/// benefit words ("success after failed LHM" is a success); then other
+/// harms.
 pub fn stated_polarity(text: &str) -> Option<Polarity> {
-    if STRONG_HARM_RE.is_match(text) {
+    if FREE_RE.is_match(text) || TIME_TO_HARM_RE.is_match(text) {
+        Some(Polarity::HigherBetter)
+    } else if DURATION_RE.is_match(text) || STRONG_HARM_RE.is_match(text) {
         Some(Polarity::HigherWorse)
     } else if BENEFIT_RE.is_match(text) {
         Some(Polarity::HigherBetter)
@@ -576,6 +601,7 @@ mod tests {
         assert_eq!(canon_arm("TEP"), "laparoscopic");
         assert_eq!(canon_arm("LHM plus Dor"), "lhm");
         assert_eq!(canon_arm("LHM+PF"), "lhm");
+        assert_eq!(canon_arm("LM-PF"), "lhm");
         assert_eq!(canon_arm("Pneumatic dilation"), "pd");
         let o = ArmOrder::from_arms([
             "robotic vs laparoscopic",
@@ -767,6 +793,38 @@ mod tests {
             polarity("PPI use in remission", "Place of PD"),
             Polarity::HigherWorse
         );
+        for harm in [
+            "Readmission at 30 days",
+            "Reoperation",
+            "Return to theatre",
+            "Return to OR",
+            "Re-intervention rate",
+            "Unplanned reintervention",
+        ] {
+            let p = polarity(harm, "Return to normal activity");
+            assert_eq!(p, Polarity::HigherWorse, "{harm}");
+        }
+        for worse in [
+            "Time to return to work",
+            "Days to discharge",
+            "Duration of stay",
+            "Time to resume normal activity",
+        ] {
+            assert_eq!(
+                polarity(worse, "Recovery"),
+                Polarity::HigherWorse,
+                "{worse}"
+            );
+        }
+        for better in [
+            "Recurrence-free survival",
+            "Complication-free rate",
+            "Pain-free at 1 year",
+            "Freedom from reintervention",
+            "Time to recurrence",
+        ] {
+            assert_eq!(polarity(better, "x"), Polarity::HigherBetter, "{better}");
+        }
         assert_eq!(
             polarity("Something", "Something else"),
             Polarity::HigherWorse

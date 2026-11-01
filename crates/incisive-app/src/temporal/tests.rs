@@ -318,16 +318,35 @@ fn prototype_hernia() {
     // DIRECT is not a second study in its era.
     assert_eq!(t.eras[1].n_studies, 3);
 
+    // The latest era holds ROGER +16.1, VOLTAIRE +33.2 and ROLAIS −13.4:
+    // the points disagree in direction, so the era is split, not averaged,
+    // and the gap cannot be said to narrow. The prototype's "narrowing"
+    // averaged them; that reading is not supported.
     let ot = outcome_named(&t, "Operative time");
-    assert_eq!(ot.label, Label::GapNarrowing);
+    assert_eq!(ot.label, Label::Inconclusive);
+    assert!(ot.flags.contains(&Label::PointsOnly));
     let g = &ot.groups[0];
     assert_eq!(g.family, Family::Difference);
     let direct_row = t.rows.iter().find(|r| r.study_id == "s-direct").unwrap();
     assert_eq!(direct_row.role, RowRole::Durability);
     assert!(!g.row_ids.contains(&direct_row.id));
     let late = &g.cells[1];
-    assert!((late.estimate.unwrap() - (16.1 + 33.2 - 13.4) / 3.0).abs() < 1e-9);
+    assert!(late.split && late.estimate.is_none() && late.point_mean.is_none());
     assert!(late.pooled.is_none(), "no CI: points, never pooled");
+    assert!(t.notes.iter().any(|n| n.contains("split era")));
+    assert!(t.notes.iter().any(|n| n.contains("points only")));
+
+    // Without ROLAIS the latest era is +16.1 and +33.2 (mean 24.65) against
+    // +35: same side, a drop of 30%, so the gap narrows.
+    let mut i = hernia();
+    i.outcomes[0]
+        .numbers
+        .retain(|n| n.pmid != "rolais" && n.pmid != "direct");
+    let t = build(&i);
+    assert_eq!(
+        outcome_named(&t, "Operative time").label,
+        Label::GapNarrowing
+    );
     // The meta-analysis row is a marker.
     assert_eq!(ot.marker_row_ids.len(), 1);
 }
@@ -499,7 +518,7 @@ fn cell(i: usize, pool: Option<(f64, f64)>, point: Option<f64>, z: Option<f64>) 
         point_mean: point.map(f64::exp),
         estimate: est,
         z,
-        after_earlier: z.is_some(),
+        split: false,
         favours: None,
         significant: pooled.map(|p| p.significant()),
         empty: est.is_none(),
@@ -909,4 +928,277 @@ fn ids_are_stable_and_unique() {
     let j = serde_json::to_string(&t).unwrap();
     let back: TemporalTable = serde_json::from_str(&j).unwrap();
     assert_eq!(back, t);
+}
+
+// ---- Review fixes -------------------------------------------------------------
+
+fn diff(label: &str, v: f64, lo: f64, hi: f64, pmid: &str) -> InNumber {
+    InNumber {
+        label: label.into(),
+        value: Some(v),
+        unit: Some("percentage points".into()),
+        arm: Some("POEM minus PD".into()),
+        ci_low: Some(lo),
+        ci_high: Some(hi),
+        p: None,
+        pmid: pmid.into(),
+    }
+}
+
+/// Blocker: an unchanged difference in raw units (+40 pp then +41 pp) is
+/// not a shift. Z compares with the earlier era's pool, not a N(0, 1)
+/// prior on percentage points.
+#[test]
+fn unchanged_difference_is_not_a_shift() {
+    let i = input(
+        vec![
+            study("a", "Trial A", "RCT", "2016-2018"),
+            study("b", "Trial B", "RCT", "2022-2024"),
+        ],
+        vec![reference("a", 2019), reference("b", 2025)],
+        vec![outcome(
+            "Success",
+            vec![
+                diff("Difference in success", 40.0, 24.0, 56.0, "a"),
+                diff("Difference in success", 41.0, 25.0, 57.0, "b"),
+            ],
+        )],
+    );
+    let t = build(&i);
+    let o = &t.outcomes[0];
+    let g = &o.groups[0];
+    let late = g.cells.last().unwrap();
+    assert!(late.z.unwrap().abs() < 0.2, "z = {:?}", late.z);
+    assert!(!o.flags.contains(&Label::ShiftingToward));
+    assert!(!o.flags.contains(&Label::ShiftingAgainst));
+    assert_eq!(o.label, Label::Stable);
+    // The prior and τ are in the data's units: 10 × the median SE.
+    let sc = g.scale.unwrap();
+    let se = 32.0 / maths::Z95 / 2.0;
+    assert!((sc.tau_unit - se).abs() < 1e-3, "{sc:?}");
+    assert!((sc.prior_sd - 10.0 * se).abs() < 1e-2);
+    assert!((g.dynamic[3].tau - se).abs() < 1e-3);
+    // The posterior is not shrunk towards zero: it sits near +40.
+    let last = g.dynamic[0].eras.last().unwrap();
+    assert!((last.mean - 40.5).abs() < 1.0, "{}", last.mean);
+    // The first pooled era has no Z.
+    assert!(
+        g.cells
+            .iter()
+            .find(|c| c.pooled.is_some())
+            .unwrap()
+            .z
+            .is_none()
+    );
+}
+
+/// Review 2: OR 2.0, 1.2, 2.1 is not "early harm not seen later" (the
+/// latest era is a significant harm again).
+#[test]
+fn early_harm_needs_a_null_latest_era() {
+    let mk = |v: f64, i: usize| cell(i, Some((f64::ln(v), 0.05)), None, None);
+    let mut cells = vec![mk(2.0, 0), mk(1.2, 1), mk(2.1, 2)];
+    cells[1].z = Some(-3.0);
+    cells[2].z = Some(3.0);
+    let f = flags(&cells);
+    assert!(!f.contains(&Label::EarlyHarmNotSeenLater), "{f:?}");
+    // A later significant harm in the middle also blocks it.
+    let mut cells = vec![
+        mk(2.0, 0),
+        mk(1.8, 1),
+        cell(2, Some((0.01, 0.2)), None, None),
+    ];
+    cells[2].z = Some(-2.5);
+    assert!(!flags(&cells).contains(&Label::EarlyHarmNotSeenLater));
+}
+
+/// Review 3: a crossing from a null era is a shift, not a flip.
+#[test]
+fn flip_needs_a_significant_earlier_era() {
+    let f = flags(&[
+        cell(0, Some((0.1, 0.2)), None, None),
+        cell(1, Some((-0.8, 0.1)), None, Some(-4.0)),
+    ]);
+    assert!(!f.contains(&Label::DirectionFlipped));
+    assert_eq!(pick_label(&f), Label::ShiftingToward);
+}
+
+/// Review 4: narrowing needs one side, a 25% drop and no split era; a
+/// group with no pooled CI is flagged points-only.
+#[test]
+fn narrowing_thresholds_and_split_eras() {
+    let pt = |v: f64, i: usize| {
+        let mut c = cell(i, None, None, None);
+        c.estimate = Some(v);
+        c.point_mean = Some(v);
+        c.empty = false;
+        c
+    };
+    let d = |cells: &[EraCell]| trajectory_flags(Family::Difference, Polarity::HigherWorse, cells);
+    // 20% drop: not enough.
+    assert!(!d(&[pt(10.0, 0), pt(8.0, 1)]).contains(&Label::GapNarrowing));
+    // Crossing the null: not narrowing.
+    assert!(!d(&[pt(10.0, 0), pt(-2.0, 1)]).contains(&Label::GapNarrowing));
+    // 30% drop on one side: narrowing, points only.
+    let f = d(&[pt(10.0, 0), pt(7.0, 1)]);
+    assert!(f.contains(&Label::GapNarrowing) && f.contains(&Label::PointsOnly));
+    assert_eq!(pick_label(&f), Label::GapNarrowing);
+    // A split era blocks it and still counts as data.
+    let mut split = cell(1, None, None, None);
+    split.split = true;
+    split.empty = false;
+    let f = d(&[pt(35.0, 0), split]);
+    assert!(!f.contains(&Label::GapNarrowing));
+    assert!(!f.contains(&Label::NoRecentData) && !f.contains(&Label::OneEraOnly));
+    assert_eq!(pick_label(&f), Label::Inconclusive);
+}
+
+/// Review 6: different comparisons never pool together.
+#[test]
+fn comparisons_are_separate_groups() {
+    let i = input(
+        vec![
+            study("a", "Trial A", "RCT", "2016-2018"),
+            study("b", "Trial B", "RCT", "2016-2018"),
+            study("c", "Trial C", "RCT", "2016-2018"),
+        ],
+        vec![
+            reference("a", 2019),
+            reference("b", 2019),
+            reference("c", 2019),
+        ],
+        vec![outcome(
+            "Success",
+            vec![
+                InNumber {
+                    arm: Some("POEM minus PD".into()),
+                    ..diff("Difference", 41.0, 25.0, 57.0, "a")
+                },
+                InNumber {
+                    arm: Some("LHM minus PD".into()),
+                    ..diff("Difference", 4.0, -5.0, 13.0, "b")
+                },
+                InNumber {
+                    arm: Some("POEM minus LHM".into()),
+                    ..diff("Difference", 1.4, -8.7, 11.4, "c")
+                },
+            ],
+        )],
+    );
+    let t = build(&i);
+    let gs = &t.outcomes[0].groups;
+    assert_eq!(
+        gs.len(),
+        3,
+        "{:?}",
+        gs.iter().map(|g| &g.id).collect::<Vec<_>>()
+    );
+    assert!(gs.iter().all(|g| g.row_ids.len() == 1));
+    assert!(
+        gs.iter()
+            .any(|g| g.id.contains("-poem-pd-") && g.intervention == "poem")
+    );
+    assert!(gs.iter().any(|g| g.id.contains("-lhm-pd-")));
+    assert!(gs.iter().any(|g| g.id.contains("-poem-lhm-")));
+}
+
+/// Nit 13: a primary row with no era stays out of random effects.
+#[test]
+fn rows_without_an_era_are_left_out_of_random_effects() {
+    let i = input(
+        vec![
+            study("a", "Dated", "RCT", "2020-2022"),
+            study("b", "Undated", "RCT", "Somewhere"),
+        ],
+        vec![reference("a", 2023)],
+        vec![outcome(
+            "Leak",
+            vec![
+                ratio("OR leak", 0.8, 0.5, 1.28, RL, "a"),
+                ratio("OR leak", 3.0, 2.0, 4.5, RL, "b"),
+            ],
+        )],
+    );
+    let t = build(&i);
+    let g = &t.outcomes[0].groups[0];
+    assert_eq!(g.random_effects.as_ref().unwrap().k, 1);
+    assert!(
+        t.notes
+            .iter()
+            .any(|n| n.contains("left out of the random-effects pool"))
+    );
+}
+
+/// Review 5: years outside 1900–2100 are ignored with a note; no overflow.
+#[test]
+fn absurd_years_are_ignored() {
+    let mut i = input(
+        vec![
+            study("a", "Trial A", "RCT", "single centre"),
+            study("b", "Trial B", "RCT", "single centre"),
+        ],
+        vec![
+            InReference {
+                year: Some(i32::MIN),
+                ..reference("a", 0)
+            },
+            InReference {
+                year: Some(i32::MAX),
+                ..reference("b", 0)
+            },
+        ],
+        vec![outcome(
+            "Leak",
+            vec![ratio("OR leak", 0.8, 0.5, 1.28, RL, "a")],
+        )],
+    );
+    i.created_at = Some("9999-01-01".into());
+    let t = build(&i);
+    assert!(
+        t.studies
+            .iter()
+            .all(|s| s.pub_year.is_none() && s.era_id.is_none())
+    );
+    assert!(t.notes.iter().any(|n| n.contains("outside 1900–2100")));
+    assert!(t.eras.is_empty());
+    serde_json::to_string(&t).unwrap();
+}
+
+/// Nit 15: the fixture tables round-trip through serde: every value is
+/// finite (no NaN or infinity reaches JSON), the table reads back, and it
+/// writes the same JSON again up to the last bit of a float
+/// (serde_json's default float parsing is not bit-exact; the shape, the
+/// text and every number to 1e-12 are).
+#[test]
+fn fixtures_round_trip_through_serde() {
+    fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+        use serde_json::Value as V;
+        match (a, b) {
+            (V::Number(x), V::Number(y)) => {
+                let (x, y) = (x.as_f64().unwrap(), y.as_f64().unwrap());
+                x == y || (x - y).abs() <= 1e-12 * x.abs().max(y.abs())
+            }
+            (V::Array(x), V::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q))
+            }
+            (V::Object(x), V::Object(y)) => {
+                x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+            }
+            _ => a == b,
+        }
+    }
+    for f in ["cholecystitis", "hernia", "achalasia"] {
+        let p = format!(
+            "{}/tests/fixtures/temporal/{f}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let i = TemporalInput::from_json(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let t = build(&i);
+        let j = serde_json::to_value(&t).unwrap();
+        let back: TemporalTable = serde_json::from_value(j.clone()).unwrap();
+        assert!(same(&serde_json::to_value(&back).unwrap(), &j), "{f}");
+        let text = serde_json::to_string(&t).unwrap();
+        let back2: TemporalTable = serde_json::from_str(&text).unwrap();
+        assert!(same(&serde_json::to_value(&back2).unwrap(), &j), "{f}");
+    }
 }
