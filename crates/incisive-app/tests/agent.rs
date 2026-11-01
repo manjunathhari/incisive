@@ -944,6 +944,7 @@ fn app_state(pool: PgPool) -> AppState {
         quick_engine: incisive_app::runs::QuickEngine::Classic,
         full_engine: incisive_app::runs::Engine::Classic,
         completeness: false,
+        temporal: Default::default(),
         worker: WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),
@@ -992,7 +993,8 @@ fn agent_llm(llm: &Arc<ScriptedLlm>) -> AgentLlm {
             writer: m.clone(),
             extractor: m.clone(),
             skeptic: m.clone(),
-            completeness: m,
+            completeness: m.clone(),
+            temporal: m,
         },
     }
 }

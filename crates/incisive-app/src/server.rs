@@ -45,6 +45,9 @@ pub struct AppState {
     /// Stage 4b: whether Full runs make the completeness review after the
     /// writer (`COMPLETENESS`; default on).
     pub completeness: bool,
+    /// Temporal T2/T3: the expert opinion after a saved Full answer
+    /// (`TEMPORAL`, default off; `TEMPORAL_MAX_TOKENS`).
+    pub temporal: crate::agent::temporal_writer::TemporalSettings,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev

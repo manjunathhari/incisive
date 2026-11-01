@@ -156,6 +156,7 @@ async fn main() {
         quick_engine: config.quick_engine,
         full_engine: config.full_engine,
         completeness: config.completeness,
+        temporal: config.temporal,
         worker: WorkerHandle::default(),
         llm,
         lit,

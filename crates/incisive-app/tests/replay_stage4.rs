@@ -416,6 +416,7 @@ async fn run_ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
             quick_engine: Engine::Team,
             full_engine: Engine::Team,
             completeness: false,
+            temporal: Default::default(),
             worker: WorkerHandle::default(),
             llm: None,
             lit: lit.clone(),

@@ -100,6 +100,11 @@ pub struct AgentModels {
     /// decision, 31 Oct); set `claude-opus-5-5` to switch.
     #[serde(default = "default_model")]
     pub completeness: String,
+    /// Temporal T2: the expert writer of the Temporal Evidence Board (one
+    /// structured call after a Full answer is saved, outside the run).
+    /// Default Opus 5.5.
+    #[serde(default = "default_opus_model")]
+    pub temporal: String,
 }
 
 fn default_model() -> String {
@@ -128,6 +133,7 @@ impl Default for AgentModels {
             extractor: default_model(),
             skeptic: default_model(),
             completeness: default_model(),
+            temporal: default_opus_model(),
         }
     }
 }
@@ -138,7 +144,7 @@ impl AgentModels {
     pub fn from_json(json: &str) -> Result<AgentModels, String> {
         let m: AgentModels = serde_json::from_str(json).map_err(|e| {
             format!(
-                "expected a JSON object with optional keys frame, search, screen, extract, write, check, researcher, writer, extractor, skeptic, completeness, each a model id (line {}, column {})",
+                "expected a JSON object with optional keys frame, search, screen, extract, write, check, researcher, writer, extractor, skeptic, completeness, temporal, each a model id (line {}, column {})",
                 e.line(),
                 e.column()
             )
@@ -155,7 +161,7 @@ impl AgentModels {
 
     /// Every (step or role, model) pair, for validation (the startup price
     /// check covers each of them).
-    pub fn entries(&self) -> [(&'static str, &str); 11] {
+    pub fn entries(&self) -> [(&'static str, &str); 12] {
         [
             ("frame", &self.frame),
             ("search", &self.search),
@@ -168,6 +174,7 @@ impl AgentModels {
             ("extractor", &self.extractor),
             ("skeptic", &self.skeptic),
             ("completeness", &self.completeness),
+            ("temporal", &self.temporal),
         ]
     }
 }
@@ -545,7 +552,7 @@ impl OutputSchema {
 /// one user message and, on the structured path, `output_config` with the
 /// step's JSON Schema. No request carries `tools` or `tool_choice` (Ruling
 /// R-FA1: Sonnet 5.5 rejects a forced tool choice).
-fn build_request(
+pub(crate) fn build_request(
     model: &str,
     system: &str,
     user: &str,

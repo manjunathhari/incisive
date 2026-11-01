@@ -75,7 +75,8 @@ pub fn agent_llm(client: Arc<dyn LlmClient>, model: &str) -> Arc<AgentLlm> {
             writer: m.clone(),
             extractor: m.clone(),
             skeptic: m.clone(),
-            completeness: m,
+            completeness: m.clone(),
+            temporal: m,
         },
     })
 }
