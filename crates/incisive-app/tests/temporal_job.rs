@@ -853,3 +853,25 @@ fn the_reserve_on_the_three_fixtures_is_bounded() {
     println!("ceiling: about {worst} bytes, {cap} paise");
     assert!(cap <= 7_000, "{cap}");
 }
+
+/// The smoke's request (`temporal_writer::request`, emitted offline for the
+/// owner's curl script) is exactly what the job sends: the scripted LLM
+/// records the job's request, and both serialise to the same wire body.
+#[tokio::test]
+async fn the_smoke_request_is_the_jobs_request_byte_for_byte() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let llm = ScriptedLlm::new().reply_json(board_json(), usage());
+    let (_, status, _, llm) = job_with(&pool, uid, llm, TemporalSettings::on(), BIG).await;
+    assert_eq!(status, JobStatus::Done);
+    let sent = llm.requests().pop().unwrap();
+    let body = hernia_body();
+    let input = incisive_app::temporal::TemporalInput::from_json(&body.to_string()).unwrap();
+    let table = incisive_app::temporal::build(&input);
+    let user = writer::user(&writer::answer_text(&body, &input), &table, &input);
+    let smoke = writer::request(MODEL, &user, writer::DEFAULT_MAX_TOKENS);
+    assert_eq!(
+        serde_json::to_vec(&smoke.body()).unwrap(),
+        serde_json::to_vec(&sent.body()).unwrap()
+    );
+}

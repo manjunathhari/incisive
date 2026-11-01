@@ -503,11 +503,9 @@ pub async fn review(
     if left < MIN_TIME {
         return skipped("time");
     }
-    let mut wait = left.saturating_sub(MARGIN);
+    let wait = left.saturating_sub(MARGIN);
     #[cfg(feature = "test-util")]
-    if let Some(cap) = test_wait_cap(ctx.run_id) {
-        wait = wait.min(cap);
-    }
+    let wait = test_wait_cap(ctx.run_id).map_or(wait, |cap| wait.min(cap));
     review_waiting(ctx, llm, user, cx, wait).await
 }
 

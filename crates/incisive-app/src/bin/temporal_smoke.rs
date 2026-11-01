@@ -19,6 +19,15 @@
 //! `temporal` key, else Opus 5.5. The cost estimate uses `MODEL_PRICES` and
 //! `USD_INR` when set, else Opus at $4/$20 per million tokens and 88.
 //! `--print-schema` prints the schema as JSON and makes no call.
+//!
+//! Offline modes (no network, no key), for an owner shell with only curl:
+//! * `--emit-requests DIR`: writes `DIR/<name>-request.json`, the exact
+//!   Messages API body the job sends (`MessagesRequest::body`, as the client
+//!   serialises it), and `DIR/<name>-meta.json` (the table, the answer text,
+//!   the reference numbers, the marker reference numbers and the reserve).
+//! * `--check-responses DIR`: reads each `DIR/<name>-response.json` (the raw
+//!   API response) with its meta, reads the board as the job does, runs every
+//!   check, prints the results and writes `DIR/<name>-board.json`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -56,6 +65,18 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--print-schema") {
         println!("{}", writer::schema());
+        return;
+    }
+    let offline = if let Some(dir) = arg(&args, "--emit-requests") {
+        Some(emit_requests(&args, &PathBuf::from(dir)))
+    } else {
+        arg(&args, "--check-responses").map(|dir| check_responses(&args, &PathBuf::from(dir)))
+    };
+    if let Some(r) = offline {
+        if let Err(e) = r {
+            eprintln!("temporal_smoke: {e}");
+            std::process::exit(1);
+        }
         return;
     }
     if let Err(e) = run(&args).await {
@@ -196,6 +217,201 @@ async fn run(args: &[String]) -> Result<(), String> {
         )
         .map_err(|_| "cannot write the board")?;
         println!("saved {}", path.display());
+    }
+    Ok(())
+}
+
+// ---------- offline modes ----------
+
+/// The temporal model (`AGENT_MODELS` key `temporal`, else Opus 5.5).
+fn model() -> Result<String, String> {
+    Ok(match std::env::var("AGENT_MODELS") {
+        Ok(j) if !j.trim().is_empty() => AgentModels::from_json(&j)?.temporal,
+        _ => AgentModels::default().temporal,
+    })
+}
+
+fn prices_and_rate() -> Result<(Prices, f64), String> {
+    let prices = match std::env::var("MODEL_PRICES") {
+        Ok(j) if !j.trim().is_empty() => Prices::from_json(&j).map_err(|e| e.to_string())?,
+        _ => Prices::from_json(DEFAULT_PRICES).map_err(|e| e.to_string())?,
+    };
+    let usd_inr: f64 = std::env::var("USD_INR")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(88.0);
+    Ok((prices, usd_inr))
+}
+
+fn names(args: &[String]) -> Vec<&'static str> {
+    let only = arg(args, "--only");
+    FIXTURES
+        .into_iter()
+        .filter(|n| only.as_deref().is_none_or(|o| o == *n))
+        .collect()
+}
+
+/// `--emit-requests DIR` (see the module docs).
+fn emit_requests(args: &[String], dir: &std::path::Path) -> Result<(), String> {
+    use incisive_app::runs::budget::RunBudget;
+    std::fs::create_dir_all(dir).map_err(|_| "cannot create the output directory")?;
+    let max_tokens: u32 = match arg(args, "--max-tokens") {
+        Some(v) => v.parse().map_err(|_| "--max-tokens must be a number")?,
+        None => writer::DEFAULT_MAX_TOKENS,
+    };
+    let model = model()?;
+    let (prices, usd_inr) = prices_and_rate()?;
+    let budget = RunBudget::new(uuid::Uuid::nil(), 0, 0, Instant::now(), prices, usd_inr);
+    for name in names(args) {
+        let (json_text, kind) = fixture(name)?;
+        let body: serde_json::Value =
+            serde_json::from_str(&json_text).map_err(|_| "bad fixture")?;
+        let input = TemporalInput::from_json(&json_text).map_err(|_| "bad fixture")?;
+        let table = build(&input);
+        let answer_text = writer::answer_text(&body, &input);
+        let user = writer::user(&answer_text, &table, &input);
+        let req = writer::request(&model, &user, max_tokens);
+        let wire = serde_json::to_vec(&req.body()).map_err(|_| "cannot serialise the request")?;
+        let reserve = writer::reserve(&budget, &model, &user, max_tokens);
+        let req_path = dir.join(format!("{name}-request.json"));
+        std::fs::write(&req_path, &wire).map_err(|_| "cannot write the request")?;
+        let meta = json!({
+            "fixture": name, "body": kind, "model": model, "max_tokens": max_tokens,
+            "reserve_paise": reserve,
+            "answer_text": answer_text,
+            "table": table,
+            "reference_numbers": writer::reference_numbers(&input),
+            "marker_reference_numbers": writer::marker_reference_numbers(&input, &table),
+        });
+        std::fs::write(
+            dir.join(format!("{name}-meta.json")),
+            serde_json::to_vec(&meta).map_err(|_| "cannot serialise the meta")?,
+        )
+        .map_err(|_| "cannot write the meta")?;
+        println!(
+            "{name} ({kind} body): request {} bytes, reserve {} -> {}",
+            wire.len(),
+            reserve.map_or("unpriced".into(), |p| format!("{p} paise")),
+            req_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// `--check-responses DIR` (see the module docs).
+fn check_responses(args: &[String], dir: &std::path::Path) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let (prices, usd_inr) = prices_and_rate()?;
+    for name in names(args) {
+        println!("\n== {name} ==");
+        let resp_path = dir.join(format!("{name}-response.json"));
+        let Ok(raw) = std::fs::read_to_string(&resp_path) else {
+            println!("status: no response file");
+            continue;
+        };
+        let meta: serde_json::Value =
+            std::fs::read_to_string(dir.join(format!("{name}-meta.json")))
+                .ok()
+                .and_then(|m| serde_json::from_str(&m).ok())
+                .ok_or_else(|| {
+                    format!("no readable {name}-meta.json (run --emit-requests first)")
+                })?;
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                println!("status: failed (response is not JSON)");
+                continue;
+            }
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+            println!(
+                "status: failed (api error {})",
+                v["error"]["type"].as_str().unwrap_or("unknown")
+            );
+            continue;
+        }
+        let resp: claude_client::MessagesResponse = match serde_json::from_value(v) {
+            Ok(r) => r,
+            Err(_) => {
+                println!("status: failed (not a Messages response)");
+                continue;
+            }
+        };
+        let u = resp.usage;
+        let model = meta["model"]
+            .as_str()
+            .unwrap_or("claude-opus-5-5")
+            .to_string();
+        let cost = cost_paise(&prices, usd_inr, &model, &u)
+            .map(|p| format!("\u{20b9}{:.2}", p as f64 / 100.0))
+            .unwrap_or_else(|_| "unpriced".into());
+        println!(
+            "tokens: {} in, {} out, {} cache write, {} cache read · cost {cost} · stop {:?}",
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_creation_input_tokens,
+            u.cache_read_input_tokens,
+            resp.stop_reason
+        );
+        let board = match writer::read_board(&resp) {
+            Ok(b) => b,
+            Err(kind) => {
+                println!("status: failed ({kind})");
+                continue;
+            }
+        };
+        let table: incisive_app::temporal::TemporalTable =
+            serde_json::from_value(meta["table"].clone()).map_err(|_| "bad table in meta")?;
+        let set = |k: &str| -> BTreeSet<u16> {
+            serde_json::from_value(meta[k].clone()).unwrap_or_default()
+        };
+        let (refs, markers) = (set("reference_numbers"), set("marker_reference_numbers"));
+        let answer_text = meta["answer_text"].as_str().unwrap_or_default();
+        let flags = writer::check(
+            &board,
+            &CheckContext {
+                answer_text,
+                table: &table,
+                references: &refs,
+                marker_references: &markers,
+            },
+        );
+        println!("status: done");
+        println!("topic: {}", board.topic);
+        println!(
+            "debate rounds: {} · decisions: {}",
+            board.debate.len(),
+            board.decisions.len()
+        );
+        println!("flags ({}): {}", flags.total(), flags.counts());
+        for (kind, list) in [
+            ("not traced", &flags.not_traced),
+            ("cost/country", &flags.cost_country),
+            ("unknown reference", &flags.unknown_references),
+            ("unknown id", &flags.unknown_ids),
+            ("meta-analysis called a trial", &flags.meta_called_trial),
+            ("At a glance stronger", &flags.glance_stronger),
+            ("shape", &flags.shape),
+        ] {
+            for f in list {
+                println!("  - [{kind}] {}: {}", f.field, f.text);
+            }
+        }
+        println!("At a glance");
+        println!("  original: {}", board.at_a_glance.original_quote);
+        println!("  expert:   {}", board.at_a_glance.expert);
+        println!("  today:    {}", board.at_a_glance.today);
+        let out = dir.join(format!("{name}-board.json"));
+        let saved = json!({"fixture": name, "usage": {
+            "input_tokens": u.input_tokens, "output_tokens": u.output_tokens,
+            "cache_creation_input_tokens": u.cache_creation_input_tokens,
+            "cache_read_input_tokens": u.cache_read_input_tokens}, "board": board, "flags": flags});
+        std::fs::write(
+            &out,
+            serde_json::to_string_pretty(&saved).unwrap_or_default(),
+        )
+        .map_err(|_| "cannot write the board")?;
+        println!("saved {}", out.display());
     }
     Ok(())
 }
