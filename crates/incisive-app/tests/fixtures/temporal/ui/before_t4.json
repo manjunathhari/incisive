@@ -1,0 +1,14 @@
+{
+  "achalasia": {
+    "fnv1a": "f2b31f9995a29013",
+    "len": 285109
+  },
+  "cholecystitis": {
+    "fnv1a": "42c92016de726f95",
+    "len": 272620
+  },
+  "hernia": {
+    "fnv1a": "964c14a2cd7a4a22",
+    "len": 258885
+  }
+}
