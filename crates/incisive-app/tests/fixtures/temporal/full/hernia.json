@@ -1,0 +1,1689 @@
+{
+ "mode": "focused",
+ "notes": [],
+ "answer": {
+  "studies": [
+   {
+    "n": 113,
+    "pmid": "32186683",
+    "label": "RIVAL 2020, JAMA Surg",
+    "design": "Multicentre single-blinded pilot RCT",
+    "setting": "6 academic US sites",
+    "appraisal": "Pilot with no primary outcome; patient-blinded only; 30-day follow-up; underpowered; same patients as the 2023 report.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "Median operative time 75.5 min with robotic vs 40.5 min with laparoscopic repair; median cost $3258 vs $1421; no difference in pain, SF-36, wound events or readmissions [32186683]."
+   },
+   {
+    "n": 102,
+    "pmid": "35578051",
+    "label": "RIVAL 2-year, Surg Endosc 2023",
+    "design": "1- and 2-year follow-up of RCT",
+    "setting": "Six sites",
+    "appraisal": "Same trial as RIVAL 2020; 77 of 102 completed 2-year follow-up; too few events to assess recurrence.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "Recurrence 1 with robotic vs 1 with laparoscopic repair at 2 years (P=1.0); pain, QoL and physical activity similar; no neuropathic pain [35578051]."
+   },
+   {
+    "n": 182,
+    "pmid": "41511872",
+    "label": "ROGER 2025, Br J Surg",
+    "design": "Single-centre patient- and assessor-blinded RCT",
+    "setting": "Tertiary centre, Basel, Switzerland",
+    "appraisal": "Powered for 24-h pain; blinding for 7 days only; comparator TEP, not TAPP; baseline imbalance; surgeons more proficient in TEP; 1-year follow-up.",
+    "comparison": "Robotic TAPP vs laparoscopic TEP",
+    "key_results": "Pain coughing at 24 h median 4 with rTAPP vs 5 with TEP (P=0.431); complications 9 (10%) vs 10 (11%); unilateral time 80.3 vs 64.2 min; cost $3327 vs $2732 [41511872]."
+   },
+   {
+    "n": 150,
+    "pmid": "40277023",
+    "label": "ROLAIS 2025, Br J Surg",
+    "design": "Single-centre open-label RCT",
+    "setting": "Single centre, elective surgery",
+    "appraisal": "Open-label; CRP primary outcome; 11 unbalanced pre-surgery withdrawals; same trial as DIRECT; high laparoscopic complication rate.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "Complications 23.0% with R-TAPP vs 41.5% with L-TAPP; operating time -13.4 min; same-day discharge 95.9% vs 81.5%; no difference in chronic pain or recurrence [40277023]."
+   },
+   {
+    "n": 138,
+    "pmid": "40632168",
+    "label": "DIRECT 2025, Hernia",
+    "design": "Secondary analysis of RCT",
+    "setting": "University hospital, Denmark; four expert surgeons",
+    "appraisal": "Secondary analysis of ROLAIS (same patients, not independent); complexity classified after allocation; timing unblinded.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "Operative time 51 min with r-TAPP vs 60 min with l-TAPP (simple hernias) and 72 vs 92 min (complex hernias) [40632168]."
+   },
+   {
+    "n": 101,
+    "pmid": "42527734",
+    "label": "AIIMS RCT 2026, Surg Endosc",
+    "design": "Single-centre participant- and assessor-blinded RCT",
+    "setting": "AIIMS, India",
+    "appraisal": "Abstract only; 2:1 allocation; surgeon experience not reported; 4-week follow-up.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "No difference in VAS pain at 3, 6 or 12 h (MD 0.28, -0.16 and 0.32), rescue analgesia (20.6% robotic vs 17.9% laparoscopic), operative time (p=0.142) or return to activity (p=0.180) [42527734]."
+   },
+   {
+    "n": 60,
+    "pmid": "40450465",
+    "label": "VOLTAIRE 2025, Am J Surg",
+    "design": "RCT",
+    "setting": "Not reported",
+    "appraisal": "Abstract only; small; unequal arms; open-console robot; ergonomics primary; blinding not reported.",
+    "comparison": "Open-console robotic vs laparoscopic repair",
+    "key_results": "Operative time 64.9 min with robotic vs 31.7 min with laparoscopic repair; resumed activity at 14 days 15 (39%) vs 1 (5%); REBA 3 vs 5 [40450465]."
+   },
+   {
+    "n": null,
+    "pmid": "37580577",
+    "label": "Stray energy RCT 2023, Surg Endosc",
+    "design": "Single-centre RCT",
+    "setting": "US Veterans Affairs Medical Center",
+    "appraisal": "Histological surrogate outcome; samples rather than patients analysed; small.",
+    "comparison": "Robotic TAPP vs laparoscopic TAPP",
+    "key_results": "Port-site thermal injury in 60% of robotic vs 49% of laparoscopic samples (p=0.548) [37580577]."
+   },
+   {
+    "n": 691,
+    "pmid": "42625069",
+    "label": "RCT meta-analysis 2026, Surg Endosc",
+    "design": "Systematic review and meta-analysis of 7 RCTs",
+    "setting": "Mostly single-centre RCTs",
+    "appraisal": "GRADE low to very low; pool includes secondary reports (RIVAL follow-up, ROLAIS/DIRECT) and one TEP comparator; overlaps the other reviews.",
+    "comparison": "Robotic vs laparoscopic (TAPP/TEP)",
+    "key_results": "Complications RR 0.76 (95% CI 0.49-1.17); chronic pain RR 0.53 (0.20-1.39) [42625069]."
+   },
+   {
+    "n": 401,
+    "pmid": "42927985",
+    "label": "TAPP RCT meta-analysis 2026, J Laparoendosc Adv Surg Tech",
+    "design": "Meta-analysis of 4 RCTs",
+    "setting": "Hospital RCTs",
+    "appraisal": "Abstract only; same trials as the other reviews; imprecise.",
+    "comparison": "r-TAPP vs l-TAPP",
+    "key_results": "Complications RR 0.89 (0.45-1.78); operative time MD +18.5 min (-8.4 to 45.5) [42927985]."
+   },
+   {
+    "n": 78940,
+    "pmid": "42541618",
+    "label": "Mixed meta-analysis 2026, J Robot Surg",
+    "design": "Meta-analysis, mostly observational",
+    "setting": "Mostly US cohorts and registries",
+    "appraisal": "17 of 18 cohorts observational; confounding; GRADE low to very low.",
+    "comparison": "Robotic vs laparoscopic TAPP/TEP",
+    "key_results": "Recurrence RR 0.32 (0.17-0.59); operative time MD +30.04 min; complications RR 1.68 (1.00-2.84) [42541618]."
+   },
+   {
+    "n": null,
+    "pmid": "41258567",
+    "label": "Italian cost-utility 2025, Hernia",
+    "design": "Markov cost-utility model",
+    "setting": "Italian public payer",
+    "appraisal": "Model-based, not a trial; assumes equal recurrence; Spanish cost inputs; ignores robot acquisition and learning curve.",
+    "comparison": "r-TAPP vs l-TAPP",
+    "key_results": "Incremental cost €2,224; 0.05 QALYs gained; ICER €44,480/QALY [41258567]."
+   },
+   {
+    "n": 992,
+    "pmid": "41452528",
+    "label": "R-TAPP vs L-TEP meta-analysis 2025, J Robot Surg",
+    "design": "Meta-analysis with trial sequential analysis, 6 studies",
+    "setting": "Published studies",
+    "appraisal": "Abstract only; appears to include non-randomised studies; pain result comes from sensitivity analysis.",
+    "comparison": "Robotic TAPP vs laparoscopic TEP",
+    "key_results": "Operative time MD 17.76 min longer with R-TAPP; pain MD -1.59 (-2.41 to -0.76) [41452528]."
+   },
+   {
+    "n": 379,
+    "pmid": "41182506",
+    "label": "Da Vinci Xi meta-analysis 2025, J Robot Surg",
+    "design": "Meta-analysis of 3 RCTs",
+    "setting": "RCTs",
+    "appraisal": "Only 3 RCTs; the time advantage appears only after removing one study; overlaps the other reviews.",
+    "comparison": "Da Vinci Xi r-TAPP vs l-TAPP",
+    "key_results": "Operative time MD 0.59 min (-23.67 to 24.85; I2 98%); any complication OR 0.84 (0.19-3.79) [41182506]."
+   },
+   {
+    "n": 300,
+    "pmid": "41384988",
+    "label": "Short-term RCT meta-analysis 2025, Hernia",
+    "design": "Meta-analysis of 3 RCTs",
+    "setting": "RCTs from several countries",
+    "appraisal": "3 open-label RCTs; ROLAIS supplemented with DIRECT data; overlapping pool.",
+    "comparison": "r-TAPP vs l-TAPP",
+    "key_results": "Operative time MD +17.6 min (-20.7 to 55.9); complications RR 0.83 (0.34-2.03); readmission RR 0.71 [41384988]."
+   }
+  ],
+  "outcomes": [
+   {
+    "why": "Consistent null results in blinded trials, but they are small, and the chronic pain estimate is imprecise.",
+    "pmids": [
+     "41511872",
+     "42527734",
+     "32186683",
+     "35578051",
+     "42625069"
+    ],
+    "numbers": [
+     {
+      "p": "0.431",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "NRS points",
+      "label": "Median NRS pain coughing 24 h",
+      "value": 4.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.431",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "NRS points",
+      "label": "Median NRS pain coughing 24 h",
+      "value": 5.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.261",
+      "arm": "robotic minus laparoscopic",
+      "pmid": "42527734",
+      "unit": "points",
+      "label": "VAS mean difference at 3 h",
+      "value": 0.28,
+      "ci_low": -0.34,
+      "ci_high": 0.9
+     },
+     {
+      "p": "0.744",
+      "arm": "robotic",
+      "pmid": "42527734",
+      "unit": "%",
+      "label": "Rescue analgesia",
+      "value": 20.6,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.744",
+      "arm": "laparoscopic",
+      "pmid": "42527734",
+      "unit": "%",
+      "label": "Rescue analgesia",
+      "value": 17.9,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.20",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "42625069",
+      "unit": "RR",
+      "label": "Chronic pain RR",
+      "value": 0.53,
+      "ci_low": 0.2,
+      "ci_high": 1.39
+     }
+    ],
+    "outcome": "Postoperative and chronic pain",
+    "certainty": "Low",
+    "effect_text": "There was no difference in early or late pain. In ROGER, median NRS pain while coughing at 24 h was 4 with rTAPP vs 5 with TEP (P=0.431) [41511872]. In the Indian RCT, VAS mean differences (robotic minus laparoscopic) were 0.28 (95% CI -0.34 to 0.90) at 3 h, -0.16 (-0.69 to 0.37) at 6 h and 0.32 (-0.15 to 0.79) at 12 h [42527734]. Rescue analgesia was needed by 20.6% with robotic vs 17.9% with laparoscopic repair [42527734]. RIVAL found similar pain at 30 days, 1 year and 2 years [32186683; 35578051]. For chronic pain, the pooled RR was 0.53 (95% CI 0.20-1.39) from 2 RCTs [42625069].",
+    "rct_evidence": "ROGER, Indian AIIMS RCT, RIVAL (2020 and 2023 reports of one trial), meta-analysis of RCTs",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Inconsistency (ROLAIS vs the other trials), imprecision, and open-label design in ROLAIS.",
+    "pmids": [
+     "42625069",
+     "42927985",
+     "41384988",
+     "41511872",
+     "40277023",
+     "37580577"
+    ],
+    "numbers": [
+     {
+      "p": "0.22",
+      "arm": "robotic vs laparoscopic",
+      "pmid": "42625069",
+      "unit": "RR",
+      "label": "Overall complications RR",
+      "value": 0.76,
+      "ci_low": 0.49,
+      "ci_high": 1.17
+     },
+     {
+      "p": null,
+      "arm": "r-TAPP vs l-TAPP",
+      "pmid": "42927985",
+      "unit": "RR",
+      "label": "Overall complications RR",
+      "value": 0.89,
+      "ci_low": 0.45,
+      "ci_high": 1.78
+     },
+     {
+      "p": "> 0.999",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "patients",
+      "label": "Postoperative complications",
+      "value": 9.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "> 0.999",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "patients",
+      "label": "Postoperative complications",
+      "value": 10.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.029",
+      "arm": "R-TAPP",
+      "pmid": "40277023",
+      "unit": "%",
+      "label": "Complications ROLAIS",
+      "value": 23.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.029",
+      "arm": "L-TAPP",
+      "pmid": "40277023",
+      "unit": "%",
+      "label": "Complications ROLAIS",
+      "value": 41.5,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Postoperative complications",
+    "certainty": "Low",
+    "effect_text": "Pooled RCTs show no significant difference in complications (RR 0.76, 95% CI 0.49-1.17) [42625069]. Other RCT meta-analyses agree: RR 0.89 (0.45-1.78) [42927985] and RR 0.83 (0.34-2.03) [41384988]. In ROGER, complications occurred in 9 patients (10%) with rTAPP vs 10 (11%) with TEP [41511872]. In ROLAIS, open-label, complications were 23.0% with R-TAPP vs 41.5% with L-TAPP, and haematomas 6.8% vs 18.5% [40277023]. Port-site thermal injury occurred in 60% of robotic vs 49% of laparoscopic samples (p=0.548) [37580577].",
+    "rct_evidence": "ROGER, ROLAIS, RIVAL, stray-energy RCT; RCT meta-analyses (overlapping pools)",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Very few events, short follow-up and attrition; the only favourable signal is observational.",
+    "pmids": [
+     "35578051",
+     "40277023",
+     "42541618"
+    ],
+    "numbers": [
+     {
+      "p": "1.0",
+      "arm": "robotic",
+      "pmid": "35578051",
+      "unit": "patients",
+      "label": "Recurrences at 2 years (RIVAL)",
+      "value": 1.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "1.0",
+      "arm": "laparoscopic",
+      "pmid": "35578051",
+      "unit": "patients",
+      "label": "Recurrences at 2 years (RIVAL)",
+      "value": 1.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.0003",
+      "arm": "robotic vs laparoscopic (mostly observational)",
+      "pmid": "42541618",
+      "unit": "RR",
+      "label": "Recurrence RR",
+      "value": 0.32,
+      "ci_low": 0.17,
+      "ci_high": 0.59
+     }
+    ],
+    "outcome": "Hernia recurrence",
+    "certainty": "Very low",
+    "effect_text": "In RIVAL at 2 years there was 1 recurrence with robotic vs 1 with laparoscopic repair (P=1.0) [35578051]. ROLAIS and ROGER found no difference [40277023; 41511872]. A mostly observational meta-analysis reported RR 0.32 (95% CI 0.17-0.59) favouring robotic repair; this is non-randomised and not causal [42541618].",
+    "rct_evidence": "RIVAL 2-year follow-up, ROLAIS; observational-dominated meta-analysis",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Inconsistent results; small, partly unblinded trials, and a secondary outcome in VOLTAIRE.",
+    "pmids": [
+     "40450465",
+     "42527734",
+     "35578051",
+     "42625069"
+    ],
+    "numbers": [
+     {
+      "p": "0.006",
+      "arm": "robotic",
+      "pmid": "40450465",
+      "unit": "patients",
+      "label": "Resumed normal activity at 14 days",
+      "value": 15.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.006",
+      "arm": "laparoscopic",
+      "pmid": "40450465",
+      "unit": "patients",
+      "label": "Resumed normal activity at 14 days",
+      "value": 1.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Return to normal activity",
+    "certainty": "Very low",
+    "effect_text": "In VOLTAIRE, more robotic patients had resumed normal activity at 14 days: 15 (39%) with robotic vs 1 (5%) with laparoscopic repair (p=0.006) [40450465; 42625069]. The blinded Indian RCT found no difference in time to resumption of activities (p=0.180) [42527734]. RIVAL found similar physical activity at 1 and 2 years [35578051].",
+    "rct_evidence": "VOLTAIRE, Indian AIIMS RCT, RIVAL",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Two small trials with consistent null results; imprecise.",
+    "pmids": [
+     "41511872",
+     "32186683",
+     "35578051"
+    ],
+    "numbers": [
+     {
+      "p": "0.617",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "index",
+      "label": "EQ-5D-5L at 12 months",
+      "value": 0.95,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.617",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "index",
+      "label": "EQ-5D-5L at 12 months",
+      "value": 0.96,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Quality of life",
+    "certainty": "Low",
+    "effect_text": "In ROGER, EQ-5D-5L at 12 months was 0.95 with rTAPP vs 0.96 with TEP (P=0.617) [41511872]. RIVAL found no SF-36 difference at 30 days, 1 year or 2 years [32186683; 35578051].",
+    "rct_evidence": "ROGER, RIVAL",
+    "evidence_type": "rct"
+   },
+   {
+    "why": "Severe inconsistency (I2 about 98%), likely driven by surgeon experience.",
+    "pmids": [
+     "32186683",
+     "41511872",
+     "40450465",
+     "40277023",
+     "40632168",
+     "42527734",
+     "42927985",
+     "41384988"
+    ],
+    "numbers": [
+     {
+      "p": "P < .001",
+      "arm": "robotic",
+      "pmid": "32186683",
+      "unit": "min",
+      "label": "Median operative time (RIVAL)",
+      "value": 75.5,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "P < .001",
+      "arm": "laparoscopic",
+      "pmid": "32186683",
+      "unit": "min",
+      "label": "Median operative time (RIVAL)",
+      "value": 40.5,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "min",
+      "label": "Mean operating time unilateral (ROGER)",
+      "value": 80.3,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "min",
+      "label": "Mean operating time unilateral (ROGER)",
+      "value": 64.2,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "<0.001",
+      "arm": "R-TAPP vs L-TAPP",
+      "pmid": "40277023",
+      "unit": "min",
+      "label": "Operating time difference (ROLAIS)",
+      "value": -13.4,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "r-TAPP vs l-TAPP",
+      "pmid": "42927985",
+      "unit": "min",
+      "label": "Pooled MD operative time",
+      "value": 18.5,
+      "ci_low": -8.4,
+      "ci_high": 45.5
+     }
+    ],
+    "outcome": "Operative time",
+    "certainty": "Low",
+    "effect_text": "Robotic repair was longer in three trials: median 75.5 min with robotic vs 40.5 min with laparoscopic TAPP [32186683]; 80.3 min with rTAPP vs 64.2 min with TEP [41511872]; 64.9 min with robotic vs 31.7 min with laparoscopic [40450465]. It was shorter in ROLAIS (-13.4 min) [40277023] and its DIRECT analysis (simple hernias 51 vs 60 min, robotic vs laparoscopic) [40632168]. The Indian RCT found no difference (p=0.142) [42527734]. Pooled RCTs give MD +18.5 min (95% CI -8.4 to 45.5; I2 97.7%) [42927985] and MD +17.6 min (-20.7 to 55.9; I2 98.8%) [41384988].",
+    "rct_evidence": "RIVAL, ROGER, VOLTAIRE, ROLAIS/DIRECT (one trial), Indian AIIMS RCT; RCT meta-analyses",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Consistent direction in two RCTs, but only two trials, and costs are setting-specific.",
+    "pmids": [
+     "32186683",
+     "41511872",
+     "41258567"
+    ],
+    "numbers": [
+     {
+      "p": "P < .001",
+      "arm": "robotic",
+      "pmid": "32186683",
+      "unit": "USD",
+      "label": "Median cost per case",
+      "value": 3258.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "P < .001",
+      "arm": "laparoscopic",
+      "pmid": "32186683",
+      "unit": "USD",
+      "label": "Median cost per case",
+      "value": 1421.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "USD",
+      "label": "Mean procedural cost unilateral",
+      "value": 3327.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "USD",
+      "label": "Mean procedural cost unilateral",
+      "value": 2732.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "r-TAPP vs l-TAPP",
+      "pmid": "41258567",
+      "unit": "EUR/QALY",
+      "label": "ICER",
+      "value": 44480.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Cost",
+    "certainty": "Moderate",
+    "effect_text": "Median cost was $3258 with robotic vs $1421 with laparoscopic TAPP [32186683]. Mean unilateral procedural cost was $3327 with rTAPP vs $2732 with TEP [41511872]. An Italian model estimated an incremental cost of €2,224 for 0.05 QALYs gained, an ICER of €44,480/QALY, with under 25% probability of cost-effectiveness at €30,000/QALY [41258567]. This model is not trial-based and ignores robot acquisition and learning-curve effects.",
+    "rct_evidence": "RIVAL, ROGER; Italian model-based cost-utility analysis",
+    "evidence_type": "mixed"
+   },
+   {
+    "why": "Single open-label trial; the other data are observational.",
+    "pmids": [
+     "40277023",
+     "42541618"
+    ],
+    "numbers": [
+     {
+      "p": "0.012",
+      "arm": "R-TAPP",
+      "pmid": "40277023",
+      "unit": "%",
+      "label": "Same-day discharge",
+      "value": 95.9,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.012",
+      "arm": "L-TAPP",
+      "pmid": "40277023",
+      "unit": "%",
+      "label": "Same-day discharge",
+      "value": 81.5,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Same-day discharge and length of stay",
+    "certainty": "Very low",
+    "effect_text": "In ROLAIS, same-day discharge was 95.9% with R-TAPP vs 81.5% with L-TAPP (P=0.012) [40277023]. Mostly observational data show no significant difference in length of stay (MD +0.33 days, 95% CI -0.03 to 0.70) [42541618].",
+    "rct_evidence": "ROLAIS only; observational meta-analysis",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Inconsistent results, unblinded surgeon-reported measures and different comparators.",
+    "pmids": [
+     "32186683",
+     "41511872",
+     "40450465"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "robotic",
+      "pmid": "32186683",
+      "unit": "score",
+      "label": "NASA-TLX frustration",
+      "value": 32.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "laparoscopic",
+      "pmid": "32186683",
+      "unit": "score",
+      "label": "NASA-TLX frustration",
+      "value": 20.1,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "rTAPP",
+      "pmid": "41511872",
+      "unit": "score",
+      "label": "NASA raw TLX",
+      "value": 18.4,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "< 0.001",
+      "arm": "TEP",
+      "pmid": "41511872",
+      "unit": "score",
+      "label": "NASA raw TLX",
+      "value": 34.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Surgeon workload and ergonomics",
+    "certainty": "Low",
+    "effect_text": "Results are mixed. In RIVAL, frustration was higher with robotic repair (32.7 vs 20.1 with laparoscopic) [32186683]. In ROGER, NASA-TLX workload was 18.4 with rTAPP vs 34.0 with TEP [41511872]. In VOLTAIRE, median REBA ergonomic score was 3 with robotic vs 5 with laparoscopic repair [40450465].",
+    "rct_evidence": "RIVAL, ROGER, VOLTAIRE",
+    "evidence_type": "rct"
+   }
+  ],
+  "conflicts": [
+   {
+    "text": "ROLAIS (with its DIRECT secondary analysis, one trial) found fewer complications (23.0% robotic vs 41.5% laparoscopic) and shorter operating time with robotic TAPP [40277023; 40632168]. RIVAL and ROGER found no complication difference and longer robotic operating time [32186683; 41511872]. The difference may reflect ROLAIS's open-label design, its CRP primary outcome, its unusually high laparoscopic complication rate, unbalanced withdrawals, and very experienced robotic surgeons (at least 100 r-TAPP each) [40277023; 40632168].",
+    "pmids": [
+     "40277023",
+     "40632168",
+     "41511872",
+     "32186683"
+    ]
+   },
+   {
+    "text": "A mostly observational meta-analysis (17 of 18 cohorts observational) reported lower recurrence with robotic repair (RR 0.32, 95% CI 0.17-0.59) [42541618]. The RCTs show no difference, with only 1 recurrence per arm at 2 years in RIVAL [35578051; 42625069]. The observational signal is prone to confounding and is not causal.",
+    "pmids": [
+     "42541618",
+     "35578051",
+     "42625069"
+    ]
+   },
+   {
+    "text": "A meta-analysis with trial sequential analysis found lower pain with robotic TAPP than laparoscopic TEP (MD -1.59, 95% CI -2.41 to -0.76) [41452528]. Its pool appears to include non-randomised studies, and the finding comes from sensitivity analysis. It conflicts with the blinded ROGER RCT, which compared the same approaches and found no pain difference [41511872].",
+    "pmids": [
+     "41452528",
+     "41511872"
+    ]
+   },
+   {
+    "text": "VOLTAIRE found more robotic patients back to normal activity at 14 days [40450465; 42625069]. The blinded Indian RCT found no difference in time to resumption of activities (p=0.180) [42527734]. VOLTAIRE was small, unequally allocated, used an open-console robot and had ergonomics as its focus [40450465].",
+    "pmids": [
+     "40450465",
+     "42527734"
+    ]
+   },
+   {
+    "text": "Pooled operative-time estimates range from no difference (MD 0.59 min) to clearly longer robotic surgery (MD +30.04 min), with I2 around 98% [41182506; 42541618; 42927985; 41384988]. The spread is driven by trial design and surgeon experience. The largest pooled estimate (+30.04 min) is mostly observational [42541618].",
+    "pmids": [
+     "42927985",
+     "41182506",
+     "41384988",
+     "42541618"
+    ]
+   }
+  ],
+  "guidelines": [],
+  "at_a_glance": {
+   "verdict": "Robotic repair has not been shown to improve pain, complications, recurrence or quality of life over laparoscopic repair; it costs more and usually takes longer (low certainty).",
+   "key_numbers": [
+    {
+     "pmid": "",
+     "label": "Pain coughing at 24 h",
+     "value_text": "median NRS 4 with rTAPP vs 5 with TEP, P=0.431 [41511872]"
+    },
+    {
+     "pmid": "",
+     "label": "Complications (pooled RCTs)",
+     "value_text": "RR 0.76 (95% CI 0.49-1.17), robotic vs laparoscopic [42625069]"
+    },
+    {
+     "pmid": "",
+     "label": "Median cost",
+     "value_text": "$3258 with robotic vs $1421 with laparoscopic TAPP, P<.001 [32186683]"
+    },
+    {
+     "pmid": "",
+     "label": "Operative time",
+     "value_text": "75.5 min with robotic vs 40.5 min with laparoscopic (median), P<.001 [32186683]"
+    }
+   ],
+   "main_caveat": "a few small trials with experienced surgeons and short follow-up, underpowered for recurrence and chronic pain; one open-label trial (ROLAIS) found fewer complications with robotic repair [40277023]."
+  },
+  "bottom_line": {
+   "text": "Randomised trials show no consistent benefit of robotic over laparoscopic inguinal hernia repair for pain, complications, recurrence, quality of life or return to activity, while robotic repair costs more per case and usually takes longer [32186683; 35578051; 41511872; 42527734; 42625069]. The one trial favouring robotic repair (ROLAIS/DIRECT, fewer complications and shorter time) was open-label and single-centre [40277023; 40632168]. The trials are underpowered for recurrence and chronic pain, so equivalence on these outcomes cannot be claimed [42625069].",
+   "certainty": "Low",
+   "certainty_reason": "Few small, mostly single-centre trials with short follow-up; inconsistent operative-time results; imprecise for rare outcomes."
+  },
+  "would_change": [
+   "A large multicentre blinded RCT powered for chronic pain and recurrence with at least 2-3 years of follow-up.",
+   "An independent trial replicating the ROLAIS complication and operative-time advantage with experienced robotic surgeons.",
+   "RCTs in obese patients and in recurrent or bilateral hernias, and studies of the robotic learning curve.",
+   "Trial-based cost-effectiveness analyses including robot acquisition and maintenance costs, especially from India or similar health systems."
+  ],
+  "applicability": {
+   "case_mix": "The randomised evidence covers mostly elective, uncomplicated, primary unilateral (some bilateral) inguinal hernias in predominantly male adults, operated on by experienced minimally invasive surgeons [32186683; 41511872; 42527734; 40277023]. ROGER excluded recurrent hernias [41511872]. The Indian trial enrolled uncomplicated hernias only [42527734]. There are no dedicated randomised data for obese patients, recurrent or bilateral hernias, or the robotic learning curve [42625069]. Most trials compared robotic TAPP with laparoscopic TAPP, but ROGER's comparator was laparoscopic TEP and VOLTAIRE used an open-console robot [41511872; 40450465].",
+   "training": "The Italian model suggests confining r-TAPP to training programmes [41258567]. Surgeon workload findings are mixed: frustration was higher with robotic repair in RIVAL [32186683], while NASA-TLX workload was lower with rTAPP than TEP in ROGER [41511872] and ergonomic risk was lower in VOLTAIRE [40450465]. No RCT has assessed the robotic learning curve. ROGER's authors acknowledge that some rTAPP surgeons may not have completed it [41511872].",
+   "india_cost_context": "One blinded single-centre RCT from AIIMS, India found no difference in early pain, rescue analgesia, operative time or return to activity [42527734]. That trial reported no cost data. All cost figures come from the US, Switzerland and an Italian model, all showing higher robotic cost per case [32186683; 41511872; 41258567]. Indian per-case costs, robot acquisition and maintenance costs, and the cost-effectiveness of robotic repair in Indian hospitals are not known from this evidence. The modelled analyses do not capture robot acquisition or learning-curve effects."
+  },
+  "notable_findings": [
+   {
+    "text": "DIRECT, labelled an RCT, is a secondary analysis of the ROLAIS CRP trial on the same patients; allocation was by the surgeon on the day of surgery and hernia complexity was classified intraoperatively after allocation [40632168].",
+    "pmids": [
+     "40632168"
+    ]
+   },
+   {
+    "text": "ROLAIS had 11 withdrawals before surgery with unbalanced arms (74 robotic vs 65 laparoscopic analysed) and was open-label [40277023].",
+    "pmids": [
+     "40277023"
+    ]
+   },
+   {
+    "text": "RIVAL was a pilot with no primary outcome; only 77 of 102 patients completed 2-year follow-up, and the 2020 and 2023 reports describe the same patients [32186683; 35578051].",
+    "pmids": [
+     "32186683",
+     "35578051"
+    ]
+   },
+   {
+    "text": "ROGER's rTAPP arm had more lateral and larger hernias, and its surgeons were more proficient in TEP, the institutional standard [41511872].",
+    "pmids": [
+     "41511872"
+    ]
+   },
+   {
+    "text": "No guideline addressing robotic vs laparoscopic inguinal repair was found, and no included report states its funding or conflicts of interest [42625069].",
+    "pmids": [
+     "42625069"
+    ]
+   }
+  ],
+  "clinical_practice": {
+   "counselling": "Expect similar pain, recovery, complication and recurrence risk with either approach; robotic surgery usually takes longer and costs more, and long-term data are limited [35578051; 41511872; 42527734].",
+   "cost_per_case": "Robotic repair costs roughly USD 595 more (Switzerland, rTAPP $3327 vs TEP $2732) to USD 1837 more (US, robotic $3258 vs laparoscopic TAPP $1421) per case [41511872; 32186683]; the Italian public-payer model gives an incremental cost of €2,224 [41258567]; Indian costs are not known.",
+   "default_choice": "Laparoscopic (TAPP or TEP) repair; robotic repair offers no proven patient benefit and costs more [32186683; 41511872; 42625069].",
+   "who_may_benefit": "The evidence does not identify any patient group; benefits in obese patients and in recurrent or complex hernias are untested in RCTs, and the only trial favouring robotic repair involved highly experienced robotic surgeons [40277023; 40632168]."
+  }
+ },
+ "skeptic": {
+  "leads": [
+   {
+    "kind": "contradicting study",
+    "pmid": "40450465"
+   }
+  ],
+  "spans": [
+   {
+    "len": 3,
+    "field": "must_mention.0",
+    "start": 75
+   }
+  ],
+  "verdict": "holds with caveats",
+  "ma_notes": [
+   {
+    "pmid": "42541618",
+    "text": "Pooled 18 cohorts and 78,940 participants, mostly observational; the recurrence RR 0.32 is non-randomised.",
+    "quote": null
+   },
+   {
+    "pmid": "41452528",
+    "text": "The pool of 6 studies for r-TAPP vs laparoscopic TEP appears to include non-randomised studies, since the abstract recommends further randomized trials.",
+    "quote": null
+   },
+   {
+    "pmid": "42625069",
+    "text": "Counts 7 RCTs reported in 9 publications, so the pool includes secondary reports and overlapping trials such as RIVAL follow-up and ROLAIS/DIRECT; the pool also mixes TAPP and TEP comparators.",
+    "quote": null
+   },
+   {
+    "pmid": "41182506",
+    "text": "Pools only 3 RCTs; the operative-time advantage emerges only after removing the heterogeneity-driving study (I2 98%).",
+    "quote": null
+   }
+  ],
+  "overlaps": [
+   {
+    "note": "RIVAL 2020 and its 1-2 year follow-up report the same 102 patients.",
+    "pmids": [
+     "32186683",
+     "35578051"
+    ]
+   },
+   {
+    "note": "DIRECT is a secondary analysis of the ROLAIS trial (138 vs 139 patients), so they are a single trial.",
+    "pmids": [
+     "40277023",
+     "40632168"
+    ]
+   },
+   {
+    "note": "The meta-analyses pool the same small set of RCTs and are not independent confirmations.",
+    "pmids": [
+     "42625069",
+     "42927985",
+     "41182506",
+     "41384988",
+     "41452528"
+    ]
+   }
+  ],
+  "guidelines": [],
+  "missed_rcts": [],
+  "extract_next": [
+   {
+    "pmid": "41452528",
+    "text": "Robotic TAPP vs laparoscopic TEP meta-analysis with trial sequential analysis; its pain-benefit claim conflicts with the RCTs and its pool composition needs checking.",
+    "quote": null
+   },
+   {
+    "pmid": "41182506",
+    "text": "GRADE-assessed RCT-only meta-analysis of r-TAPP vs l-TAPP; the operative-time result depends on removing one study.",
+    "quote": null
+   },
+   {
+    "pmid": "41384988",
+    "text": "RCT-only meta-analysis on short-term outcomes; useful for checking trial overlap and the consistency of the pooled operative time.",
+    "quote": null
+   }
+  ],
+  "must_mention": [
+   "Randomized evidence is small and low to very low certainty, with about 100-180 patients per trial, experienced surgeons and mostly uncomplicated hernias in men. Equivalence cannot be claimed for rare outcomes such as recurrence or chronic pain.",
+   "RIVAL was an underpowered pilot with no primary outcome and 25% loss to follow-up at 2 years. RIVAL 2020 and 2023 are the same patients.",
+   "ROLAIS and DIRECT are the same trial and are not independent. ROLAIS reported fewer complications and shorter operative time but was single-centre and open-label.",
+   "Comparators are heterogeneous: ROGER compared robotic TAPP with laparoscopic TEP, VOLTAIRE used an open-console robot, and the Indian RCT used 2:1 allocation.",
+   "Operative time results are inconsistent across trials (robotic longer in RIVAL, VOLTAIRE and ROGER, shorter in ROLAIS) with I2 around 98%.",
+   "Cost evidence is a model-based Italian cost-utility analysis (ICER €44,480/QALY) plus RIVAL cost data ($3258 vs $1421); no RCT-based cost-effectiveness analysis exists, and it ignores robot acquisition and learning-curve effects.",
+   "The lower-recurrence signal comes from observational data and should not be treated as causal. No guideline addressing robotic vs laparoscopic inguinal repair was found. No RCT data exist on obesity, recurrent or bilateral hernias, or the learning curve."
+  ],
+  "contradicting": [
+   {
+    "pmid": "40277023",
+    "text": "Single-centre open-label RCT found robotic TAPP gave fewer complications, shorter operating time and more same-day discharge, which conflicts with a 'no difference' conclusion",
+    "quote": "R-TAPP was associated with a shorter operating time (-13.4 min, P < 0.001), fewer complications (23.0% versus 41.5%, P = 0.029), including fewer haematomas (6.8% versus 18.5%, P = 0.043), and a higher same-day discharge rate (95.9% versus 81.5%, P = 0.012)."
+   },
+   {
+    "pmid": "42541618",
+    "text": "Pooled mostly non-randomised data show lower recurrence with robotic repair",
+    "quote": "robotic repair was associated with a lower observed recurrence risk (RR 0.32, 95% CI 0.17-0.59; I2 = 0%), although certainty was low and the randomized evidence was imprecise."
+   },
+   {
+    "pmid": "41452528",
+    "text": "Trial sequential analysis suggests lower postoperative pain with robotic TAPP versus laparoscopic TEP",
+    "quote": "Sensitivity and trial sequential analyses suggested a significant reduction in postoperative pain with R-TAPP, with TSA confirming robust evidence for lower pain scores"
+   }
+  ],
+  "dropped_quotes": 0,
+  "dropped_unseen": 0
+ },
+ "version": 3,
+ "coverage": {
+  "gaps": [
+   {
+    "kind": "outcome",
+    "pmid": "32186683",
+    "text": "No differences between groups at preoperative, 1-week or 30-day points in wound events, readmissions, VAS pain or SF-36 quality of life.",
+    "numbers": [],
+    "outcome": "Pain, quality of life, wound events and readmissions"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "35578051",
+    "text": "No patients in either arm experienced neuropathic pain.",
+    "numbers": [],
+    "outcome": "Neuropathic pain (LANSS)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "35578051",
+    "text": "Health-related quality of life and physical activity were similar at 1 and 2 years.",
+    "numbers": [],
+    "outcome": "Quality of life and physical activity"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "35578051",
+    "text": "No long-term wound morbidity in either repair type.",
+    "numbers": [],
+    "outcome": "Wound morbidity"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "35578051",
+    "text": "Original RIVAL trial showed increased operative time, cost, and surgeon frustration with robotic approach without advantages over laparoscopy (no numbers given).",
+    "numbers": [],
+    "outcome": "Operative time and cost (original trial)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40277023",
+    "text": "IL-6 was lower after R-TAPP at 30 and 120 min after extubation (reductions of 26% and 22%, P < 0.001). (IL-6 reduction at 30 min = 26 % (R-TAPP), p <0.001; IL-6 reduction at 120 min = 22 % (R-TAPP), p <0.001)",
+    "numbers": [
+     26.0,
+     22.0
+    ],
+    "outcome": "IL-6"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40277023",
+    "text": "No significant differences in chronic pain or recurrence rates (no numbers given).",
+    "numbers": [],
+    "outcome": "Chronic pain and recurrence"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40632168",
+    "text": "Robotic repair was faster from Veress needle to skin closure for simple (62 vs 73 min) and complex hernias (83 vs 105 min). (Veress to skin closure, simple = 62 min (r-TAPP simple), p <0.01; Veress to skin closure, simple = 73 min (l-TAPP simple), p <0.01; Veress to skin closure, complex = 83 min (r-TAPP complex), p <0.01; Veress to skin closure, complex = 105 min (l-TAPP complex), p <0.01)",
+    "numbers": [
+     62.0,
+     73.0,
+     83.0,
+     105.0
+    ],
+    "outcome": "Total time Veress needle to skin closure (Step 4)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40632168",
+    "text": "Dissection, mesh and peritoneal closure time (Step 2) was shorter with robotic repair, for simple (35 vs 50 min) and complex hernias (57 vs 81 min). (Step 2 time, simple = 35 min (r-TAPP simple), p <0.01; Step 2 time, simple = 50 min (l-TAPP simple), p <0.01; Step 2 time, complex = 57 min (r-TAPP complex), p <0.01; Step 2 time, complex = 81 min (l-TAPP complex), p <0.01)",
+    "numbers": [
+     35.0,
+     50.0,
+     57.0,
+     81.0
+    ],
+    "outcome": "Peritoneal incision to instrument removal (Step 2)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "37580577",
+    "text": "Camera port injury in 68% (13/19) of robotic vs 47% (8/17) of TAPP samples; not significant (p = 0.503). (Camera port thermal injury = 68 % (rTAPP), p 0.503; Camera port thermal injury = 47 % (TAPP))",
+    "numbers": [
+     68.0,
+     47.0
+    ],
+    "outcome": "Camera port thermal injury"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "37580577",
+    "text": "Working port injury 53% (10/19) robotic vs 47% (8/17) laparoscopic; no difference (p = 0.991). (Working port thermal injury = 53 % (rTAPP), p 0.991; Working port thermal injury = 47 % (TAPP))",
+    "numbers": [
+     53.0,
+     47.0
+    ],
+    "outcome": "Working port thermal injury"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "42541618",
+    "text": "No significant difference in postoperative-day-1 pain (SMD -0.47, 95% CI -1.56 to 0.63); very low certainty. (POD1 pain SMD = -0.47 SMD (robotic), CI -1.56 to 0.63, p 0.208)",
+    "numbers": [
+     -0.47,
+     -1.56,
+     0.63
+    ],
+    "outcome": "Postoperative pain (day 1)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "42541618",
+    "text": "Costs were consistently higher with robotic repair, e.g. a $3,999 higher total hospital cost in Khoraki 2020. No pooled estimate and no cost-effectiveness analysis were possible. (Higher total hospital cost (Khoraki 2020) = 3999 USD (robotic))",
+    "numbers": [
+     3999.0
+    ],
+    "outcome": "Costs"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "41452528",
+    "text": "Hospital stay slightly longer with R-TAPP, mean difference 0.16 days (95% CI 0.03 to 0.29; p = 0.01), likely not clinically meaningful. (Hospital stay mean difference = 0.16 days (R-TAPP vs L-TEP), CI 0.03 to 0.29, p 0.01)",
+    "numbers": [
+     0.16,
+     0.03,
+     0.29
+    ],
+    "outcome": "Hospital stay"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "41452528",
+    "text": "No significant differences in recurrence, seroma, urinary retention or wound infection (no numbers given).",
+    "numbers": [],
+    "outcome": "Recurrence and complications"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "41182506",
+    "text": "Sensitivity analysis removing the heterogeneity-driving study showed r-TAPP was 15.20 min shorter. (Mean difference in operative time, sensitivity analysis = -15.2 min, CI -18.58 to -11.82, p < 0.00001)",
+    "numbers": [
+     -15.2,
+     -18.58,
+     -11.82
+    ],
+    "outcome": "Operative time (sensitivity analysis)"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "42625069",
+    "text": "Returned to normal activity at 14 days = 38.5 % (robotic), p 0.006",
+    "numbers": [
+     38.5
+    ],
+    "outcome": "Return to normal activity"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "42927985",
+    "text": "Risk ratio, seroma = 0.4 RR, CI 0.08 to 2.03",
+    "numbers": [
+     0.4,
+     0.08,
+     2.03
+    ],
+    "outcome": "Seroma, hematoma, surgical site infection"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "42927985",
+    "text": "Risk ratio, hematoma = 0.65 RR, CI 0.12 to 3.41",
+    "numbers": [
+     0.65,
+     0.12,
+     3.41
+    ],
+    "outcome": "Seroma, hematoma, surgical site infection"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "41182506",
+    "text": "Odds ratio, hematoma = 0.64, CI 0.08 to 5.3",
+    "numbers": [
+     0.64,
+     0.08,
+     5.3
+    ],
+    "outcome": "Seroma and hematoma"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "41384988",
+    "text": "Median pain score day 14 = 0 score (robotic), p 0.46",
+    "numbers": [
+     0.0
+    ],
+    "outcome": "Postoperative pain"
+   },
+   {
+    "kind": "number",
+    "pmid": "40277023",
+    "text": "CRP reduction postoperative day 3 = 32 % (R-TAPP), p 0.001",
+    "numbers": [
+     32.0
+    ],
+    "outcome": "CRP (primary outcome)"
+   },
+   {
+    "kind": "number",
+    "pmid": "40632168",
+    "text": "Set-up time, simple = 16 min (r-TAPP simple), p 0.70",
+    "numbers": [
+     16.0
+    ],
+    "outcome": "Set-up time (Step 1)"
+   },
+   {
+    "kind": "number",
+    "pmid": "40632168",
+    "text": "Set-up time, complex = 16 min (r-TAPP complex), p 0.70",
+    "numbers": [
+     16.0
+    ],
+    "outcome": "Set-up time (Step 1)"
+   },
+   {
+    "kind": "number",
+    "pmid": "42527734",
+    "text": "Absolute risk difference = 2.7 %, CI -13.7 to 19.1, p 0.744",
+    "numbers": [
+     2.7,
+     -13.7,
+     19.1
+    ],
+    "outcome": "Rescue analgesia requirement"
+   }
+  ],
+  "counts": {
+   "gaps_cut": 0,
+   "pooled_missing": 9,
+   "numbers_checked": 111,
+   "numbers_missing": 27,
+   "skeptic_checked": 10,
+   "skeptic_missing": 0,
+   "outcomes_checked": 69,
+   "outcomes_missing": 16
+  }
+ },
+ "evidence": [
+  {
+   "pmid": "32186683",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "35578051",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41511872",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 2,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40277023",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40632168",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42527734",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40450465",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "37580577",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42625069",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 2,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "PROSPERO CRD420261370145"
+  },
+  {
+   "pmid": "42927985",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42541618",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 2,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "PROSPERO CRD420251075296"
+  },
+  {
+   "pmid": "41258567",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41452528",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "found_by_skeptic": true,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41182506",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "found_by_skeptic": true,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "PROSPERO CRD420251154089"
+  },
+  {
+   "pmid": "41384988",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "found_by_skeptic": true,
+   "numbers_unverified": 2,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "PROSPERO CRD420251157847"
+  }
+ ],
+ "question": "Does robotic inguinal hernia repair improve pain, complications, recurrence, return to normal activity, or quality of life compared with conventional laparoscopic repair? Assess randomized evidence, operative time, and costs.",
+ "searches": [
+  {
+   "hits": 57,
+   "query": "robotic AND laparoscopic AND inguinal hernia AND (randomized OR randomised) AND (trial[tiab] OR random*[tiab])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 46,
+   "query": "robotic inguinal hernia repair AND (meta-analysis[pt] OR meta-analysis[tiab] OR systematic review[tiab])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 23,
+   "query": "(robot*[ti]) AND (inguinal[ti] OR groin[ti]) AND (randomized[tiab] OR randomised[tiab]) AND (cost*[tiab] OR \"quality of life\"[tiab] OR pain[tiab])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 25,
+   "query": "related to PMID 41511872",
+   "source": "PubMed related"
+  },
+  {
+   "hits": 12,
+   "query": "(robot*[tiab]) AND (inguinal hernia[tiab]) AND (randomized controlled trial[pt]) NOT block[ti]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 10,
+   "query": "(groin hernia OR inguinal hernia) AND robot* AND (\"practice guideline\"[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti])",
+   "source": "PubMed"
+  }
+ ],
+ "untraced": [
+  {
+   "len": 3,
+   "field": "clinical_practice.cost_per_case",
+   "start": 33
+  },
+  {
+   "len": 4,
+   "field": "clinical_practice.cost_per_case",
+   "start": 89
+  }
+ ],
+ "elapsed_s": 273,
+ "integrity": {
+  "dropped_unseen": 0,
+  "dropped_numbers": 0,
+  "dropped_studies": 0,
+  "numbers_checked": 360,
+  "labels_defaulted": 0,
+  "numbers_untraced": 2,
+  "dropped_unfetched": 0,
+  "removed_citations": 0,
+  "numbers_unverified": 10,
+  "outcomes_unverified": 0
+ },
+ "cost_paise": 17341,
+ "created_at": "2026-10-31T10:47:09.053002123Z",
+ "references": [
+  {
+   "n": 1,
+   "doi": "10.1001/jamasurg.2020.0034",
+   "pmid": "32186683",
+   "year": 2020,
+   "title": "Robotic Inguinal vs Transabdominal Laparoscopic Inguinal Hernia Repair: The RIVAL Randomized Clinical Trial.",
+   "journal": "JAMA surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 2,
+   "doi": "10.1007/s00464-022-09320-9",
+   "pmid": "35578051",
+   "year": 2023,
+   "title": "Laparoscopic versus robotic inguinal hernia repair: 1- and 2-year outcomes from the RIVAL trial.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 3,
+   "doi": "10.1093/bjs/znaf283",
+   "pmid": "41511872",
+   "year": 2025,
+   "title": "Robotic versus laparoscopic minimally invasive inguinal hernia repair: randomized clinical trial (the ROGER trial).",
+   "journal": "The British journal of surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 4,
+   "doi": "10.1093/bjs/znaf074",
+   "pmid": "40277023",
+   "year": 2025,
+   "title": "Inflammatory response and short-term outcomes after laparoscopic versus robotic transabdominal preperitoneal inguinal hernia repair: randomized clinical trial (ROLAIS).",
+   "journal": "The British journal of surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 5,
+   "doi": "10.1007/s10029-025-03402-y",
+   "pmid": "40632168",
+   "year": 2025,
+   "title": "Shorter operative times following robotic-assisted transabdominal preperitoneal inguinal hernia repair (TAPP) compared to laparoscopic TAPP: the Danish Inguinal Randomized Controlled Trial (DIRECT).",
+   "journal": "Hernia : the journal of hernias and abdominal wall surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 6,
+   "doi": "10.1007/s00464-026-13240-3",
+   "pmid": "42527734",
+   "year": 2026,
+   "title": "Laparoscopic versus robotic transabdominal preperitoneal inguinal hernia repair: a randomized controlled trial.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 7,
+   "doi": "10.1016/j.amjsurg.2025.116429",
+   "pmid": "40450465",
+   "year": 2025,
+   "title": "Robotic assisted surgery reduces ergonomic risk during minimally invasive inguinal hernia repair: the VOLTAIRE randomised controlled trial.",
+   "journal": "American journal of surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 8,
+   "doi": "10.1007/s00464-023-10331-3",
+   "pmid": "37580577",
+   "year": 2023,
+   "title": "Stray energy injury during robotic versus laparoscopic inguinal hernia repair: a randomized controlled trial.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 9,
+   "doi": "10.1007/s00464-026-13253-y",
+   "pmid": "42625069",
+   "year": 2026,
+   "title": "Robotic versus laparoscopic inguinal hernia repair: a systematic review and meta-analysis of randomized controlled trials.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 10,
+   "doi": "10.1177/10926429261501679",
+   "pmid": "42927985",
+   "year": 2026,
+   "title": "Robotic Versus Laparoscopic Transabdominal Preperitoneal Inguinal Hernia Repair: An Updated Systematic Review and Meta-Analysis of Randomized Controlled Trials.",
+   "journal": "Journal of laparoendoscopic & advanced surgical techniques. Part A",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 11,
+   "doi": "10.1007/s11701-026-03728-4",
+   "pmid": "42541618",
+   "year": 2026,
+   "title": "Comparative outcomes of robotic versus laparoscopic inguinal hernia repair: a systematic review and meta-analysis.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 12,
+   "doi": "10.1007/s10029-025-03513-6",
+   "pmid": "41258567",
+   "year": 2025,
+   "title": "Cost-utility of robotic versus laparoscopic TAPP for inguinal hernia: a model‑based analysis from a public payer perspective.",
+   "journal": "Hernia : the journal of hernias and abdominal wall surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 13,
+   "doi": "10.1007/s11701-025-03058-x",
+   "pmid": "41452528",
+   "year": 2025,
+   "title": "Robotic transabdominal preperitoneal versus laparoscopic total extraperitoneal inguinal hernia repair: a systematic review and meta-analysis with trial sequential analysis.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 14,
+   "doi": "10.1007/s11701-025-02940-y",
+   "pmid": "41182506",
+   "year": 2025,
+   "title": "Da Vinci Xi versus laparoscopic transabdominal preperitoneal (TAPP) repair of inguinal hernia: a GRADE-assessed systematic review and meta-analysis of randomized controlled trials.",
+   "journal": "Journal of robotic surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 15,
+   "doi": "10.1007/s10029-025-03550-1",
+   "pmid": "41384988",
+   "year": 2025,
+   "title": "Robotic vs. laparoscopic TAPP: a systematic review and meta-analysis of randomized controlled trials on short-term outcomes.",
+   "journal": "Hernia : the journal of hernias and abdominal wall surgery",
+   "retracted": false,
+   "found_by_skeptic": true
+  }
+ ],
+ "completeness": {
+  "notes": [
+   "Cost is rated Moderate although the answer's own reasoning cites only two trials, setting-specific costs and a non-trial model, which seems inconsistent with the Low overall certainty.",
+   "Return to activity is rated Very low, while the At a Glance and Bottom Line statements describe the results as consistently no benefit, despite the VOLTAIRE signal favouring robotic repair."
+  ],
+  "skipped": null,
+  "untraced": [],
+  "items_cut": 0,
+  "not_added": [
+   {
+    "gap": "RIVAL wound events/readmissions/VAS/SF-36 at 30 days; neuropathic pain; wound morbidity; QoL at 1-2 years; original RIVAL time/cost; ROLAIS chronic pain/recurrence",
+    "reason": "Already covered in substance by the answer's pain, QoL, recurrence and complication rows; no numbers given."
+   },
+   {
+    "gap": "IL-6 and CRP reductions (ROLAIS)",
+    "reason": "Inflammatory biomarkers are surrogate outcomes, not asked in the question."
+   },
+   {
+    "gap": "DIRECT step-wise times and set-up times",
+    "reason": "Detail beyond the total operative time already reported."
+   },
+   {
+    "gap": "Stray energy camera and working port injury",
+    "reason": "Histological surrogate; the overall result is already given."
+   },
+   {
+    "gap": "Mixed MA POD1 pain SMD and Khoraki cost",
+    "reason": "Observational-dominated, very low certainty; marginal to the RCT question."
+   },
+   {
+    "gap": "R-TAPP vs L-TEP hospital stay and recurrence/complications",
+    "reason": "Pool likely includes non-randomised studies; the answer already flags it."
+   },
+   {
+    "gap": "Da Vinci Xi sensitivity operative time -15.2 min",
+    "reason": "The answer already notes that the time advantage appears only after removing one study."
+   },
+   {
+    "gap": "Return to normal activity 38.5% (pooled review)",
+    "reason": "Same VOLTAIRE data as 15 (39%) already stated."
+   },
+   {
+    "gap": "Median pain day 14; rescue analgesia risk difference; CRP day 3; seroma/hematoma ORs",
+    "reason": "Minor detail or duplicative of what is already reported."
+   }
+  ],
+  "gaps_found": 25,
+  "added_outcomes": [
+   {
+    "why": "Sparse events, wide CIs, overlapping small RCT pools",
+    "pmids": [
+     "42927985",
+     "41182506",
+     "41384988"
+    ],
+    "outcome": "Specific complications: seroma, haematoma, infection, conversion, readmission",
+    "certainty": "Low",
+    "effect_text": "Pooled RCT estimates for specific complications showed no significant difference for r-TAPP vs l-TAPP: seroma RR 0.40 (95% CI 0.08-2.03), haematoma RR 0.65 (0.12-3.41) and surgical site infection RR 0.33 (0.03-3.14) [42927985 as 10]. Conversion RR was 1.00 (0.09-10.91) [10]. In the three-RCT Da Vinci Xi pool, haematoma OR was 0.64 (0.08-5.30), and readmission OR 0.51 (0.02-12.14) [14]. Readmission RR was 0.71 (0.09-5.58) in the short-term RCT pool [15]."
+   }
+  ],
+  "added_conflicts": [],
+  "labels_defaulted": 0,
+  "outcome_additions": [],
+  "removed_citations": 0
+ },
+ "empty_reason": null,
+ "notable_code": [
+  {
+   "text": "Not independent evidence (the skeptic): RIVAL 2020 and its 1-2 year follow-up report the same 102 patients.",
+   "pmids": [
+    "32186683",
+    "35578051"
+   ]
+  },
+  {
+   "text": "Not independent evidence (the skeptic): DIRECT is a secondary analysis of the ROLAIS trial (138 vs 139 patients), so they are a single trial.",
+   "pmids": [
+    "40277023",
+    "40632168"
+   ]
+  },
+  {
+   "text": "Not independent evidence (the skeptic): The meta-analyses pool the same small set of RCTs and are not independent confirmations.",
+   "pmids": [
+    "42625069",
+    "42927985",
+    "41182506",
+    "41384988",
+    "41452528"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): Pooled 18 cohorts and 78,940 participants, mostly observational; the recurrence RR 0.32 is non-randomised.",
+   "pmids": [
+    "42541618"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool of 6 studies for r-TAPP vs laparoscopic TEP appears to include non-randomised studies, since the abstract recommends further randomized trials.",
+   "pmids": [
+    "41452528"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): Counts 7 RCTs reported in 9 publications, so the pool includes secondary reports and overlapping trials such as RIVAL follow-up and ROLAIS/DIRECT; the pool also mixes TAPP and TEP comparators.",
+   "pmids": [
+    "42625069"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): Pools only 3 RCTs; the operative-time advantage emerges only after removing the heterogeneity-driving study (I2 98%).",
+   "pmids": [
+    "41182506"
+   ]
+  },
+  {
+   "text": "The extractor could not match 10 numbers to the papers' wording; they are kept and labelled “not verified” in the trials table.",
+   "pmids": [
+    "41511872",
+    "40632168",
+    "40450465",
+    "42625069",
+    "42541618",
+    "41384988"
+   ]
+  }
+ ],
+ "stopped_early": null
+}

@@ -51,6 +51,10 @@ pub struct Config {
     /// Stage 4b: the completeness review after the Full writer
     /// (`COMPLETENESS`: `on`, the default, or `off`, the rollback switch).
     pub completeness: bool,
+    /// Temporal T2/T3: the expert writer after a saved Full answer
+    /// (`TEMPORAL`: `off`, the default, or `on`; `TEMPORAL_MAX_TOKENS`
+    /// optional, 2,000–32,000, default 20,000).
+    pub temporal: crate::agent::temporal_writer::TemporalSettings,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -223,6 +227,40 @@ impl Config {
             }
         };
 
+        let temporal = {
+            use crate::agent::temporal_writer::{MAX_TOKENS_RANGE, TemporalSettings};
+            let on = match lookup("TEMPORAL").as_deref() {
+                None | Some("off") => false,
+                Some("on") => true,
+                Some(_) => {
+                    return Err(ConfigError::Invalid {
+                        var: "TEMPORAL",
+                        reason: "expected `on` or `off`".to_string(),
+                    });
+                }
+            };
+            let max_tokens = match lookup("TEMPORAL_MAX_TOKENS") {
+                None => TemporalSettings::default().max_tokens,
+                Some(v) => v
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| MAX_TOKENS_RANGE.contains(n))
+                    .ok_or_else(|| ConfigError::Invalid {
+                        var: "TEMPORAL_MAX_TOKENS",
+                        reason: format!(
+                            "expected a whole number from {} to {}",
+                            MAX_TOKENS_RANGE.start(),
+                            MAX_TOKENS_RANGE.end()
+                        ),
+                    })?,
+            };
+            TemporalSettings {
+                on,
+                max_tokens,
+                ..TemporalSettings::default()
+            }
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -299,6 +337,7 @@ impl Config {
             quick_engine,
             full_engine,
             completeness,
+            temporal,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -861,6 +900,76 @@ mod tests {
         assert_eq!(
             (c.quick_engine, c.full_engine),
             (Engine::Team, Engine::Classic)
+        );
+    }
+
+    /// Temporal T2: `TEMPORAL` is `off` (default) or `on`, trimmed;
+    /// `TEMPORAL_MAX_TOKENS` is optional within its range; anything else is
+    /// refused at startup without echoing the value. The model is Opus by
+    /// default and switchable by `AGENT_MODELS`.
+    #[test]
+    fn temporal_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.temporal.on, "off by default");
+        assert_eq!(c.temporal.max_tokens, 20_000);
+        assert_eq!(c.agent_models.temporal, "claude-opus-5-5");
+        for (v, want) in [("on", true), (" on ", true), ("off", false), ("  ", false)] {
+            let mut pairs = full();
+            pairs.push(("TEMPORAL", v));
+            assert_eq!(
+                Config::from_lookup(lookup(&pairs)).unwrap().temporal.on,
+                want,
+                "{v:?}"
+            );
+        }
+        for bad in ["On", "true", "1", "o n"] {
+            let mut pairs = full();
+            pairs.push(("TEMPORAL", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "TEMPORAL",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+            assert!(!err.to_string().contains(bad));
+        }
+        let mut pairs = full();
+        pairs.push(("TEMPORAL_MAX_TOKENS", "12000"));
+        assert_eq!(
+            Config::from_lookup(lookup(&pairs))
+                .unwrap()
+                .temporal
+                .max_tokens,
+            12_000
+        );
+        for bad in ["1999", "32001", "9k", "-1"] {
+            let mut pairs = full();
+            pairs.push(("TEMPORAL_MAX_TOKENS", bad));
+            let err = Config::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "TEMPORAL_MAX_TOKENS",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+        }
+        let mut pairs = full();
+        pairs.push(("AGENT_MODELS", r#"{"temporal": "claude-sonnet-5-5"}"#));
+        assert_eq!(
+            Config::from_lookup(lookup(&pairs))
+                .unwrap()
+                .agent_models
+                .temporal,
+            "claude-sonnet-5-5"
         );
     }
 

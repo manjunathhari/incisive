@@ -1,0 +1,2028 @@
+{
+ "mode": "focused",
+ "notes": [],
+ "answer": {
+  "studies": [
+   {
+    "n": 221,
+    "pmid": "31800987",
+    "label": "Werner 2019, NEJM",
+    "design": "Multicentre randomised non-inferiority trial",
+    "setting": "European multicentre",
+    "appraisal": "Abstract only; open-label with a subjective endpoint; margin -12.5 points; not powered for reflux or adverse events. Same trial as 40112837.",
+    "comparison": "POEM vs LHM + Dor",
+    "key_results": "2-year success 83.0% with POEM vs 81.7% with LHM+Dor; oesophagitis 44% vs 29% at 24 months; serious adverse events 2.7% vs 7.3% [31800987]."
+   },
+   {
+    "n": 241,
+    "pmid": "40112837",
+    "label": "5-year follow-up 2025, Lancet Gastroenterol Hepatol",
+    "design": "5-year follow-up of a multicentre open-label non-inferiority RCT",
+    "setting": "8 centres, 6 European countries",
+    "appraisal": "Same cohort as 31800987 (NCT01601678); open-label; modified ITT; 20% lost to follow-up; pH testing in 37%; Olympus among funders.",
+    "comparison": "POEM vs LHM + Dor",
+    "key_results": "Success 75.0% with POEM vs 70.8% with LHM+Dor; oesophagitis 41% vs 31%; abnormal acid exposure 62% vs 31% [40112837]."
+   },
+   {
+    "n": 40,
+    "pmid": "36156932",
+    "label": "Brazil 2022, World J Gastroenterol",
+    "design": "Single-centre RCT",
+    "setting": "Tertiary hospital, Brazil",
+    "appraisal": "40 patients; single centre; one expert POEM operator; allocation concealment and blinding not described; incomplete endoscopy; about a quarter with Chagas exposure; 12-month follow-up.",
+    "comparison": "POEM vs laparoscopic myotomy + partial fundoplication",
+    "key_results": "Eckardt scores similar; GerdQ reflux 64.6% with POEM vs 11.1% with LM-PF; procedure time 95.7 vs 218.75 min [36156932]."
+   },
+   {
+    "n": 133,
+    "pmid": "31287522",
+    "label": "Ponds 2019, JAMA",
+    "design": "Multicentre RCT",
+    "setting": "6 hospitals in Europe, Hong Kong and the USA",
+    "appraisal": "Abstract only; open-label; reflux assessed only in patients without failure. Same trial as 36206786.",
+    "comparison": "POEM vs pneumatic dilation (30/35 mm)",
+    "key_results": "2-year success 92% with POEM vs 54% with PD; oesophagitis 41% vs 7% [31287522]."
+   },
+   {
+    "n": 133,
+    "pmid": "36206786",
+    "label": "5-year follow-up 2022, Lancet Gastroenterol Hepatol",
+    "design": "5-year follow-up of an RCT",
+    "setting": "6 hospitals",
+    "appraisal": "Same cohort as 31287522 (NTR3593); unmasked; endoscopy only in patients in remission; the single dilation series disadvantages PD.",
+    "comparison": "POEM vs pneumatic dilation",
+    "key_results": "Success 81% with POEM vs 40% with PD; PPI use 46% vs 13% [36206786]."
+   },
+   {
+    "n": 201,
+    "pmid": "21561346",
+    "label": "European Achalasia Trial 2011, NEJM",
+    "design": "Multicentre RCT",
+    "setting": "European centres",
+    "appraisal": "Abstract only; no equivalence margin reported; open-label. Same trial as 38050085.",
+    "comparison": "Pneumatic dilation vs LHM + Dor",
+    "key_results": "2-year success 86% with PD vs 90% with LHM; perforation 4% with PD; mucosal tears 12% with LHM [21561346]."
+   },
+   {
+    "n": 201,
+    "pmid": "38050085",
+    "label": "European Achalasia Trial 10-year 2024, Gut",
+    "design": "10-year follow-up of an RCT",
+    "setting": "European multicentre",
+    "appraisal": "Same cohort as 21561346; heavy attrition (40 vs 36 analysed); exploratory subtype analyses.",
+    "comparison": "Pneumatic dilation series vs LHM",
+    "key_results": "Success 74% with LHM vs 74% with PD; PD superior in type II (p=0.03); LHM trend in type III (p=0.05) [38050085]."
+   },
+   {
+    "n": 90,
+    "pmid": "36907524",
+    "label": "Dutch trial 2023, Gastroenterology",
+    "design": "Multicentre RCT",
+    "setting": "Netherlands, multicentre",
+    "appraisal": "Abstract only; 1-year follow-up; previously operated patients only.",
+    "comparison": "POEM vs pneumatic dilation after failed LHM",
+    "key_results": "Success 62.2% with POEM vs 26.7% with PD; oesophagitis 34.3% vs 15% (not significant) [36907524]."
+   },
+   {
+    "n": 911,
+    "pmid": "33035470",
+    "label": "NMA 2021, Lancet Gastroenterol Hepatol",
+    "design": "Network meta-analysis of 9 RCTs",
+    "setting": "International RCTs",
+    "appraisal": "No trial at low risk of bias; I2 61.5%; partly indirect estimates; overlaps with the other meta-analyses.",
+    "comparison": "POEM vs LHM vs PD",
+    "key_results": "RR of failure vs PD 0.33 for POEM and 0.45 for LHM; no POEM vs LHM difference in reflux or oesophagitis [33035470]."
+   },
+   {
+    "n": 745,
+    "pmid": "32856150",
+    "label": "NMA 2021, Surg Endosc",
+    "design": "Network meta-analysis of 6 RCTs with GRADE",
+    "setting": "International RCTs",
+    "appraisal": "Only one direct POEM vs LHM RCT; GRADE low to very low; 1–2 year follow-up.",
+    "comparison": "POEM vs LHM vs PD",
+    "key_results": "1-year success RR 1.09 for POEM vs LHM; oesophagitis 45.4% with POEM vs 24.9% with LHM; serious adverse events 1.4% vs 6.7% [32856150]."
+   },
+   {
+    "n": 1099,
+    "pmid": "40624423",
+    "label": "Long-term MA 2025, Surg Endosc",
+    "design": "Meta-analysis of randomised and non-randomised studies (≥24 months)",
+    "setting": "9 studies",
+    "appraisal": "Pools non-randomised studies with RCTs; oesophagitis result depends on post hoc exclusion of outliers.",
+    "comparison": "POEM vs LHM",
+    "key_results": "Success OR 1.43 (0.96–2.13); oesophagitis OR 2.57; PPI use OR 1.72; operative time MD -35.69 min [40624423]."
+   },
+   {
+    "n": 1575,
+    "pmid": "30690706",
+    "label": "Subtype MA 2019, Br J Surg",
+    "design": "Meta-analysis of 20 observational series",
+    "setting": "Published series",
+    "appraisal": "Observational series, not RCTs; confounding; PubMed only.",
+    "comparison": "POEM vs LHM (also PD, botulinum) by subtype",
+    "key_results": "POEM vs LHM OR 2.97 in type I and 3.50 in type III [30690706]."
+   },
+   {
+    "n": 1170,
+    "pmid": "42617727",
+    "label": "NMA 2026, J Gastrointest Surg",
+    "design": "Network meta-analysis of 15 RCTs",
+    "setting": "International RCTs",
+    "appraisal": "Likely counts several reports of the same trials as separate RCTs; wide CIs; abstract only.",
+    "comparison": "POEM, Heller, PD, botulinum toxin",
+    "key_results": "5-year success OR 6.33 for POEM and 6.39 for Heller [42617727]."
+   },
+   {
+    "n": 590,
+    "pmid": "41792489",
+    "label": "MA 2026, Surg Endosc",
+    "design": "Meta-analysis of RCTs and prospective studies",
+    "setting": "Treatment-naive adults",
+    "appraisal": "3 RCTs plus 1 propensity-matched cohort; only 4 studies; overlaps with the included trials.",
+    "comparison": "POEM vs LHM + partial fundoplication",
+    "key_results": "Adverse events RR 1.15; oesophagitis RR 3.10; abnormal pH RR 1.94 [41792489]."
+   },
+   {
+    "n": null,
+    "pmid": "37539633",
+    "label": "SR 2024, Dis Esophagus",
+    "design": "Systematic review of 31 studies, no meta-analysis",
+    "setting": "Mixed studies",
+    "appraisal": "Narrative synthesis; mostly retrospective studies; single screener; several extracted claims could not be verified.",
+    "comparison": "POEM vs LHM and PD",
+    "key_results": "Reports higher complications with POEM in the Brazilian RCT (64.3% vs 35.7%) [37539633]."
+   }
+  ],
+  "outcomes": [
+   {
+    "why": "Effectively one open-label trial with a subjective endpoint and a fairly wide margin; consistent support from a small trial and pooled data.",
+    "pmids": [
+     "31800987",
+     "40112837",
+     "36156932",
+     "32856150"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Clinical success at 2 years",
+      "value": 83.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Clinical success at 2 years",
+      "value": 81.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.007 for noninferiority",
+      "arm": "POEM minus LHM",
+      "pmid": "31800987",
+      "unit": "percentage points",
+      "label": "Difference in 2-year success",
+      "value": 1.4,
+      "ci_low": -8.7,
+      "ci_high": 11.4
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Clinical success at 5 years",
+      "value": 75.0,
+      "ci_low": 66.2,
+      "ci_high": 82.1
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Clinical success at 5 years",
+      "value": 70.8,
+      "ci_low": 61.7,
+      "ci_high": 78.5
+     },
+     {
+      "p": null,
+      "arm": "POEM minus LHM",
+      "pmid": "40112837",
+      "unit": "points",
+      "label": "Difference in mean Eckardt score at 5 years",
+      "value": -0.29,
+      "ci_low": -0.62,
+      "ci_high": 0.05
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "36156932",
+      "unit": "points",
+      "label": "Median Eckardt at 12 months",
+      "value": 0.5,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM",
+      "pmid": "32856150",
+      "unit": "RR",
+      "label": "RR 1-year treatment success",
+      "value": 1.09,
+      "ci_low": 0.86,
+      "ci_high": 1.39
+     }
+    ],
+    "outcome": "Symptom relief / clinical success (Eckardt ≤3)",
+    "certainty": "Moderate",
+    "effect_text": "POEM was non-inferior to LHM+Dor. Clinical success was 83.0% with POEM vs 81.7% with LHM+Dor at 2 years (difference 1.4 points, 95% CI -8.7 to 11.4; margin -12.5) [31800987]. At 5 years it was 75.0% with POEM vs 70.8% with LHM+Dor (difference 4.2, -7.4 to 15.7) [40112837]. The mean Eckardt difference at 5 years was -0.29 (-0.62 to 0.05) [40112837]. In the small Brazilian trial, median Eckardt scores at 12 months were 0.5 with POEM vs 0.0 with LM-PF, not significantly different [36156932]. In network meta-analysis, the 1-year success RR for POEM vs LHM was 1.09 (0.86–1.39) [32856150].",
+    "rct_evidence": "European multicentre RCT (2- and 5-year reports, one cohort); Brazilian single-centre RCT; RCT network meta-analysis",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "None of the pooled RCTs were at low risk of bias, heterogeneity was moderate, the estimates are imprecise and one pool includes observational studies.",
+    "pmids": [
+     "33035470",
+     "40624423",
+     "36156932"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM vs PD",
+      "pmid": "33035470",
+      "unit": "RR",
+      "label": "RR of treatment failure",
+      "value": 0.33,
+      "ci_low": 0.15,
+      "ci_high": 0.71
+     },
+     {
+      "p": null,
+      "arm": "LHM vs PD",
+      "pmid": "33035470",
+      "unit": "RR",
+      "label": "RR of treatment failure",
+      "value": 0.45,
+      "ci_low": 0.26,
+      "ci_high": 0.78
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM",
+      "pmid": "40624423",
+      "unit": "OR",
+      "label": "OR treatment success (mixed designs)",
+      "value": 1.43,
+      "ci_low": 0.96,
+      "ci_high": 2.13
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "36156932",
+      "unit": "patients",
+      "label": "Treatment success at 12 months",
+      "value": 19.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Treatment failure",
+    "certainty": "Low",
+    "effect_text": "Network meta-analysis of 9 RCTs: the RR of failure vs pneumatic dilation was 0.33 (0.15–0.71) for POEM and 0.45 (0.26–0.78) for LHM, with no significant POEM vs LHM difference; heterogeneity was I2 61.5% [33035470]. The long-term pool (mixed randomised and non-randomised studies) gave a success OR of 1.43 for POEM vs LHM (0.96–2.13) [40624423]. Brazilian trial: success at 12 months in 19/20 with POEM [36156932].",
+    "rct_evidence": "Network meta-analyses; long-term meta-analysis (includes observational studies); Brazilian RCT",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Consistent direction across studies, but endoscopy and pH covered selected subsets, the 5-year endoscopic difference was imprecise and the trials were open-label.",
+    "pmids": [
+     "31800987",
+     "40112837",
+     "41792489",
+     "36156932",
+     "40624423"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 24 months",
+      "value": 44.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 24 months",
+      "value": 29.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 5 years",
+      "value": 41.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 5 years",
+      "value": 31.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "LA B–D oesophagitis at 5 years",
+      "value": 14.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "LA B–D oesophagitis at 5 years",
+      "value": 7.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Abnormal acid exposure at 5 years",
+      "value": 62.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "40112837",
+      "unit": "%",
+      "label": "Abnormal acid exposure at 5 years",
+      "value": 31.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM+PF",
+      "pmid": "41792489",
+      "unit": "RR",
+      "label": "RR endoscopic oesophagitis",
+      "value": 3.1,
+      "ci_low": 2.17,
+      "ci_high": 4.41
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM+PF",
+      "pmid": "41792489",
+      "unit": "RR",
+      "label": "RR abnormal pH",
+      "value": 1.94,
+      "ci_low": 1.07,
+      "ci_high": 3.53
+     },
+     {
+      "p": "<0.02",
+      "arm": "POEM",
+      "pmid": "36156932",
+      "unit": "%",
+      "label": "GER by GerdQ",
+      "value": 64.6,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "<0.02",
+      "arm": "LM-PF",
+      "pmid": "36156932",
+      "unit": "%",
+      "label": "GER by GerdQ",
+      "value": 11.1,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Gastro-oesophageal reflux and oesophagitis",
+    "certainty": "Moderate",
+    "effect_text": "Reflux oesophagitis after POEM vs LHM+Dor was 57% vs 20% at 3 months and 44% vs 29% at 24 months [31800987]. At 5 years it was 41% after POEM vs 31% after LHM+Dor (difference 10.2, -7.0 to 26.8), and LA B–D oesophagitis was 14% vs 7% [40112837]. Abnormal acid exposure at 5 years was 62% after POEM vs 31% after LHM+Dor (difference 31.7, 9.8 to 50.5), but only 37% had pH-metry; reflux symptom scores were similar (DeMeester 1.3 vs 1.1) [40112837]. Pooled RR for POEM vs LHM+PF was 3.10 for endoscopic oesophagitis and 1.94 for abnormal pH [41792489]. GerdQ-assessed reflux was 64.6% after POEM vs 11.1% after LM-PF [36156932]. PPI use OR was 1.72 for POEM vs LHM (mixed designs) [40624423].",
+    "rct_evidence": "European RCT (2 and 5 years); Brazilian RCT; meta-analysis of 3 RCTs plus 1 cohort",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Trials were not powered for adverse events, definitions were inconsistent and events were few.",
+    "pmids": [
+     "31800987",
+     "32856150",
+     "41792489",
+     "36156932",
+     "21561346",
+     "33035470"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Serious adverse events",
+      "value": 2.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM plus Dor",
+      "pmid": "31800987",
+      "unit": "%",
+      "label": "Serious adverse events",
+      "value": 7.3,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "32856150",
+      "unit": "%",
+      "label": "Pooled serious adverse events",
+      "value": 1.4,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM",
+      "pmid": "32856150",
+      "unit": "%",
+      "label": "Pooled serious adverse events",
+      "value": 6.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "PD",
+      "pmid": "32856150",
+      "unit": "%",
+      "label": "Pooled serious adverse events",
+      "value": 4.2,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM+PF",
+      "pmid": "41792489",
+      "unit": "RR",
+      "label": "RR adverse events",
+      "value": 1.15,
+      "ci_low": 0.38,
+      "ci_high": 3.44
+     },
+     {
+      "p": null,
+      "arm": "PD",
+      "pmid": "21561346",
+      "unit": "%",
+      "label": "Oesophageal perforation",
+      "value": 4.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM",
+      "pmid": "21561346",
+      "unit": "%",
+      "label": "Mucosal tear",
+      "value": 12.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Adverse events",
+    "certainty": "Low",
+    "effect_text": "Serious adverse events were 2.7% with POEM vs 7.3% with LHM+Dor [31800987]. Pooled procedure-related serious adverse events were 1.4% with POEM, 6.7% with LHM and 4.2% with PD [32856150]. Overall adverse events were similar for POEM vs LHM+PF (RR 1.15, 0.38–3.44) [41792489]. In the Brazilian trial there were 3 mucosal injuries with POEM vs 1 empyema with LM-PF [36156932]. In the European Achalasia Trial, perforation occurred in 4% with PD and mucosal tears in 12% with LHM [21561346]. One network found PD less likely than POEM to cause adverse events [33035470].",
+    "rct_evidence": "European POEM vs LHM RCT; Brazilian RCT; European Achalasia Trial; meta-analyses",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Single trial, 20% attrition, nothing beyond 5 years for POEM; the network likely double-counts trial reports.",
+    "pmids": [
+     "40112837",
+     "42617727",
+     "38050085"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "42617727",
+      "unit": "OR",
+      "label": "OR 5-year treatment success (network)",
+      "value": 6.33,
+      "ci_low": 2.83,
+      "ci_high": 14.0
+     },
+     {
+      "p": null,
+      "arm": "Heller myotomy",
+      "pmid": "42617727",
+      "unit": "OR",
+      "label": "OR 5-year treatment success (network)",
+      "value": 6.39,
+      "ci_low": 1.24,
+      "ci_high": 32.89
+     },
+     {
+      "p": "0.84",
+      "arm": "LHM",
+      "pmid": "38050085",
+      "unit": "%",
+      "label": "Success at 10 years (full analysis set)",
+      "value": 74.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.84",
+      "arm": "PD",
+      "pmid": "38050085",
+      "unit": "%",
+      "label": "Success at 10 years (full analysis set)",
+      "value": 74.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Long-term durability",
+    "certainty": "Low",
+    "effect_text": "POEM vs LHM success at 5 years was 75.0% vs 70.8% [40112837]. In the RCT network, both had greater 5-year success than the comparator network (OR 6.33 for POEM, 6.39 for Heller) [42617727]. No randomised POEM vs LHM data exist beyond 5 years. LHM vs PD at 10 years was 74% vs 74% (full analysis set) [38050085].",
+    "rct_evidence": "5-year European POEM vs LHM report; 10-year European Achalasia Trial; RCT network meta-analysis",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Observational, confounded data; exploratory, underpowered subgroups.",
+    "pmids": [
+     "30690706",
+     "38050085",
+     "40399617"
+    ],
+    "numbers": [
+     {
+      "p": "0·032",
+      "arm": "POEM vs LHM",
+      "pmid": "30690706",
+      "unit": "OR",
+      "label": "OR success, type I",
+      "value": 2.97,
+      "ci_low": 1.09,
+      "ci_high": 8.03
+     },
+     {
+      "p": "0·007",
+      "arm": "POEM vs LHM",
+      "pmid": "30690706",
+      "unit": "OR",
+      "label": "OR success, type III",
+      "value": 3.5,
+      "ci_low": 1.39,
+      "ci_high": 8.77
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "30690706",
+      "unit": "%",
+      "label": "Success, type III",
+      "value": 93.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "LHM",
+      "pmid": "30690706",
+      "unit": "%",
+      "label": "Success, type III",
+      "value": 71.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Subtype differences (types I–III)",
+    "certainty": "Very low",
+    "effect_text": "Observational pooling of 20 series showed higher success with POEM than LHM in type I (OR 2.97, 1.09–8.03) and type III (OR 3.50, 1.39–8.77) [30690706]. Pooled success rates were 95%, 97% and 93% for POEM vs 81%, 92% and 71% for LHM in types I, II and III [30690706]. In the 10-year RCT subgroup analysis, PD was superior to LHM for type II (p=0.03), with a non-significant trend favouring LHM for type III (p=0.05) [38050085]. SAGES 2024 favoured POEM over HM with fundoplication for type III (conditional recommendation) [40399617].",
+    "rct_evidence": "No randomised POEM vs LHM subtype analysis; observational meta-analysis; exploratory subgroup of the 10-year PD vs LHM trial",
+    "evidence_type": "rcts_and_meta_analyses"
+   },
+   {
+    "why": "Large effects in RCTs, but each comparison is a single open-label trial, and the dilation protocols differ between trials.",
+    "pmids": [
+     "31287522",
+     "36206786",
+     "36907524",
+     "21561346",
+     "38050085"
+    ],
+    "numbers": [
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "31287522",
+      "unit": "%",
+      "label": "Success at 2 years",
+      "value": 92.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "Pneumatic dilation",
+      "pmid": "31287522",
+      "unit": "%",
+      "label": "Success at 2 years",
+      "value": 54.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "36206786",
+      "unit": "%",
+      "label": "Success at 5 years",
+      "value": 81.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "Pneumatic dilation",
+      "pmid": "36206786",
+      "unit": "%",
+      "label": "Success at 5 years",
+      "value": 40.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "<0·0001",
+      "arm": "POEM minus PD",
+      "pmid": "36206786",
+      "unit": "%",
+      "label": "Adjusted difference at 5 years",
+      "value": 41.0,
+      "ci_low": 25.0,
+      "ci_high": 57.0
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "31287522",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 2 years",
+      "value": 41.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "Pneumatic dilation",
+      "pmid": "31287522",
+      "unit": "%",
+      "label": "Reflux oesophagitis at 2 years",
+      "value": 7.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0·008",
+      "arm": "POEM",
+      "pmid": "36206786",
+      "unit": "%",
+      "label": "PPI use in remission",
+      "value": 46.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0·008",
+      "arm": "Pneumatic dilation",
+      "pmid": "36206786",
+      "unit": "%",
+      "label": "PPI use in remission",
+      "value": 13.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM",
+      "pmid": "36907524",
+      "unit": "%",
+      "label": "Success after failed LHM, 1 year",
+      "value": 62.2,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "PD",
+      "pmid": "36907524",
+      "unit": "%",
+      "label": "Success after failed LHM, 1 year",
+      "value": 26.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "pneumatic dilation",
+      "pmid": "21561346",
+      "unit": "%",
+      "label": "Success at 2 years vs LHM",
+      "value": 86.0,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.46",
+      "arm": "LHM",
+      "pmid": "21561346",
+      "unit": "%",
+      "label": "Success at 2 years vs PD",
+      "value": 90.0,
+      "ci_low": null,
+      "ci_high": null
+     }
+    ],
+    "outcome": "Place of pneumatic dilation",
+    "certainty": "Moderate",
+    "effect_text": "POEM vs PD in treatment-naive patients: success 92% vs 54% at 2 years [31287522] and 81% vs 40% at 5 years (adjusted difference 41%, 25–57) [36206786]. Oesophagitis was 41% with POEM vs 7% with PD at 2 years [31287522], and PPI use among patients in remission was 46% with POEM vs 13% with PD [36206786]. After failed LHM, success was 62.2% with POEM vs 26.7% with PD at 1 year [36907524]. PD vs LHM: success at 2 years was 86% with PD vs 90% with LHM [21561346].",
+    "rct_evidence": "POEM vs PD RCT (2- and 5-year reports, one cohort); Dutch RCT after failed LHM; European Achalasia Trial (2 and 10 years, one cohort)",
+    "evidence_type": "rct"
+   },
+   {
+    "why": "Small single-centre trial, inconsistent pooled results, observational data in the pool.",
+    "pmids": [
+     "36156932",
+     "40624423",
+     "41792489"
+    ],
+    "numbers": [
+     {
+      "p": "0.001",
+      "arm": "POEM",
+      "pmid": "36156932",
+      "unit": "min",
+      "label": "Procedure time",
+      "value": 95.7,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": "0.001",
+      "arm": "LM-PF",
+      "pmid": "36156932",
+      "unit": "min",
+      "label": "Procedure time",
+      "value": 218.75,
+      "ci_low": null,
+      "ci_high": null
+     },
+     {
+      "p": null,
+      "arm": "POEM vs LHM",
+      "pmid": "40624423",
+      "unit": "min",
+      "label": "Operative time mean difference",
+      "value": -35.69,
+      "ci_low": -50.54,
+      "ci_high": -20.83
+     }
+    ],
+    "outcome": "Operative time",
+    "certainty": "Low",
+    "effect_text": "Procedure time was 95.7 min with POEM vs 218.75 min with LM-PF, and anaesthesia time 185 vs 296.75 min [36156932]. In the mixed-design pool, POEM operative time was shorter (MD -35.69 min, -50.54 to -20.83) [40624423]. Another pool reported no significant difference, with very wide intervals (not verified against the paper's wording) [41792489].",
+    "rct_evidence": "Brazilian RCT; meta-analyses (one includes non-randomised studies)",
+    "evidence_type": "rcts_and_meta_analyses"
+   }
+  ],
+  "conflicts": [
+   {
+    "text": "One network meta-analysis found no significant POEM vs LHM difference in reflux or erosive oesophagitis [33035470]. The 5-year RCT shows more abnormal acid exposure after POEM, though its endoscopic oesophagitis difference was not significant [40112837]. The more recent pool found clear excess oesophagitis (RR 3.10) and abnormal pH (RR 1.94) [41792489], and the GRADE network gave pooled oesophagitis rates of 45.4% after POEM vs 24.9% after LHM [32856150]. The likely explanations are the few, small direct comparisons with wide CIs in the earlier network and the different outcome definitions.",
+    "pmids": [
+     "33035470",
+     "40112837",
+     "41792489",
+     "32856150"
+    ]
+   },
+   {
+    "text": "The long-term pool found the oesophagitis excess with POEM significant only after outlier studies were excluded, which makes the signal look fragile [40624423]. That pool mixes non-randomised studies with RCTs and has a mean POEM follow-up of only 34.2 months, so it weighs less than the RCT-dominant pool [40624423; 41792489].",
+    "pmids": [
+     "40624423"
+    ]
+   },
+   {
+    "text": "Subtype findings point in different directions. Observational data favour POEM over LHM in types I and III [30690706]. The 10-year randomised trial found pneumatic dilation superior to LHM in type II, with a non-significant trend favouring LHM in type III [38050085]. No randomised POEM vs LHM subtype analysis is available.",
+    "pmids": [
+     "38050085",
+     "30690706"
+    ]
+   },
+   {
+    "text": "Pneumatic dilation matched LHM at 2 and 10 years [21561346; 38050085] but was far inferior to POEM at 2 and 5 years [31287522; 36206786]. The dilation protocols differed: in the POEM trial a single series was allowed and later dilations counted as failure [36206786], whereas the European Achalasia Trial allowed a series of dilations [38050085]. This likely explains much of the discrepancy.",
+    "pmids": [
+     "21561346",
+     "38050085",
+     "36206786",
+     "31287522"
+    ]
+   },
+   {
+    "text": "For the Brazilian trial, the trial row reports no significant difference in adverse events (3 mucosal injuries after POEM vs 1 empyema after LM-PF) [36156932]. A systematic review describes the same trial as showing higher complication rates with POEM (64.3% vs 35.7%) [37539633]. Definitions of complications evidently differ.",
+    "pmids": [
+     "36156932",
+     "37539633"
+    ]
+   }
+  ],
+  "guidelines": [],
+  "at_a_glance": {
+   "verdict": "POEM matches LHM+Dor for symptom relief to 5 years with fewer serious adverse events, but causes more reflux oesophagitis and acid exposure.",
+   "key_numbers": [
+    {
+     "pmid": "",
+     "label": "5-yr clinical success",
+     "value_text": "75.0% POEM vs 70.8% LHM+Dor [40112837]"
+    },
+    {
+     "pmid": "",
+     "label": "Abnormal acid exposure at 5 yr",
+     "value_text": "62% POEM vs 31% LHM+Dor (only 37% tested) [40112837]"
+    },
+    {
+     "pmid": "",
+     "label": "Serious adverse events",
+     "value_text": "2.7% POEM vs 7.3% LHM+Dor [31800987]"
+    },
+    {
+     "pmid": "",
+     "label": "5-yr success",
+     "value_text": "81% POEM vs 40% pneumatic dilation [36206786]"
+    }
+   ],
+   "main_caveat": "direct comparison rests essentially on one open-label European trial (one cohort, two reports) plus a 40-patient trial; subtype claims are observational."
+  },
+  "bottom_line": {
+   "text": "In treatment-naive adults, POEM is non-inferior to laparoscopic Heller myotomy with Dor fundoplication for Eckardt-defined success at 2 and 5 years (83.0% vs 81.7%; 75.0% vs 70.8%) and had fewer serious adverse events. The trade-off is consistently more reflux oesophagitis and abnormal acid exposure, with more PPI use [31800987; 40112837]. Pneumatic dilation is clearly less durable than POEM but performed similarly to LHM at 10 years [36206786; 38050085]. Subtype advantages for POEM in types I and III rest on observational data [30690706].",
+   "certainty": "Moderate",
+   "certainty_reason": "Essentially one open-label multicentre RCT (one cohort reported at 2 and 5 years) plus one small trial; 20% attrition; sparse pH data."
+  },
+  "would_change": [
+   "An independent second large RCT of POEM vs LHM+Dor, ideally including Asian or Indian centres, with blinded outcome assessment.",
+   "Randomised POEM vs LHM data stratified by Chicago subtype, especially type III.",
+   "Follow-up beyond 5 years with complete pH monitoring and data on Barrett's oesophagus or stricture after POEM.",
+   "Trials of anti-reflux modifications of POEM (e.g. POEM with fundoplication) showing reduced reflux.",
+   "Cost-effectiveness studies including long-term PPI and surveillance costs, particularly in low- and middle-income settings."
+  ],
+  "applicability": {
+   "case_mix": "Direct POEM vs LHM+Dor randomised data cover adults with symptomatic, mostly treatment-naive idiopathic achalasia with Eckardt >3, treated in experienced European centres [31800987; 40112837], plus 40 treatment-naive Brazilian patients, about a quarter with Chagas exposure, in whom subtypes were not defined by HRM [36156932]. Subtype-specific randomised POEM vs LHM results are not reported; the subtype data are observational [30690706]. Subtype comparisons were not possible in the RCT network meta-analysis, where included patients were mostly type II (64.8%), with type I 20.1% and type III 8.8% [32856150]. Patients with failed prior LHM are covered only for POEM vs pneumatic dilation [36907524].",
+   "training": "POEM in the trials was done in specialised centres, and in the Brazilian trial by a single highly experienced operator [36156932]. Results may not transfer to units early on the learning curve. One review states that the two techniques need significant skill with comparable learning curves, but it does not quantify this [37539633]. Programmes adopting POEM should train for reflux surveillance as well as the procedure.",
+   "india_cost_context": "No study was done in India and none reports costs, so the per-case cost difference in Indian practice is not known. Practical points from the evidence: POEM shortened procedure and anaesthesia time in one trial [36156932] and in a mixed pool [40624423]. However, POEM led to more PPI use [36206786; 40624423], which implies ongoing medication and surveillance endoscopy, and it depends on advanced endoscopic expertise. Pneumatic dilation needs the least infrastructure but needs repeat sessions more often [36206786; 21561346]. Choice should follow local expertise."
+  },
+  "notable_findings": [
+   {
+    "text": "The 5-year POEM vs LHM report used a modified ITT population with 20% loss to follow-up, and pH-metry was done in only 81 (37%) of 221 patients; the acid-exposure difference therefore rests on a selected subset [40112837].",
+    "pmids": [
+     "40112837"
+    ]
+   },
+   {
+    "text": "The 5-year POEM vs LHM report lists Olympus Europe among its funders [40112837].",
+    "pmids": [
+     "40112837"
+    ]
+   },
+   {
+    "text": "In the POEM vs pneumatic dilation trial, endoscopy and reflux outcomes were assessed only in patients still in remission (16 in the dilation arm), so the oesophagitis comparison is selected and small [36206786; 31287522].",
+    "pmids": [
+     "36206786",
+     "31287522"
+    ]
+   },
+   {
+    "text": "The Brazilian RCT was powered for reflux oesophagitis rather than symptoms, its reported GER percentages are inconsistent with the denominators, and asymptomatic patients declined endoscopy [36156932].",
+    "pmids": [
+     "36156932"
+    ]
+   },
+   {
+    "text": "The newest network meta-analysis (15 RCTs) likely counts 2-year and 5-year reports of the same trials as separate trials, which inflates the apparent evidence base [42617727].",
+    "pmids": [
+     "42617727"
+    ]
+   }
+  ],
+  "clinical_practice": {
+   "counselling": "Both operations relieve swallowing symptoms in about three quarters of patients at 5 years. POEM avoids abdominal incisions and had fewer serious complications, but roughly 4 in 10 have some oesophagitis on endoscopy afterwards and many need long-term acid tablets. Dilation is less invasive but more often needs repeating [40112837; 31800987; 36206786].",
+   "cost_per_case": "not known; no study provided reports costs.",
+   "default_choice": "POEM or LHM+Dor are both reasonable first-line myotomies for treatment-naive idiopathic achalasia. Choose on local expertise and the patient's reflux risk tolerance; LHM+Dor is favoured where reflux avoidance matters most [31800987; 40112837].",
+   "who_may_benefit": "Type III (spastic) achalasia may favour POEM, a conditional recommendation in the SAGES 2024 guideline based on observational data [30690706; 40399617]. Pneumatic dilation remains an option, especially in type II, for patients accepting repeat dilations [38050085]. After failed LHM, POEM outperformed pneumatic dilation at 1 year [36907524]."
+  }
+ },
+ "skeptic": {
+  "leads": [],
+  "spans": [
+   {
+    "len": 2,
+    "field": "contradicting.2.strength",
+    "start": 90
+   },
+   {
+    "len": 1,
+    "field": "contradicting.3.text",
+    "start": 4
+   },
+   {
+    "len": 2,
+    "field": "must_mention.3",
+    "start": 40
+   }
+  ],
+  "verdict": "holds with caveats",
+  "ma_notes": [
+   {
+    "pmid": "41792489",
+    "text": "The pool includes one propensity-matched cohort alongside 3 RCTs (n=590).",
+    "quote": null
+   },
+   {
+    "pmid": "42617727",
+    "text": "The 15 RCTs likely include several reports from the same trials (e.g. 2-year and 5-year publications), and it also covers botulinum toxin and pneumatic dilation.",
+    "quote": null
+   },
+   {
+    "pmid": "40624423",
+    "text": "The pool includes non-randomised double-arm studies with at least 24 months' follow-up, assessed with ROBINS-I.",
+    "quote": null
+   },
+   {
+    "pmid": "30690706",
+    "text": "The pool consists of 20 observational series (1575 patients), not RCTs.",
+    "quote": null
+   }
+  ],
+  "overlaps": [
+   {
+    "note": "These are the same multicentre trial (NCT01601678) at 2 and 5 years, not independent evidence.",
+    "pmids": [
+     "31800987",
+     "40112837"
+    ]
+   },
+   {
+    "note": "These are the same POEM vs pneumatic dilation trial at 2 and 5 years.",
+    "pmids": [
+     "31287522",
+     "36206786"
+    ]
+   },
+   {
+    "note": "The same RCTs are pooled repeatedly across these meta-analyses.",
+    "pmids": [
+     "33035470",
+     "32856150",
+     "41792489",
+     "42617727",
+     "40624423"
+    ]
+   }
+  ],
+  "guidelines": [
+   {
+    "pmid": "40399617",
+    "text": "SAGES 2024 update",
+    "quote": "POEM was favored over HM with fundoplication for achalasia subtype III."
+   },
+   {
+    "pmid": "40399617",
+    "text": "SAGES 2024 update",
+    "quote": "A conditional recommendation for the use of POEM over PD was issued."
+   },
+   {
+    "pmid": "31839408",
+    "text": "ASGE",
+    "quote": "This American Society for Gastrointestinal Endoscopy Standards of Practice Guideline provides evidence-based recommendations for the treatment of achalasia"
+   }
+  ],
+  "missed_rcts": [],
+  "extract_next": [
+   {
+    "pmid": "42617727",
+    "text": "Newest RCT-only network meta-analysis (15 RCTs); it shows POEM and Heller comparable at 5 years with non-significant esophagitis, but its pool likely counts multiple reports of the same trials.",
+    "quote": null
+   },
+   {
+    "pmid": "41792489",
+    "text": "Newest pool focused on safety and GERD, with quantified esophagitis and pH risk ratios.",
+    "quote": null
+   },
+   {
+    "pmid": "37539633",
+    "text": "Systematic review comparing POEM, LHM and pneumatic dilation, useful for cross-checking the pool of trials.",
+    "quote": null
+   }
+  ],
+  "must_mention": [
+   "Direct randomised POEM vs LHM evidence rests on one multicentre trial (2- and 5-year reports) and one small 40-patient single-centre trial.",
+   "POEM causes more reflux oesophagitis and abnormal acid exposure than LHM+Dor. This persisted at 5 years, although pH testing covered only 37% of patients and symptom scores were similar.",
+   "Subtype advantages for types I and III come from observational data; the SAGES 2024 guideline gives only conditional recommendations, with POEM preferred for type III.",
+   "Pneumatic dilation retains a place: the 10-year European trial showed similar success to LHM, and it did well in type II. Against POEM, however, it had much lower success at 5 years (40% vs 81%).",
+   "Trials are open-label, with attrition at long-term follow-up, and trial follow-up beyond 5 years is lacking. The cost evidence is small and short-term."
+  ],
+  "contradicting": [
+   {
+    "pmid": "41792489",
+    "text": "POEM carries markedly more reflux than LHM+PF in pooled RCT-dominant data, challenging a conclusion of overall equivalence or POEM superiority.",
+    "quote": "POEM was associated with higher rates of endoscopic esophagitis (RR 3.10, 95% CI 2.17-4.41) and abnormal pH (RR 1.94, 95% CI 1.07-3.53) compared to LHM + PF."
+   },
+   {
+    "pmid": "30690706",
+    "text": "Subtype data favouring POEM for types I and III come from non-randomised series, so the subtype advantage is unproven by RCTs.",
+    "quote": "POEM was more likely to be successful than LHM for both type I (odds ratio (OR) 2·97, 95 per cent c.i. 1·09 to 8·03; P = 0·032) and type III (OR 3·50, 1·39 to 8·77; P = 0·007) achalasia."
+   },
+   {
+    "pmid": "40624423",
+    "text": "The long-term pool shows no significant difference in success, and the esophagitis excess was significant only after outlier studies were excluded, so the reflux signal is somewhat fragile.",
+    "quote": "There was no difference in treatment success between POEM and LHM (OR 1.43; CI 0.96-2.13)."
+   },
+   {
+    "pmid": "40112837",
+    "text": "The 5-year RCT shows non-inferiority is not confirmed on reflux, and its pH data are sparse (37% tested), so the reflux comparison is imprecise.",
+    "quote": "pH-metry was performed in 81 (37%) of 221 patients"
+   }
+  ],
+  "dropped_quotes": 0,
+  "dropped_unseen": 0
+ },
+ "version": 3,
+ "coverage": {
+  "gaps": [
+   {
+    "kind": "outcome",
+    "pmid": "31800987",
+    "text": "Improvement in integrated relaxation pressure from baseline to 24 months did not differ significantly between groups (difference -0.75 mm Hg). (Difference in IRP improvement = -0.75 mm Hg, CI -2.26 to 0.76)",
+    "numbers": [
+     -0.75,
+     -2.26,
+     0.76
+    ],
+    "outcome": "Esophageal function (integrated relaxation pressure)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "33035470",
+    "text": "No significant differences in perforation, reintervention or surgery, gastro-oesophageal reflux, erosive oesophagitis or serious adverse events between treatments; PD less likely to cause adverse events than POEM.",
+    "numbers": [],
+    "outcome": "Reflux, oesophagitis, perforation, reintervention and adverse events"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "32856150",
+    "text": "At 2 years POEM was comparable to LHM (RR 1.02, 0.90-1.15) and more effective than PD (RR 1.76, 1.37-2.25). (RR 2-year success = 1.76 RR (POEM vs PD), CI 1.37 to 2.25)",
+    "numbers": [
+     1.76,
+     1.37,
+     2.25
+    ],
+    "outcome": "2-year treatment success (durability)"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "32856150",
+    "text": "Severe esophagitis was uncommon: POEM 5.3%, LHM 3.7%, PD 1.5%. (Severe esophagitis = 5.3 % (POEM); Severe esophagitis = 3.7 % (LHM); Severe esophagitis = 1.5 % (PD))",
+    "numbers": [
+     5.3,
+     3.7,
+     1.5
+    ],
+    "outcome": "Severe erosive esophagitis"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "40624423",
+    "text": "Complication rates were comparable between POEM and LHM (OR 0.80, CI 0.37-1.73). (Complications odds ratio = 0.8 OR (POEM vs LHM), CI 0.37 to 1.73)",
+    "numbers": [
+     0.8,
+     0.37,
+     1.73
+    ],
+    "outcome": "Postoperative complications"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "42617727",
+    "text": "Botulinum toxin injections were associated with significantly lower treatment success at 1 year (OR 0.10, 95% CI 0.01-0.89). (Treatment success at 1 year, odds ratio = 0.1 OR (Botulinum toxin), CI 0.01 to 0.89)",
+    "numbers": [
+     0.1,
+     0.01,
+     0.89
+    ],
+    "outcome": "Treatment success at 1 year"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "42617727",
+    "text": "Pneumatic dilatation resulted in significantly higher lower esophageal sphincter pressure (mean difference 4.72, 95% CI 1.13-8.31) and greater abnormal esophageal acid exposure (OR 2.63, 95% CI 1.25-5.56). (LES pressure, mean difference = 4.72 mean difference (Pneumatic dilatation), CI 1.13 to 8.31; Abnormal esophageal acid exposure, odds ratio = 2.63 OR (Pneumatic dilatation), CI 1.25 to 5.56)",
+    "numbers": [
+     4.72,
+     1.13,
+     8.31,
+     2.63,
+     1.25,
+     5.56
+    ],
+    "outcome": "LES pressure and esophageal acid exposure with pneumatic dilatation"
+   },
+   {
+    "kind": "outcome",
+    "pmid": "41792489",
+    "text": "Length of hospital stay was comparable (MD 0.32 days, 95% CI -0.21 to 0.85).",
+    "numbers": [],
+    "outcome": "Length of hospital stay"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "33035470",
+    "text": "P-score = 0.89 (POEM)",
+    "numbers": [
+     0.89
+    ],
+    "outcome": "Treatment failure (efficacy) after at least 1 year"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "33035470",
+    "text": "P-score = 0.61 (LHM)",
+    "numbers": [
+     0.61
+    ],
+    "outcome": "Treatment failure (efficacy) after at least 1 year"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "32856150",
+    "text": "RR 1-year treatment success = 1.29 RR (POEM vs PD), CI 0.99 to 1.69",
+    "numbers": [
+     1.29,
+     0.99,
+     1.69
+    ],
+    "outcome": "1-year treatment success (network meta-analysis)"
+   },
+   {
+    "kind": "pooled",
+    "pmid": "32856150",
+    "text": "RR 1-year treatment success = 1.18 RR (LHM vs PD), CI 0.96 to 1.44",
+    "numbers": [
+     1.18,
+     0.96,
+     1.44
+    ],
+    "outcome": "1-year treatment success (network meta-analysis)"
+   },
+   {
+    "kind": "skeptic_item",
+    "pmid": "31839408",
+    "text": "Guideline (the skeptic): ASGE — “This American Society for Gastrointestinal Endoscopy Standards of Practice Guideline provides evidence-based recommendations for the treatment of achalasia”",
+    "numbers": [],
+    "outcome": ""
+   },
+   {
+    "kind": "number",
+    "pmid": "36156932",
+    "text": "Treatment success at 6 mo = 18 patients (POEM)",
+    "numbers": [
+     18.0
+    ],
+    "outcome": "Treatment success/failure"
+   },
+   {
+    "kind": "number",
+    "pmid": "36156932",
+    "text": "Esophagitis at 6 mo = 5.6 % (LM-PF)",
+    "numbers": [
+     5.6
+    ],
+    "outcome": "Reflux esophagitis on endoscopy"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Treatment success, patients = 58 patients (POEM)",
+    "numbers": [
+     58.0
+    ],
+    "outcome": "Treatment success at 2 years (Eckardt score ≤3, no severe complications or re-treatment)"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Treatment success, denominator = 63 patients (POEM)",
+    "numbers": [
+     63.0
+    ],
+    "outcome": "Treatment success at 2 years (Eckardt score ≤3, no severe complications or re-treatment)"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Treatment success, patients = 34 patients (Pneumatic dilation)",
+    "numbers": [
+     34.0
+    ],
+    "outcome": "Treatment success at 2 years (Eckardt score ≤3, no severe complications or re-treatment)"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Difference in success = 38 %, CI 22 to 52, p <.001",
+    "numbers": [
+     38.0,
+     22.0,
+     52.0
+    ],
+    "outcome": "Treatment success at 2 years (Eckardt score ≤3, no severe complications or re-treatment)"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Reflux esophagitis, patients = 22 patients (POEM)",
+    "numbers": [
+     22.0
+    ],
+    "outcome": "Reflux esophagitis"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Difference in reflux esophagitis = 34 %, CI 12 to 49, p .002",
+    "numbers": [
+     34.0,
+     12.0,
+     49.0
+    ],
+    "outcome": "Reflux esophagitis"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Median integrated relaxation pressure = 9.9 mm Hg (POEM)",
+    "numbers": [
+     9.9
+    ],
+    "outcome": "Integrated relaxation pressure of the lower esophageal sphincter"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Median integrated relaxation pressure = 12.6 mm Hg (Pneumatic dilation)",
+    "numbers": [
+     12.6
+    ],
+    "outcome": "Integrated relaxation pressure of the lower esophageal sphincter"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Median barium column height = 2.3 cm (POEM)",
+    "numbers": [
+     2.3
+    ],
+    "outcome": "Barium column height on timed barium esophagogram"
+   },
+   {
+    "kind": "number",
+    "pmid": "31287522",
+    "text": "Difference = 2.3 cm, CI 1 to 3.6, p .05",
+    "numbers": [
+     2.3,
+     1.0,
+     3.6
+    ],
+    "outcome": "Barium column height on timed barium esophagogram"
+   },
+   {
+    "kind": "number",
+    "pmid": "36206786",
+    "text": "Reflux oesophagitis = 33 % (POEM), p 0·19",
+    "numbers": [
+     33.0
+    ],
+    "outcome": "Reflux oesophagitis on 5-year endoscopy"
+   },
+   {
+    "kind": "number",
+    "pmid": "36206786",
+    "text": "Recurrent symptoms = 11 patients (POEM)",
+    "numbers": [
+     11.0
+    ],
+    "outcome": "Reasons for treatment failure"
+   },
+   {
+    "kind": "number",
+    "pmid": "21561346",
+    "text": "Abnormal acid exposure = 23 % (LHM), p 0.28",
+    "numbers": [
+     23.0
+    ],
+    "outcome": "Gastro-oesophageal reflux (abnormal acid exposure)"
+   },
+   {
+    "kind": "number",
+    "pmid": "36907524",
+    "text": "Absolute difference = 35.6 %, CI 16.4 to 54.7, p .001",
+    "numbers": [
+     35.6,
+     16.4,
+     54.7
+    ],
+    "outcome": "Treatment success (Eckardt ≤3 without unscheduled re-treatment) at 1 year"
+   },
+   {
+    "kind": "number",
+    "pmid": "36907524",
+    "text": "Relative risk for success = 2.33, CI 1.37 to 3.99",
+    "numbers": [
+     2.33,
+     1.37,
+     3.99
+    ],
+    "outcome": "Treatment success (Eckardt ≤3 without unscheduled re-treatment) at 1 year"
+   }
+  ],
+  "counts": {
+   "gaps_cut": 0,
+   "pooled_missing": 12,
+   "numbers_checked": 131,
+   "numbers_missing": 30,
+   "skeptic_checked": 14,
+   "skeptic_missing": 1,
+   "outcomes_checked": 58,
+   "outcomes_missing": 8
+  }
+ },
+ "evidence": [
+  {
+   "pmid": "31800987",
+   "text": "abstract only",
+   "spans": [],
+   "funding": "European Clinical Research Infrastructure Network and others",
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40112837",
+   "text": "abstract only",
+   "spans": [],
+   "funding": "European Clinical Research Infrastructure Network, multiple foundations, Olympus Europe and Harvard-affiliated bodies; conflicts of interest not stated in the abstract",
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "36156932",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 6,
+   "numbers_unverified": 3,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "31287522",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "36206786",
+   "text": "abstract only",
+   "spans": [],
+   "funding": "Fonds NutsOhra and European Society of Gastrointestinal Endoscopy",
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "21561346",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "NTR37; ISRCTN56304564"
+  },
+  {
+   "pmid": "38050085",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "36907524",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 2,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": "NTR4501 (NL4361)"
+  },
+  {
+   "pmid": "33035470",
+   "text": "abstract only",
+   "spans": [],
+   "funding": "None.",
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "32856150",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "40624423",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "30690706",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 4,
+   "numbers_unverified": 1,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "42617727",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 3,
+   "found_by_skeptic": true,
+   "numbers_unverified": 0,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "41792489",
+   "text": "abstract only",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 5,
+   "found_by_skeptic": true,
+   "numbers_unverified": 2,
+   "unverified_details": [],
+   "unverified_outcomes": [],
+   "trial_registration_unverified": null
+  },
+  {
+   "pmid": "37539633",
+   "text": "full text",
+   "spans": [],
+   "funding": null,
+   "funding_checked": true,
+   "numbers_dropped": 0,
+   "verified_quotes": 1,
+   "found_by_skeptic": true,
+   "numbers_unverified": 9,
+   "unverified_details": [
+    {
+     "outcome": "Oesophagitis/GORD",
+     "effect_text": "POEM GORD symptoms higher than LHM; large RCT at 24 months showed significantly more endoscopic oesophagitis after POEM (odds ratio 2.00)."
+    },
+    {
+     "outcome": "Re-treatment POEM vs PD",
+     "effect_text": "Re-treatment higher after PD (46%) than POEM (8%) in a multicentre RCT."
+    },
+    {
+     "outcome": "GORD symptoms POEM vs PD",
+     "effect_text": "Multicentre RCT showed more GORD symptoms with POEM than PD at 24 months (41 vs 7%)."
+    },
+    {
+     "outcome": "Hospital stay",
+     "effect_text": "Length of stay shorter with POEM than LHM in an RCT (3.7 vs 5.4 days)."
+    },
+    {
+     "outcome": "Type III success",
+     "effect_text": "In type III achalasia retrospectively, treatment success (Eckardt <3) was 100% with POEM vs 50% with PD at 1 year."
+    }
+   ],
+   "unverified_outcomes": [
+    "Oesophagitis/GORD",
+    "Re-treatment POEM vs PD",
+    "GORD symptoms POEM vs PD",
+    "Hospital stay",
+    "Type III success"
+   ],
+   "trial_registration_unverified": null
+  }
+ ],
+ "question": "In adults with idiopathic achalasia, how does peroral endoscopic myotomy (POEM) compare with laparoscopic Heller myotomy with fundoplication for symptom relief (Eckardt score), treatment failure, gastro-oesophageal reflux and oesophagitis, adverse events, and long-term durability? Assess randomized evidence, subtype differences (type I–III), and the place of pneumatic dilation.",
+ "searches": [
+  {
+   "hits": 13,
+   "query": "achalasia (POEM OR \"peroral endoscopic myotomy\") AND (Heller OR \"laparoscopic myotomy\" OR \"pneumatic dilation\") AND randomized controlled trial[pt]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 28,
+   "query": "achalasia \"peroral endoscopic myotomy\" Heller (meta-analysis[pt] OR \"systematic review\"[ti] OR \"meta-analysis\"[ti]) AND 2019:2025[dp]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 24,
+   "query": "achalasia (\"pneumatic dilation\" OR \"pneumatic dilatation\") AND (\"Heller\" OR myotomy) AND randomized controlled trial[pt]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 38,
+   "query": "achalasia AND (\"practice guideline\"[pt] OR guideline[pt] OR guideline*[ti] OR consensus[ti] OR recommendation*[ti]) AND 2018:2025[dp]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 26,
+   "query": "achalasia (POEM OR \"endoscopic myotomy\") AND (Heller OR laparoscopic) AND (randomized[tiab] OR randomised[tiab]) AND (trial[tiab]) NOT 31800987[pmid]",
+   "source": "PubMed"
+  },
+  {
+   "hits": 18,
+   "query": "achalasia (\"type III\" OR spastic OR subtype*) AND (POEM OR \"peroral endoscopic myotomy\") AND Heller AND (meta-analysis[pt] OR \"meta-analysis\"[ti] OR randomized[tiab])",
+   "source": "PubMed"
+  },
+  {
+   "hits": 25,
+   "query": "related to PMID 40112837",
+   "source": "PubMed related"
+  },
+  {
+   "hits": 27,
+   "query": "achalasia[ti] AND (myotomy[ti] OR POEM[ti]) AND (randomized[ti] OR randomised[ti] OR trial[ti]) AND 2020:2026[dp]",
+   "source": "PubMed"
+  }
+ ],
+ "untraced": [
+  {
+   "len": 4,
+   "field": "studies.4.appraisal",
+   "start": 28
+  }
+ ],
+ "elapsed_s": 423,
+ "integrity": {
+  "dropped_unseen": 0,
+  "dropped_numbers": 0,
+  "dropped_studies": 0,
+  "numbers_checked": 402,
+  "labels_defaulted": 0,
+  "numbers_untraced": 1,
+  "dropped_unfetched": 0,
+  "removed_citations": 0,
+  "numbers_unverified": 19,
+  "outcomes_unverified": 5
+ },
+ "cost_paise": 17555,
+ "created_at": "2026-10-31T11:00:16.611766811Z",
+ "references": [
+  {
+   "n": 1,
+   "doi": "10.1056/NEJMoa1905380",
+   "pmid": "31800987",
+   "year": 2019,
+   "title": "Endoscopic or Surgical Myotomy in Patients with Idiopathic Achalasia.",
+   "journal": "The New England journal of medicine",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 2,
+   "doi": "10.1016/S2468-1253(25)00012-3",
+   "pmid": "40112837",
+   "year": 2025,
+   "title": "Per-oral endoscopic myotomy versus laparoscopic Heller's myotomy plus Dor fundoplication in patients with idiopathic achalasia: 5-year follow-up of a multicentre, randomised, open-label, non-inferiority trial.",
+   "journal": "The lancet. Gastroenterology & hepatology",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 3,
+   "doi": "10.3748/wjg.v28.i33.4875",
+   "pmid": "36156932",
+   "year": 2022,
+   "title": "Peroral endoscopic myotomy vs laparoscopic myotomy and partial fundoplication for esophageal achalasia: A single-center randomized controlled trial.",
+   "journal": "World journal of gastroenterology",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 4,
+   "doi": "10.1001/jama.2019.8859",
+   "pmid": "31287522",
+   "year": 2019,
+   "title": "Effect of Peroral Endoscopic Myotomy vs Pneumatic Dilation on Symptom Severity and Treatment Outcomes Among Treatment-Naive Patients With Achalasia: A Randomized Clinical Trial.",
+   "journal": "JAMA",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 5,
+   "doi": "10.1016/S2468-1253(22)00300-4",
+   "pmid": "36206786",
+   "year": 2022,
+   "title": "Peroral endoscopic myotomy versus pneumatic dilation in treatment-naive patients with achalasia: 5-year follow-up of a randomised controlled trial.",
+   "journal": "The lancet. Gastroenterology & hepatology",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 6,
+   "doi": "10.1056/NEJMoa1010502",
+   "pmid": "21561346",
+   "year": 2011,
+   "title": "Pneumatic dilation versus laparoscopic Heller's myotomy for idiopathic achalasia.",
+   "journal": "The New England journal of medicine",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 7,
+   "doi": "10.1136/gutjnl-2023-331374",
+   "pmid": "38050085",
+   "year": 2024,
+   "title": "10-year follow-up results of the European Achalasia Trial: a multicentre randomised controlled trial comparing pneumatic dilation with laparoscopic Heller myotomy.",
+   "journal": "Gut",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 8,
+   "doi": "10.1053/j.gastro.2023.02.048",
+   "pmid": "36907524",
+   "year": 2023,
+   "title": "The Efficacy of Peroral Endoscopic Myotomy vs Pneumatic Dilation as Treatment for Patients With Achalasia Suffering From Persistent or Recurrent Symptoms After Laparoscopic Heller Myotomy: A Randomized Clinical Trial.",
+   "journal": "Gastroenterology",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 9,
+   "doi": "10.1016/S2468-1253(20)30296-X",
+   "pmid": "33035470",
+   "year": 2021,
+   "title": "Efficacy of surgical or endoscopic treatment of idiopathic achalasia: a systematic review and network meta-analysis.",
+   "journal": "The lancet. Gastroenterology & hepatology",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 10,
+   "doi": "10.1007/s00464-020-07920-x",
+   "pmid": "32856150",
+   "year": 2021,
+   "title": "Comparative efficacy of first-line therapeutic interventions for achalasia: a systematic review and network meta-analysis.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 11,
+   "doi": "10.1007/s00464-025-11895-y",
+   "pmid": "40624423",
+   "year": 2025,
+   "title": "Long-term outcomes after per-oral endoscopic myotomy versus laparoscopic Heller myotomy in the treatment of achalasia: a systematic review and meta-analysis.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 12,
+   "doi": "10.1002/bjs.11049",
+   "pmid": "30690706",
+   "year": 2019,
+   "title": "Meta-analysis of clinical outcome after treatment for achalasia based on manometric subtypes.",
+   "journal": "The British journal of surgery",
+   "retracted": false,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 13,
+   "doi": "10.1016/j.gassur.2026.102558",
+   "pmid": "42617727",
+   "year": 2026,
+   "title": "Evaluating surgical management of primary achalasia-a systematic review and network meta-analysis of randomized clinical trials.",
+   "journal": "Journal of gastrointestinal surgery : official journal of the Society for Surgery of the Alimentary Tract",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 14,
+   "doi": "10.1007/s00464-026-12703-x",
+   "pmid": "41792489",
+   "year": 2026,
+   "title": "POEM vs laparoscopic Heller myotomy with fundoplication for achalasia: systematic review and meta-analysis of randomized and prospective studies.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 15,
+   "doi": "10.1093/dote/doad055",
+   "pmid": "37539633",
+   "year": 2024,
+   "title": "Peroral endoscopic myotomy compared to laparoscopic Heller myotomy and pneumatic dilation in the treatment of achalasia: a systematic review.",
+   "journal": "Diseases of the esophagus : official journal of the International Society for Diseases of the Esophagus",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 16,
+   "doi": "10.1007/s00464-025-11789-z",
+   "pmid": "40399617",
+   "year": 2025,
+   "title": "2024 Update to SAGES guidelines for the use of peroral endoscopic myotomy (POEM) in the treatment of achalasia.",
+   "journal": "Surgical endoscopy",
+   "retracted": false,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 17,
+   "doi": "10.1016/j.gie.2019.04.231",
+   "pmid": "31839408",
+   "year": 2020,
+   "title": "ASGE guideline on the management of achalasia.",
+   "journal": "Gastrointestinal endoscopy",
+   "retracted": false,
+   "found_by_skeptic": true
+  }
+ ],
+ "completeness": {
+  "notes": [
+   "The Dutch failed-LHM trial reported oesophagitis of 34.3% with POEM vs 15% with PD, not significant [36907524], which the answer omits; it is a small selected subset.",
+   "Treatment failure is rated Low and adverse events Low, while the at-a-glance line presents the 2.7% vs 7.3% serious adverse event figures without that caveat."
+  ],
+  "skipped": null,
+  "untraced": [],
+  "items_cut": 0,
+  "not_added": [
+   {
+    "gap": "IRP improvement POEM vs LHM (31800987)",
+    "reason": "Secondary physiological outcome, no significant difference; does not change the answer."
+   },
+   {
+    "gap": "33035470 narrative on reflux, perforation, reintervention (no significant differences)",
+    "reason": "Already reflected in the conflicts section (no significant POEM vs LHM reflux difference) and adverse events row."
+   },
+   {
+    "gap": "2-year success RR POEM vs PD 1.76 (32856150)",
+    "reason": "Same direction as the POEM vs PD RCT figures already given; 2-year POEM vs LHM RR 1.02 is unverified."
+   },
+   {
+    "gap": "Severe esophagitis rates (32856150)",
+    "reason": "Minor detail from a GRADE low/very low pool."
+   },
+   {
+    "gap": "Complications OR 0.80 (40624423)",
+    "reason": "Mixed-design pool; adverse events already covered by RCT data and other pools."
+   },
+   {
+    "gap": "Botulinum toxin OR 0.10 (42617727)",
+    "reason": "Botulinum toxin is outside the question."
+   },
+   {
+    "gap": "PD LES pressure and acid exposure (42617727)",
+    "reason": "Abstract-only network estimate; PD place already covered by RCTs."
+   },
+   {
+    "gap": "Length of hospital stay MD 0.32 (41792489)",
+    "reason": "Number is unverified and not asked about."
+   },
+   {
+    "gap": "P-scores 0.89 and 0.61 (33035470)",
+    "reason": "Rankings add little beyond the RR values already stated."
+   },
+   {
+    "gap": "1-year RR POEM vs PD 1.29 and LHM vs PD 1.18 (32856150)",
+    "reason": "Both CIs include 1; the PD comparison is better supported by the RCTs."
+   },
+   {
+    "gap": "ASGE guideline quote (31839408)",
+    "reason": "Already listed under guidelines; the quote carries no recommendation."
+   },
+   {
+    "gap": "Brazilian 6-month numbers (36156932)",
+    "reason": "Intermediate time points; 12-month data are already given."
+   },
+   {
+    "gap": "POEM vs PD 2-year counts, CI, IRP and barium column (31287522)",
+    "reason": "The counts restate the percentages given; IRP and barium secondary endpoints are not significant or not central."
+   },
+   {
+    "gap": "Esophagitis 33% vs 13% at 5 years (36206786)",
+    "reason": "Selected small subset, non-significant; the answer already covers PD oesophagitis at 2 years and PPI use."
+   },
+   {
+    "gap": "Recurrent symptoms counts (36206786)",
+    "reason": "Detail on failure reasons; the success difference is stated."
+   },
+   {
+    "gap": "Abnormal acid exposure 23% LHM (21561346)",
+    "reason": "Comparator-only number for the PD vs LHM comparison, p 0.28; minor."
+   },
+   {
+    "gap": "Failed-LHM trial difference and RR (36907524)",
+    "reason": "Restates the 62.2% vs 26.7% already given."
+   }
+  ],
+  "gaps_found": 30,
+  "added_outcomes": [],
+  "added_conflicts": [],
+  "labels_defaulted": 0,
+  "outcome_additions": [],
+  "removed_citations": 0
+ },
+ "empty_reason": null,
+ "notable_code": [
+  {
+   "text": "Not independent evidence (the skeptic): These are the same multicentre trial (NCT01601678) at 2 and 5 years, not independent evidence.",
+   "pmids": [
+    "31800987",
+    "40112837"
+   ]
+  },
+  {
+   "text": "Not independent evidence (the skeptic): These are the same POEM vs pneumatic dilation trial at 2 and 5 years.",
+   "pmids": [
+    "31287522",
+    "36206786"
+   ]
+  },
+  {
+   "text": "Not independent evidence (the skeptic): The same RCTs are pooled repeatedly across these meta-analyses.",
+   "pmids": [
+    "33035470",
+    "32856150",
+    "41792489",
+    "42617727",
+    "40624423"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool includes one propensity-matched cohort alongside 3 RCTs (n=590).",
+   "pmids": [
+    "41792489"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The 15 RCTs likely include several reports from the same trials (e.g. 2-year and 5-year publications), and it also covers botulinum toxin and pneumatic dilation.",
+   "pmids": [
+    "42617727"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool includes non-randomised double-arm studies with at least 24 months' follow-up, assessed with ROBINS-I.",
+   "pmids": [
+    "40624423"
+   ]
+  },
+  {
+   "text": "What a meta-analysis pooled (the skeptic): The pool consists of 20 observational series (1575 patients), not RCTs.",
+   "pmids": [
+    "30690706"
+   ]
+  },
+  {
+   "text": "The extractor could not match 5 outcomes and 19 numbers to the papers' wording; they are kept and labelled “not verified” in the trials table.",
+   "pmids": [
+    "36156932",
+    "36206786",
+    "38050085",
+    "32856150",
+    "40624423",
+    "30690706",
+    "41792489",
+    "37539633"
+   ]
+  }
+ ],
+ "stopped_early": null
+}

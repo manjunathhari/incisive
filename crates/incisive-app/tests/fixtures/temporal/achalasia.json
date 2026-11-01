@@ -1,0 +1,956 @@
+{
+ "mode": "focused",
+ "skeptic": {
+  "overlaps": [
+   {
+    "note": "These are the same multicentre trial (NCT01601678) at 2 and 5 years, not independent evidence.",
+    "pmids": [
+     "31800987",
+     "40112837"
+    ]
+   },
+   {
+    "note": "These are the same POEM vs pneumatic dilation trial at 2 and 5 years.",
+    "pmids": [
+     "31287522",
+     "36206786"
+    ]
+   },
+   {
+    "note": "The same RCTs are pooled repeatedly across these meta-analyses.",
+    "pmids": [
+     "33035470",
+     "32856150",
+     "41792489",
+     "42617727",
+     "40624423"
+    ]
+   }
+  ]
+ },
+ "studies": [
+  {
+   "n": 221,
+   "pmid": "31800987",
+   "label": "Werner 2019, NEJM",
+   "design": "Multicentre randomised non-inferiority trial",
+   "setting": "European multicentre",
+   "appraisal": "Abstract only; open-label with a subjective endpoint; margin -12.5 points; not powered for reflux or adverse events. Same trial as 40112837.",
+   "comparison": "POEM vs LHM + Dor",
+   "key_results": "2-year success 83.0% with POEM vs 81.7% with LHM+Dor; oesophagitis 44% vs 29% at 24 months; serious adverse events 2.7% vs 7.3% [31800987]."
+  },
+  {
+   "n": 241,
+   "pmid": "40112837",
+   "label": "5-year follow-up 2025, Lancet Gastroenterol Hepatol",
+   "design": "5-year follow-up of a multicentre open-label non-inferiority RCT",
+   "setting": "8 centres, 6 European countries",
+   "appraisal": "Same cohort as 31800987 (NCT01601678); open-label; modified ITT; 20% lost to follow-up; pH testing in 37%; Olympus among funders.",
+   "comparison": "POEM vs LHM + Dor",
+   "key_results": "Success 75.0% with POEM vs 70.8% with LHM+Dor; oesophagitis 41% vs 31%; abnormal acid exposure 62% vs 31% [40112837]."
+  },
+  {
+   "n": 40,
+   "pmid": "36156932",
+   "label": "Brazil 2022, World J Gastroenterol",
+   "design": "Single-centre RCT",
+   "setting": "Tertiary hospital, Brazil",
+   "appraisal": "40 patients; single centre; one expert POEM operator; allocation concealment and blinding not described; incomplete endoscopy; about a quarter with Chagas exposure; 12-month follow-up.",
+   "comparison": "POEM vs laparoscopic myotomy + partial fundoplication",
+   "key_results": "Eckardt scores similar; GerdQ reflux 64.6% with POEM vs 11.1% with LM-PF; procedure time 95.7 vs 218.75 min [36156932]."
+  },
+  {
+   "n": 133,
+   "pmid": "31287522",
+   "label": "Ponds 2019, JAMA",
+   "design": "Multicentre RCT",
+   "setting": "6 hospitals in Europe, Hong Kong and the USA",
+   "appraisal": "Abstract only; open-label; reflux assessed only in patients without failure. Same trial as 36206786.",
+   "comparison": "POEM vs pneumatic dilation (30/35 mm)",
+   "key_results": "2-year success 92% with POEM vs 54% with PD; oesophagitis 41% vs 7% [31287522]."
+  },
+  {
+   "n": 133,
+   "pmid": "36206786",
+   "label": "5-year follow-up 2022, Lancet Gastroenterol Hepatol",
+   "design": "5-year follow-up of an RCT",
+   "setting": "6 hospitals",
+   "appraisal": "Same cohort as 31287522 (NTR3593); unmasked; endoscopy only in patients in remission; the single dilation series disadvantages PD.",
+   "comparison": "POEM vs pneumatic dilation",
+   "key_results": "Success 81% with POEM vs 40% with PD; PPI use 46% vs 13% [36206786]."
+  },
+  {
+   "n": 201,
+   "pmid": "21561346",
+   "label": "European Achalasia Trial 2011, NEJM",
+   "design": "Multicentre RCT",
+   "setting": "European centres",
+   "appraisal": "Abstract only; no equivalence margin reported; open-label. Same trial as 38050085.",
+   "comparison": "Pneumatic dilation vs LHM + Dor",
+   "key_results": "2-year success 86% with PD vs 90% with LHM; perforation 4% with PD; mucosal tears 12% with LHM [21561346]."
+  },
+  {
+   "n": 201,
+   "pmid": "38050085",
+   "label": "European Achalasia Trial 10-year 2024, Gut",
+   "design": "10-year follow-up of an RCT",
+   "setting": "European multicentre",
+   "appraisal": "Same cohort as 21561346; heavy attrition (40 vs 36 analysed); exploratory subtype analyses.",
+   "comparison": "Pneumatic dilation series vs LHM",
+   "key_results": "Success 74% with LHM vs 74% with PD; PD superior in type II (p=0.03); LHM trend in type III (p=0.05) [38050085]."
+  },
+  {
+   "n": 90,
+   "pmid": "36907524",
+   "label": "Dutch trial 2023, Gastroenterology",
+   "design": "Multicentre RCT",
+   "setting": "Netherlands, multicentre",
+   "appraisal": "Abstract only; 1-year follow-up; previously operated patients only.",
+   "comparison": "POEM vs pneumatic dilation after failed LHM",
+   "key_results": "Success 62.2% with POEM vs 26.7% with PD; oesophagitis 34.3% vs 15% (not significant) [36907524]."
+  },
+  {
+   "n": 911,
+   "pmid": "33035470",
+   "label": "NMA 2021, Lancet Gastroenterol Hepatol",
+   "design": "Network meta-analysis of 9 RCTs",
+   "setting": "International RCTs",
+   "appraisal": "No trial at low risk of bias; I2 61.5%; partly indirect estimates; overlaps with the other meta-analyses.",
+   "comparison": "POEM vs LHM vs PD",
+   "key_results": "RR of failure vs PD 0.33 for POEM and 0.45 for LHM; no POEM vs LHM difference in reflux or oesophagitis [33035470]."
+  },
+  {
+   "n": 745,
+   "pmid": "32856150",
+   "label": "NMA 2021, Surg Endosc",
+   "design": "Network meta-analysis of 6 RCTs with GRADE",
+   "setting": "International RCTs",
+   "appraisal": "Only one direct POEM vs LHM RCT; GRADE low to very low; 1–2 year follow-up.",
+   "comparison": "POEM vs LHM vs PD",
+   "key_results": "1-year success RR 1.09 for POEM vs LHM; oesophagitis 45.4% with POEM vs 24.9% with LHM; serious adverse events 1.4% vs 6.7% [32856150]."
+  },
+  {
+   "n": 1099,
+   "pmid": "40624423",
+   "label": "Long-term MA 2025, Surg Endosc",
+   "design": "Meta-analysis of randomised and non-randomised studies (≥24 months)",
+   "setting": "9 studies",
+   "appraisal": "Pools non-randomised studies with RCTs; oesophagitis result depends on post hoc exclusion of outliers.",
+   "comparison": "POEM vs LHM",
+   "key_results": "Success OR 1.43 (0.96–2.13); oesophagitis OR 2.57; PPI use OR 1.72; operative time MD -35.69 min [40624423]."
+  },
+  {
+   "n": 1575,
+   "pmid": "30690706",
+   "label": "Subtype MA 2019, Br J Surg",
+   "design": "Meta-analysis of 20 observational series",
+   "setting": "Published series",
+   "appraisal": "Observational series, not RCTs; confounding; PubMed only.",
+   "comparison": "POEM vs LHM (also PD, botulinum) by subtype",
+   "key_results": "POEM vs LHM OR 2.97 in type I and 3.50 in type III [30690706]."
+  },
+  {
+   "n": 1170,
+   "pmid": "42617727",
+   "label": "NMA 2026, J Gastrointest Surg",
+   "design": "Network meta-analysis of 15 RCTs",
+   "setting": "International RCTs",
+   "appraisal": "Likely counts several reports of the same trials as separate RCTs; wide CIs; abstract only.",
+   "comparison": "POEM, Heller, PD, botulinum toxin",
+   "key_results": "5-year success OR 6.33 for POEM and 6.39 for Heller [42617727]."
+  },
+  {
+   "n": 590,
+   "pmid": "41792489",
+   "label": "MA 2026, Surg Endosc",
+   "design": "Meta-analysis of RCTs and prospective studies",
+   "setting": "Treatment-naive adults",
+   "appraisal": "3 RCTs plus 1 propensity-matched cohort; only 4 studies; overlaps with the included trials.",
+   "comparison": "POEM vs LHM + partial fundoplication",
+   "key_results": "Adverse events RR 1.15; oesophagitis RR 3.10; abnormal pH RR 1.94 [41792489]."
+  },
+  {
+   "n": null,
+   "pmid": "37539633",
+   "label": "SR 2024, Dis Esophagus",
+   "design": "Systematic review of 31 studies, no meta-analysis",
+   "setting": "Mixed studies",
+   "appraisal": "Narrative synthesis; mostly retrospective studies; single screener; several extracted claims could not be verified.",
+   "comparison": "POEM vs LHM and PD",
+   "key_results": "Reports higher complications with POEM in the Brazilian RCT (64.3% vs 35.7%) [37539633]."
+  }
+ ],
+ "outcomes": [
+  {
+   "pmids": [
+    "31800987",
+    "40112837",
+    "36156932",
+    "32856150"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Clinical success at 2 years",
+     "value": 83.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Clinical success at 2 years",
+     "value": 81.7,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0.007 for noninferiority",
+     "arm": "POEM minus LHM",
+     "pmid": "31800987",
+     "unit": "percentage points",
+     "label": "Difference in 2-year success",
+     "value": 1.4,
+     "ci_low": -8.7,
+     "ci_high": 11.4
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Clinical success at 5 years",
+     "value": 75.0,
+     "ci_low": 66.2,
+     "ci_high": 82.1
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Clinical success at 5 years",
+     "value": 70.8,
+     "ci_low": 61.7,
+     "ci_high": 78.5
+    },
+    {
+     "p": null,
+     "arm": "POEM minus LHM",
+     "pmid": "40112837",
+     "unit": "points",
+     "label": "Difference in mean Eckardt score at 5 years",
+     "value": -0.29,
+     "ci_low": -0.62,
+     "ci_high": 0.05
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "36156932",
+     "unit": "points",
+     "label": "Median Eckardt at 12 months",
+     "value": 0.5,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM",
+     "pmid": "32856150",
+     "unit": "RR",
+     "label": "RR 1-year treatment success",
+     "value": 1.09,
+     "ci_low": 0.86,
+     "ci_high": 1.39
+    }
+   ],
+   "outcome": "Symptom relief / clinical success (Eckardt ≤3)",
+   "certainty": "Moderate",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "33035470",
+    "40624423",
+    "36156932"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM vs PD",
+     "pmid": "33035470",
+     "unit": "RR",
+     "label": "RR of treatment failure",
+     "value": 0.33,
+     "ci_low": 0.15,
+     "ci_high": 0.71
+    },
+    {
+     "p": null,
+     "arm": "LHM vs PD",
+     "pmid": "33035470",
+     "unit": "RR",
+     "label": "RR of treatment failure",
+     "value": 0.45,
+     "ci_low": 0.26,
+     "ci_high": 0.78
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM",
+     "pmid": "40624423",
+     "unit": "OR",
+     "label": "OR treatment success (mixed designs)",
+     "value": 1.43,
+     "ci_low": 0.96,
+     "ci_high": 2.13
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "36156932",
+     "unit": "patients",
+     "label": "Treatment success at 12 months",
+     "value": 19.0,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Treatment failure",
+   "certainty": "Low",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "31800987",
+    "40112837",
+    "41792489",
+    "36156932",
+    "40624423"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 24 months",
+     "value": 44.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 24 months",
+     "value": 29.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 5 years",
+     "value": 41.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 5 years",
+     "value": 31.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "LA B–D oesophagitis at 5 years",
+     "value": 14.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "LA B–D oesophagitis at 5 years",
+     "value": 7.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Abnormal acid exposure at 5 years",
+     "value": 62.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "40112837",
+     "unit": "%",
+     "label": "Abnormal acid exposure at 5 years",
+     "value": 31.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM+PF",
+     "pmid": "41792489",
+     "unit": "RR",
+     "label": "RR endoscopic oesophagitis",
+     "value": 3.1,
+     "ci_low": 2.17,
+     "ci_high": 4.41
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM+PF",
+     "pmid": "41792489",
+     "unit": "RR",
+     "label": "RR abnormal pH",
+     "value": 1.94,
+     "ci_low": 1.07,
+     "ci_high": 3.53
+    },
+    {
+     "p": "<0.02",
+     "arm": "POEM",
+     "pmid": "36156932",
+     "unit": "%",
+     "label": "GER by GerdQ",
+     "value": 64.6,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "<0.02",
+     "arm": "LM-PF",
+     "pmid": "36156932",
+     "unit": "%",
+     "label": "GER by GerdQ",
+     "value": 11.1,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Gastro-oesophageal reflux and oesophagitis",
+   "certainty": "Moderate",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "31800987",
+    "32856150",
+    "41792489",
+    "36156932",
+    "21561346",
+    "33035470"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Serious adverse events",
+     "value": 2.7,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM plus Dor",
+     "pmid": "31800987",
+     "unit": "%",
+     "label": "Serious adverse events",
+     "value": 7.3,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "32856150",
+     "unit": "%",
+     "label": "Pooled serious adverse events",
+     "value": 1.4,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM",
+     "pmid": "32856150",
+     "unit": "%",
+     "label": "Pooled serious adverse events",
+     "value": 6.7,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "PD",
+     "pmid": "32856150",
+     "unit": "%",
+     "label": "Pooled serious adverse events",
+     "value": 4.2,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM+PF",
+     "pmid": "41792489",
+     "unit": "RR",
+     "label": "RR adverse events",
+     "value": 1.15,
+     "ci_low": 0.38,
+     "ci_high": 3.44
+    },
+    {
+     "p": null,
+     "arm": "PD",
+     "pmid": "21561346",
+     "unit": "%",
+     "label": "Oesophageal perforation",
+     "value": 4.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM",
+     "pmid": "21561346",
+     "unit": "%",
+     "label": "Mucosal tear",
+     "value": 12.0,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Adverse events",
+   "certainty": "Low",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "40112837",
+    "42617727",
+    "38050085"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "42617727",
+     "unit": "OR",
+     "label": "OR 5-year treatment success (network)",
+     "value": 6.33,
+     "ci_low": 2.83,
+     "ci_high": 14.0
+    },
+    {
+     "p": null,
+     "arm": "Heller myotomy",
+     "pmid": "42617727",
+     "unit": "OR",
+     "label": "OR 5-year treatment success (network)",
+     "value": 6.39,
+     "ci_low": 1.24,
+     "ci_high": 32.89
+    },
+    {
+     "p": "0.84",
+     "arm": "LHM",
+     "pmid": "38050085",
+     "unit": "%",
+     "label": "Success at 10 years (full analysis set)",
+     "value": 74.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0.84",
+     "arm": "PD",
+     "pmid": "38050085",
+     "unit": "%",
+     "label": "Success at 10 years (full analysis set)",
+     "value": 74.0,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Long-term durability",
+   "certainty": "Low",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "30690706",
+    "38050085",
+    "40399617"
+   ],
+   "numbers": [
+    {
+     "p": "0·032",
+     "arm": "POEM vs LHM",
+     "pmid": "30690706",
+     "unit": "OR",
+     "label": "OR success, type I",
+     "value": 2.97,
+     "ci_low": 1.09,
+     "ci_high": 8.03
+    },
+    {
+     "p": "0·007",
+     "arm": "POEM vs LHM",
+     "pmid": "30690706",
+     "unit": "OR",
+     "label": "OR success, type III",
+     "value": 3.5,
+     "ci_low": 1.39,
+     "ci_high": 8.77
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "30690706",
+     "unit": "%",
+     "label": "Success, type III",
+     "value": 93.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "LHM",
+     "pmid": "30690706",
+     "unit": "%",
+     "label": "Success, type III",
+     "value": 71.0,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Subtype differences (types I–III)",
+   "certainty": "Very low",
+   "evidence_type": "rcts_and_meta_analyses"
+  },
+  {
+   "pmids": [
+    "31287522",
+    "36206786",
+    "36907524",
+    "21561346",
+    "38050085"
+   ],
+   "numbers": [
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "31287522",
+     "unit": "%",
+     "label": "Success at 2 years",
+     "value": 92.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "Pneumatic dilation",
+     "pmid": "31287522",
+     "unit": "%",
+     "label": "Success at 2 years",
+     "value": 54.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "36206786",
+     "unit": "%",
+     "label": "Success at 5 years",
+     "value": 81.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "Pneumatic dilation",
+     "pmid": "36206786",
+     "unit": "%",
+     "label": "Success at 5 years",
+     "value": 40.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "<0·0001",
+     "arm": "POEM minus PD",
+     "pmid": "36206786",
+     "unit": "%",
+     "label": "Adjusted difference at 5 years",
+     "value": 41.0,
+     "ci_low": 25.0,
+     "ci_high": 57.0
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "31287522",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 2 years",
+     "value": 41.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "Pneumatic dilation",
+     "pmid": "31287522",
+     "unit": "%",
+     "label": "Reflux oesophagitis at 2 years",
+     "value": 7.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0·008",
+     "arm": "POEM",
+     "pmid": "36206786",
+     "unit": "%",
+     "label": "PPI use in remission",
+     "value": 46.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0·008",
+     "arm": "Pneumatic dilation",
+     "pmid": "36206786",
+     "unit": "%",
+     "label": "PPI use in remission",
+     "value": 13.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM",
+     "pmid": "36907524",
+     "unit": "%",
+     "label": "Success after failed LHM, 1 year",
+     "value": 62.2,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "PD",
+     "pmid": "36907524",
+     "unit": "%",
+     "label": "Success after failed LHM, 1 year",
+     "value": 26.7,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "pneumatic dilation",
+     "pmid": "21561346",
+     "unit": "%",
+     "label": "Success at 2 years vs LHM",
+     "value": 86.0,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0.46",
+     "arm": "LHM",
+     "pmid": "21561346",
+     "unit": "%",
+     "label": "Success at 2 years vs PD",
+     "value": 90.0,
+     "ci_low": null,
+     "ci_high": null
+    }
+   ],
+   "outcome": "Place of pneumatic dilation",
+   "certainty": "Moderate",
+   "evidence_type": "rct"
+  },
+  {
+   "pmids": [
+    "36156932",
+    "40624423",
+    "41792489"
+   ],
+   "numbers": [
+    {
+     "p": "0.001",
+     "arm": "POEM",
+     "pmid": "36156932",
+     "unit": "min",
+     "label": "Procedure time",
+     "value": 95.7,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": "0.001",
+     "arm": "LM-PF",
+     "pmid": "36156932",
+     "unit": "min",
+     "label": "Procedure time",
+     "value": 218.75,
+     "ci_low": null,
+     "ci_high": null
+    },
+    {
+     "p": null,
+     "arm": "POEM vs LHM",
+     "pmid": "40624423",
+     "unit": "min",
+     "label": "Operative time mean difference",
+     "value": -35.69,
+     "ci_low": -50.54,
+     "ci_high": -20.83
+    }
+   ],
+   "outcome": "Operative time",
+   "certainty": "Low",
+   "evidence_type": "rcts_and_meta_analyses"
+  }
+ ],
+ "question": "In adults with idiopathic achalasia, how does peroral endoscopic myotomy (POEM) compare with laparoscopic Heller myotomy with fundoplication for symptom relief (Eckardt score), treatment failure, gastro-oesophageal reflux and oesophagitis, adverse events, and long-term durability? Assess randomized evidence, subtype differences (type I–III), and the place of pneumatic dilation.",
+ "created_at": "2026-10-31T11:00:16.611766811Z",
+ "guidelines": null,
+ "references": [
+  {
+   "n": 1,
+   "pmid": "31800987",
+   "year": 2019,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 2,
+   "pmid": "40112837",
+   "year": 2025,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 3,
+   "pmid": "36156932",
+   "year": 2022,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 4,
+   "pmid": "31287522",
+   "year": 2019,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 5,
+   "pmid": "36206786",
+   "year": 2022,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 6,
+   "pmid": "21561346",
+   "year": 2011,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 7,
+   "pmid": "38050085",
+   "year": 2024,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 8,
+   "pmid": "36907524",
+   "year": 2023,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 9,
+   "pmid": "33035470",
+   "year": 2021,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 10,
+   "pmid": "32856150",
+   "year": 2021,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 11,
+   "pmid": "40624423",
+   "year": 2025,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 12,
+   "pmid": "30690706",
+   "year": 2019,
+   "found_by_skeptic": false
+  },
+  {
+   "n": 13,
+   "pmid": "42617727",
+   "year": 2026,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 14,
+   "pmid": "41792489",
+   "year": 2026,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 15,
+   "pmid": "37539633",
+   "year": 2024,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 16,
+   "pmid": "40399617",
+   "year": 2025,
+   "found_by_skeptic": true
+  },
+  {
+   "n": 17,
+   "pmid": "31839408",
+   "year": 2020,
+   "found_by_skeptic": true
+  }
+ ]
+}

@@ -19,6 +19,13 @@ name = "goldset"
 path = "src/bin/goldset.rs"
 required-features = ["ssr"]
 
+# The temporal smoke (T5): the expert writer's real prompt and schema on the
+# three stored fixtures; no database, no PubMed. Run by the owner.
+[[bin]]
+name = "temporal_smoke"
+path = "src/bin/temporal_smoke.rs"
+required-features = ["ssr"]
+
 [dependencies]
 secrecy = "0.10"
 leptos = { version = "0.8" }

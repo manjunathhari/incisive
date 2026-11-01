@@ -79,6 +79,22 @@ pub async fn get_view(state: &AppState, user: &User, run_id: Uuid) -> Result<Run
     }
 }
 
+/// Temporal T3 (read path for T4): the expert opinion of one of the
+/// user's runs; `Ok(None)` when the run is theirs but has no opinion (not
+/// run: Quick, `TEMPORAL=off`, or before T3). Someone else's run is
+/// "not found", as for [`get_view`].
+pub async fn temporal_view(
+    state: &AppState,
+    user: &User,
+    run_id: Uuid,
+) -> Result<Option<super::TemporalView>, RunApiError> {
+    match super::temporal::get_for_user(&state.pool, user.id, run_id).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(RunApiError::NotFound),
+        Err(_) => Err(failed("temporal", user.id)),
+    }
+}
+
 /// The user's runs as Library cards, newest first (read-only; same scoping
 /// and limit as [`list_view`]).
 pub async fn library_view(

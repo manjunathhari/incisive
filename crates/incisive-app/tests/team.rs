@@ -146,6 +146,8 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         quick_engine: QuickEngine::Team,
         full_engine: incisive_app::runs::Engine::Classic,
         completeness: false,
+        temporal: Default::default(),
+        temporal_client: None,
         worker: WorkerHandle::default(),
         llm: None,
         lit,

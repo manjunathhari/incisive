@@ -86,6 +86,11 @@ pub enum Event {
     RunStarted,
     RunFinished,
     RunDeleted,
+    /// Temporal T3: the expert writer's after-run job ended (ids and kinds only).
+    TemporalDone,
+    TemporalFailed,
+    TemporalSkipped,
+    TemporalCapBlocked,
 }
 
 impl Event {
@@ -101,6 +106,10 @@ impl Event {
             Event::RunStarted => "run_started",
             Event::RunFinished => "run_finished",
             Event::RunDeleted => "run_deleted",
+            Event::TemporalDone => "temporal_done",
+            Event::TemporalFailed => "temporal_failed",
+            Event::TemporalSkipped => "temporal_skipped",
+            Event::TemporalCapBlocked => "temporal_cap_blocked",
         }
     }
 
@@ -116,6 +125,10 @@ impl Event {
             "run_started" => Event::RunStarted,
             "run_finished" => Event::RunFinished,
             "run_deleted" => Event::RunDeleted,
+            "temporal_done" => Event::TemporalDone,
+            "temporal_failed" => Event::TemporalFailed,
+            "temporal_skipped" => Event::TemporalSkipped,
+            "temporal_cap_blocked" => Event::TemporalCapBlocked,
             _ => return None,
         })
     }
@@ -290,6 +303,23 @@ pub fn run_finished_detail(
         "status": status,
         "cost_paise": cost_paise,
         "steps": steps,
+    })
+}
+
+/// How the temporal job of a run ended: the run id, a fixed reason kind
+/// (`None` when done), what it cost and how many check flags the board got.
+/// Never the question, the answer, the board or the topic.
+pub fn temporal_detail(
+    run_id: Uuid,
+    reason: Option<&'static str>,
+    cost_paise: i64,
+    flags: usize,
+) -> Value {
+    json!({
+        "run_id": run_id.to_string(),
+        "reason": reason,
+        "cost_paise": cost_paise,
+        "flags": flags,
     })
 }
 

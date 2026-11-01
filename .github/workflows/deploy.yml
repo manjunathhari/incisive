@@ -41,6 +41,8 @@ jobs:
           QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
           FULL_ENGINE: ${{ vars.FULL_ENGINE }}
           COMPLETENESS: ${{ vars.COMPLETENESS }}
+          TEMPORAL: ${{ vars.TEMPORAL }}
+          TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -77,7 +79,7 @@ jobs:
           for v in AGENT_MODELS RUN_LIMITS; do
             [ -n "${!v//[[:space:]]/}" ] || continue
             case "$v" in
-              AGENT_MODELS) allowed="frame search screen extract write check researcher writer extractor skeptic completeness"; fields="" ;;
+              AGENT_MODELS) allowed="frame search screen extract write check researcher writer extractor skeptic completeness temporal"; fields="" ;;
               RUN_LIMITS) allowed="quick focused"
                           fields="refinements screen_n use_n full_text limit_paise time_limit_s agent_limit_paise agent_time_limit_s researcher_turns skeptic_turns researcher_max_tokens skeptic_max_tokens extractor_max_tokens writer_max_tokens writer_time_allowance_s review_time_allowance_s extractor_concurrency" ;;
             esac
@@ -118,7 +120,8 @@ jobs:
                       "write": "claude-sonnet-5-5", "check": "claude-sonnet-5-5",
                       "researcher": "claude-opus-5-5", "writer": "claude-opus-5-5",
                       "extractor": "claude-sonnet-5-5", "skeptic": "claude-sonnet-5-5",
-                      "completeness": "claude-sonnet-5-5"}
+                      "completeness": "claude-sonnet-5-5",
+                      "temporal": "claude-opus-5-5"}
           prices = json.loads(os.environ["MODEL_PRICES"])
           if not isinstance(prices, dict):
               sys.exit("vars.MODEL_PRICES must be a JSON object")
@@ -160,6 +163,19 @@ jobs:
             ""|on|off) ;;
             *) echo "::error::vars.COMPLETENESS must be on or off (see infra/README.md section 12)"; exit 1 ;;
           esac
+          # Optional temporal expert opinion (T2/T3, Full only): unset (off), off
+          # or on. The same trim. TEMPORAL_MAX_TOKENS: unset or 2000-32000.
+          tp="${TEMPORAL#"${TEMPORAL%%[![:space:]]*}"}"
+          tp="${tp%"${tp##*[![:space:]]}"}"
+          case "$tp" in
+            ""|on|off) ;;
+            *) echo "::error::vars.TEMPORAL must be on or off (see infra/README.md section 13)"; exit 1 ;;
+          esac
+          tm="${TEMPORAL_MAX_TOKENS#"${TEMPORAL_MAX_TOKENS%%[![:space:]]*}"}"
+          tm="${tm%"${tm##*[![:space:]]}"}"
+          if [ -n "$tm" ] && ! { [[ "$tm" =~ ^[0-9]+$ ]] && [ "$tm" -ge 2000 ] && [ "$tm" -le 32000 ]; }; then
+            echo "::error::vars.TEMPORAL_MAX_TOKENS must be a whole number from 2000 to 32000 (see infra/README.md section 13)"; exit 1
+          fi
           # Optional switches: unset, true or false (a typo must not silently mean off).
           for v in HAS_NCBI_KEY CPU_ALWAYS; do
             case "${!v//[[:space:]]/}" in
@@ -207,6 +223,8 @@ jobs:
           QUICK_ENGINE: ${{ vars.QUICK_ENGINE }}
           FULL_ENGINE: ${{ vars.FULL_ENGINE }}
           COMPLETENESS: ${{ vars.COMPLETENESS }}
+          TEMPORAL: ${{ vars.TEMPORAL }}
+          TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
         run: |
@@ -224,6 +242,8 @@ jobs:
                    "MODEL_PRICES", "USD_INR", "GLOBAL_MONTHLY_CAP_INR", "UNPAYWALL_EMAIL"]
           # Optional: written only when set, so the app's defaults apply otherwise.
           optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE", "COMPLETENESS"]
+          # Temporal T2/T3 (infra/README.md section 13): optional too.
+          optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}"
