@@ -5,4 +5,5 @@
 | memory-layer | Discovery complete → Phase 0 brainstorming | 2026-11-01 |
 
 ## Open questions for owner
-1. Retention: should a de-identified copy of each evidence pair outlive the 12-month delete?
+1. ~~Retention~~ — decided A (de-identified permanent library copy).
+2. Topic grouping — open.
