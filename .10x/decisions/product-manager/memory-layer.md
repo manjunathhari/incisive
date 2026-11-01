@@ -9,3 +9,6 @@
 - **D3 Owner admin (2026-11-01, owner):** owner can merge and split topics afterwards; every merge/split logged and reversible. (Mitigates D2's silent wrong merges.)
 - **D4 Gate (2026-11-01, owner):** when the topic already has a stored Full run, open the stored answer + Expert Opinion at once (no cost) and offer "Update with newer evidence", a fresh Full run that searches only papers after the stored run's date.
 - **D5 Shared library visibility (2026-11-01, owner):** only the owner sees the shared (de-identified, all-users) library. Other users see only their own runs.
+- **D6 Gate scope for other users (2026-11-01, owner):** every user's gate matches against all stored runs, de-identified (they can open a stored answer from anyone's run, but cannot browse the shared library and never see who asked).
+- **D7 Expert layer (2026-11-01, owner):** structured verdict (adopt / selective / not yet) plus a note, per topic, dated and versioned, owner-written.
+- **D8 Search (2026-11-01, owner):** full-text and meaning-search (embeddings + pgvector) both in v1.
