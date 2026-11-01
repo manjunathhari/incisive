@@ -2,7 +2,7 @@
 
 | Feature | Phase | Updated |
 |---|---|---|
-| memory-layer | Discovery complete → Phase 0 brainstorming | 2026-11-01 |
+| memory-layer | Phase 0: spec written, awaiting owner review | 2026-11-01 |
 
 ## Open questions for owner
 1. ~~Retention~~ — decided A (de-identified permanent library copy).
