@@ -35,6 +35,10 @@ pub mod runs;
 pub mod server;
 #[cfg(feature = "ssr")]
 pub mod spend;
+/// The temporal evidence table (T1): eras, linked reports and effect
+/// trajectories from a stored answer (pure code).
+#[cfg(feature = "ssr")]
+pub mod temporal;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
