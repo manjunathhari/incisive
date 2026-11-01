@@ -12,3 +12,5 @@
 - **D6 Gate scope for other users (2026-11-01, owner):** every user's gate matches against all stored runs, de-identified (they can open a stored answer from anyone's run, but cannot browse the shared library and never see who asked).
 - **D7 Expert layer (2026-11-01, owner):** structured verdict (adopt / selective / not yet) plus a note, per topic, dated and versioned, owner-written.
 - **D8 Search (2026-11-01, owner):** full-text and meaning-search (embeddings + pgvector) both in v1.
+- **D9 Update in v1 (2026-11-01, owner chose A):** "Update with newer evidence" runs a normal Full run; the engine stays frozen. The new record joins the topic and the ledger merges studies (duplicates by PMID counted once). Date-limited search deferred to its own approved engine change.
+- **Design Section 1 (tables + flows) accepted 2026-11-01.**
