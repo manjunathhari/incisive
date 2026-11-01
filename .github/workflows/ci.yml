@@ -126,7 +126,7 @@ jobs:
           [ "$body" = "ok" ] || { echo "::error::/health returned '$body'"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/ready)
           [ "$code" = "503" ] || { echo "::error::/ready returned $code, expected 503"; exit 1; }
-          curl -fsS localhost:8080/ | grep -q 'Cut to the evidence.' \
+          curl -fsS localhost:8080/ | grep -q 'searched, checked, summarised' \
             || { echo "::error::home page missing tagline"; exit 1; }
           curl -fsS localhost:8080/ | grep -q '<textarea id="question"' \
             || { echo "::error::home page missing question box"; exit 1; }
