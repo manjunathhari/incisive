@@ -6,7 +6,6 @@
 pub struct Candidate<'a> {
     pub pairs: &'a [(String, String)],
     pub embedding: Option<&'a [f32]>,
-    pub fts_rank: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -14,6 +13,7 @@ pub struct TopicFeatures {
     pub topic_id: i64,
     pub pairs: Vec<(String, String)>,
     pub embedding: Option<Vec<f32>>,
+    /// The topic's FTS rank against the query, normalised to 0..1 by the store.
     pub fts_rank: f32,
 }
 
@@ -66,13 +66,14 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     finite(r)
 }
 
-/// Weighted score in 0.0..=1.0 (NaN inputs count as 0.0).
+/// Weighted score in 0.0..=1.0 (NaN inputs count as 0.0). The FTS term is the
+/// topic's own `fts_rank`, since the store ranks FTS per topic.
 ///
 /// With both embeddings: `0.5*cosine + 0.3*jaccard + 0.2*fts`.
 /// Otherwise: `0.6*jaccard + 0.4*fts`.
 pub fn score(c: &Candidate, t: &TopicFeatures) -> f32 {
     let jac = jaccard(c.pairs, &t.pairs);
-    let fts = finite(c.fts_rank).clamp(0.0, 1.0);
+    let fts = finite(t.fts_rank).clamp(0.0, 1.0);
     let raw = match (c.embedding, t.embedding.as_deref()) {
         (Some(ea), Some(eb)) => 0.5 * cosine(ea, eb) + 0.3 * jac + 0.2 * fts,
         _ => 0.6 * jac + 0.4 * fts,
@@ -148,6 +149,18 @@ mod tests {
     }
 
     #[test]
+    fn jaccard_duplicate_pairs_do_not_inflate() {
+        // Sets: {(a,b)} vs {(a,b)} gives 1.0, not 2.0 or more.
+        let a = vec![p("a", "b"), p("a", "b"), p("b", "a")];
+        let b = vec![p("a", "b")];
+        assert!(close(jaccard(&a, &b), 1.0));
+        // {(a,b)} vs {(a,b),(c,d)}: intersection 1, union 2.
+        let c = vec![p("a", "b"), p("a", "b")];
+        let d = vec![p("a", "b"), p("c", "d")];
+        assert!(close(jaccard(&c, &d), 0.5));
+    }
+
+    #[test]
     fn cosine_mismatched_len_zero() {
         assert!(close(cosine(&[1.0, 0.0], &[1.0, 0.0, 0.0]), 0.0));
     }
@@ -164,16 +177,63 @@ mod tests {
     }
 
     #[test]
+    fn cosine_orthogonal_is_zero_and_opposite_is_minus_one() {
+        assert!(close(cosine(&[1.0, 0.0], &[0.0, 1.0]), 0.0));
+        assert!(close(cosine(&[1.0, 0.0], &[-1.0, 0.0]), -1.0));
+    }
+
+    #[test]
+    fn cosine_nan_component_gives_finite_result() {
+        let r = cosine(&[f32::NAN, 1.0], &[1.0, 1.0]);
+        assert!(r.is_finite());
+        assert!((-1.0..=1.0).contains(&r));
+    }
+
+    #[test]
+    fn score_opposite_embeddings_clamped_to_zero() {
+        let pairs = vec![p("a", "b")];
+        let emb = [1.0_f32, 0.0];
+        let c = Candidate {
+            pairs: &pairs,
+            embedding: Some(&emb),
+        };
+        let t = topic(1, vec![p("x", "y")], Some(vec![-1.0, 0.0]), 0.0);
+        // 0.5 * (-1) + 0 + 0 is negative, so the clamp gives 0.0.
+        let s = score(&c, &t);
+        assert!(s >= 0.0);
+        assert!(close(s, 0.0));
+    }
+
+    #[test]
     fn score_without_embeddings_uses_fallback_weights() {
         let pairs = vec![p("robotic", "laparoscopic")];
         let c = Candidate {
             pairs: &pairs,
             embedding: None,
-            fts_rank: 0.5,
         };
-        let t = topic(1, pairs.clone(), None, 0.0);
+        let t = topic(1, pairs.clone(), None, 0.5);
         // 0.6 * jaccard(1) + 0.4 * fts(0.5) = 0.8
         assert!(close(score(&c, &t), 0.8));
+    }
+
+    #[test]
+    fn score_one_embedding_missing_uses_fallback_weights() {
+        let pairs = vec![p("robotic", "laparoscopic")];
+        let emb = [1.0_f32, 0.0];
+        // Candidate has an embedding, topic does not: fallback weights apply.
+        let c = Candidate {
+            pairs: &pairs,
+            embedding: Some(&emb),
+        };
+        let t = topic(1, pairs.clone(), None, 0.5);
+        assert!(close(score(&c, &t), 0.8));
+        // Topic has an embedding, candidate does not: fallback weights apply.
+        let c2 = Candidate {
+            pairs: &pairs,
+            embedding: None,
+        };
+        let t2 = topic(2, pairs.clone(), Some(vec![1.0, 0.0]), 0.5);
+        assert!(close(score(&c2, &t2), 0.8));
     }
 
     #[test]
@@ -183,9 +243,8 @@ mod tests {
         let c = Candidate {
             pairs: &pairs,
             embedding: Some(&emb),
-            fts_rank: 1.0,
         };
-        let t = topic(1, vec![p("open", "x")], Some(vec![1.0, 0.0]), 0.0);
+        let t = topic(1, vec![p("open", "x")], Some(vec![1.0, 0.0]), 1.0);
         // 0.5 * cosine(1) + 0.3 * jaccard(0) + 0.2 * fts(1) = 0.7
         assert!(close(score(&c, &t), 0.7));
     }
@@ -196,20 +255,29 @@ mod tests {
         let c = Candidate {
             pairs: &pairs,
             embedding: None,
-            fts_rank: f32::NAN,
         };
-        let t = topic(1, pairs.clone(), None, 0.0);
+        let t = topic(1, pairs.clone(), None, f32::NAN);
         // NaN fts treated as 0.0, leaving 0.6 * jaccard(1) = 0.6.
         assert!(close(score(&c, &t), 0.6));
 
-        let c2 = Candidate {
-            pairs: &pairs,
-            embedding: None,
-            fts_rank: 50.0,
-        };
-        let s = score(&c2, &t);
+        let t2 = topic(2, pairs.clone(), None, 50.0);
+        let s = score(&c, &t2);
         assert!((0.0..=1.0).contains(&s));
         assert!(close(s, 1.0));
+    }
+
+    #[test]
+    fn best_uses_topic_fts_to_separate_topics() {
+        let pairs = vec![p("a", "b")];
+        let c = Candidate {
+            pairs: &pairs,
+            embedding: None,
+        };
+        let topics = vec![
+            topic(1, pairs.clone(), None, 0.2),
+            topic(2, pairs.clone(), None, 0.9),
+        ];
+        assert_eq!(best(&c, &topics).map(|(id, _)| id), Some(2));
     }
 
     #[test]
@@ -218,7 +286,6 @@ mod tests {
         let c = Candidate {
             pairs: &pairs,
             embedding: None,
-            fts_rank: 0.0,
         };
         let topics = vec![
             topic(9, pairs.clone(), None, 0.0),
@@ -236,7 +303,6 @@ mod tests {
         let c = Candidate {
             pairs: &pairs,
             embedding: None,
-            fts_rank: 0.0,
         };
         let topics = vec![
             topic(1, vec![p("x", "y")], None, 0.0),
@@ -250,7 +316,6 @@ mod tests {
         let c = Candidate {
             pairs: &[],
             embedding: None,
-            fts_rank: 0.0,
         };
         assert!(best(&c, &[]).is_none());
     }
