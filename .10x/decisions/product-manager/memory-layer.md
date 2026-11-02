@@ -24,3 +24,4 @@
 - No run's status, timing, answer or cost changes because of memory (verified by existing test suite unchanged).
 
 **Spec approved by owner 2026-11-01 22:46 IST.**
+- **D10a (2026-11-02, owner):** intends to use runs + Expert Opinions to train a narrow paraphrase/summarisation model (one stored record in → plain-language summary out; no open chat). Retrieval use unaffected. Recommended: written confirmation of that scope from Anthropic before any fine-tune.
