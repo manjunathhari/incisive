@@ -384,7 +384,22 @@ pub fn build(
             }
         }
         c.pmid_ns(&o.pmids, &mut ns);
-        let mut tags = tags_of_pmids(&c, &o.pmids);
+        // Own words and arms first; the studies' comparisons only when the
+        // row names no pair; then the record's sole pair.
+        let mut own = vec![
+            o.outcome.clone(),
+            o.effect_text.clone(),
+            o.rct_evidence.clone(),
+            o.why.clone(),
+        ];
+        own.extend(o.numbers.iter().filter_map(|n| n.arm.clone()));
+        if let Some(comp) = &a.completeness {
+            own.extend(comp.additions_to(i).map(|(_, add)| add.text.clone()));
+        }
+        let mut tags = comparison::tags(&own.join(" , "), pairs);
+        if tags.is_empty() {
+            tags = tags_of_pmids(&c, &o.pmids);
+        }
         let text = join_nonempty(&parts);
         if tags.is_empty() {
             tags = c.tags_or_sole(&text);
@@ -420,7 +435,11 @@ pub fn build(
                 },
                 unsourced_note(x.unsourced),
             ]);
-            let mut tags = tags_of_pmids(&c, &x.pmids);
+            let own = [x.outcome.as_str(), x.effect_text.as_str(), x.why.as_str()].join(" , ");
+            let mut tags = comparison::tags(&own, pairs);
+            if tags.is_empty() {
+                tags = tags_of_pmids(&c, &x.pmids);
+            }
             if tags.is_empty() {
                 tags = c.tags_or_sole(&text);
             }
@@ -1332,14 +1351,29 @@ mod tests {
             .iter()
             .enumerate()
         {
-            let mut want: Vec<String> = Vec::new();
+            // Own words and number arms first; the studies' union otherwise.
+            let mut own = vec![
+                o["outcome"].to_string(),
+                o["effect_text"].to_string(),
+                o["rct_evidence"].to_string(),
+                o["why"].to_string(),
+            ];
+            own.extend(
+                o["numbers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|n| n["arm"].as_str().map(str::to_string)),
+            );
+            let mut want: Vec<String> = comparison::tags(&own.join(" , "), &pairs("achalasia"));
+            let from_own = !want.is_empty();
             for p in o["pmids"].as_array().unwrap() {
                 let s = b["answer"]["studies"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|s| s["pmid"] == *p);
-                if let Some(s) = s {
+                if let (true, Some(s)) = (!from_own, s) {
                     for k in
                         comparison::tags(s["comparison"].as_str().unwrap(), &pairs("achalasia"))
                     {
@@ -1392,6 +1426,37 @@ mod tests {
             assert!(!p.comparisons.is_empty(), "{:?} is untagged", p.kind);
             if p.comparisons.contains(&asked) {
                 reached += 1;
+                if p.kind == PassageKind::Outcome {
+                    // An outcome row reached by robotic-vs-open names open
+                    // itself (text or number arms), or names no pair at all.
+                    let rows = b["answer"]["outcomes"].as_array().unwrap();
+                    let row = rows.iter().find(|o| {
+                        p.text
+                            .contains(&format!("Outcome: {}.", o["outcome"].as_str().unwrap()))
+                    });
+                    if let Some(row) = row {
+                        let mut own = vec![
+                            row["outcome"].to_string(),
+                            row["effect_text"].to_string(),
+                            row["rct_evidence"].to_string(),
+                            row["why"].to_string(),
+                        ];
+                        own.extend(
+                            row["numbers"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|n| n["arm"].as_str().map(str::to_string)),
+                        );
+                        let own = own.join(" , ");
+                        assert!(
+                            comparison::arms_named(&own, &pr).contains(&"open".to_string())
+                                || comparison::tags(&own, &pr).is_empty(),
+                            "{}",
+                            p.text
+                        );
+                    }
+                }
                 assert!(
                     p.ref_ns.iter().any(|n| open_ns.contains(n))
                         || comparison::arms_named(&p.text, &pr).contains(&"open".to_string()),
@@ -1412,6 +1477,57 @@ mod tests {
             reached < built(f).len() / 2,
             "{reached} passages reach an open question"
         );
+    }
+
+    #[test]
+    fn outcome_row_prefers_its_own_arms_over_study_union() {
+        let mut b = body("cholecystitis");
+        let pr = pairs("cholecystitis");
+        let multi = b["answer"]["studies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| {
+                s["comparison"]
+                    .as_str()
+                    .unwrap()
+                    .contains("laparoscopic or open")
+            })
+            .expect("multi-arm study in fixture")["pmid"]
+            .clone();
+        let open = comparison::key("robotic", "open");
+        let rl = comparison::key("robotic", "laparoscopic");
+        // Row 0 names robotic and laparoscopic; row 1 names no arms.
+        for (i, eff) in [
+            (0, "Robotic took 5 min longer than laparoscopic."),
+            (1, "Stay was shorter."),
+        ] {
+            let o = &mut b["answer"]["outcomes"][i];
+            o["outcome"] = json!("Stay");
+            o["effect_text"] = json!(eff);
+            o["rct_evidence"] = json!("");
+            o["why"] = json!("");
+            o["numbers"] = json!([]);
+            o["pmids"] = json!([multi.clone()]);
+        }
+        let ps = build(&b, &board("cholecystitis"), &pr, &[]).unwrap();
+        let outs = of(&ps, PassageKind::Outcome);
+        assert_eq!(outs[0].comparisons, std::slice::from_ref(&rl));
+        assert!(!outs[0].comparisons.contains(&open));
+        // No arms of its own: falls back to the study union.
+        assert!(
+            outs[1].comparisons.contains(&open),
+            "{:?}",
+            outs[1].comparisons
+        );
+        assert!(outs[1].comparisons.contains(&rl));
+        // Number arms count as the row's own words.
+        b["answer"]["outcomes"][1]["numbers"] = json!([
+            {"label": "x", "value": 1.0, "unit": null, "arm": "robotic", "ci_low": null, "ci_high": null, "p": null, "pmid": multi},
+            {"label": "x", "value": 2.0, "unit": null, "arm": "laparoscopic", "ci_low": null, "ci_high": null, "p": null, "pmid": multi}
+        ]);
+        let ps = build(&b, &board("cholecystitis"), &pr, &[]).unwrap();
+        assert_eq!(of(&ps, PassageKind::Outcome)[1].comparisons, [rl]);
     }
 
     #[test]
