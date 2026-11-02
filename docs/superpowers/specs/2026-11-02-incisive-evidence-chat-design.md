@@ -21,7 +21,7 @@ A **Chat** option next to *Answer | Expert opinion* on a run page. The user asks
 | C7 | Personal questions: answer from the evidence for people in that situation, end with "Your own surgeon can tell you what this means for you", never "you should". Code adds a fixed safety line for warning symptoms. |
 | C8 | Gemma is never called without passages. No relevant passage → code replies "Not covered in this evidence." |
 | C9 | The knowledge base includes the selected papers' abstracts, verified quotes and reference details, kept permanently with the record. |
-| C10 | During the run Gemma writes its **prior** (what it believes about the question). After the run each prior claim is reconciled against the evidence. Prior and reconciliation are **owner view only**; the chat never uses the prior. |
+| C10 | During the run Gemma writes its **prior** (what it believes about the question). After the run each prior claim is reconciled against the evidence. **Reconciled claims are available to everyone in the chat** (amended 2 Nov, 23:41): *corrected* claims as "common belief vs evidence" passages, *supported* claims as "matches common belief", always cited to the run's evidence. The **raw prior and *not-in-evidence* claims are never used by the chat** and stay in the owner view with the scorecard. |
 
 ## 3. Evidence that shaped the design (VPS tests, 2 Nov, gemma3:4b, 2 CPU)
 
@@ -44,6 +44,7 @@ Built by code from stored data only (no engine change). Each **passage** is a sh
 | `quote` | each verified quote (extractor, skeptic), with `[ref n]` |
 | `reference` | title, journal, year, design for each reference |
 | `owner_qa` | owner-approved Q&As for the record's topic (§7) |
+| `belief` | a reconciled prior claim (§6): *corrected* → "Common belief: … This evidence: …" with the evidence passage's citation; *supported* → "This matches what is commonly believed: …" |
 
 Each passage carries: `ref_n`/`pmid` when it comes from a paper, a **comparison tag** (normalised intervention–comparator pair, from the outcome group or the record's pairs; NULL when unknown), the text, a Gemma vector, and a full-text index.
 
@@ -72,7 +73,8 @@ Tapping a citation opens its passage (and, for papers, the reference).
 - **Prior:** the memory loop notices a running Full run with no prior and asks Gemma (no passages, by design) for its expected answer as JSON: claims, each with any numbers and studies it believes. Stored as `chat_priors` (labelled unverified). No engine change: it reads `runs.question` and status only.
 - **Reconciliation:** after the record exists, for each prior claim: retrieve the top passages; Gemma marks it `supported` / `corrected` (with the evidence's version) / `not_in_evidence`; code checks numbers and citations as in §5. Stored with the prior.
 - **Scorecard:** per run and overall: share supported / corrected / not in evidence; invented references (prior references not among the run's references).
-- Shown only in the owner view. Never retrieved by the chat.
+- **In the chat (everyone):** *corrected* and *supported* claims become `belief` passages, retrieved like any other and always shown with the citation of the evidence passage that settled them. A `belief` passage is only created when its settling passage exists and the code checks pass.
+- **Owner view only:** the raw prior, *not-in-evidence* claims, invented references and the scorecard. The raw prior is never retrieved by the chat.
 
 ## 7. Owner view (`/chats`, owner only)
 
@@ -132,4 +134,4 @@ Tapping a citation opens its passage (and, for papers, the reference).
 - Voice (browser speech) after CH7.
 - More CPU on the VPS if replies feel slow in real use.
 - Sign-up notice wording for C4 (owner reads chats) — owner to approve before inviting users.
-- Prior claims shown to users ("common belief vs evidence") — later, only after the owner trusts the reconciliation.
+- Owner spot-checks the first reconciliations before `CHAT=on` for other users (CH7).
