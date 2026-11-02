@@ -1549,6 +1549,78 @@ async fn follow_up_naming_an_arm_outside_the_record_leaves_the_pair_behind() {
     assert!(prompt.contains(open), "{prompt}");
 }
 
+/// Only the test's own passages, so the fixture's cannot crowd out the top 3.
+async fn only_added_passages(pool: &PgPool, rec: i64) {
+    sqlx::query("DELETE FROM incisive.chat_passages WHERE record_id = $1")
+        .bind(rec)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A third arm mentioned in passing does not take the record's own comparison
+/// away from the question.
+#[tokio::test]
+async fn incidental_third_arm_keeps_the_records_evidence() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, rec) = ready(&pool, &HERNIA).await;
+    only_added_passages(&pool, rec).await;
+    let rl = "Robotic laparoscopic previous open surgery zebra note";
+    add_passage(&pool, rec, 9001, rl, &["laparoscopic|robotic"]).await;
+
+    let server = gemma_says("Zebra note [1].", 1).await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let q = "Robotic or laparoscopic after previous open surgery?";
+    let a = service::ask(&st, &user, run, q, ChatMode::Clinical)
+        .await
+        .unwrap();
+    assert_eq!(finished(&st, &user, a).await.status, "done");
+    let sent = sent_messages(&server, 0).await;
+    let prompt = sent.iter().map(|(_, c)| c.as_str()).collect::<String>();
+    assert!(prompt.contains(rl), "{prompt}");
+}
+
+/// "and laparoscopic?" asks about the record's own arm: the "open" in the
+/// question before it does not carry over.
+#[tokio::test]
+async fn follow_up_on_record_arm_does_not_inherit_outside_arm() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, rec) = ready(&pool, &HERNIA).await;
+    only_added_passages(&pool, rec).await;
+    let open = "Robotic open zebra note";
+    add_passage(&pool, rec, 9001, open, &["open|robotic"]).await;
+    let rl = "Robotic laparoscopic open zebra note";
+    add_passage(&pool, rec, 9002, rl, &["laparoscopic|robotic"]).await;
+
+    let server = gemma_says("Zebra note [1].", 4).await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let m = ChatMode::Clinical;
+    for (call, q) in [
+        "robotic or open?",
+        "and laparoscopic?",
+        "robotic or open?",
+        "and robotic?",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let a = service::ask(&st, &user, run, q, m).await.unwrap();
+        assert_eq!(finished(&st, &user, a).await.status, "done", "{q}");
+        let sent = sent_messages(&server, call).await;
+        let prompt = sent.iter().map(|(_, c)| c.as_str()).collect::<String>();
+        if call % 2 == 0 {
+            // The pair asked for, as before.
+            assert!(!prompt.contains(rl), "{prompt}");
+        } else {
+            assert!(prompt.contains(rl), "{q}: {prompt}");
+        }
+    }
+}
+
 /// A record whose every passage is about its own pair has nothing to say about
 /// an arm outside it, and Gemma is never asked (C8).
 #[tokio::test]

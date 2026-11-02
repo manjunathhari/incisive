@@ -507,8 +507,7 @@ async fn reply_to(job: &TurnJob) -> Result<(), &'static str> {
     // What the question names; a short follow-up stays on what it follows
     // ("how sure is that?" after "robotic or open?"). An arm the record does
     // not compare holds the search to that arm ("and open?").
-    let asked =
-        comparison::focus(&job.question, &pairs).or_else(|| comparison::focus(&query, &pairs));
+    let asked = comparison::focus_of_turn(&job.question, &query, &pairs);
 
     let vector = query_vector(&job.state, &query).await;
     let hits = retrieve::top(

@@ -236,8 +236,9 @@ async fn embed_best_effort(state: &AppState, text: &str) -> Option<Vec<f32>> {
 }
 
 /// Fills up to 20 records that have no embedding. Stops when the server is
-/// unavailable (timeout, 401, connection error, 5xx); skips a record whose own
-/// failure is not that (bad body, wrong size, other 4xx) and goes on. Returns how many were filled.
+/// unavailable or refusing (see `EmbedError::is_server_unavailable`); skips a
+/// record whose own failure is not that (bad body, wrong size, 400, 413, 422)
+/// and goes on. Returns how many were filled.
 pub async fn sweep_embeddings(state: &AppState) -> usize {
     let Some(e) = state.embedder.as_ref() else {
         return 0;

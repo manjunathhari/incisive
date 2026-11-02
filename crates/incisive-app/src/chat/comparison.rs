@@ -201,18 +201,31 @@ fn in_record(arm: &str, pairs: &[(String, String)]) -> bool {
 }
 
 /// What a text's evidence must be about, in the form `retrieve::top` and
-/// `checks::run` take: the comparison key when exactly two arms are named;
-/// otherwise the first arm named that the record does not compare. `None`
-/// when nothing narrows it (also for a record with no known pairs).
+/// `checks::run` take: the comparison key when exactly two arms are named; the
+/// arm when exactly one is named and the record does not compare it. `None`
+/// when nothing narrows it: three or more arms (a third may be incidental, as
+/// in "after previous open surgery"), or a record with no known pairs.
 pub fn focus(text: &str, pairs: &[(String, String)]) -> Option<String> {
-    let arms = arms_named(text, pairs);
-    if let [a, b] = arms.as_slice() {
-        return Some(key(a, b));
+    match arms_named(text, pairs).as_slice() {
+        [a, b] => Some(key(a, b)),
+        [a] if !pairs.is_empty() && !in_record(a, pairs) => Some(a.clone()),
+        _ => None,
     }
-    if pairs.is_empty() {
-        return None;
+}
+
+/// [`focus`] for a question and its search text (the question joined to the
+/// previous one if it is short). A follow-up stays on what it follows, unless
+/// it names an arm itself and what it follows reaches outside the record:
+/// "and laparoscopic?" after "robotic or open?" leaves "open" behind.
+pub fn focus_of_turn(question: &str, query: &str, pairs: &[(String, String)]) -> Option<String> {
+    if let Some(own) = focus(question, pairs) {
+        return Some(own);
     }
-    arms.into_iter().find(|a| !in_record(a, pairs))
+    let joined = focus(query, pairs)?;
+    let inherits_outside_arm = !pairs.is_empty()
+        && !arms_named(question, pairs).is_empty()
+        && joined.split('|').any(|a| !in_record(a, pairs));
+    (!inherits_outside_arm).then_some(joined)
 }
 
 #[cfg(test)]
@@ -276,10 +289,14 @@ mod tests {
             Some("open".to_string())
         );
         assert_eq!(focus("and open?", &rl()), Some("open".to_string()));
-        // Three arms, one outside the record.
+        // Three arms, one outside the record: incidental, so nothing narrows.
+        assert_eq!(focus("robotic or laparoscopic? and open?", &rl()), None);
         assert_eq!(
-            focus("robotic or laparoscopic? and open?", &rl()),
-            Some("open".to_string())
+            focus(
+                "Robotic or laparoscopic after previous open surgery?",
+                &rl()
+            ),
+            None
         );
         // Exactly two arms: the pair, as before.
         assert_eq!(
@@ -295,6 +312,34 @@ mod tests {
         assert_eq!(focus("Is keyhole safe?", &rl()), None);
         assert_eq!(focus("How long is the stay?", &rl()), None);
         assert_eq!(focus("Is open safe?", &[]), None);
+    }
+
+    #[test]
+    fn a_follow_up_inherits_unless_it_names_an_arm_and_would_reach_outside() {
+        let turn = |q: &str, prev: &str| focus_of_turn(q, &format!("{prev} {q}"), &rl());
+        // No arm of its own: stays on what it follows, whatever that is.
+        assert_eq!(
+            turn("how sure is that?", "robotic or open?"),
+            Some(key("robotic", "open"))
+        );
+        assert_eq!(
+            turn("how sure is that?", "Is open repair safe?"),
+            Some("open".to_string())
+        );
+        // Names an arm outside the record itself.
+        assert_eq!(
+            turn("and open?", "robotic or laparoscopic?"),
+            Some("open".to_string())
+        );
+        // Names one of the record's arms: "open" does not carry over.
+        assert_eq!(turn("and laparoscopic?", "robotic or open?"), None);
+        assert_eq!(turn("and robotic?", "robotic or open?"), None);
+        assert_eq!(turn("and robotic?", "Is open repair safe?"), None);
+        // Within the record the pair still carries.
+        assert_eq!(
+            turn("and robotic?", "Is laparoscopic repair safe?"),
+            Some(key("robotic", "laparoscopic"))
+        );
     }
 
     #[test]
