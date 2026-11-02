@@ -2,6 +2,10 @@
 //! when a safety line is added. Pure. These strings are the only place the
 //! wording lives.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 pub const NOT_COVERED: &str = "Not covered in this evidence.";
 pub const SEE_YOUR_SURGEON: &str = "Your own surgeon can tell you what this means for you.";
 pub const WARNING_LINE: &str =
@@ -21,7 +25,7 @@ pub fn is_not_covered(reply: &str) -> bool {
 
 /// Symptom words and phrases that mean "act now" when a patient names them.
 /// Matched on the lower-cased question, whole words only. "pain" alone is
-/// not here: only the qualified forms are.
+/// not a warning: only the qualified forms are (see [`QUALIFIED_PAIN`]).
 const WARNING_TERMS: &[&str] = &[
     "fever",
     "fevers",
@@ -58,7 +62,29 @@ const WARNING_TERMS: &[&str] = &[
     "cannot pass urine",
     "can't pass urine",
     "not passing urine",
+    "discharge from my wound",
+    "wound is red",
+    "red wound",
+    "cannot urinate",
+    "can't urinate",
+    "blood in stool",
+    "blood in my stool",
+    "coughing up blood",
+    "can't breathe",
+    "cannot breathe",
+    "trouble breathing",
+    "throwing up",
+    "high temperature",
 ];
+
+/// Pain with a qualifier on either side, some words apart ("severe abdominal
+/// pain", "the pain is getting worse"). Run on the lower-cased question.
+static QUALIFIED_PAIN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b(?:severe|bad|unbearable|worsening|increasing)(?:\s+\w+){0,2}\s+pain\b|\bpain\s+(?:is\s+|getting\s+)?(?:\w+\s+)?(?:severe|worse|worsening|increasing)\b",
+    )
+    .expect("qualified pain")
+});
 
 /// Words that fire on their own: the asker, or their family via "my".
 const FIRST_PERSON: &[&str] = &[
@@ -103,7 +129,7 @@ fn has_phrase(text: &str, phrase: &str) -> bool {
 /// Whether the question names a symptom that needs the safety line.
 pub fn warning_symptoms(q: &str) -> bool {
     let q = norm(q);
-    WARNING_TERMS.iter().any(|t| has_phrase(&q, t))
+    QUALIFIED_PAIN.is_match(&q) || WARNING_TERMS.iter().any(|t| has_phrase(&q, t))
 }
 
 /// Whether the question is about the asker's own case (or family's).
@@ -208,6 +234,60 @@ mod tests {
             "discharge from the wound",
             "I can't pass urine",
             "he cannot pass urine",
+        ] {
+            assert!(warning_symptoms(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn qualified_pain_is_a_warning_in_any_order() {
+        for q in [
+            "severe abdominal pain",
+            "I have bad pain",
+            "really bad stomach pain",
+            "severe pain",
+            "unbearable belly pain",
+            "worsening groin pain",
+            "increasing wound site pain",
+            "the pain is severe",
+            "pain is worse",
+            "pain getting worse",
+            "pain is getting worse",
+            "the pain is really bad and pain severe",
+            "pain worsening",
+            "pain is increasing",
+            "Severe\u{a0}pain",
+        ] {
+            assert!(warning_symptoms(q), "{q}");
+        }
+        // Too far apart, or not about pain.
+        for q in [
+            "bad outcomes and a lot of pain",
+            "painless and severe",
+            "Is severe painting safe?",
+        ] {
+            assert!(!warning_symptoms(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn further_warning_phrases_detected() {
+        for q in [
+            "there is discharge from my wound",
+            "discharge from the wound",
+            "my wound is red",
+            "a red wound",
+            "I cannot urinate",
+            "I can't urinate",
+            "I can\u{2019}t urinate",
+            "blood in my stool",
+            "blood in stool",
+            "coughing up blood",
+            "I can't breathe",
+            "I cannot breathe",
+            "trouble breathing",
+            "throwing up all night",
+            "a high temperature",
         ] {
             assert!(warning_symptoms(q), "{q}");
         }
