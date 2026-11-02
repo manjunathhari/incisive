@@ -4,6 +4,7 @@
 pub mod comparison;
 pub mod job;
 pub mod passages;
+pub mod retrieve;
 pub mod settings;
 pub mod store;
 
