@@ -777,3 +777,61 @@ async fn sweep_tick_holds_an_advisory_lock() {
     assert!(job::sweep_tick(&st).await);
     assert!(job::sweep_tick(&st).await);
 }
+
+#[tokio::test]
+async fn record_stops_being_swept_after_five_failed_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let plain = state(pool.clone(), true);
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let JobOutcome::Done { record_id, .. } = job::process(&plain, run).await else {
+        panic!("done");
+    };
+    let attempts = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT embed_attempts FROM incisive.evidence_records WHERE id = $1",
+        )
+        .bind(record_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let listed = |pool: PgPool| async move {
+        store::records_missing_embedding(&pool, 100_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == record_id)
+    };
+    // Server unavailable (500): does not count.
+    let down = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&down)
+        .await;
+    let st = embed_state(pool.clone(), &down.uri());
+    for _ in 0..6 {
+        assert_eq!(job::sweep_embeddings(&st).await, 0);
+    }
+    assert_eq!(attempts(pool.clone()).await, 0);
+    assert!(listed(pool.clone()).await);
+    // Record-specific failure (400): counts, and stops at five.
+    let bad = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&bad)
+        .await;
+    let st = embed_state(pool.clone(), &bad.uri());
+    for i in 1..=5 {
+        assert_eq!(job::sweep_embeddings(&st).await, 0);
+        assert_eq!(attempts(pool.clone()).await, i);
+    }
+    assert!(!listed(pool.clone()).await);
+    assert_eq!(job::sweep_embeddings(&st).await, 0);
+    assert_eq!(attempts(pool.clone()).await, 5);
+}

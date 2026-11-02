@@ -483,3 +483,24 @@ async fn backfill_topic_embeddings_copies_latest_record_vector() {
             .unwrap();
     assert!(none);
 }
+
+#[tokio::test]
+async fn note_embed_attempt_caps_the_missing_list() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    let t = new_topic(&pool).await;
+    let (r, _) = rec(&pool, t, run, &format!("cap {}", Uuid::new_v4())).await;
+    let listed = || async {
+        store::records_missing_embedding(&pool, 100_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == r)
+    };
+    for _ in 0..4 {
+        store::note_embed_attempt(&pool, r).await.unwrap();
+    }
+    assert!(listed().await);
+    store::note_embed_attempt(&pool, r).await.unwrap();
+    assert!(!listed().await);
+}

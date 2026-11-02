@@ -109,18 +109,14 @@ impl std::error::Error for ConfigError {}
 /// `https://`; plain `http://` is allowed only for `localhost` or `127.0.0.1`
 /// (local development and tests).
 fn gemma_url_allowed(u: &str) -> bool {
-    let lower = u.to_ascii_lowercase();
-    if lower.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = lower.strip_prefix("http://") else {
+    let Ok(url) = url::Url::parse(u) else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // Drop any user:pass@ prefix, then the port.
-    let host_port = authority.rsplit('@').next().unwrap_or("");
-    let host = host_port.split(':').next().unwrap_or("");
-    host == "localhost" || host == "127.0.0.1"
+    match (url.scheme(), url.host_str()) {
+        ("https", Some(_)) => true,
+        ("http", Some(h)) => h == "localhost" || h == "127.0.0.1",
+        _ => false,
+    }
 }
 
 impl Config {
@@ -1182,6 +1178,8 @@ mod tests {
             "https://gemma.example.org",
             "http://localhost:11434",
             "http://127.0.0.1:8080/",
+            "https://x.example",
+            "http://127.0.0.1",
         ] {
             let mut p = full();
             p.push(("GEMMA_URL", ok));
@@ -1193,6 +1191,9 @@ mod tests {
             "gemma.example.org",
             "http://localhost@evil.example.org",
             "http://127.0.0.1.evil.example.org",
+            "http://evil.example\\@localhost/",
+            "http://localhost.evil.example",
+            "ftp://x",
         ] {
             let mut p = full();
             p.push(("GEMMA_URL", bad));
@@ -1209,6 +1210,18 @@ mod tests {
             );
             assert!(!err.to_string().contains(bad));
         }
+    }
+
+    #[test]
+    fn gemma_url_rejects_backslash_bypass() {
+        assert!(!gemma_url_allowed("http://evil.example\\@localhost/"));
+        assert!(!gemma_url_allowed("http://evil.example\\@127.0.0.1/"));
+        assert!(gemma_url_allowed("https://x.example"));
+        assert!(gemma_url_allowed("http://localhost:11434"));
+        assert!(gemma_url_allowed("http://127.0.0.1"));
+        assert!(!gemma_url_allowed("http://localhost.evil.example"));
+        assert!(!gemma_url_allowed("ftp://x"));
+        assert!(!gemma_url_allowed("https://"));
     }
 
     #[test]
