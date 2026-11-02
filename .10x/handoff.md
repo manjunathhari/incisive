@@ -1,7 +1,6 @@
 # Handoff
 
-**From:** Planning (EM + Senior Engineer) → **To:** SDE (builder) + independent reviewer
+**From:** SDE/QA/Security (PR A) → **To:** Owner + DevOps
 
-Read: spec `docs/superpowers/specs/2026-11-01-incisive-memory-layer-design.md`, ADR-001, plan `docs/superpowers/plans/2026-11-01-incisive-memory-layer.md`.
-Start with Tasks 1–8 (back end, PR A). Do not touch UI files until the temporal T4 UI is merged to main. MEMORY stays off in deploy until Task 13.
-Owner action before Task 8 smoke: create Secret Manager secret `gemma-auth` (commands in plan Task 8).
+PR A (Tasks 1–8) is complete on `memory-layer` (head 47fb2df), all reviews closed. Before merge: owner runs the pgvector check in Supabase. After merge (MEMORY stays off): owner creates `gemma-auth` secret (infra/README.md), then a small PR wires the deploy workflow and adds the `on_temporal_done` call in runs/temporal.rs once the Expert Opinion is frozen. Then smoke: MEMORY=on + TEMPORAL=on, run `memory_backfill`, check records in SQL.
+Next build: PR B (Tasks 9–10, owner Topics; mockup first) + parked hardening.

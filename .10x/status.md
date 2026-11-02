@@ -2,7 +2,7 @@
 
 | Feature | Phase | Updated |
 |---|---|---|
-| memory-layer | Phase 3 planning complete — awaiting owner plan review + execution choice | 2026-11-01 |
+| memory-layer | PR A (Tasks 1–8) built + reviewed; awaiting owner pgvector check, PR, "merge it" | 2026-11-02 |
 
 ## Open questions for owner
 1. ~~Retention~~ — decided A (de-identified permanent library copy).
@@ -11,6 +11,6 @@
 4. ~~Embedding host~~ — owner VPS Ollama + embeddinggemma behind Traefik (A1). Waiting on owner setup (subdomain).
 
 ## Task list (plan)
-- [ ] T1 migration 0013 · [ ] T2 MEMORY switch · [ ] T3 extract · [ ] T4 matcher · [ ] T5 store · [ ] T6 job+loop · [ ] T7 backfill · [ ] T8 embeddings
+- [x] T1 migration 0013 · [x] T2 MEMORY switch · [x] T3 extract · [x] T4 matcher · [x] T5 store · [x] T6 job+loop (hook pending owner) · [x] T7 backfill · [x] T8 embeddings
 - [ ] T9 topics domain · [ ] T10 topics pages (after temporal T4 on main)
 - [ ] T11 gate · [ ] T12 Ask card + stored page · [ ] T13 calibration
