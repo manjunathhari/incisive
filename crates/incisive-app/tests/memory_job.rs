@@ -546,3 +546,47 @@ async fn record_embedded_after_job() {
     .unwrap();
     assert!(filled);
 }
+
+#[tokio::test]
+async fn inline_and_sweep_send_identical_input() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let st = embed_state(pool.clone(), &server.uri());
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let JobOutcome::Done { record_id, .. } = job::process(&st, run).await else {
+        panic!("expected Done");
+    };
+    let text: String =
+        sqlx::query_scalar("SELECT embed_text FROM incisive.evidence_records WHERE id = $1")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!text.is_empty());
+    // The inline attempt (500) already sent the same text the sweep will.
+    let first = server.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(&first[0].body).unwrap();
+    assert_eq!(sent["input"], text);
+    server.reset().await;
+    let m = Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_partial_json(serde_json::json!({ "input": text })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": [vec![0.25f32; 768]] })),
+        )
+        .expect(1)
+        .mount_as_scoped(&server)
+        .await;
+    assert_eq!(job::sweep_embeddings(&st).await, 1);
+    drop(m);
+}

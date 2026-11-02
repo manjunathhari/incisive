@@ -35,6 +35,7 @@ CREATE TABLE incisive.evidence_records (
     topic_label TEXT NOT NULL,
     -- Outcome names plus the first At a glance line.
     fts_extra TEXT NOT NULL DEFAULT '',
+    embed_text TEXT NOT NULL DEFAULT '',
     fts tsvector GENERATED ALWAYS AS (
         to_tsvector('english',
             coalesce(question, '') || ' ' || coalesce(topic_label, '') || ' ' || coalesce(fts_extra, ''))

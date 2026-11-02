@@ -161,6 +161,8 @@ pub struct NewRecord<'a> {
     pub evidence_through: NaiveDate,
     pub topic_label: &'a str,
     pub fts_extra: &'a str,
+    /// The exact text embedded for this record (inline and sweep alike).
+    pub embed_text: &'a str,
 }
 
 /// Insert a record at version max+1 for its topic; returns (record id, version).
@@ -173,10 +175,10 @@ pub async fn insert_record(tx: &mut PgConnection, r: &NewRecord<'_>) -> sqlx::Re
     let row = sqlx::query(
         "INSERT INTO incisive.evidence_records \
          (topic_id, version, source_run_id, question, answer, answer_version, board, era_table, \
-          evidence_through, topic_label, fts_extra) \
+          evidence_through, topic_label, fts_extra, embed_text) \
          VALUES ($1, (SELECT COALESCE(MAX(version), 0) + 1 FROM incisive.evidence_records \
                       WHERE topic_id = $1), \
-                 $2, $3, $4::text::jsonb, $5, $6::text::jsonb, $7::text::jsonb, $8, $9, $10) \
+                 $2, $3, $4::text::jsonb, $5, $6::text::jsonb, $7::text::jsonb, $8, $9, $10, $11) \
          RETURNING id, version",
     )
     .bind(r.topic_id)
@@ -189,6 +191,7 @@ pub async fn insert_record(tx: &mut PgConnection, r: &NewRecord<'_>) -> sqlx::Re
     .bind(r.evidence_through)
     .bind(r.topic_label)
     .bind(r.fts_extra)
+    .bind(r.embed_text)
     .fetch_one(tx)
     .await?;
     Ok((row.try_get("id")?, row.try_get("version")?))
@@ -276,6 +279,22 @@ pub async fn set_record_embedding(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Copies the vector of each live, un-embedded topic's latest embedded
+/// record onto the topic. No network. Returns how many topics were filled.
+pub async fn backfill_topic_embeddings(pool: &PgPool) -> sqlx::Result<u64> {
+    let r = sqlx::query(
+        "UPDATE incisive.topics t SET embedding = x.embedding, embed_model = x.embed_model, \
+                updated_at = now() \
+         FROM (SELECT DISTINCT ON (topic_id) topic_id, embedding, embed_model \
+               FROM incisive.evidence_records WHERE embedding IS NOT NULL \
+               ORDER BY topic_id, version DESC, id DESC) x \
+         WHERE x.topic_id = t.id AND t.merged_into IS NULL AND t.embedding IS NULL",
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 pub async fn set_topic_embedding(
@@ -378,7 +397,7 @@ pub async fn retry_or_fail_job(
 /// Records with no embedding yet, with the text to embed.
 pub async fn records_missing_embedding(pool: &PgPool, n: i64) -> sqlx::Result<Vec<(i64, String)>> {
     sqlx::query_as(
-        "SELECT id, topic_label || E'\\n' || fts_extra FROM incisive.evidence_records \
+        "SELECT id, embed_text FROM incisive.evidence_records \
          WHERE embedding IS NULL ORDER BY id LIMIT $1",
     )
     .bind(n)

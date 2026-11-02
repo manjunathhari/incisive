@@ -221,6 +221,8 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
 }
 
 const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total time one tick's record sweep may take.
+const SWEEP_BUDGET: Duration = Duration::from_secs(30);
 
 async fn embed_best_effort(state: &AppState, text: &str) -> Option<Vec<f32>> {
     let e = state.embedder.as_ref()?;
@@ -243,8 +245,12 @@ pub async fn sweep_embeddings(state: &AppState) -> usize {
         tracing::warn!(code = "sweep_query", "embedding sweep query failed");
         return 0;
     };
+    let started = std::time::Instant::now();
     let mut filled = 0;
     for (id, text) in rows {
+        if started.elapsed() > SWEEP_BUDGET {
+            break;
+        }
         match e.embed(&text, EMBED_TIMEOUT).await {
             Ok(v) => {
                 if store::set_record_embedding(&state.pool, id, &v, e.model())
@@ -299,6 +305,7 @@ async fn write_record(
             evidence_through: ist_date(created_at),
             topic_label: &ex.topic_label,
             fts_extra: &ex.fts_extra,
+            embed_text: &ex.embed_text,
         },
     )
     .await?;
@@ -356,6 +363,9 @@ pub async fn memory_loop(state: AppState) {
             }
         }
         sweep_embeddings(&state).await;
+        if store::backfill_topic_embeddings(&state.pool).await.is_err() {
+            tracing::warn!(code = "topic_embed", "topic embedding backfill failed");
+        }
     }
 }
 

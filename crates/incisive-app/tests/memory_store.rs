@@ -71,6 +71,7 @@ async fn rec(pool: &PgPool, topic: i64, _run: Uuid, label: &str) -> (i64, i32) {
             evidence_through: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
             topic_label: label,
             fts_extra: "",
+            embed_text: &format!("{label}\nembed"),
         },
     )
     .await
@@ -287,7 +288,7 @@ async fn candidates_by_vector_and_missing_embedding() {
         .await
         .unwrap();
     let hit = missing.iter().find(|(id, _)| *id == r).expect("returned");
-    assert_eq!(hit.1, format!("{label}\n"));
+    assert_eq!(hit.1, format!("{label}\nembed"));
     store::set_record_embedding(&pool, r, &[0.1; 768], "m")
         .await
         .unwrap();
@@ -357,4 +358,38 @@ async fn stale_exhausted_running_job_is_given_up() {
             .await
             .unwrap();
     assert_eq!((s.as_str(), e.as_deref()), ("failed", Some("gave_up")));
+}
+
+#[tokio::test]
+async fn backfill_topic_embeddings_copies_latest_record_vector() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    let t = new_topic(&pool).await;
+    let (r1, _) = rec(&pool, t, run, "old").await;
+    let (r2, _) = rec(&pool, t, run, "new").await;
+    store::set_record_embedding(&pool, r1, &[0.1; 768], "m1")
+        .await
+        .unwrap();
+    store::set_record_embedding(&pool, r2, &[0.2; 768], "m2")
+        .await
+        .unwrap();
+    let t2 = new_topic(&pool).await; // no embedded record: stays NULL
+    rec(&pool, t2, run, "none").await;
+    assert!(store::backfill_topic_embeddings(&pool).await.unwrap() >= 1);
+    let (has, model): (bool, Option<String>) = sqlx::query_as(
+        "SELECT embedding IS NOT NULL, embed_model FROM incisive.topics WHERE id = $1",
+    )
+    .bind(t)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(has);
+    assert_eq!(model.as_deref(), Some("m2"));
+    let none: bool =
+        sqlx::query_scalar("SELECT embedding IS NULL FROM incisive.topics WHERE id = $1")
+            .bind(t2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(none);
 }

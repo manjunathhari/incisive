@@ -59,8 +59,14 @@ impl Embedder {
         }
         let url = s.gemma_url.as_ref()?.trim_end_matches('/').to_string();
         let raw = s.gemma_auth.as_ref()?.expose_secret();
-        let (user, password) = raw.split_once(':')?;
-        let client = reqwest::Client::builder().build().ok()?;
+        let Some((user, password)) = raw.split_once(':') else {
+            tracing::warn!(code = "bad_auth", "GEMMA_AUTH is not user:password");
+            return None;
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok()?;
         Some(Embedder {
             client,
             url,
@@ -126,7 +132,9 @@ impl Embedder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_partial_json, header_exists, method, path};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn embedder(server: &MockServer) -> Embedder {
@@ -150,7 +158,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/embed"))
-            .and(header_exists("authorization"))
+            .and(header(
+                "authorization",
+                format!("Basic {}", STANDARD.encode("incisive:s3cret-pw")).as_str(),
+            ))
             .and(body_partial_json(serde_json::json!({
                 "model": "embeddinggemma", "input": "hello", "keep_alive": "30m"
             })))
