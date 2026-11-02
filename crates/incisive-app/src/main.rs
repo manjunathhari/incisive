@@ -179,7 +179,10 @@ async fn main() {
             tokio::spawn(retention_loop(pool.clone()));
             // The memory loop also waits for migrations: it reads the 0013 tables.
             if state.memory.on {
-                tokio::spawn(incisive_app::memory::job::memory_loop(state));
+                tokio::spawn(incisive_app::memory::job::memory_loop(state.clone()));
+            }
+            if state.chat.on {
+                tokio::spawn(incisive_app::chat::job::chat_loop(state));
             }
             ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
         }

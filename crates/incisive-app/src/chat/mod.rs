@@ -2,8 +2,10 @@
 //! stored evidence. Server-only; off unless `CHAT=on` (and `MEMORY=on`).
 
 pub mod comparison;
+pub mod job;
 pub mod passages;
 pub mod settings;
+pub mod store;
 
 /// Who the reply is written for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
