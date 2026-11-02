@@ -72,6 +72,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: Some(llm),
         lit: offline_literature(),

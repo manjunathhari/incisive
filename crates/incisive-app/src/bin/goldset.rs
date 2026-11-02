@@ -1080,6 +1080,7 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,

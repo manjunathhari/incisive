@@ -199,6 +199,7 @@ fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         // The real pipeline.
         worker: WorkerHandle::default(),
         llm: Some(incisive_app::agent::testing::agent_llm(llm, MODEL)),

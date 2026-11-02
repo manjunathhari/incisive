@@ -44,6 +44,17 @@ impl EmbedError {
     }
 }
 
+/// `GEMMA_AUTH` is `user:password`, split on the first `:`. `None` (with a
+/// fixed-code warning, never the value) when there is no colon. Shared with
+/// the chat client.
+pub(crate) fn parse_auth(raw: &SecretString) -> Option<(String, SecretString)> {
+    let Some((user, password)) = raw.expose_secret().split_once(':') else {
+        tracing::warn!(code = "bad_auth", "GEMMA_AUTH is not user:password");
+        return None;
+    };
+    Some((user.to_string(), SecretString::from(password.to_string())))
+}
+
 pub struct Embedder {
     client: reqwest::Client,
     url: String,
@@ -69,11 +80,7 @@ impl Embedder {
             return None;
         }
         let url = s.gemma_url.as_ref()?.trim_end_matches('/').to_string();
-        let raw = s.gemma_auth.as_ref()?.expose_secret();
-        let Some((user, password)) = raw.split_once(':') else {
-            tracing::warn!(code = "bad_auth", "GEMMA_AUTH is not user:password");
-            return None;
-        };
+        let (user, password) = parse_auth(s.gemma_auth.as_ref()?)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -81,8 +88,8 @@ impl Embedder {
         Some(Embedder {
             client,
             url,
-            user: user.to_string(),
-            password: SecretString::from(password.to_string()),
+            user,
+            password,
             model: s.embed_model.clone(),
         })
     }
@@ -256,6 +263,14 @@ mod tests {
         assert!(!dbg.contains("s3cret-pw"));
         assert!(!dbg.contains("incisive:"));
         assert!(dbg.contains("embeddinggemma"));
+    }
+
+    #[test]
+    fn parse_auth_splits_on_first_colon() {
+        let (u, p) = parse_auth(&SecretString::from("incisive:pw:with:colons")).unwrap();
+        assert_eq!(u, "incisive");
+        assert_eq!(p.expose_secret(), "pw:with:colons");
+        assert!(parse_auth(&SecretString::from("nocolon")).is_none());
     }
 
     #[test]

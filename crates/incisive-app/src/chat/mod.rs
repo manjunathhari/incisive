@@ -3,9 +3,11 @@
 
 pub mod checks;
 pub mod comparison;
+pub mod gemma;
 pub mod job;
 pub mod lines;
 pub mod passages;
+pub mod prompt;
 pub mod retrieve;
 pub mod settings;
 pub mod store;

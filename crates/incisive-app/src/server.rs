@@ -57,6 +57,9 @@ pub struct AppState {
     pub memory: crate::memory::settings::MemorySettings,
     /// Gemma embeddings client; `None` when `GEMMA_URL`/`GEMMA_AUTH` are unset.
     pub embedder: Option<std::sync::Arc<crate::memory::embed::Embedder>>,
+    /// Gemma chat client; `None` when chat is off or `GEMMA_URL`/`GEMMA_AUTH`
+    /// are unset.
+    pub gemma: Option<std::sync::Arc<crate::chat::gemma::GemmaChat>>,
     /// The evidence chat's settings (`CHAT`, default off).
     pub chat: crate::chat::settings::ChatSettings,
     /// Starts and cancels background runs.

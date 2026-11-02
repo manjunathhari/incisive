@@ -71,6 +71,7 @@ fn state(pool: PgPool) -> AppState {
             ..MemorySettings::default()
         },
         embedder: None,
+        gemma: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: None,
         lit: offline_literature(),

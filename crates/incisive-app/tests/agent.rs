@@ -949,6 +949,7 @@ fn app_state(pool: PgPool) -> AppState {
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         worker: WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

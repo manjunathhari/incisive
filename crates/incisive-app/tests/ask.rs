@@ -141,6 +141,7 @@ fn state_with(pool: PgPool, gate: Arc<dyn Classifier>, dev_mode: bool) -> AppSta
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm(GATE_MODEL)),

@@ -160,6 +160,8 @@ async fn main() {
         chat: config.chat.clone(),
         embedder: incisive_app::memory::embed::Embedder::from_settings(&config.memory)
             .map(std::sync::Arc::new),
+        gemma: incisive_app::chat::gemma::GemmaChat::from_settings(&config.memory, &config.chat)
+            .map(std::sync::Arc::new),
         worker: WorkerHandle::default(),
         llm,
         lit,
