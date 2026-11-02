@@ -31,6 +31,11 @@ async fn retention_loop(pool: sqlx::PgPool) {
             Ok(pruned) => tracing::info!(pruned, "paper cache prune"),
             Err(_) => tracing::error!("paper cache prune failed"),
         }
+        // Whatever CHAT's value: rows left without an owner must still go.
+        match incisive_app::chat::store::retention_pass(&pool).await {
+            Ok((qas, priors)) => tracing::info!(qas, priors, "chat retention pass"),
+            Err(_) => tracing::error!("chat retention pass failed"),
+        }
     }
 }
 

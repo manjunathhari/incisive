@@ -94,6 +94,10 @@ pub enum ChatError {
     },
     /// A store error on a call that reads no question.
     Failed,
+    /// Feedback other than 1 or -1.
+    BadFeedback,
+    /// A turn that is not `done`, or whose run has no record to file under.
+    NotSuggestable,
 }
 
 /// A question accepted; its reply is on the way.
@@ -259,6 +263,49 @@ pub async fn turn_view(state: &AppState, user: &User, turn_id: i64) -> Result<Tu
         .await
         .map_err(|_| store_error("turn"))?
         .map(view_of)
+        .ok_or(ChatError::NotFound)
+}
+
+/// Records this user's thumbs on their own turn. Anyone else's turn is
+/// `NotFound`.
+pub async fn give_feedback(
+    state: &AppState,
+    user: &User,
+    turn_id: i64,
+    value: i64,
+) -> Result<(), ChatError> {
+    let value = match value {
+        1 => 1i16,
+        -1 => -1i16,
+        _ => return Err(ChatError::BadFeedback),
+    };
+    match store::set_feedback(&state.pool, user.id, turn_id, value).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ChatError::NotFound),
+        Err(_) => Err(store_error("feedback")),
+    }
+}
+
+/// Files the user's own `done` turn as a suggested Q&A for the owner to
+/// review. Returns the Q&A's id; asking twice returns the same one.
+pub async fn suggest(state: &AppState, user: &User, turn_id: i64) -> Result<i64, ChatError> {
+    match store::suggest_turn(&state.pool, user.id, turn_id).await {
+        Ok(store::SuggestOutcome::Filed { qa_id, .. }) => Ok(qa_id),
+        Ok(store::SuggestOutcome::NotFound) => Err(ChatError::NotFound),
+        Ok(_) => Err(ChatError::NotSuggestable),
+        Err(_) => Err(store_error("suggest")),
+    }
+}
+
+/// The source behind a citation tap, if it is in one of the user's turns.
+pub async fn cited_source(
+    state: &AppState,
+    user: &User,
+    stored_id: i64,
+) -> Result<store::CitedSource, ChatError> {
+    store::cited_source(&state.pool, user.id, stored_id)
+        .await
+        .map_err(|_| store_error("source"))?
         .ok_or(ChatError::NotFound)
 }
 

@@ -548,3 +548,220 @@ pub async fn conversation_for_run(
     let turns = rows.iter().map(turn_row).collect::<sqlx::Result<_>>()?;
     Ok((Some(c), turns))
 }
+
+/// Sets this user's feedback on their own turn; `false` when the turn does
+/// not exist or is someone else's. `updated_at` is left alone: the stale
+/// sweep reads it for pending turns.
+pub async fn set_feedback(
+    pool: &PgPool,
+    user_id: i64,
+    turn_id: i64,
+    value: i16,
+) -> sqlx::Result<bool> {
+    let n =
+        sqlx::query("UPDATE incisive.chat_turns SET feedback = $3 WHERE id = $1 AND user_id = $2")
+            .bind(turn_id)
+            .bind(user_id)
+            .bind(value)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok(n == 1)
+}
+
+/// What filing a turn as a suggested Q&A came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuggestOutcome {
+    /// No such turn for this user.
+    NotFound,
+    /// Only a `done` turn can be suggested.
+    NotDone,
+    /// The turn's run has no record, so there is no topic to file under.
+    NoTopic,
+    /// `created` is false when the turn was already suggested.
+    Filed { qa_id: i64, created: bool },
+}
+
+/// Files a `done` turn as a `suggested` Q&A under its record's live topic
+/// and sets `suggested`. Idempotent: the turn row is locked for the check, so
+/// two calls make one Q&A.
+pub async fn suggest_turn(
+    pool: &PgPool,
+    user_id: i64,
+    turn_id: i64,
+) -> sqlx::Result<SuggestOutcome> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        "SELECT t.status, t.question, t.reply, c.run_id \
+         FROM incisive.chat_turns t \
+         JOIN incisive.chat_conversations c ON c.id = t.conversation_id \
+         WHERE t.id = $1 AND t.user_id = $2 FOR UPDATE OF t",
+    )
+    .bind(turn_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(SuggestOutcome::NotFound);
+    };
+    let status: String = row.try_get("status")?;
+    if status != "done" {
+        return Ok(SuggestOutcome::NotDone);
+    }
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM incisive.topic_qas WHERE source_turn_id = $1 ORDER BY id LIMIT 1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(qa_id) = existing {
+        sqlx::query("UPDATE incisive.chat_turns SET suggested = TRUE WHERE id = $1")
+            .bind(turn_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(SuggestOutcome::Filed {
+            qa_id,
+            created: false,
+        });
+    }
+    let run_id: Uuid = row.try_get("run_id")?;
+    let topic: Option<i64> = sqlx::query_scalar(
+        "SELECT topic_id FROM incisive.evidence_records WHERE source_run_id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(topic) = topic else {
+        return Ok(SuggestOutcome::NoTopic);
+    };
+    // The record's topic may have been merged since; file under the live one.
+    let topic = crate::memory::store::resolve_topic(pool, topic).await?;
+    let qa_id: i64 = sqlx::query_scalar(
+        "INSERT INTO incisive.topic_qas \
+         (topic_id, source_turn_id, question, gemma_reply, status, author_user_id) \
+         VALUES ($1, $2, $3, $4, 'suggested', $5) RETURNING id",
+    )
+    .bind(topic)
+    .bind(turn_id)
+    .bind(row.try_get::<String, _>("question")?)
+    .bind(row.try_get::<String, _>("reply")?)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE incisive.chat_turns SET suggested = TRUE WHERE id = $1")
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(SuggestOutcome::Filed {
+        qa_id,
+        created: true,
+    })
+}
+
+/// What a citation tap shows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CitedSource {
+    Passage {
+        id: i64,
+        kind: String,
+        text: String,
+        ref_ns: Vec<i32>,
+        pmid: Option<String>,
+        /// The record's references this passage rests on.
+        references: Value,
+    },
+    Qa {
+        id: i64,
+        question: String,
+        text: String,
+    },
+}
+
+/// The cited source behind a stored `passage_ids` entry (positive: a
+/// `chat_passages` id; negative: a `topic_qas` id), only if it is in one of
+/// this user's own turns. A Q&A no longer approved is gone too.
+pub async fn cited_source(
+    pool: &PgPool,
+    user_id: i64,
+    stored_id: i64,
+) -> sqlx::Result<Option<CitedSource>> {
+    if stored_id == 0 {
+        return Ok(None);
+    }
+    let cited: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM incisive.chat_turns \
+         WHERE user_id = $1 AND $2 = ANY(passage_ids))",
+    )
+    .bind(user_id)
+    .bind(stored_id)
+    .fetch_one(pool)
+    .await?;
+    if !cited {
+        return Ok(None);
+    }
+    if stored_id < 0 {
+        let row = sqlx::query(
+            "SELECT id, question, owner_text FROM incisive.topic_qas \
+             WHERE id = $1 AND status = 'approved' AND owner_text IS NOT NULL",
+        )
+        .bind(-stored_id)
+        .fetch_optional(pool)
+        .await?;
+        return row
+            .map(|r| {
+                Ok(CitedSource::Qa {
+                    id: r.try_get("id")?,
+                    question: r.try_get("question")?,
+                    text: r.try_get("owner_text")?,
+                })
+            })
+            .transpose();
+    }
+    let row = sqlx::query(
+        "SELECT p.id, p.kind, p.text, p.ref_ns, p.pmid, \
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object( \
+                'n', r->'n', 'title', r->'title', 'journal', r->'journal', \
+                'year', r->'year', 'pmid', r->'pmid', 'doi', r->'doi') \
+                ORDER BY (r->>'n')::int), '[]'::jsonb) \
+            FROM incisive.evidence_records e, \
+                 jsonb_array_elements(CASE WHEN jsonb_typeof(e.answer->'references') = 'array' \
+                                           THEN e.answer->'references' ELSE '[]'::jsonb END) r \
+            WHERE e.id = p.record_id AND (r->>'n')::int = ANY(p.ref_ns)) AS refs \
+         FROM incisive.chat_passages p WHERE p.id = $1",
+    )
+    .bind(stored_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| {
+        Ok(CitedSource::Passage {
+            id: r.try_get("id")?,
+            kind: r.try_get("kind")?,
+            text: r.try_get("text")?,
+            ref_ns: r.try_get("ref_ns")?,
+            pmid: r.try_get("pmid")?,
+            references: r.try_get("refs")?,
+        })
+    })
+    .transpose()
+}
+
+/// Retention for what no longer has an owner: suggested or rejected Q&As
+/// whose turn is gone (the run expired) and priors whose run and record are
+/// both gone. Approved Q&As and linked rows stay. Returns the two counts.
+pub async fn retention_pass(pool: &PgPool) -> sqlx::Result<(u64, u64)> {
+    let qas = sqlx::query(
+        "DELETE FROM incisive.topic_qas WHERE source_turn_id IS NULL AND status <> 'approved'",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let priors =
+        sqlx::query("DELETE FROM incisive.chat_priors WHERE run_id IS NULL AND record_id IS NULL")
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok((qas, priors))
+}

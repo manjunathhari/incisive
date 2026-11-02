@@ -1,6 +1,7 @@
 //! Evidence chat: answers a surgeon's or patient's questions from one run's
 //! stored evidence. Server-only; off unless `CHAT=on` (and `MEMORY=on`).
 
+pub mod api;
 pub mod checks;
 pub mod comparison;
 pub mod gemma;

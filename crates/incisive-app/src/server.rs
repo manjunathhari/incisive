@@ -173,7 +173,7 @@ pub async fn revalidate_pkg(
     res
 }
 
-/// `POST /api/ask`, `POST /api/fn/*` and `DELETE /api/runs[/*]`: when an `Origin` header is present it
+/// `POST /api/ask`, `POST /api/fn/*`, the chat's POST routes and `DELETE /api/runs[/*]`: when an `Origin` header is present it
 /// must match the request's host and port, or the request is refused with 403
 /// before identity, audit or spend. A missing `Origin` is allowed (curl and
 /// server-side clients omit it).
@@ -185,7 +185,12 @@ async fn same_origin_check(
     use axum::response::IntoResponse;
     let path = req.uri().path();
     let guarded = match *req.method() {
-        Method::POST => path == "/api/ask" || path.starts_with("/api/fn/"),
+        Method::POST => {
+            path == "/api/ask"
+                || path.starts_with("/api/fn/")
+                || path.starts_with("/api/chat/")
+                || (path.starts_with("/api/runs/") && path.ends_with("/chat"))
+        }
         Method::DELETE => path == "/api/runs" || path.starts_with("/api/runs/"),
         _ => false,
     };
@@ -216,9 +221,10 @@ async fn same_origin_check(
     next.run(req).await
 }
 
-/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`, and the run routes.
+/// `GET /api/me`, `POST /api/ask`, `GET /api/activity`, the run routes and,
+/// with `CHAT=on`, the chat routes.
 pub fn api_routes(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/api/me", get(me_handler))
         .route(
             "/api/ask",
@@ -232,7 +238,30 @@ pub fn api_routes(state: AppState) -> Router {
         .route(
             "/api/runs/{id}",
             get(runs_api::get_handler).delete(runs_api::delete_handler),
-        )
+        );
+    // Registered only with `CHAT=on`: with it off these paths are unknown.
+    if state.chat.on {
+        use crate::chat::api as chat_api;
+        let limit = DefaultBodyLimit::max(ASK_BODY_LIMIT);
+        router = router
+            .route(
+                "/api/runs/{id}/chat",
+                get(chat_api::state_handler)
+                    .post(chat_api::ask_handler)
+                    .layer(limit),
+            )
+            .route("/api/chat/turns/{id}", get(chat_api::turn_handler))
+            .route("/api/chat/passages/{id}", get(chat_api::passage_handler))
+            .route(
+                "/api/chat/turns/{id}/feedback",
+                post(chat_api::feedback_handler).layer(limit),
+            )
+            .route(
+                "/api/chat/turns/{id}/suggest",
+                post(chat_api::suggest_handler).layer(limit),
+            );
+    }
+    router
         .layer(axum::middleware::from_fn(same_origin_check))
         .with_state(state)
 }
