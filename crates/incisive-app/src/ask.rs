@@ -32,6 +32,69 @@ pub const TOO_LONG_MESSAGE: &str =
 /// Longest question accepted, in characters (Unicode scalar values, not bytes).
 pub const MAX_QUESTION_CHARS: usize = 4_000;
 
+/// Full questions up to this many words get the quiet grey count.
+pub const FULL_HINT_WORDS: usize = 50;
+/// Longest Full question accepted, in words ([`word_count`]). Quick is not
+/// limited in words, only by [`MAX_QUESTION_CHARS`].
+pub const FULL_MAX_WORDS: usize = 100;
+pub const FULL_TOO_LONG_MESSAGE: &str = "That question is too long for a Full answer (100 words max). Please shorten it, or name up to 4\u{2013}5 outcomes.";
+
+/// Words in a question: whitespace-separated tokens of the trimmed text
+/// (`split_whitespace` already ignores leading and trailing whitespace).
+/// Shared by the Ask page's counter and the server's input check.
+pub fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The Full word counter's state for a word count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullWords {
+    /// Up to [`FULL_HINT_WORDS`]: a quiet grey count.
+    Fine,
+    /// Up to [`FULL_MAX_WORDS`]: an amber hint; Send still works.
+    Long,
+    /// Over [`FULL_MAX_WORDS`]: red, Send is off and the server refuses it.
+    TooLong,
+}
+
+impl FullWords {
+    pub fn of(words: usize) -> Self {
+        if words > FULL_MAX_WORDS {
+            FullWords::TooLong
+        } else if words > FULL_HINT_WORDS {
+            FullWords::Long
+        } else {
+            FullWords::Fine
+        }
+    }
+
+    /// The counter's state class (`ok`, `hint` or `over`).
+    pub fn class(self) -> &'static str {
+        match self {
+            FullWords::Fine => "ok",
+            FullWords::Long => "hint",
+            FullWords::TooLong => "over",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            FullWords::Fine => "Full questions work best under 50 words.",
+            FullWords::Long => {
+                "Shorter questions give sharper answers: name up to 4\u{2013}5 outcomes."
+            }
+            FullWords::TooLong => {
+                "Too long for a Full answer. Shorten it to 100 words or fewer to send."
+            }
+        }
+    }
+}
+
+/// `N / 100 words`.
+pub fn full_words_text(words: usize) -> String {
+    format!("{words} / {FULL_MAX_WORDS} words")
+}
+
 /// One blocked span: kind, user-facing label and offsets. Never the text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingView {
@@ -229,6 +292,11 @@ mod server {
         if question.chars().count() > MAX_QUESTION_CHARS {
             return Ok(AskOutcome::InvalidInput {
                 message: TOO_LONG_MESSAGE.to_string(),
+            });
+        }
+        if mode == RunMode::Focused && word_count(question) > FULL_MAX_WORDS {
+            return Ok(AskOutcome::InvalidInput {
+                message: FULL_TOO_LONG_MESSAGE.to_string(),
             });
         }
 
@@ -483,8 +551,9 @@ mod server {
     ///
     /// This does **not** check the question. Callers must first apply the
     /// checks `run_ask` makes before anything else: reject an empty question
-    /// or one longer than [`MAX_QUESTION_CHARS`], and refuse any question in
-    /// which `deid::scan` finds an identifier.
+    /// or one longer than [`MAX_QUESTION_CHARS`] (and a Full question of more
+    /// than [`FULL_MAX_WORDS`] words), and refuse any question in which
+    /// `deid::scan` finds an identifier.
     #[doc(hidden)]
     pub async fn start_run(
         state: &AppState,
@@ -782,5 +851,42 @@ mod server {
             Ok(view) => Json(view).into_response(),
             Err(ActivityError::Failed(f)) => failure_response(f),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(n: usize) -> String {
+        vec!["word"; n].join(" ")
+    }
+
+    #[test]
+    fn word_count_counts_whitespace_separated_tokens() {
+        assert_eq!(word_count(""), 0);
+        assert_eq!(word_count("   \n\t  "), 0);
+        assert_eq!(word_count("  robotic   vs\nlaparoscopic\t\trepair  "), 4);
+        // Punctuation sticks to its word; a lone dash is a token.
+        assert_eq!(word_count("Pain, leak (30-day) and SSI? \u{2014} yes."), 7);
+        assert_eq!(word_count("4\u{2013}5 outcomes"), 2);
+        for n in [50, 51, 100, 101] {
+            assert_eq!(word_count(&words(n)), n);
+        }
+    }
+
+    #[test]
+    fn full_word_states_at_the_thresholds() {
+        assert_eq!(FullWords::of(0), FullWords::Fine);
+        assert_eq!(FullWords::of(50), FullWords::Fine);
+        assert_eq!(FullWords::of(51), FullWords::Long);
+        assert_eq!(FullWords::of(100), FullWords::Long);
+        assert_eq!(FullWords::of(101), FullWords::TooLong);
+        assert_eq!(
+            [FullWords::Fine, FullWords::Long, FullWords::TooLong].map(FullWords::class),
+            ["ok", "hint", "over"]
+        );
+        assert_eq!(full_words_text(23), "23 / 100 words");
+        assert_eq!(full_words_text(111), "111 / 100 words");
     }
 }

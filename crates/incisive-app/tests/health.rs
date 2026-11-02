@@ -143,7 +143,12 @@ async fn home_page_shows_name_and_tagline() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Incisive"));
-    assert!(body.contains("Medical literature \u{2014} searched, checked, summarised"));
+    assert!(body.contains(
+        "Medical literature \u{2014} searched, checked, summarised \u{b7} <b>Educational tool only</b>"
+    ));
+    // The phone line: today's date and "Educational tool only".
+    assert!(body.contains("\u{b7} <b>Educational tool only</b></span>"));
+    assert!(!body.contains("Medical literature, summarised"));
 }
 
 #[tokio::test]
