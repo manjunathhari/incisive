@@ -13,3 +13,4 @@ Goal (owner, 2 Nov 2026): a "Chat" option next to Answer | Expert opinion on the
 - Design consequences: 2–3 most relevant passages only; prompt names the comparison; plain-language rules; code checks (numbers traced, citations real, comparison match).
 - C4 Visibility (2 Nov): each conversation is private to its user (no other user sees it); the owner can read all conversations. Sign-up notice must say the owner can read chats. Chat replies join the shared knowledge base only after owner approval ("Suggest for library" → owner approves/edits in his own words). Chats follow the 12-month rule like runs.
 - C5 Scope (2 Nov): this run only — the run's answer + Expert Opinion, plus owner-approved Q&As for its topic. No other runs, no whole-library retrieval in v1.
+- C6 Eligibility (2 Nov): Chat option only on Full runs with a finished Expert Opinion (i.e. runs with a memory record). Quick runs: no chat in v1.
