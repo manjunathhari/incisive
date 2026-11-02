@@ -967,6 +967,7 @@ fn app_state(pool: PgPool) -> AppState {
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),

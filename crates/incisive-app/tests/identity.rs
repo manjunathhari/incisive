@@ -195,6 +195,7 @@ fn state_with(env: AppEnv, pool: sqlx::PgPool, verifier: IapVerifier) -> AppStat
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: incisive_app::runs::worker::WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

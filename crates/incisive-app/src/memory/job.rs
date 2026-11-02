@@ -150,10 +150,13 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         fts.push(' ');
         fts.push_str(b);
     }
-    let candidates = store::topic_candidates(pool, &fts, None, 10).await?;
+    // Best effort: any failure means FTS-only matching and a NULL embedding
+    // that the sweep fills later.
+    let emb = embed_best_effort(state, &ex.embed_text).await;
+    let candidates = store::topic_candidates(pool, &fts, emb.as_deref(), 10).await?;
     let cand = matcher::Candidate {
         pairs: &ex.pairs,
-        embedding: None,
+        embedding: emb.as_deref(),
     };
     let matched = matcher::best(&cand, &candidates)
         .filter(|(_, score)| *score >= state.memory.topic_match)
@@ -163,7 +166,7 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         None => None,
     };
 
-    match write_record(
+    let written = write_record(
         pool,
         run_id,
         &ex,
@@ -175,8 +178,33 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         &table,
         created_at,
     )
-    .await
+    .await;
+    if let (
+        Ok(JobOutcome::Done {
+            record_id,
+            topic_id,
+            new_topic,
+        }),
+        Some(v),
+        Some(e),
+    ) = (&written, &emb, &state.embedder)
     {
+        let model = e.model();
+        if store::set_record_embedding(pool, *record_id, v, model)
+            .await
+            .is_err()
+        {
+            tracing::warn!(code = "embed_store", "record embedding not stored");
+        }
+        if *new_topic
+            && store::set_topic_embedding(pool, *topic_id, v, model)
+                .await
+                .is_err()
+        {
+            tracing::warn!(code = "embed_store", "topic embedding not stored");
+        }
+    }
+    match written {
         Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("23505") => {
             // Another job recorded this run first; join its record.
             match existing_record(pool, run_id).await? {
@@ -190,6 +218,51 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         }
         other => other,
     }
+}
+
+const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn embed_best_effort(state: &AppState, text: &str) -> Option<Vec<f32>> {
+    let e = state.embedder.as_ref()?;
+    match e.embed(text, EMBED_TIMEOUT).await {
+        Ok(v) => Some(v),
+        Err(err) => {
+            tracing::warn!(code = err.code(), "embedding failed; matching without it");
+            None
+        }
+    }
+}
+
+/// Fills up to 20 records that have no embedding. Stops at the first embed
+/// failure (the server is probably down). Returns how many were filled.
+pub async fn sweep_embeddings(state: &AppState) -> usize {
+    let Some(e) = state.embedder.as_ref() else {
+        return 0;
+    };
+    let Ok(rows) = store::records_missing_embedding(&state.pool, 20).await else {
+        tracing::warn!(code = "sweep_query", "embedding sweep query failed");
+        return 0;
+    };
+    let mut filled = 0;
+    for (id, text) in rows {
+        match e.embed(&text, EMBED_TIMEOUT).await {
+            Ok(v) => {
+                if store::set_record_embedding(&state.pool, id, &v, e.model())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(code = "embed_store", "record embedding not stored");
+                    break;
+                }
+                filled += 1;
+            }
+            Err(err) => {
+                tracing::warn!(code = err.code(), "embedding sweep stopped");
+                break;
+            }
+        }
+    }
+    filled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -282,6 +355,7 @@ pub async fn memory_loop(state: AppState) {
                 tracing::warn!(code = "finish", "memory job not finished");
             }
         }
+        sweep_embeddings(&state).await;
     }
 }
 

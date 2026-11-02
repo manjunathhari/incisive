@@ -70,6 +70,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         temporal,
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: Some(llm),
         lit: offline_literature(),

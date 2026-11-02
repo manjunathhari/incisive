@@ -589,3 +589,22 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
 
 Both are checked like `COMPLETENESS` (only the ends trimmed) before the build, and the app refuses
 any other value at startup. The `temporal` model, default or set, must be priced in `MODEL_PRICES`.
+
+## Memory layer (Gemma embeddings)
+
+The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama
+server at `POST {GEMMA_URL}/api/embed` with HTTP basic auth. `GEMMA_AUTH` holds
+`incisive:<password>`. The app works without it (FTS-only matching; records stay un-embedded until
+the next sweep that reaches the server).
+
+Owner commands, run in Cloud Shell. The password is typed at the hidden prompt, never put on the
+command line:
+
+```
+read -s -p "Gemma password: " P; printf 'incisive:%s' "$P" | gcloud secrets create gemma-auth --data-file=- --replication-policy=user-managed --locations=asia-south1 --project=incisive-prod-512902; unset P
+gcloud secrets add-iam-policy-binding gemma-auth --member=serviceAccount:incisive-run@incisive-prod-512902.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --project=incisive-prod-512902
+```
+
+TODO (only after the `gemma-auth` secret exists, otherwise every deploy breaks): change the deploy
+workflow to add `GEMMA_AUTH=gemma-auth:latest` to `--set-secrets`, and pass `GEMMA_URL` and `MEMORY`
+as environment values taken from repository variables.

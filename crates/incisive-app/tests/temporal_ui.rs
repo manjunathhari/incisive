@@ -67,6 +67,7 @@ fn state(pool: PgPool) -> AppState {
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm(MODEL)),
         lit: incisive_app::agent::testing::offline_literature(),

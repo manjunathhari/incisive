@@ -71,6 +71,7 @@ fn state(pool: PgPool, on: bool) -> AppState {
             on,
             ..MemorySettings::default()
         },
+        embedder: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: None,
         lit: offline_literature(),
@@ -448,4 +449,100 @@ async fn backfill_enqueues_once() {
     assert_eq!(job::backfill(&pool).await.unwrap(), 0);
     assert_eq!(job_row_count(&pool, eligible_a).await, 1);
     assert_eq!(job_row_count(&pool, eligible_b).await, 1);
+}
+
+fn embed_state(pool: PgPool, uri: &str) -> AppState {
+    let settings = MemorySettings {
+        on: true,
+        gemma_url: Some(uri.to_string()),
+        gemma_auth: Some(SecretString::from("incisive:pw")),
+        ..MemorySettings::default()
+    };
+    let mut st = state(pool, true);
+    st.embedder = Some(Arc::new(
+        incisive_app::memory::embed::Embedder::from_settings(&settings).unwrap(),
+    ));
+    st.memory = settings;
+    st
+}
+
+#[tokio::test]
+async fn record_embedded_after_job() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let server = MockServer::start().await;
+    let ok = Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": [vec![0.25f32; 768]] })),
+        )
+        .mount_as_scoped(&server)
+        .await;
+    let st = embed_state(pool.clone(), &server.uri());
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let JobOutcome::Done {
+        record_id,
+        topic_id,
+        new_topic,
+    } = job::process(&st, run).await
+    else {
+        panic!("expected Done");
+    };
+    assert!(new_topic);
+    let rec: bool = sqlx::query_scalar(
+        "SELECT embedding IS NOT NULL FROM incisive.evidence_records WHERE id = $1",
+    )
+    .bind(record_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let top: bool =
+        sqlx::query_scalar("SELECT embedding IS NOT NULL FROM incisive.topics WHERE id = $1")
+            .bind(topic_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(rec && top);
+    drop(ok);
+
+    // Server down (500): the job still succeeds, the embedding stays NULL,
+    // and the sweep fills it once the server recovers.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let run2 = seed(&pool, &ACHALASIA, "focused", Some("done")).await;
+    let JobOutcome::Done { record_id: r2, .. } = job::process(&st, run2).await else {
+        panic!("expected Done");
+    };
+    let null: bool =
+        sqlx::query_scalar("SELECT embedding IS NULL FROM incisive.evidence_records WHERE id = $1")
+            .bind(r2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(null);
+    assert_eq!(job::sweep_embeddings(&st).await, 0);
+    server.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": [vec![0.25f32; 768]] })),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(job::sweep_embeddings(&st).await, 1);
+    let filled: bool = sqlx::query_scalar(
+        "SELECT embedding IS NOT NULL FROM incisive.evidence_records WHERE id = $1",
+    )
+    .bind(r2)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(filled);
 }
