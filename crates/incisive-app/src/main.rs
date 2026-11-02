@@ -157,6 +157,7 @@ async fn main() {
         temporal: config.temporal,
         temporal_client,
         memory: config.memory.clone(),
+        chat: config.chat.clone(),
         embedder: incisive_app::memory::embed::Embedder::from_settings(&config.memory)
             .map(std::sync::Arc::new),
         worker: WorkerHandle::default(),

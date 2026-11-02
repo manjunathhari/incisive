@@ -1,6 +1,6 @@
 # Incisive evidence chat: design
 
-**Date:** 2 Nov 2026 · **Status:** designed with the owner in chat, awaiting owner review of this written spec
+**Date:** 2 Nov 2026 · **Status:** approved by the owner
 **Branch:** `evidence-chat` · **Team state:** `.10x/decisions/product-manager/evidence-chat.md` (C1–C10)
 **Builds on:** memory layer v0.7.0 (records, topics, Gemma embeddings live since 2 Nov)
 
@@ -68,7 +68,7 @@ Each passage carries: `ref_n`/`pmid` when it comes from a paper, a **comparison 
 
 Tapping a citation opens its passage (and, for papers, the reference).
 
-## 6. Gemma's prior and reconciliation (C10, owner only)
+## 6. Gemma's prior and reconciliation (C10; reconciled claims are for everyone, the raw prior is owner only)
 
 - **Prior:** the memory loop notices a running Full run with no prior and asks Gemma (no passages, by design) for its expected answer as JSON: claims, each with any numbers and studies it believes. Stored as `chat_priors` (labelled unverified). No engine change: it reads `runs.question` and status only.
 - **Reconciliation:** after the record exists, for each prior claim: retrieve the top passages; Gemma marks it `supported` / `corrected` (with the evidence's version) / `not_in_evidence`; code checks numbers and citations as in §5. Stored with the prior.
@@ -135,3 +135,20 @@ Tapping a citation opens its passage (and, for papers, the reference).
 - More CPU on the VPS if replies feel slow in real use.
 - Sign-up notice wording for C4 (owner reads chats) — owner to approve before inviting users.
 - Owner spot-checks the first reconciliations before `CHAT=on` for other users (CH7).
+
+## 15. Departures from this spec
+
+The implementation plan changed these after reading the code; the owner confirmed them. Where this table differs from the text above, the table wins.
+
+| # | Spec says | Plan does | Why |
+|---|---|---|---|
+| P1 | `quote` passages from extractor and skeptic | **Skeptic quotes only (3–7 per run).** The structured numbers in each outcome row stay in the `outcome` passages. | Extractor quotes (41–69 per run) are checked, then discarded; only their count is stored (`EvidenceV3.verified_quotes`). Keeping them is an engine change, so it waits for Part B under the freeze. |
+| P2 | Reply streams to the browser | Gemma streams to the server, which writes the row at most every 500 ms; the page polls every 700 ms. | Cloud Run has up to 3 instances, so a follow-up request can land on another instance. There is no SSE in the app today. The reply also survives a locked phone. |
+| P3 | Single `comparison`, `ref_n` | `comparisons TEXT[]`, `ref_ns INT[]` | Many passages cover several arms or several papers (e.g. "POEM vs LHM vs PD"). |
+| P4 | Passage kinds as listed in §4 | Also `guideline`, `clinical_practice`, `notable` and the completeness review's additions | Spec §1 says "its answer", and "who may benefit" and counselling are what patients ask about. |
+| P5 | (silent) | **Every chat question goes through `deid::scan`.** A hit is blocked before anything is stored or sent. | Personal questions are the expected use, and Ask already has this rule. |
+| P6 | Belief passages pass number checks | The "Common belief" half must contain **no numbers**. A claim with numbers gets no belief passage. | A corrected belief's own numbers are wrong by definition, and Gemma would otherwise repeat them. |
+| P7 | Evaluation is a bin | Owner-only action in the app; results are ordinary turns on a flagged conversation. | Bins can't run in production: `memory_backfill` had to be replaced by SQL, and Cloud Shell has no cargo. |
+| P8 | Prep inside the memory job | Separate `chat_loop` that finds records with no `chat_prep` row | Covers backfill and retries with one path, leaves the memory job alone, and a slow Gemma call can't hold up memory jobs. |
+| P9 | `CHAT` needs `MEMORY=on` | `CHAT=on` with `MEMORY=off` means chat is off, with a warning, not a boot failure | `MEMORY=off` must stay a safe rollback on its own. |
+| P10 | §10 lists four variables | Adds `CHAT_MIN_SCORE` (default 0.45, placeholder until Task 13) | The threshold must be tunable without a release. |

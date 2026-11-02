@@ -620,3 +620,25 @@ Order: create the secret and its binding (above) → set `GEMMA_URL` and `HAS_GE
 `DATABASE_URL=… cargo run -p incisive-app --bin memory_backfill` (prints only the count).
 
 Rollback: `MEMORY=off` and re-run Deploy (tables and records stay).
+
+## Evidence chat
+
+A Chat option on Full runs that have a finished Expert Opinion. Gemma (`gemma3:4b`) answers only from
+that run's stored evidence, and code checks every reply. It reuses `GEMMA_URL` and `GEMMA_AUTH` from
+the Memory layer, so that section comes first. Migration `0014_chat.sql` is additive and runs on
+deploy whether or not chat is on.
+
+Repository variables read by the deploy workflow (all optional; unset means the app default):
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `CHAT` | `on` / `off` (default off) | Turns the chat on. Needs `MEMORY=on`; with `MEMORY=off` the app logs a warning and chat stays off. |
+| `CHAT_MODEL` | default `gemma3:4b` | Chat model name on the Gemma server. |
+| `CHAT_DAILY_LIMIT` | whole number, 1 or more (default 30) | Questions per user per day. |
+| `CHAT_PRIOR` | `on` / `off` (default on when `CHAT` is on) | Gemma's expected answer and its reconciliation (owner view only). |
+| `CHAT_MIN_SCORE` | 0-1 (default 0.45) | Retrieval score floor; a placeholder until calibration. |
+
+Order: Memory layer working (`MEMORY=on`, Gemma reachable) -> set `CHAT=on` -> re-run Deploy.
+
+Rollback: `CHAT=off` and re-run Deploy (tables, passages and conversations stay). `MEMORY=off` also
+turns chat off.

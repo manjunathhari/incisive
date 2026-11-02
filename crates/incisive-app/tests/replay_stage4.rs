@@ -419,6 +419,7 @@ async fn run_ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
             temporal: Default::default(),
             temporal_client: None,
             memory: incisive_app::memory::settings::MemorySettings::default(),
+            chat: incisive_app::chat::settings::ChatSettings::default(),
             embedder: None,
             worker: WorkerHandle::default(),
             llm: None,

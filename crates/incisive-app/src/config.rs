@@ -58,6 +58,9 @@ pub struct Config {
     /// The memory layer (`MEMORY`, default off; `GEMMA_URL`, `GEMMA_AUTH`,
     /// `EMBED_MODEL`, `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH`).
     pub memory: crate::memory::settings::MemorySettings,
+    /// The evidence chat (`CHAT`, default off; needs `MEMORY=on`;
+    /// `CHAT_MODEL`, `CHAT_DAILY_LIMIT`, `CHAT_PRIOR`, `CHAT_MIN_SCORE`).
+    pub chat: crate::chat::settings::ChatSettings,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -294,6 +297,64 @@ impl Config {
             }
         };
 
+        let chat = {
+            use crate::chat::settings::ChatSettings;
+            let switch = |var: &'static str| match lookup(var).as_deref().map(str::trim) {
+                None => Ok(None),
+                Some("off") => Ok(Some(false)),
+                Some("on") => Ok(Some(true)),
+                Some(_) => Err(ConfigError::Invalid {
+                    var,
+                    reason: "expected `on` or `off`".to_string(),
+                }),
+            };
+            let asked = switch("CHAT")?.unwrap_or(false);
+            let prior_switch = switch("CHAT_PRIOR")?;
+            let daily_limit = match lookup("CHAT_DAILY_LIMIT") {
+                None => None,
+                Some(v) => Some(
+                    v.trim()
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| ConfigError::Invalid {
+                            var: "CHAT_DAILY_LIMIT",
+                            reason: "expected a whole number of 1 or more".to_string(),
+                        })?,
+                ),
+            };
+            let min_score = match lookup("CHAT_MIN_SCORE") {
+                None => None,
+                Some(v) => Some(
+                    v.trim()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|n| (0.0..=1.0).contains(n))
+                        .ok_or_else(|| ConfigError::Invalid {
+                            var: "CHAT_MIN_SCORE",
+                            reason: "expected a number from 0.0 to 1.0".to_string(),
+                        })?,
+                ),
+            };
+            // MEMORY=off must stay a safe rollback on its own: chat then
+            // turns itself off with a warning instead of failing the boot.
+            let on = asked && memory.on;
+            if asked && !memory.on {
+                tracing::warn!("CHAT=on is ignored because MEMORY is off");
+            }
+            let defaults = ChatSettings::default();
+            ChatSettings {
+                on,
+                model: lookup("CHAT_MODEL")
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or(defaults.model),
+                daily_limit: daily_limit.unwrap_or(defaults.daily_limit),
+                prior: on && prior_switch.unwrap_or(true),
+                min_score: min_score.unwrap_or(defaults.min_score),
+            }
+        };
+
         let temporal = {
             use crate::agent::temporal_writer::{MAX_TOKENS_RANGE, TemporalSettings};
             let on = match lookup("TEMPORAL").as_deref() {
@@ -406,6 +467,7 @@ impl Config {
             completeness,
             temporal,
             memory,
+            chat,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -1018,6 +1080,81 @@ mod tests {
         p.push(("MEMORY_TOPIC_MATCH", "0"));
         let c = Config::from_lookup(lookup(&p)).unwrap();
         assert_eq!((c.memory.gate_match, c.memory.topic_match), (0.9, 0.0));
+    }
+
+    #[test]
+    fn chat_defaults_off() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.chat.on);
+        assert_eq!(c.chat.model, "gemma3:4b");
+        assert_eq!(c.chat.daily_limit, 30);
+        assert!(!c.chat.prior);
+        assert_eq!(c.chat.min_score, 0.45);
+    }
+
+    #[test]
+    fn chat_invalid_value_is_config_error() {
+        for (var, bad) in [
+            ("CHAT", "yes"),
+            ("CHAT_PRIOR", "maybe"),
+            ("CHAT_DAILY_LIMIT", "abc"),
+            ("CHAT_DAILY_LIMIT", "0"),
+            ("CHAT_DAILY_LIMIT", "-3"),
+        ] {
+            let mut p = full();
+            p.push(("MEMORY", "on"));
+            p.push((var, bad));
+            match Config::from_lookup(lookup(&p)).unwrap_err() {
+                ConfigError::Invalid { var: v, .. } => assert_eq!(v, var, "{bad}"),
+                e => panic!("{bad}: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn chat_on_with_memory_off_is_off() {
+        let mut p = full();
+        p.push(("CHAT", "on"));
+        let c = Config::from_lookup(lookup(&p)).unwrap();
+        assert!(!c.chat.on);
+        assert!(!c.chat.prior, "no prior while chat is off");
+        p.push(("MEMORY", "on"));
+        assert!(Config::from_lookup(lookup(&p)).unwrap().chat.on);
+    }
+
+    #[test]
+    fn chat_prior_defaults_on_when_chat_on() {
+        let mut p = full();
+        p.push(("MEMORY", "on"));
+        p.push(("CHAT", " on "));
+        assert!(Config::from_lookup(lookup(&p)).unwrap().chat.prior);
+        p.push(("CHAT_PRIOR", "off"));
+        assert!(!Config::from_lookup(lookup(&p)).unwrap().chat.prior);
+        p.push(("CHAT_MODEL", "gemma3:12b"));
+        p.push(("CHAT_DAILY_LIMIT", "5"));
+        let c = Config::from_lookup(lookup(&p)).unwrap();
+        assert_eq!(
+            (c.chat.model.as_str(), c.chat.daily_limit),
+            ("gemma3:12b", 5)
+        );
+    }
+
+    #[test]
+    fn chat_min_score_out_of_range_is_config_error() {
+        for bad in ["1.5", "-0.1", "abc"] {
+            let mut p = full();
+            p.push(("CHAT_MIN_SCORE", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&p)).unwrap_err(),
+                ConfigError::Invalid {
+                    var: "CHAT_MIN_SCORE",
+                    ..
+                }
+            ));
+        }
+        let mut p = full();
+        p.push(("CHAT_MIN_SCORE", "0.6"));
+        assert_eq!(Config::from_lookup(lookup(&p)).unwrap().chat.min_score, 0.6);
     }
 
     #[test]

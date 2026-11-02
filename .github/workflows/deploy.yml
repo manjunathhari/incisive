@@ -50,6 +50,11 @@ jobs:
           EMBED_MODEL: ${{ vars.EMBED_MODEL }}
           MEMORY_TOPIC_MATCH: ${{ vars.MEMORY_TOPIC_MATCH }}
           MEMORY_GATE_MATCH: ${{ vars.MEMORY_GATE_MATCH }}
+          CHAT: ${{ vars.CHAT }}
+          CHAT_MODEL: ${{ vars.CHAT_MODEL }}
+          CHAT_DAILY_LIMIT: ${{ vars.CHAT_DAILY_LIMIT }}
+          CHAT_PRIOR: ${{ vars.CHAT_PRIOR }}
+          CHAT_MIN_SCORE: ${{ vars.CHAT_MIN_SCORE }}
           HAS_GEMMA_KEY: ${{ vars.HAS_GEMMA_KEY }}
         run: |
           missing=0
@@ -200,6 +205,22 @@ jobs:
               echo "::error::vars.$v must be a number from 0 to 1 (see infra/README.md, Memory layer)"; exit 1
             fi
           done
+          # Evidence chat (infra/README.md, "Evidence chat"): CHAT and CHAT_PRIOR unset,
+          # off or on; CHAT_DAILY_LIMIT a whole number from 1; CHAT_MIN_SCORE 0-1.
+          for v in CHAT CHAT_PRIOR; do
+            case "${!v//[[:space:]]/}" in
+              ""|on|off) ;;
+              *) echo "::error::vars.$v must be on or off (see infra/README.md, Evidence chat)"; exit 1 ;;
+            esac
+          done
+          cl="${CHAT_DAILY_LIMIT//[[:space:]]/}"
+          if [ -n "$cl" ] && ! { [[ "$cl" =~ ^[0-9]+$ ]] && [ "$cl" -ge 1 ]; }; then
+            echo "::error::vars.CHAT_DAILY_LIMIT must be a whole number of 1 or more (see infra/README.md, Evidence chat)"; exit 1
+          fi
+          cs="${CHAT_MIN_SCORE//[[:space:]]/}"
+          if [ -n "$cs" ] && ! python3 -c 'import sys; x=float(sys.argv[1]); assert 0.0 <= x <= 1.0' "$cs" 2>/dev/null; then
+            echo "::error::vars.CHAT_MIN_SCORE must be a number from 0 to 1 (see infra/README.md, Evidence chat)"; exit 1
+          fi
           if [ "${HAS_GEMMA_KEY//[[:space:]]/}" = "true" ] && [ -z "$gu" ]; then
             echo "::error::vars.HAS_GEMMA_KEY is true but vars.GEMMA_URL is empty (see infra/README.md, Memory layer)"; exit 1
           fi
@@ -258,6 +279,11 @@ jobs:
           EMBED_MODEL: ${{ vars.EMBED_MODEL }}
           MEMORY_TOPIC_MATCH: ${{ vars.MEMORY_TOPIC_MATCH }}
           MEMORY_GATE_MATCH: ${{ vars.MEMORY_GATE_MATCH }}
+          CHAT: ${{ vars.CHAT }}
+          CHAT_MODEL: ${{ vars.CHAT_MODEL }}
+          CHAT_DAILY_LIMIT: ${{ vars.CHAT_DAILY_LIMIT }}
+          CHAT_PRIOR: ${{ vars.CHAT_PRIOR }}
+          CHAT_MIN_SCORE: ${{ vars.CHAT_MIN_SCORE }}
           HAS_GEMMA_KEY: ${{ vars.HAS_GEMMA_KEY }}
         run: |
           set -euo pipefail
@@ -278,6 +304,8 @@ jobs:
           optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
           # Memory layer: optional too (GEMMA_AUTH is a secret, below).
           optional += ["MEMORY", "GEMMA_URL", "EMBED_MODEL", "MEMORY_TOPIC_MATCH", "MEMORY_GATE_MATCH"]
+          # Evidence chat: optional too; it reuses GEMMA_URL and GEMMA_AUTH.
+          optional += ["CHAT", "CHAT_MODEL", "CHAT_DAILY_LIMIT", "CHAT_PRIOR", "CHAT_MIN_SCORE"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}"

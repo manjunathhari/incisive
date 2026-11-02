@@ -57,6 +57,8 @@ pub struct AppState {
     pub memory: crate::memory::settings::MemorySettings,
     /// Gemma embeddings client; `None` when `GEMMA_URL`/`GEMMA_AUTH` are unset.
     pub embedder: Option<std::sync::Arc<crate::memory::embed::Embedder>>,
+    /// The evidence chat's settings (`CHAT`, default off).
+    pub chat: crate::chat::settings::ChatSettings,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev

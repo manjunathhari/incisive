@@ -165,6 +165,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
         worker: WorkerHandle::default(),
         llm: None,

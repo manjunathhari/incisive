@@ -1078,6 +1078,7 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
         worker: WorkerHandle::default(),
         llm: Some(llm),
