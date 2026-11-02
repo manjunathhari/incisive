@@ -66,10 +66,20 @@ static YOU_SHOULD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn marker_numbers(m: &str) -> Vec<u32> {
-    m.split(|c: char| !c.is_ascii_digit())
-        .filter(|d| !d.is_empty())
-        .filter_map(|d| d.parse().ok())
-        .collect()
+    let mut out = Vec::new();
+    // Split into comma-separated parts; "a-b" expands to a..=b.
+    for part in m.split(',') {
+        let nums: Vec<u32> = part
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|d| !d.is_empty())
+            .filter_map(|d| d.parse().ok())
+            .collect();
+        match nums.as_slice() {
+            [a, b] if a <= b && b - a <= 50 => out.extend(*a..=*b),
+            _ => out.extend(nums),
+        }
+    }
+    out
 }
 
 fn blank(text: &str, spans: &[(usize, usize)]) -> String {
@@ -293,6 +303,25 @@ mod tests {
     fn reply_without_citation_flagged_uncited() {
         assert!(run("Robotic repair is fine.", &[P1], None, &pairs()).uncited);
         assert!(!run("Robotic repair is fine [1].", &[P1], None, &pairs()).uncited);
+    }
+
+    #[test]
+    fn citation_range_cites_every_passage_in_it() {
+        let c = run(
+            "Stay 18 minutes longer [1-3].",
+            &[P1, P2, "x"],
+            None,
+            &pairs(),
+        );
+        assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
+        assert!(!c.uncited);
+        let c = run(
+            "Longer [1\u{2013}2], and [2-5].",
+            &[P1, P2, "x"],
+            None,
+            &pairs(),
+        );
+        assert_eq!(c.unknown_citations, vec![4, 5]);
     }
 
     #[test]

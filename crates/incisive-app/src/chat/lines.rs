@@ -16,7 +16,19 @@ pub const FOOTER: &str =
 /// not here: only the qualified forms are.
 const WARNING_TERMS: &[&str] = &[
     "fever",
+    "fevers",
     "feverish",
+    "vomit",
+    "vomited",
+    "vomits",
+    "bled",
+    "pain is increasing",
+    "pain getting worse",
+    "pain is getting worse",
+    "pain is worse",
+    "pain worsening",
+    "unbearable pain",
+    "discharge from the wound",
     "bleeding",
     "bleeds",
     "bleed",
@@ -40,10 +52,24 @@ const WARNING_TERMS: &[&str] = &[
     "not passing urine",
 ];
 
-/// First-person words: the question is about the asker (or their family).
-const PERSONAL_WORDS: &[&str] = &[
-    "i", "i'm", "i've", "i'd", "i'll", "me", "my", "mine", "myself", "we", "we're", "we've", "our",
-    "ours",
+/// Words that fire on their own: the asker, or their family via "my".
+const FIRST_PERSON: &[&str] = &[
+    "i", "i'm", "i've", "i'd", "i'll", "me", "my", "mine", "myself",
+];
+
+/// "we", "our", "you", "your" are only about the asker when a decision is
+/// being asked about.
+const SHARED_PERSON: &[&str] = &[
+    "we", "we're", "we've", "our", "ours", "you", "you're", "you've", "your", "yours",
+];
+
+const DECISION_WORDS: &[&str] = &["should", "will", "can", "need", "choose"];
+const DECISION_PHRASES: &[&str] = &["better for", "go home"];
+
+/// A label before "I" means the Roman numeral, not the pronoun.
+const LABELS: &[&str] = &[
+    "type", "grade", "phase", "class", "stage", "group", "level", "tier", "step", "part",
+    "category", "level", "cohort", "arm", "trial", "factor", "zone", "tumour", "tumor",
 ];
 
 fn norm(q: &str) -> String {
@@ -75,8 +101,19 @@ pub fn warning_symptoms(q: &str) -> bool {
 /// Whether the question is about the asker's own case (or family's).
 pub fn personal(q: &str) -> bool {
     let q = norm(q);
-    q.split(|c: char| !(c.is_alphanumeric() || c == '\''))
-        .any(|w| PERSONAL_WORDS.contains(&w))
+    let words: Vec<&str> = q
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let first = words.iter().enumerate().any(|(i, w)| {
+        FIRST_PERSON.contains(w) && !(*w == "i" && i > 0 && LABELS.contains(&words[i - 1]))
+    });
+    if first {
+        return true;
+    }
+    let decision = words.iter().any(|w| DECISION_WORDS.contains(w))
+        || DECISION_PHRASES.iter().any(|p| has_phrase(&q, p));
+    decision && words.iter().any(|w| SHARED_PERSON.contains(w))
 }
 
 #[cfg(test)]
@@ -119,6 +156,54 @@ mod tests {
         ] {
             assert!(warning_symptoms(q), "{q}");
         }
+    }
+
+    #[test]
+    fn warning_inflections_detected() {
+        for q in [
+            "she vomited twice",
+            "he vomits",
+            "I vomit after meals",
+            "fevers at night",
+            "feverish since morning",
+            "he bled overnight",
+            "it bleeds when I cough",
+            "she is breathless",
+            "I am short of breath",
+            "my pain is increasing",
+            "pain getting worse",
+            "the pain is getting worse",
+            "the pain is worse today",
+            "pain worsening each day",
+            "unbearable pain",
+            "some redness near the cut",
+            "discharge from the wound",
+            "I can't pass urine",
+            "he cannot pass urine",
+        ] {
+            assert!(warning_symptoms(q), "{q}");
+        }
+    }
+
+    #[test]
+    fn should_you_have_is_personal() {
+        assert!(personal("Should you have the robotic operation?"));
+        assert!(personal("Can we choose robotic repair?"));
+        assert!(personal("Is robotic better for your recovery?"));
+        assert!(personal("Will our mother go home sooner?"));
+    }
+
+    #[test]
+    fn what_do_we_know_is_not_personal() {
+        assert!(!personal("What do we know about recurrence?"));
+        assert!(!personal("What does your evidence say about stay?"));
+    }
+
+    #[test]
+    fn type_i_error_is_not_personal() {
+        assert!(!personal("What is the type I error here?"));
+        assert!(!personal("Were stage I patients included?"));
+        assert!(personal("Can I go home sooner?"));
     }
 
     #[test]
