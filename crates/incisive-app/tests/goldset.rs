@@ -196,6 +196,7 @@ fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
         // The real pipeline.
         worker: WorkerHandle::default(),
         llm: Some(incisive_app::agent::testing::agent_llm(llm, MODEL)),

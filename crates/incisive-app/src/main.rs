@@ -148,6 +148,12 @@ async fn main() {
         );
     }
 
+    if config.memory.on && !config.temporal.on {
+        tracing::warn!(
+            "MEMORY=on but TEMPORAL is off; memory has no expert opinions to learn from"
+        );
+    }
+
     let state = AppState {
         pool: pool.clone(),
         verifier: Arc::new(verifier),
@@ -165,6 +171,7 @@ async fn main() {
         completeness: config.completeness,
         temporal: config.temporal,
         temporal_client,
+        memory: config.memory.clone(),
         worker: WorkerHandle::default(),
         llm,
         lit,

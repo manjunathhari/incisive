@@ -164,6 +164,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
         worker: WorkerHandle::default(),
         llm: None,
         lit,

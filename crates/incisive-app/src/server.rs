@@ -53,6 +53,8 @@ pub struct AppState {
     /// `temporal_writer::ATTEMPT_TIMEOUT` (`temporal_writer::client`).
     /// `None` (tests, dev without a key): the agent's client is used.
     pub temporal_client: Option<std::sync::Arc<dyn crate::agent::llm::LlmClient>>,
+    /// The memory layer's settings (`MEMORY`, default off).
+    pub memory: crate::memory::settings::MemorySettings,
     /// Starts and cancels background runs.
     pub worker: WorkerHandle,
     /// The evidence agent's Claude client and models. `None` only in dev

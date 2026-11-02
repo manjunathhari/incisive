@@ -55,6 +55,9 @@ pub struct Config {
     /// (`TEMPORAL`: `off`, the default, or `on`; `TEMPORAL_MAX_TOKENS`
     /// optional, 2,000–32,000, default 20,000).
     pub temporal: crate::agent::temporal_writer::TemporalSettings,
+    /// The memory layer (`MEMORY`, default off; `GEMMA_URL`, `GEMMA_AUTH`,
+    /// `EMBED_MODEL`, `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH`).
+    pub memory: crate::memory::settings::MemorySettings,
     /// NCBI E-utilities key (`NCBI_API_KEY`, optional secret). With it PubMed
     /// is paced at 10 requests a second instead of 3. Redacted by `Debug`;
     /// never logged.
@@ -227,6 +230,42 @@ impl Config {
             }
         };
 
+        let memory = {
+            use crate::memory::settings::MemorySettings;
+            let on = match lookup("MEMORY").as_deref() {
+                None | Some("off") => false,
+                Some("on") => true,
+                Some(_) => {
+                    return Err(ConfigError::Invalid {
+                        var: "MEMORY",
+                        reason: "expected `on` or `off`".to_string(),
+                    });
+                }
+            };
+            let threshold = |var: &'static str, default: f32| match lookup(var) {
+                None => Ok(default),
+                Some(v) => v
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|n| (0.0..=1.0).contains(n))
+                    .ok_or_else(|| ConfigError::Invalid {
+                        var,
+                        reason: "expected a number from 0.0 to 1.0".to_string(),
+                    }),
+            };
+            let defaults = MemorySettings::default();
+            MemorySettings {
+                on,
+                gemma_url: lookup("GEMMA_URL")
+                    .map(|u| u.trim_end_matches('/').to_string())
+                    .filter(|u| !u.is_empty()),
+                gemma_auth: lookup("GEMMA_AUTH").map(SecretString::from),
+                embed_model: lookup("EMBED_MODEL").unwrap_or(defaults.embed_model),
+                topic_match: threshold("MEMORY_TOPIC_MATCH", defaults.topic_match)?,
+                gate_match: threshold("MEMORY_GATE_MATCH", defaults.gate_match)?,
+            }
+        };
+
         let temporal = {
             use crate::agent::temporal_writer::{MAX_TOKENS_RANGE, TemporalSettings};
             let on = match lookup("TEMPORAL").as_deref() {
@@ -338,6 +377,7 @@ impl Config {
             full_engine,
             completeness,
             temporal,
+            memory,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
@@ -901,6 +941,82 @@ mod tests {
             (c.quick_engine, c.full_engine),
             (Engine::Team, Engine::Classic)
         );
+    }
+
+    #[test]
+    fn memory_defaults_off() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.memory.on);
+        assert_eq!(c.memory.embed_model, "embeddinggemma");
+        assert_eq!(c.memory.topic_match, 0.80);
+        assert_eq!(c.memory.gate_match, 0.85);
+        assert!(!c.memory.embeddings_enabled());
+    }
+
+    #[test]
+    fn memory_on_parses() {
+        let mut p = full();
+        p.push(("MEMORY", " on "));
+        assert!(Config::from_lookup(lookup(&p)).unwrap().memory.on);
+    }
+
+    #[test]
+    fn memory_rejects_unknown() {
+        let mut p = full();
+        p.push(("MEMORY", "yes"));
+        assert!(matches!(
+            Config::from_lookup(lookup(&p)).unwrap_err(),
+            ConfigError::Invalid { var: "MEMORY", .. }
+        ));
+    }
+
+    #[test]
+    fn memory_threshold_range() {
+        for (var, bad) in [
+            ("MEMORY_GATE_MATCH", "1.5"),
+            ("MEMORY_GATE_MATCH", "-0.1"),
+            ("MEMORY_TOPIC_MATCH", "abc"),
+            ("MEMORY_TOPIC_MATCH", "2"),
+        ] {
+            let mut p = full();
+            p.push((var, bad));
+            match Config::from_lookup(lookup(&p)).unwrap_err() {
+                ConfigError::Invalid { var: v, .. } => assert_eq!(v, var, "{bad}"),
+                e => panic!("{bad}: {e:?}"),
+            }
+        }
+        let mut p = full();
+        p.push(("MEMORY_GATE_MATCH", "0.9"));
+        p.push(("MEMORY_TOPIC_MATCH", "0"));
+        let c = Config::from_lookup(lookup(&p)).unwrap();
+        assert_eq!((c.memory.gate_match, c.memory.topic_match), (0.9, 0.0));
+    }
+
+    #[test]
+    fn embeddings_need_url_and_auth() {
+        let mut p = full();
+        p.push(("GEMMA_URL", "https://gemma.example.org/"));
+        let c = Config::from_lookup(lookup(&p)).unwrap();
+        assert!(!c.memory.embeddings_enabled());
+        assert_eq!(
+            c.memory.gemma_url.as_deref(),
+            Some("https://gemma.example.org")
+        );
+        p.push(("GEMMA_AUTH", "tok"));
+        assert!(
+            Config::from_lookup(lookup(&p))
+                .unwrap()
+                .memory
+                .embeddings_enabled()
+        );
+    }
+
+    #[test]
+    fn gemma_auth_not_in_debug() {
+        let mut p = full();
+        p.push(("GEMMA_AUTH", "s3cr3t-gemma-token"));
+        let c = Config::from_lookup(lookup(&p)).unwrap();
+        assert!(!format!("{:?}", c.memory).contains("s3cr3t-gemma-token"));
     }
 
     /// Temporal T2: `TEMPORAL` is `off` (default) or `on`, trimmed;

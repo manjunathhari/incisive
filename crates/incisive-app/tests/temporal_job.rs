@@ -69,6 +69,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         completeness: false,
         temporal,
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: Some(llm),
         lit: offline_literature(),
