@@ -1077,6 +1077,8 @@ fn build_state(pool: PgPool, config: &Config) -> Result<AppState, String> {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: WorkerHandle::default(),
         llm: Some(llm),
         lit,

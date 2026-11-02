@@ -418,6 +418,8 @@ async fn run_ctx(pool: &PgPool, llm: Arc<ScriptedLlm>) -> RunContext {
             completeness: false,
             temporal: Default::default(),
             temporal_client: None,
+            memory: incisive_app::memory::settings::MemorySettings::default(),
+            embedder: None,
             worker: WorkerHandle::default(),
             llm: None,
             lit: lit.clone(),

@@ -103,6 +103,8 @@ fn state(pool: PgPool, gate: Arc<dyn Classifier>, gate_model: &str) -> AppState 
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: incisive_app::runs::worker::WorkerHandle::default(),
         llm: None,
         lit: incisive_app::agent::testing::offline_literature(),

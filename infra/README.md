@@ -589,3 +589,34 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
 
 Both are checked like `COMPLETENESS` (only the ends trimmed) before the build, and the app refuses
 any other value at startup. The `temporal` model, default or set, must be priced in `MODEL_PRICES`.
+
+## Memory layer (Gemma embeddings)
+
+The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama
+server at `POST {GEMMA_URL}/api/embed` with HTTP basic auth. `GEMMA_AUTH` holds
+`incisive:<password>`. The app works without it (FTS-only matching; records stay un-embedded until
+the next sweep that reaches the server).
+
+Owner commands, run in Cloud Shell. The password is typed at the hidden prompt, never put on the
+command line:
+
+```
+read -s -p "Gemma password: " P; printf 'incisive:%s' "$P" | gcloud secrets create gemma-auth --data-file=- --replication-policy=user-managed --locations=asia-south1 --project=incisive-prod-512902; unset P
+gcloud secrets add-iam-policy-binding gemma-auth --member=serviceAccount:incisive-run@incisive-prod-512902.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --project=incisive-prod-512902
+```
+
+Repository variables read by the deploy workflow (all optional; unset means the app default):
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `MEMORY` | `on` / `off` (default off) | Turns the memory layer on. Needs `TEMPORAL=on` to create records. |
+| `GEMMA_URL` | `https://ollama-s9os.srv2117610.hstgr.cloud` | The Gemma server (https only). |
+| `HAS_GEMMA_KEY` | `true` / `false` | Set `true` **only after** the `gemma-auth` secret exists; the deploy then mounts it as `GEMMA_AUTH`. |
+| `EMBED_MODEL` | default `embeddinggemma` | Embedding model name on the server. |
+| `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH` | 0–1 (defaults 0.80, 0.85) | Match thresholds; placeholders until calibration. |
+
+Order: create the secret and its binding (above) → set `GEMMA_URL` and `HAS_GEMMA_KEY=true` → set
+`MEMORY=on` → re-run Deploy. Then queue existing Full runs once:
+`DATABASE_URL=… cargo run -p incisive-app --bin memory_backfill` (prints only the count).
+
+Rollback: `MEMORY=off` and re-run Deploy (tables and records stay).

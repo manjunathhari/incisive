@@ -26,6 +26,13 @@ name = "temporal_smoke"
 path = "src/bin/temporal_smoke.rs"
 required-features = ["ssr"]
 
+# The memory backfill: queues the memory job for every existing Full run
+# with a finished Expert Opinion. Run by the owner with DATABASE_URL set.
+[[bin]]
+name = "memory_backfill"
+path = "src/bin/memory_backfill.rs"
+required-features = ["ssr"]
+
 [dependencies]
 secrecy = "0.10"
 leptos = { version = "0.8" }

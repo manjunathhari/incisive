@@ -383,6 +383,11 @@ pub async fn run_job(
         .and_then(|v| serde_json::from_value::<BoardFlags>(v.clone()).ok())
         .map_or(0, |b| b.total());
     match finish(&state.pool, run_id, status, &f).await {
+        // Memory layer: a stored Expert Opinion queues the run for the
+        // evidence library (a no-op while MEMORY is off; never touches the run).
+        Ok(true) if status == JobStatus::Done => {
+            crate::memory::job::on_temporal_done(state, run_id).await;
+        }
         Ok(true) => {}
         Ok(false) => tracing::info!(%run_id, "temporal row gone or already finished"),
         Err(_) => {

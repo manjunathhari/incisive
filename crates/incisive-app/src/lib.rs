@@ -30,6 +30,9 @@ pub mod identity;
 pub mod library;
 #[cfg(feature = "ssr")]
 pub mod lit;
+/// The memory layer (off by default).
+#[cfg(feature = "ssr")]
+pub mod memory;
 /// The Ask page's advisory Question check and PICO helper (no Leptos).
 pub mod question_check;
 pub mod runs;

@@ -69,6 +69,8 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         completeness: false,
         temporal,
         temporal_client: None,
+        memory: incisive_app::memory::settings::MemorySettings::default(),
+        embedder: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: Some(llm),
         lit: offline_literature(),
@@ -951,4 +953,65 @@ async fn job_uses_the_writers_own_client_and_the_pending_index_exists() {
         def.contains("(created_at)") && def.contains("'pending'"),
         "{def}"
     );
+}
+
+// ---------- memory layer hook ----------
+
+async fn memory_jobs_for(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM incisive.memory_jobs WHERE run_id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn job_with_memory(pool: &PgPool, llm: ScriptedLlm, memory_on: bool) -> (Uuid, JobStatus) {
+    let uid = new_user(pool, 100_000).await;
+    let run = finished_run(pool, uid).await;
+    let before = run_snapshot(pool, run).await;
+    let mut st = state(
+        pool.clone(),
+        agent_llm(Arc::new(llm), MODEL),
+        TemporalSettings::on(),
+        BIG,
+    );
+    st.memory.on = memory_on;
+    let req = Uuid::new_v4();
+    assert!(insert_pending(pool, run, req).await.unwrap());
+    let status = run_job(&st, st.llm.as_ref().unwrap(), run, uid, req, &hernia_body()).await;
+    assert_eq!(run_snapshot(pool, run).await, before, "run row changed");
+    (run, status)
+}
+
+#[tokio::test]
+async fn done_opinion_queues_memory_only_when_memory_is_on() {
+    let Some(pool) = connect().await else { return };
+    let ok = || ScriptedLlm::new().reply_json(board_json(), usage());
+    let (off_run, off) = job_with_memory(&pool, ok(), false).await;
+    assert_eq!(off, JobStatus::Done);
+    assert_eq!(
+        memory_jobs_for(&pool, off_run).await,
+        0,
+        "MEMORY off: no job"
+    );
+    let (on_run, on) = job_with_memory(&pool, ok(), true).await;
+    assert_eq!(on, JobStatus::Done);
+    assert_eq!(
+        memory_jobs_for(&pool, on_run).await,
+        1,
+        "MEMORY on: one job"
+    );
+}
+
+#[tokio::test]
+async fn failed_opinion_never_queues_memory() {
+    let Some(pool) = connect().await else { return };
+    let (run, status) = job_with_memory(
+        &pool,
+        ScriptedLlm::new().reply_text("not json", usage()),
+        true,
+    )
+    .await;
+    assert_ne!(status, JobStatus::Done);
+    assert_eq!(memory_jobs_for(&pool, run).await, 0);
 }
