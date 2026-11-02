@@ -49,6 +49,9 @@ CREATE TABLE incisive.evidence_records (
 CREATE INDEX evidence_records_fts_idx ON incisive.evidence_records USING gin (fts);
 CREATE INDEX evidence_records_embedding_idx
     ON incisive.evidence_records USING hnsw (embedding vector_cosine_ops);
+-- One record per run: a second memory job for the same run cannot add another.
+CREATE UNIQUE INDEX evidence_records_source_run_uniq
+    ON incisive.evidence_records (source_run_id) WHERE source_run_id IS NOT NULL;
 CREATE INDEX evidence_records_topic_idx ON incisive.evidence_records (topic_id);
 CREATE INDEX evidence_records_through_idx ON incisive.evidence_records (evidence_through);
 CREATE INDEX topics_embedding_idx ON incisive.topics USING hnsw (embedding vector_cosine_ops);

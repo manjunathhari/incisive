@@ -355,6 +355,26 @@ pub async fn finish_job(
     Ok(())
 }
 
+/// A transient failure: back to `pending` while attempts remain (the claim
+/// already counted this one), else `failed`.
+pub async fn retry_or_fail_job(
+    pool: &PgPool,
+    run_id: Uuid,
+    code: &'static str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE incisive.memory_jobs \
+         SET status = CASE WHEN attempts < 3 THEN 'pending' ELSE 'failed' END, \
+             last_error_kind = $2, updated_at = now() \
+         WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .bind(code)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Records with no embedding yet, with the text to embed.
 pub async fn records_missing_embedding(pool: &PgPool, n: i64) -> sqlx::Result<Vec<(i64, String)>> {
     sqlx::query_as(

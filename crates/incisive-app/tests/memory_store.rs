@@ -53,7 +53,9 @@ async fn new_topic(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-async fn rec(pool: &PgPool, topic: i64, run: Uuid, label: &str) -> (i64, i32) {
+async fn rec(pool: &PgPool, topic: i64, _run: Uuid, label: &str) -> (i64, i32) {
+    // One record per run (unique index): each record gets its own run.
+    let (_, run) = seed_run(pool).await;
     let v = json!({});
     let mut tx = pool.begin().await.unwrap();
     let r = store::insert_record(

@@ -228,7 +228,6 @@ async fn same_topic_second_run_joins() {
         return;
     };
     let st = state(pool.clone(), true);
-    // Other tests share the database: a unique-ish check on the topic only.
     let r1 = seed(&pool, &HERNIA, "focused", Some("done")).await;
     let JobOutcome::Done { topic_id: t1, .. } = job::process(&st, r1).await else {
         panic!("first");
@@ -374,4 +373,56 @@ async fn trigger_only_when_on() {
     job::on_temporal_done(&state(pool.clone(), true), run).await;
     job::on_temporal_done(&state(pool.clone(), true), run).await;
     assert_eq!(job_row_count(&pool, run).await, 1);
+}
+
+#[tokio::test]
+async fn concurrent_process_yields_one_record() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let st = state(pool.clone(), true);
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let (a, b) = tokio::join!(job::process(&st, run), job::process(&st, run));
+    let (JobOutcome::Done { record_id: ra, .. }, JobOutcome::Done { record_id: rb, .. }) = (a, b)
+    else {
+        panic!("both must be Done");
+    };
+    assert_eq!(ra, rb);
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM incisive.evidence_records WHERE source_run_id = $1",
+    )
+    .bind(run)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+    let t: i64 = sqlx::query_scalar("SELECT count(*) FROM incisive.topics")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(t, 1, "the losing transaction's topic is rolled back");
+}
+
+#[tokio::test]
+async fn store_failure_retries_until_attempts_spent() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    store::enqueue_job(&pool, run).await.unwrap();
+    for attempt in 1..=3 {
+        let claimed = store::claim_jobs(&pool, 10).await.unwrap();
+        assert!(claimed.contains(&run), "attempt {attempt} claimable");
+        store::retry_or_fail_job(&pool, run, "store").await.unwrap();
+        let (status, kind): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_error_kind FROM incisive.memory_jobs WHERE run_id = $1",
+        )
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("store"));
+        assert_eq!(status, if attempt < 3 { "pending" } else { "failed" });
+    }
+    assert!(!store::claim_jobs(&pool, 10).await.unwrap().contains(&run));
 }

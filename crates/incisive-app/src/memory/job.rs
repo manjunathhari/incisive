@@ -163,6 +163,48 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         None => None,
     };
 
+    match write_record(
+        pool,
+        run_id,
+        &ex,
+        matched,
+        &question,
+        &body,
+        answer_version,
+        &board,
+        &table,
+        created_at,
+    )
+    .await
+    {
+        Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("23505") => {
+            // Another job recorded this run first; join its record.
+            match existing_record(pool, run_id).await? {
+                Some((record_id, topic_id)) => Ok(JobOutcome::Done {
+                    record_id,
+                    topic_id,
+                    new_topic: false,
+                }),
+                None => Ok(JobOutcome::Failed("store")),
+            }
+        }
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_record(
+    pool: &PgPool,
+    run_id: Uuid,
+    ex: &extract::Extracted,
+    matched: Option<i64>,
+    question: &str,
+    body: &Value,
+    answer_version: i16,
+    board: &Value,
+    table: &Value,
+    created_at: DateTime<Utc>,
+) -> sqlx::Result<JobOutcome> {
     let mut tx = pool.begin().await?;
     let (topic_id, new_topic) = match matched {
         Some(id) => (id, false),
@@ -176,11 +218,11 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         &store::NewRecord {
             topic_id,
             source_run_id: run_id,
-            question: &question,
-            answer: &body,
+            question,
+            answer: body,
             answer_version,
-            board: &board,
-            era_table: &table,
+            board,
+            era_table: table,
             evidence_through: ist_date(created_at),
             topic_label: &ex.topic_label,
             fts_extra: &ex.fts_extra,
@@ -194,6 +236,11 @@ async fn process_inner(state: &AppState, run_id: Uuid) -> sqlx::Result<JobOutcom
         topic_id,
         new_topic,
     })
+}
+
+/// Only a transient store error is retried; run_gone and panic are terminal.
+fn outcome_is_store_failure(code: Option<&'static str>, status: &str) -> bool {
+    status == "failed" && code == Some("store")
 }
 
 /// Every 30 s: claim up to five jobs, process each, record the outcome.
@@ -227,10 +274,11 @@ pub async fn memory_loop(state: AppState) {
                 JobOutcome::Skipped(c) => ("skipped", Some(c), None),
                 JobOutcome::Failed(c) => ("failed", Some(c), None),
             };
-            if store::finish_job(&state.pool, run_id, status, code, record)
-                .await
-                .is_err()
-            {
+            let finished = match outcome_is_store_failure(code, status) {
+                true => store::retry_or_fail_job(&state.pool, run_id, "store").await,
+                false => store::finish_job(&state.pool, run_id, status, code, record).await,
+            };
+            if finished.is_err() {
                 tracing::warn!(code = "finish", "memory job not finished");
             }
         }
