@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::comparison::arms_named;
+use super::passages::NOT_TRACED_MARK;
 use crate::agent::extractor::has_own_sign;
 use crate::agent::temporal_writer::{text_numbers, traced};
 
@@ -32,9 +33,19 @@ impl Checks {
     }
 }
 
-/// Bare whole numbers up to this, with no `%`, are counts, round numbers and
-/// codes, not findings: never flagged (the temporal check's rule).
+/// Bare whole numbers up to this, with no `%` and no unit or rate word after
+/// them, are counts, round numbers and codes, not findings: never flagged.
 const SMALL_INT: f64 = 12.0;
+
+/// What makes a small whole number a finding: a unit or rate word right after
+/// it, or after the rest of its range ("3 days", "3-day", "7-10 days", "7 to
+/// 10 days", "2 of 5"). Spec section 15, P13.
+static UNIT_AFTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:\s*(?:[\-\u{2013}\u{2014}]|to\b)\s*\d+(?:\.\d+)?)?[\s\-]*(?:%|(?:days?|weeks?|months?|years?|hours?|minutes?|mm|cm|ml|kg|percent|per\s+cent|of|in|out\s+of)\b)",
+    )
+    .expect("unit after")
+});
 
 /// `[1]`, `[2, 3]`, `[1-3]`: citation markers.
 static MARKER: LazyLock<Regex> =
@@ -184,6 +195,11 @@ pub fn run(
     let mut allowed: Vec<f64> = Vec::new();
     for n in &cited {
         if let Some(p) = n.checked_sub(1).and_then(|i| passages.get(i as usize)) {
+            // The mark does not say how far back its run goes, and it can
+            // follow a whole field, so such a passage vouches for no number.
+            if p.contains(NOT_TRACED_MARK) {
+                continue;
+            }
             let clean = MARKER.replace_all(p, " ");
             for (_, _, vals, _) in text_numbers(&clean) {
                 allowed.extend(vals);
@@ -195,7 +211,7 @@ pub fn run(
             continue;
         }
         let token = &body[s..e];
-        let whole = dp == 0 && !token.ends_with('%');
+        let whole = dp == 0 && !token.ends_with('%') && !UNIT_AFTER.is_match(&body[e..]);
         let own = has_own_sign(&body, s);
         let ok = vals.iter().all(|v| {
             (whole && v.fract() == 0.0 && v.abs() <= SMALL_INT) || traced(*v, dp, own, &allowed)
@@ -309,10 +325,74 @@ mod tests {
     fn range_is_checked() {
         let c = run("Stay was 15-20 days [1].", &[P2], None, &pairs());
         assert_eq!(c.not_traced, vec!["20".to_string()]);
-        let c = run("Stay was 7\u{2013}10 days [1].", &[P1], None, &pairs());
-        assert!(c.not_traced.is_empty());
+        // Both ends of a range carry its unit.
+        for t in ["Stay was 7\u{2013}10 days [1].", "Stay was 7-10 days [1]."] {
+            let c = run(t, &[P1], None, &pairs());
+            assert_eq!(c.not_traced, vec!["7".to_string(), "10".to_string()], "{t}");
+        }
+        let c = run("Stay was 7 to 10 days [1].", &[P1], None, &pairs());
+        assert_eq!(c.not_traced, vec!["7".to_string(), "10".to_string()]);
         let c = run("Stay was 7\u{2013}14 days [1].", &[P1], None, &pairs());
-        assert_eq!(c.not_traced, vec!["14".to_string()]);
+        assert_eq!(c.not_traced, vec!["7".to_string(), "14".to_string()]);
+        // Held by the cited passage: nothing to flag.
+        let c = run("Stay was 7-10 days [1].", &["Stay 7 to 10 days."], None, &pairs());
+        assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
+    }
+
+    #[test]
+    fn a_small_number_with_a_unit_or_rate_word_is_a_finding() {
+        for (t, n) in [
+            ("You go home 3 days sooner [1].", "3"),
+            ("Back at work in 2 weeks [1].", "2"),
+            ("Recovery took 1 week [1].", "1"),
+            ("After 6 months [1].", "6"),
+            ("At 5 years [1].", "5"),
+            ("A 3-year follow-up [1].", "3"),
+            ("About 2 hours [1].", "2"),
+            ("Saved 9 minutes [1].", "9"),
+            ("Mesh of 5 mm [1].", "5"),
+            ("Defect of 4cm [1].", "4"),
+            ("Blood loss of 10 ml [1].", "10"),
+            ("Lost 2 kg [1].", "2"),
+            ("A rate of 5 percent [1].", "5"),
+            ("A rate of 5 per cent [1].", "5"),
+            ("A rate of 5 % [1].", "5"),
+            ("Seen in 4 of the patients [1].", "4"),
+            ("About 1 in 5 [1].", "1"),
+            ("About 3 out of 8 [1].", "3"),
+            ("3 DAYS sooner [1].", "3"),
+        ] {
+            let c = run(t, &[P2], None, &pairs());
+            assert!(c.not_traced.contains(&n.to_string()), "{t}: {:?}", c.not_traced);
+        }
+    }
+
+    #[test]
+    fn a_small_number_counting_things_stays_exempt() {
+        for t in [
+            "Two trials agree [1].",
+            "3 studies agree [1].",
+            "3 trials agree [1].",
+            "It was grade 2 [1].",
+            "Round 3 [1].",
+            "3 injuries and 4 officers [1].",
+        ] {
+            let c = run(t, &[P2], None, &pairs());
+            assert!(c.not_traced.is_empty(), "{t}: {:?}", c.not_traced);
+        }
+    }
+
+    #[test]
+    fn numbers_in_a_cited_passage_marked_not_traced_are_not_allowed() {
+        let marked = "Stay 4.5 days (not traced); 18 minutes longer.";
+        let c = run("Stay was 4.5 days [1].", &["Stay 4.5 days (not traced)"], None, &pairs());
+        assert_eq!(c.not_traced, vec!["4.5".to_string()]);
+        // The mark does not say how far back its run goes, so nothing counts.
+        let c = run("18 minutes longer [1].", &[marked], None, &pairs());
+        assert_eq!(c.not_traced, vec!["18".to_string()]);
+        // Another cited passage still holds it, and text is kept either way.
+        let c = run("Stay was 4.5 days [1, 2].", &[marked, "Stay 4.5 days."], None, &pairs());
+        assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
     }
 
     #[test]

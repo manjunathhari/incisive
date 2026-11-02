@@ -92,6 +92,9 @@ impl BuildError {
 /// Longest abstract piece, in words.
 pub const ABSTRACT_WORDS: usize = 120;
 
+/// The words that follow a number the answer could not trace. The reply
+/// checks read them, so a marked number never vouches for a reply.
+pub const NOT_TRACED_MARK: &str = "(not traced)";
 const NOT_TRACED: &str = " (not traced)";
 
 struct Ctx<'a> {
