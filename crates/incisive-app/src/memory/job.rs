@@ -284,3 +284,19 @@ pub async fn memory_loop(state: AppState) {
         }
     }
 }
+
+/// Queue every existing Full run with a `done` Expert Opinion that has no
+/// memory job yet. Returns how many jobs were queued.
+pub async fn backfill(pool: &PgPool) -> sqlx::Result<u64> {
+    let r = sqlx::query(
+        "INSERT INTO incisive.memory_jobs (run_id) \
+         SELECT r.id FROM incisive.runs r \
+         JOIN incisive.run_temporal t ON t.run_id = r.id \
+         WHERE r.mode = 'focused' AND t.status = 'done' \
+           AND NOT EXISTS (SELECT 1 FROM incisive.memory_jobs j WHERE j.run_id = r.id) \
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}

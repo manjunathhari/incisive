@@ -426,3 +426,24 @@ async fn store_failure_retries_until_attempts_spent() {
     }
     assert!(!store::claim_jobs(&pool, 10).await.unwrap().contains(&run));
 }
+
+#[tokio::test]
+async fn backfill_enqueues_once() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let eligible_a = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let eligible_b = seed(&pool, &ACHALASIA, "focused", Some("done")).await;
+    let quick = seed(&pool, &HERNIA, "quick", Some("done")).await;
+    let no_opinion = seed(&pool, &HERNIA, "focused", None).await;
+    let queued = job::backfill(&pool).await.unwrap();
+    assert!(queued >= 2, "queued {queued}");
+    assert_eq!(job_row_count(&pool, eligible_a).await, 1);
+    assert_eq!(job_row_count(&pool, eligible_b).await, 1);
+    assert_eq!(job_row_count(&pool, quick).await, 0);
+    assert_eq!(job_row_count(&pool, no_opinion).await, 0);
+    // The first call queued every eligible run, so a second call adds none.
+    assert_eq!(job::backfill(&pool).await.unwrap(), 0);
+    assert_eq!(job_row_count(&pool, eligible_a).await, 1);
+    assert_eq!(job_row_count(&pool, eligible_b).await, 1);
+}
