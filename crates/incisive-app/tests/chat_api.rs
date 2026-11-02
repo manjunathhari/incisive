@@ -647,6 +647,30 @@ async fn sources_from_a_real_turn_view_open_in_the_passage_route() {
     }
 }
 
+/// A pool of one connection: asking for a second inside the transaction would
+/// wait until the pool gave up.
+#[tokio::test]
+async fn suggest_holds_one_connection() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, _) = ready(&pool, &HERNIA).await;
+    let turn = done_turn(&pool, run, &user, 1, &[]).await;
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect(&std::env::var("TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let out = incisive_app::chat::store::suggest_turn(&one, user.id, turn)
+        .await
+        .expect("no second connection");
+    assert!(matches!(
+        out,
+        incisive_app::chat::store::SuggestOutcome::Filed { created: true, .. }
+    ));
+}
+
 #[tokio::test]
 async fn suggest_is_idempotent_and_only_for_done_turns() {
     let Some((_g, pool)) = begin().await else {
@@ -1007,6 +1031,22 @@ async fn errors_map_to_statuses_and_carry_the_safety_line() {
         let (code, _) = call(api_routes(st.clone()), post(e, &uri, body)).await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
     }
+    // A bad mode does not hide symptoms in a question that could be read.
+    for mode in [json!("Clinical"), json!(3), Value::Null] {
+        let body = json!({"question": "I have a fever", "mode": mode});
+        let (code, b) = call(api_routes(st.clone()), post(e, &uri, body)).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(b["safety_line"], json!(true));
+        assert_eq!(b["lines"], json!([lines::WARNING_LINE]));
+    }
+    let body = json!({"question": "I have a fever"});
+    let (code, b) = call(api_routes(st.clone()), post(e, &uri, body)).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(b["lines"], json!([lines::WARNING_LINE]));
+    let body = json!({"question": "stay?", "mode": "Clinical"});
+    let (code, b) = call(api_routes(st.clone()), post(e, &uri, body)).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(b["safety_line"], json!(false));
 }
 
 #[tokio::test]

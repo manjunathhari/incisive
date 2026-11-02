@@ -152,7 +152,8 @@ pub async fn set_passage_vector(
     Ok(())
 }
 
-/// Counts one failure that was the passage's own (bad body, wrong size, 4xx).
+/// Counts one failure that was the passage's own (bad body, wrong size, or a
+/// 400, 413 or 422).
 pub async fn note_passage_attempt(pool: &PgPool, id: i64) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE incisive.chat_passages SET embed_attempts = embed_attempts + 1 WHERE id = $1",
@@ -164,12 +165,14 @@ pub async fn note_passage_attempt(pool: &PgPool, id: i64) -> sqlx::Result<()> {
 }
 
 /// Resolves turns left `pending` past [`STALE_TURN_SECS`] (their instance
-/// died): text so far becomes `partial`, none becomes `unavailable`. This
-/// frees the user's one-pending slot. Returns how many were resolved.
+/// died): text so far becomes `partial`, none becomes `unavailable`, and
+/// `checks` says no check ran. This frees the user's one-pending slot.
+/// Returns how many were resolved.
 pub async fn resolve_stale_turns(pool: &PgPool) -> sqlx::Result<u64> {
     let r = sqlx::query(
         "UPDATE incisive.chat_turns \
          SET status = CASE WHEN reply <> '' THEN 'partial' ELSE 'unavailable' END, \
+             checks = '{\"unchecked\": true}', \
              updated_at = now() \
          WHERE status = 'pending' AND updated_at < now() - make_interval(secs => $1)",
     )
@@ -584,17 +587,31 @@ pub enum SuggestOutcome {
 
 /// Files a `done` turn as a `suggested` Q&A under its record's live topic
 /// and sets `suggested`. Idempotent: the turn row is locked for the check, so
-/// two calls make one Q&A.
+/// two calls make one Q&A. The topic is resolved before the transaction, so
+/// it holds one connection, never waits on a second.
 pub async fn suggest_turn(
     pool: &PgPool,
     user_id: i64,
     turn_id: i64,
 ) -> sqlx::Result<SuggestOutcome> {
+    let topic: Option<i64> = sqlx::query_scalar(
+        "SELECT e.topic_id FROM incisive.chat_turns t \
+         JOIN incisive.chat_conversations c ON c.id = t.conversation_id \
+         JOIN incisive.evidence_records e ON e.source_run_id = c.run_id \
+         WHERE t.id = $1 AND t.user_id = $2",
+    )
+    .bind(turn_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    // The record's topic may have been merged since; file under the live one.
+    let topic = match topic {
+        Some(t) => Some(crate::memory::store::resolve_topic(pool, t).await?),
+        None => None,
+    };
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
-        "SELECT t.status, t.question, t.reply, c.run_id \
-         FROM incisive.chat_turns t \
-         JOIN incisive.chat_conversations c ON c.id = t.conversation_id \
+        "SELECT t.status, t.question, t.reply FROM incisive.chat_turns t \
          WHERE t.id = $1 AND t.user_id = $2 FOR UPDATE OF t",
     )
     .bind(turn_id)
@@ -625,18 +642,9 @@ pub async fn suggest_turn(
             created: false,
         });
     }
-    let run_id: Uuid = row.try_get("run_id")?;
-    let topic: Option<i64> = sqlx::query_scalar(
-        "SELECT topic_id FROM incisive.evidence_records WHERE source_run_id = $1",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await?;
     let Some(topic) = topic else {
         return Ok(SuggestOutcome::NoTopic);
     };
-    // The record's topic may have been merged since; file under the live one.
-    let topic = crate::memory::store::resolve_topic(pool, topic).await?;
     let qa_id: i64 = sqlx::query_scalar(
         "INSERT INTO incisive.topic_qas \
          (topic_id, source_turn_id, question, gemma_reply, status, author_user_id) \

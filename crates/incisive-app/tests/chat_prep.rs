@@ -362,6 +362,45 @@ async fn embedded(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
+/// A server refusing every call is not the passage's fault: the sweep stops
+/// at the first one and no attempt is spent.
+#[tokio::test]
+async fn sweep_refused_by_the_server_spends_no_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    seed_record(&pool, &ACHALASIA).await;
+    let mut prepared = false;
+    for code in [403u16, 404, 408, 429] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        let st = embed_state(pool.clone(), &server.uri());
+        if !prepared {
+            job::tick(&st).await;
+            prepared = true;
+        }
+        assert_eq!(job::sweep_passage_vectors(&st).await, 0, "{code}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{code} stops the sweep"
+        );
+        let spent: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(embed_attempts), 0)::bigint FROM incisive.chat_passages",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(spent, 0, "{code} spends no attempt");
+    }
+}
+
 #[tokio::test]
 async fn sweep_fills_vectors_and_gives_up_after_five_bad_attempts() {
     use wiremock::matchers::{method, path};
@@ -557,4 +596,12 @@ async fn stale_pending_turn_becomes_partial_after_90s() {
         .await
         .unwrap();
     assert_eq!(text, "The mesh group had");
+    // No check ran on what the sweep kept, and the stored row says so.
+    let checks: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT checks FROM incisive.chat_turns WHERE id = $1")
+            .bind(with_text)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(checks, Some(serde_json::json!({"unchecked": true})));
 }

@@ -836,3 +836,45 @@ async fn record_stops_being_swept_after_five_failed_attempts() {
     assert_eq!(job::sweep_embeddings(&st).await, 0);
     assert_eq!(attempts(pool.clone()).await, 5);
 }
+
+/// A server refusing every call (a proxy's 403, a missing model's 404, 408, a
+/// rate limit's 429) is not the record's fault: the sweep stops at the first
+/// one and no attempt is spent.
+#[tokio::test]
+async fn sweep_refused_by_the_server_spends_no_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let plain = state(pool.clone(), true);
+    for fx in [&HERNIA, &ACHALASIA] {
+        let run = seed(&pool, fx, "focused", Some("done")).await;
+        assert!(matches!(
+            job::process(&plain, run).await,
+            JobOutcome::Done { .. }
+        ));
+    }
+    for code in [403u16, 404, 408, 429] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        let st = embed_state(pool.clone(), &server.uri());
+        assert_eq!(job::sweep_embeddings(&st).await, 0, "{code}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{code} stops the sweep"
+        );
+        let spent: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(embed_attempts), 0)::bigint FROM incisive.evidence_records",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(spent, 0, "{code} spends no attempt");
+    }
+}

@@ -168,6 +168,53 @@ pub fn asked(question: &str, pairs: &[(String, String)]) -> Option<String> {
     }
 }
 
+/// Whether `surface` occurs in `text` as whole words.
+fn has_words(text: &str, surface: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric();
+    text.match_indices(surface).any(|(a, m)| {
+        !text[..a].chars().next_back().is_some_and(is_word)
+            && !text[a + m.len()..].chars().next().is_some_and(is_word)
+    })
+}
+
+/// Whether the canonical `arm` is one the record compares, by its own name or
+/// inside a longer one ("robotic" in "robotic tar", "laparoscopic" in
+/// "laparoscopic heller myotomy").
+fn in_record(arm: &str, pairs: &[(String, String)]) -> bool {
+    let surfaces = |canon: &str| -> Vec<String> {
+        std::iter::once(canon.to_string())
+            .chain(
+                ALIASES
+                    .iter()
+                    .filter(|(_, c)| *c == canon)
+                    .map(|(s, _)| (*s).to_string()),
+            )
+            .collect()
+    };
+    let wanted = surfaces(arm);
+    pairs.iter().flat_map(|(a, b)| [a, b]).any(|recorded| {
+        let n = normalise_arm(recorded);
+        std::iter::once(n.clone())
+            .chain(surfaces(&canonical(&n)))
+            .any(|text| wanted.iter().any(|w| has_words(&text, w)))
+    })
+}
+
+/// What a text's evidence must be about, in the form `retrieve::top` and
+/// `checks::run` take: the comparison key when exactly two arms are named;
+/// otherwise the first arm named that the record does not compare. `None`
+/// when nothing narrows it (also for a record with no known pairs).
+pub fn focus(text: &str, pairs: &[(String, String)]) -> Option<String> {
+    let arms = arms_named(text, pairs);
+    if let [a, b] = arms.as_slice() {
+        return Some(key(a, b));
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    arms.into_iter().find(|a| !in_record(a, pairs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +267,51 @@ mod tests {
         assert_eq!(asked("How long is the stay?", &rl()), None);
         // Three arms: no single pair to hold the answer to.
         assert_eq!(asked("POEM or Heller or dilation?", &ach()), None);
+    }
+
+    #[test]
+    fn focus_is_the_pair_or_an_arm_the_record_does_not_compare() {
+        assert_eq!(
+            focus("Is open repair safe?", &rl()),
+            Some("open".to_string())
+        );
+        assert_eq!(focus("and open?", &rl()), Some("open".to_string()));
+        // Three arms, one outside the record.
+        assert_eq!(
+            focus("robotic or laparoscopic? and open?", &rl()),
+            Some("open".to_string())
+        );
+        // Exactly two arms: the pair, as before.
+        assert_eq!(
+            focus("robotic or open?", &rl()),
+            Some(key("robotic", "open"))
+        );
+        assert_eq!(
+            focus("robotic or laparoscopic?", &rl()),
+            Some(key("robotic", "laparoscopic"))
+        );
+        // Arms the record compares narrow nothing.
+        assert_eq!(focus("Is robotic safe?", &rl()), None);
+        assert_eq!(focus("Is keyhole safe?", &rl()), None);
+        assert_eq!(focus("How long is the stay?", &rl()), None);
+        assert_eq!(focus("Is open safe?", &[]), None);
+    }
+
+    #[test]
+    fn an_arm_inside_the_records_longer_name_is_in_the_record() {
+        let tar = vec![p("robotic TAR", "open TAR")];
+        assert_eq!(focus("Is robotic safe?", &tar), None);
+        assert_eq!(focus("Is open safe?", &tar), None);
+        assert_eq!(
+            focus("Is laparoscopic safe?", &tar),
+            Some("laparoscopic".to_string())
+        );
+        // "laparoscopic" is inside what `lhm` stands for.
+        assert_eq!(focus("Is laparoscopic safe?", &ach()), None);
+        assert_eq!(
+            focus("Is robotic safe?", &ach()),
+            Some("robotic".to_string())
+        );
     }
 
     #[test]

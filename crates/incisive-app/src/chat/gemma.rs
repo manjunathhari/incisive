@@ -43,11 +43,11 @@ pub enum GemmaError {
 
 impl GemmaError {
     /// The server itself is unavailable or refusing us. Same rule as
-    /// `EmbedError`.
+    /// `EmbedError`: only 400, 413 and 422 are about this request.
     pub fn is_server_unavailable(&self) -> bool {
         match self {
             GemmaError::Timeout | GemmaError::Unauthorized => true,
-            GemmaError::Http(c) => *c == 0 || *c >= 500,
+            GemmaError::Http(c) => !matches!(c, 400 | 413 | 422),
             GemmaError::BadBody | GemmaError::Upstream => false,
         }
     }
@@ -68,7 +68,8 @@ impl GemmaError {
 pub enum StreamEnd {
     /// Ollama's `done` line arrived.
     Complete,
-    /// The time limit hit after some text had arrived.
+    /// The time limit hit after some text had arrived, or Ollama stopped at
+    /// `num_predict` (`done_reason: "length"`).
     CutAtLimit,
 }
 
@@ -186,8 +187,8 @@ impl GemmaChat {
                     // A last line with no newline.
                     if buf.iter().any(|b| !b.is_ascii_whitespace()) {
                         let line = std::mem::take(&mut buf);
-                        if handle_line(&line, &mut on_text, &mut got_text)? {
-                            return Ok(StreamEnd::Complete);
+                        if let Some(end) = handle_line(&line, &mut on_text, &mut got_text)? {
+                            return Ok(end);
                         }
                     }
                     return Err(GemmaError::BadBody);
@@ -195,8 +196,8 @@ impl GemmaChat {
             }
             while let Some(i) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=i).collect();
-                if handle_line(&line, &mut on_text, &mut got_text)? {
-                    return Ok(StreamEnd::Complete);
+                if let Some(end) = handle_line(&line, &mut on_text, &mut got_text)? {
+                    return Ok(end);
                 }
             }
         }
@@ -223,14 +224,14 @@ impl GemmaChat {
     }
 }
 
-/// One NDJSON line. `Ok(true)` on the `done` line.
+/// One NDJSON line. `Ok(Some(_))` on the `done` line: how the stream ended.
 fn handle_line(
     line: &[u8],
     on_text: &mut impl FnMut(&str),
     got_text: &mut bool,
-) -> Result<bool, GemmaError> {
+) -> Result<Option<StreamEnd>, GemmaError> {
     if line.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(false);
+        return Ok(None);
     }
     let v: Value = serde_json::from_slice(line).map_err(|_| GemmaError::BadBody)?;
     if v.get("error").is_some() {
@@ -245,7 +246,16 @@ fn handle_line(
         *got_text = true;
         on_text(t);
     }
-    Ok(v.get("done").and_then(Value::as_bool) == Some(true))
+    if v.get("done").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    Ok(Some(
+        if v.get("done_reason").and_then(Value::as_str) == Some("length") {
+            StreamEnd::CutAtLimit
+        } else {
+            StreamEnd::Complete
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -478,6 +488,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn done_reason_length_is_cut_at_limit() {
+        for (done, end) in [
+            (
+                "{\"done\":true,\"done_reason\":\"length\"}\n",
+                StreamEnd::CutAtLimit,
+            ),
+            (
+                "{\"done\":true,\"done_reason\":\"length\"}",
+                StreamEnd::CutAtLimit,
+            ),
+            (DONE, StreamEnd::Complete),
+            ("{\"done\":true}\n", StreamEnd::Complete),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/chat"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    format!("{}{done}", line("Stay fell")),
+                    "application/x-ndjson",
+                ))
+                .mount(&server)
+                .await;
+            let mut got = String::new();
+            let e = client(server.uri())
+                .stream(&req(), T, |t| got.push_str(t))
+                .await
+                .unwrap();
+            assert_eq!(e, end, "{done}");
+            assert_eq!(got, "Stay fell");
+        }
+    }
+
+    #[tokio::test]
     async fn html_404_and_401_map_to_codes() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -490,7 +533,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(e, GemmaError::Http(404));
         assert_eq!(e.code(), "http");
-        assert!(!e.is_server_unavailable());
+        // The server, not this request: same rule as embeddings.
+        assert!(e.is_server_unavailable());
+        for c in [403, 408, 429] {
+            assert!(GemmaError::Http(c).is_server_unavailable(), "{c}");
+        }
+        for c in [400, 413, 422] {
+            assert!(!GemmaError::Http(c).is_server_unavailable(), "{c}");
+        }
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))

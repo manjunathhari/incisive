@@ -269,3 +269,28 @@ async fn other_records_passages_are_never_returned() {
     assert!(hits.is_empty());
     let _ = retrieve::TOP_N;
 }
+
+/// An arm the record does not compare: only passages tagged with that arm, and
+/// untagged ones, come through.
+#[tokio::test]
+async fn single_arm_keeps_only_passages_tagged_with_it() {
+    let Some(pool) = connect().await else {
+        return;
+    };
+    let t = topic(&pool).await;
+    let r = record(&pool, t).await;
+    let rl = passage(&pool, r, 0, "zebra stay", &[RL], None).await;
+    let open = passage(&pool, r, 1, "zebra stay", &[RO], None).await;
+    let plain = passage(&pool, r, 2, "zebra stay", &[], None).await;
+    let hits = top(&pool, r, t, Some("open"), "zebra stay", None, 0.1)
+        .await
+        .unwrap();
+    let ids: Vec<i64> = hits.iter().filter_map(|h| h.passage_id).collect();
+    assert_eq!(ids, [open, plain], "not {rl}");
+    // A key still needs the whole key.
+    let hits = top(&pool, r, t, Some(RL), "zebra stay", None, 0.1)
+        .await
+        .unwrap();
+    let ids: Vec<i64> = hits.iter().filter_map(|h| h.passage_id).collect();
+    assert_eq!(ids, [rl, plain]);
+}

@@ -638,7 +638,21 @@ Repository variables read by the deploy workflow (all optional; unset means the 
 | `CHAT_PRIOR` | `on` / `off` (default on when `CHAT` is on) | Gemma's expected answer and its reconciliation (owner view only). |
 | `CHAT_MIN_SCORE` | 0-1 (default 0.45) | Retrieval score floor; a placeholder until calibration. |
 
-Order: Memory layer working (`MEMORY=on`, Gemma reachable) -> set `CHAT=on` -> re-run Deploy.
+Order: Memory layer working (`MEMORY=on`, Gemma reachable) -> `CPU_ALWAYS=true` (a reply is written
+after its request has returned, so the CPU must stay on; the deploy refuses `CHAT=on` without it) ->
+set `CHAT=on` -> re-run Deploy.
 
 Rollback: `CHAT=off` and re-run Deploy (tables, passages and conversations stay). `MEMORY=off` also
 turns chat off.
+
+**Embedding attempts.** A row is left out of the embedding sweeps after 5 failures of its own. Only a
+bad body, a wrong size, or a 400, 413 or 422 counts as its own; a timeout and every other status mean
+the server is refusing, and stop the sweep with nothing counted. Once a cause is fixed, or if rows
+were counted under the older rule (where 403, 404, 408 and 429 counted), give them their attempts back
+in the Supabase SQL editor; the next sweep picks them up:
+
+```sql
+UPDATE incisive.evidence_records SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
+UPDATE incisive.chat_passages SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
+UPDATE incisive.topic_qas SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
+```

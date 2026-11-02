@@ -8,8 +8,8 @@
 //! carries the safety line, `safety_line` is true and `lines` holds the
 //! fixed warning text, so the page can show it with no answer.
 //!
-//! Status per error: `NotFound` 404; `Empty`, `TooLong`, `BadFeedback`
-//! and a malformed body 400; `Identifiers` 422; `InFlight`, `NotOffered`,
+//! Status per error: `NotFound` 404; `Empty`, `TooLong`, `BadFeedback`,
+//! `BadMode` and a malformed body 400; `Identifiers` 422; `InFlight`, `NotOffered`,
 //! `NotSuggestable` 409; `Busy`, `DailyLimit` 429; `Unavailable` 503;
 //! `Failed` 500.
 //!
@@ -115,6 +115,12 @@ fn parts(e: ChatError) -> (StatusCode, &'static str, String, bool) {
             BAD_REQUEST_MESSAGE.into(),
             false,
         ),
+        BadMode { safety_line } => (
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            BAD_REQUEST_MESSAGE.into(),
+            safety_line,
+        ),
         NotSuggestable => (
             StatusCode::CONFLICT,
             "not_suggestable",
@@ -192,7 +198,10 @@ pub async fn state_handler(
 #[derive(Deserialize)]
 struct AskBody {
     question: String,
-    mode: String,
+    /// Read loosely: a mode that is missing or the wrong type must not hide
+    /// the question from the safety check.
+    #[serde(default)]
+    mode: serde_json::Value,
 }
 
 /// `POST /api/runs/{id}/chat` with `{question, mode}`.
@@ -209,8 +218,11 @@ pub async fn ask_handler(
     let Ok(b) = serde_json::from_slice::<AskBody>(&body) else {
         return bad_request();
     };
-    let Some(mode) = ChatMode::parse(&b.mode) else {
-        return bad_request();
+    let Some(mode) = b.mode.as_str().and_then(ChatMode::parse) else {
+        // The question was readable, so it still gets the safety line.
+        return error_response(ChatError::BadMode {
+            safety_line: lines::warning_symptoms(&b.question),
+        });
     };
     match service::ask(&state, &user, run, &b.question, mode).await {
         Ok(a) => {

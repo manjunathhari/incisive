@@ -56,9 +56,10 @@ pub fn query_text(question: &str, previous: Option<&str>) -> String {
 /// * `record_id`: only this record's passages are read.
 /// * `topic_id`: the record's topic; its approved Q&As count, and so do those
 ///   of every topic it was merged into (`merged_into` chain, cycle-safe).
-/// * `asked`: the comparison key the question names. A passage tagged with
-///   comparisons, none of them this one, is out; untagged passages stay.
-///   `None` excludes nothing.
+/// * `asked`: from [`super::comparison::focus`]. A comparison key: a passage
+///   tagged with comparisons, none of them this one, is out. A single arm (no
+///   `|`): a passage tagged with comparisons, none of them holding this arm,
+///   is out. Untagged passages stay; `None` excludes nothing.
 /// * `vector`: the question's embedding; a row without an embedding is scored
 ///   on words alone.
 ///
@@ -86,7 +87,9 @@ pub async fn top(
                 1 - (p.embedding <=> $3::vector) AS cos, {} AS share \
          FROM incisive.chat_passages p \
          WHERE p.record_id = $1 \
-           AND ($4::text IS NULL OR cardinality(p.comparisons) = 0 OR $4 = ANY(p.comparisons))",
+           AND ($4::text IS NULL OR cardinality(p.comparisons) = 0 OR $4 = ANY(p.comparisons) \
+                OR EXISTS (SELECT 1 FROM unnest(p.comparisons) AS c \
+                           WHERE $4 = ANY(string_to_array(c, '|'))))",
         share.replace("FTS", "p.fts")
     );
     let qas_sql = format!(

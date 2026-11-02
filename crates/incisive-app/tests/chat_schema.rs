@@ -131,6 +131,14 @@ async fn migration_applies_and_tables_exist() {
         .unwrap();
         assert!(found, "{t}.{c}");
     }
+    let def: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes \
+         WHERE schemaname = 'incisive' AND indexname = 'chat_turns_user_created_idx'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("daily-limit index");
+    assert!(def.contains("(user_id, created_at)"), "{def}");
 }
 
 #[tokio::test]

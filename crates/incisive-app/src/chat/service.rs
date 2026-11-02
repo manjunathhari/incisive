@@ -96,6 +96,10 @@ pub enum ChatError {
     Failed,
     /// Feedback other than 1 or -1.
     BadFeedback,
+    /// A readable question with a mode that is not one.
+    BadMode {
+        safety_line: bool,
+    },
     /// A turn that is not `done`, or whose run has no record to file under.
     NotSuggestable,
 }
@@ -169,9 +173,10 @@ pub struct ChatView {
 }
 
 fn view_of(t: TurnRow) -> TurnView {
+    let busy = is_busy(t.checks.as_ref());
     let reply = match t.status.as_str() {
         "not_covered" => lines::NOT_COVERED.to_string(),
-        "unavailable" if is_busy(t.checks.as_ref()) => lines::BUSY.to_string(),
+        "unavailable" if busy => lines::BUSY.to_string(),
         "unavailable" => lines::UNAVAILABLE.to_string(),
         _ => t.reply,
     };
@@ -190,8 +195,13 @@ fn view_of(t: TurnRow) -> TurnView {
         status: t.status,
         mode: t.mode,
         sources: t.passage_ids.into_iter().map(source_of).collect(),
-        // `None` for a turn with no checks, and for the busy marker.
-        checks: t.checks.and_then(|c| serde_json::from_value(c).ok()),
+        // The busy marker is not a flag: test for it first, because any JSON
+        // object now reads as `Checks`.
+        checks: if busy {
+            None
+        } else {
+            t.checks.and_then(|c| serde_json::from_value(c).ok())
+        },
         lines: fixed,
         safety_line: t.safety_line,
         personal: t.personal,
@@ -494,10 +504,11 @@ async fn reply_to(job: &TurnJob) -> Result<(), &'static str> {
         .await
         .map_err(|_| "record")?;
     let pairs = job::record_pairs(&record)?;
-    // What the question names; a short follow-up stays on the comparison it
-    // follows ("how sure is that?" after "robotic or open?").
+    // What the question names; a short follow-up stays on what it follows
+    // ("how sure is that?" after "robotic or open?"). An arm the record does
+    // not compare holds the search to that arm ("and open?").
     let asked =
-        comparison::asked(&job.question, &pairs).or_else(|| comparison::asked(&query, &pairs));
+        comparison::focus(&job.question, &pairs).or_else(|| comparison::focus(&query, &pairs));
 
     let vector = query_vector(&job.state, &query).await;
     let hits = retrieve::top(
@@ -765,6 +776,47 @@ mod tests {
             settle("Not covered in this evidence.", &cut),
             Settled::NotCovered
         );
+    }
+
+    fn row(status: &str, reply: &str, checks: Option<Value>) -> TurnRow {
+        TurnRow {
+            id: 1,
+            seq: 1,
+            question: "q".into(),
+            reply: reply.into(),
+            status: status.into(),
+            mode: "clinical".into(),
+            passage_ids: Vec::new(),
+            checks,
+            safety_line: false,
+            personal: false,
+            feedback: None,
+            suggested: false,
+            latency_ms: None,
+        }
+    }
+
+    #[test]
+    fn the_busy_marker_is_not_read_as_checks() {
+        let v = view_of(row("unavailable", "", Some(json!({BUSY_KEY: true}))));
+        assert_eq!(v.reply, lines::BUSY);
+        assert_eq!(v.checks, None);
+    }
+
+    #[test]
+    fn a_swept_partial_turn_is_not_clean() {
+        let v = view_of(row("partial", "so far", Some(json!({"unchecked": true}))));
+        assert_eq!(v.reply, "so far");
+        let c = v.checks.expect("reported, not hidden");
+        assert!(c.unchecked);
+        assert!(!c.is_clean());
+    }
+
+    #[test]
+    fn an_older_row_keeps_its_flags() {
+        let v = view_of(row("done", "r", Some(json!({"uncited": true}))));
+        let c = v.checks.expect("older row reads");
+        assert!(c.uncited && !c.is_clean());
     }
 
     #[test]

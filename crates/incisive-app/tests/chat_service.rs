@@ -1480,6 +1480,144 @@ async fn follow_up_stays_on_the_asked_comparison() {
 
 // ---------- state ----------
 
+/// The hernia record compares robotic with laparoscopic: its passages say
+/// nothing about open, whatever words they share with the question.
+#[tokio::test]
+async fn an_arm_outside_the_record_never_reads_its_tagged_passages() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, rec) = ready(&pool, &HERNIA).await;
+    let rl = "Zebra repair is safe with low recurrence";
+    add_passage(&pool, rec, 9001, rl, &["laparoscopic|robotic"]).await;
+    let plain = "Zebra repair general note";
+    add_passage(&pool, rec, 9002, plain, &[]).await;
+    let tagged_with_open = "Zebra repair after open surgery";
+    add_passage(&pool, rec, 9003, tagged_with_open, &["open|robotic"]).await;
+
+    let server = gemma_says("Robotic zebra repair is safe [1].", 1).await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let m = ChatMode::Clinical;
+
+    // A first question naming the arm.
+    let a = service::ask(&st, &user, run, "Is open zebra repair safe?", m)
+        .await
+        .unwrap();
+    let v = finished(&st, &user, a).await;
+    let sent = sent_messages(&server, 0).await;
+    let prompt = sent.iter().map(|(_, c)| c.as_str()).collect::<String>();
+    assert!(!prompt.contains(rl), "{prompt}");
+    assert!(prompt.contains(tagged_with_open), "{prompt}");
+    assert_eq!(
+        v.checks.expect("checked").comparison_mismatch,
+        ["robotic"],
+        "a reply about another arm is flagged"
+    );
+    assert_eq!(
+        stored_reply(&pool, a.turn_id).await,
+        "Robotic zebra repair is safe [1].",
+        "and kept"
+    );
+}
+
+#[tokio::test]
+async fn follow_up_naming_an_arm_outside_the_record_leaves_the_pair_behind() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, rec) = ready(&pool, &HERNIA).await;
+    let rl = "Zebra repair robotic laparoscopic";
+    add_passage(&pool, rec, 9001, rl, &["laparoscopic|robotic"]).await;
+    let open = "Zebra repair after open surgery";
+    add_passage(&pool, rec, 9002, open, &["open|robotic"]).await;
+
+    let server = gemma_says("Zebra repair is safe [1].", 2).await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let m = ChatMode::Clinical;
+    let a = service::ask(&st, &user, run, "robotic or laparoscopic zebra repair?", m)
+        .await
+        .unwrap();
+    wait_turn(&pool, a.turn_id).await;
+    let first = sent_messages(&server, 0).await;
+    assert!(first.iter().any(|(_, c)| c.contains(rl)));
+
+    let a = service::ask(&st, &user, run, "and open?", m).await.unwrap();
+    wait_turn(&pool, a.turn_id).await;
+    let second = sent_messages(&server, 1).await;
+    let prompt = second.iter().map(|(_, c)| c.as_str()).collect::<String>();
+    assert!(!prompt.contains(rl), "{prompt}");
+    assert!(prompt.contains(open), "{prompt}");
+}
+
+/// A record whose every passage is about its own pair has nothing to say about
+/// an arm outside it, and Gemma is never asked (C8).
+#[tokio::test]
+async fn only_tagged_passages_means_not_covered_for_an_outside_arm() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, rec) = seed_record(&pool, &HERNIA).await;
+    job::tick(&no_gemma(pool.clone())).await;
+    sqlx::query(
+        "UPDATE incisive.chat_passages SET comparisons = '{laparoscopic|robotic}' \
+         WHERE record_id = $1",
+    )
+    .bind(rec)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let server = gemma_says("never", 0).await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let a = service::ask(&st, &user, run, "Is open repair safe?", ChatMode::Clinical)
+        .await
+        .unwrap();
+    assert_eq!(finished(&st, &user, a).await.status, "not_covered");
+}
+
+/// Ollama stopped at `num_predict`: what came is kept, marked as cut short.
+#[tokio::test]
+async fn a_reply_stopped_at_the_length_limit_is_partial() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, _) = ready(&pool, &HERNIA).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "{}{{\"done\":true,\"done_reason\":\"length\"}}\n",
+                line("Zebra recurrence was 5% [1] and")
+            ),
+            "application/x-ndjson",
+        ))
+        .mount(&server)
+        .await;
+    let st = with_gemma(pool.clone(), &server.uri());
+    let a = service::ask(&st, &user, run, ZEBRA_Q, ChatMode::Clinical)
+        .await
+        .unwrap();
+    let v = finished(&st, &user, a).await;
+    assert_eq!(v.status, "partial");
+    assert_eq!(v.reply, "Zebra recurrence was 5% [1] and");
+}
+
+/// A dead instance's partial reply: kept, and reported as not checked.
+#[tokio::test]
+async fn a_swept_partial_turn_reads_as_not_clean() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (user, run, _) = ready(&pool, &HERNIA).await;
+    let id = add_turn(&pool, run, user.id, 1, "pending", "so far", 120).await;
+    let st = no_gemma(pool.clone());
+    assert_eq!(store::resolve_stale_turns(&pool).await.unwrap(), 1);
+    let v = service::turn_view(&st, &user, id).await.unwrap();
+    assert_eq!((v.status.as_str(), v.reply.as_str()), ("partial", "so far"));
+    let c = v.checks.expect("reported");
+    assert!(c.unchecked && !c.is_clean());
+}
+
 #[tokio::test]
 async fn quick_run_and_run_without_opinion_not_offered() {
     let Some((_g, pool)) = begin().await else {

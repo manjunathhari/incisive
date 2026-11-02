@@ -79,6 +79,9 @@ CREATE TABLE incisive.chat_turns (
 CREATE UNIQUE INDEX chat_turns_one_pending_idx
     ON incisive.chat_turns (user_id) WHERE status = 'pending';
 
+-- The daily limit counts one user's turns since midnight.
+CREATE INDEX chat_turns_user_created_idx ON incisive.chat_turns (user_id, created_at);
+
 -- Q&As suggested from turns and approved by the owner, per topic.
 CREATE TABLE incisive.topic_qas (
     id BIGSERIAL PRIMARY KEY,

@@ -11,8 +11,10 @@ use super::passages::{NOT_TRACED_MARK, RETRACTED_MARK};
 use crate::agent::extractor::has_own_sign;
 use crate::agent::temporal_writer::{text_numbers, traced};
 
-/// What the checks found in one reply.
+/// What the checks found in one reply. A field missing from a stored row
+/// reads as its default, so older rows keep their flags when one is added.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Checks {
     pub not_traced: Vec<String>,
     pub unknown_citations: Vec<u32>,
@@ -22,6 +24,8 @@ pub struct Checks {
     pub uncited: bool,
     /// A cited passage rests on a retracted paper.
     pub retracted_source: bool,
+    /// The stale sweep finished this turn: no check ran on its text.
+    pub unchecked: bool,
 }
 
 impl Checks {
@@ -33,6 +37,7 @@ impl Checks {
             && !self.you_should
             && !self.uncited
             && !self.retracted_source
+            && !self.unchecked
     }
 }
 
@@ -158,8 +163,24 @@ fn references(reply: &str, passages: &[&str]) -> Vec<(usize, usize, String)> {
     found
 }
 
+/// Each sentence's subject, taken as the first arm it names, where that is
+/// not `arm`. The reply may still compare `arm` with others.
+fn other_subjects(body: &str, arm: &str, pairs: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sentence in body.split(['.', '!', '?', '\n']) {
+        if let Some(first) = arms_named(sentence, pairs).into_iter().next()
+            && first != arm
+            && !out.contains(&first)
+        {
+            out.push(first);
+        }
+    }
+    out
+}
+
 /// Check one reply. `passages` are numbered from 1 in citations; `asked` is
-/// the comparison key of the question (`laparoscopic|robotic`), if any.
+/// what `comparison::focus` found in the question: a comparison key
+/// (`laparoscopic|robotic`), or one arm the record does not compare.
 pub fn run(
     reply: &str,
     passages: &[&str],
@@ -227,11 +248,15 @@ pub fn run(
 
     // Arms outside the asked comparison.
     if let Some(key) = asked {
-        let want: Vec<&str> = key.split('|').collect();
-        out.comparison_mismatch = arms_named(&body, pairs)
-            .into_iter()
-            .filter(|a| !want.contains(&a.as_str()))
-            .collect();
+        out.comparison_mismatch = if key.contains('|') {
+            let want: Vec<&str> = key.split('|').collect();
+            arms_named(&body, pairs)
+                .into_iter()
+                .filter(|a| !want.contains(&a.as_str()))
+                .collect()
+        } else {
+            other_subjects(&body, key, pairs)
+        };
     }
 
     out.you_should = YOU_SHOULD.is_match(&body);
@@ -339,7 +364,12 @@ mod tests {
         let c = run("Stay was 7\u{2013}14 days [1].", &[P1], None, &pairs());
         assert_eq!(c.not_traced, vec!["7".to_string(), "14".to_string()]);
         // Held by the cited passage: nothing to flag.
-        let c = run("Stay was 7-10 days [1].", &["Stay 7 to 10 days."], None, &pairs());
+        let c = run(
+            "Stay was 7-10 days [1].",
+            &["Stay 7 to 10 days."],
+            None,
+            &pairs(),
+        );
         assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
     }
 
@@ -367,7 +397,11 @@ mod tests {
             ("3 DAYS sooner [1].", "3"),
         ] {
             let c = run(t, &[P2], None, &pairs());
-            assert!(c.not_traced.contains(&n.to_string()), "{t}: {:?}", c.not_traced);
+            assert!(
+                c.not_traced.contains(&n.to_string()),
+                "{t}: {:?}",
+                c.not_traced
+            );
         }
     }
 
@@ -402,13 +436,23 @@ mod tests {
     #[test]
     fn numbers_in_a_cited_passage_marked_not_traced_are_not_allowed() {
         let marked = "Stay 4.5 days (not traced); 18 minutes longer.";
-        let c = run("Stay was 4.5 days [1].", &["Stay 4.5 days (not traced)"], None, &pairs());
+        let c = run(
+            "Stay was 4.5 days [1].",
+            &["Stay 4.5 days (not traced)"],
+            None,
+            &pairs(),
+        );
         assert_eq!(c.not_traced, vec!["4.5".to_string()]);
         // The mark does not say how far back its run goes, so nothing counts.
         let c = run("18 minutes longer [1].", &[marked], None, &pairs());
         assert_eq!(c.not_traced, vec!["18".to_string()]);
         // Another cited passage still holds it, and text is kept either way.
-        let c = run("Stay was 4.5 days [1, 2].", &[marked, "Stay 4.5 days."], None, &pairs());
+        let c = run(
+            "Stay was 4.5 days [1, 2].",
+            &[marked, "Stay 4.5 days."],
+            None,
+            &pairs(),
+        );
         assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
     }
 
@@ -506,6 +550,26 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_about_another_arm_is_flagged_when_one_arm_was_asked() {
+        for reply in [
+            "Robotic repair is safe [1].",
+            "Open repair is not studied here. Robotic repair is safe [1].",
+        ] {
+            let c = run(reply, &[P1], Some("open"), &pairs());
+            assert_eq!(c.comparison_mismatch, ["robotic"], "{reply}");
+        }
+        // Text is kept whatever is flagged; open as the subject is fine.
+        for reply in [
+            "Open repair is safe [1].",
+            "Open repair had more pain than robotic [1].",
+            "Stay was short [1].",
+        ] {
+            let c = run(reply, &[P1], Some("open"), &pairs());
+            assert!(c.comparison_mismatch.is_empty(), "{reply}");
+        }
+    }
+
+    #[test]
     fn no_asked_comparison_no_arm_flag() {
         let c = run(
             "Laparoscopic and robotic both work [1].",
@@ -581,6 +645,18 @@ J Robot Surg 2019;33:12). A second series found 7.5 vs 10.2 days.";
                 c.not_traced
             );
         }
+    }
+
+    #[test]
+    fn a_stored_row_missing_fields_keeps_its_flags() {
+        let c: Checks = serde_json::from_value(serde_json::json!({
+            "not_traced": ["18"], "uncited": true
+        }))
+        .unwrap();
+        assert_eq!(c.not_traced, ["18"]);
+        assert!(c.uncited && !c.is_clean());
+        let c: Checks = serde_json::from_value(serde_json::json!({"unchecked": true})).unwrap();
+        assert!(c.unchecked && !c.is_clean());
     }
 
     #[test]

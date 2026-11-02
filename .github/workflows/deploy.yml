@@ -213,6 +213,11 @@ jobs:
               *) echo "::error::vars.$v must be on or off (see infra/README.md, Evidence chat)"; exit 1 ;;
             esac
           done
+          # A reply is written by a task after the request has returned; with the CPU
+          # throttled between requests it stalls, so chat needs CPU_ALWAYS.
+          if [ "${CHAT//[[:space:]]/}" = "on" ] && [ "${CPU_ALWAYS//[[:space:]]/}" != "true" ]; then
+            echo "::error::vars.CHAT=on needs vars.CPU_ALWAYS=true (see infra/README.md, Evidence chat)"; exit 1
+          fi
           cl="${CHAT_DAILY_LIMIT//[[:space:]]/}"
           if [ -n "$cl" ] && ! { [[ "$cl" =~ ^[0-9]+$ ]] && [ "$cl" -ge 1 ]; }; then
             echo "::error::vars.CHAT_DAILY_LIMIT must be a whole number of 1 or more (see infra/README.md, Evidence chat)"; exit 1

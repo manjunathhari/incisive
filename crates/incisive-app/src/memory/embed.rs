@@ -23,12 +23,13 @@ pub enum EmbedError {
 
 impl EmbedError {
     /// The server itself is unavailable or refusing us, so more calls in the
-    /// same sweep would fail too. Anything else (a bad body, a wrong size, a
-    /// 4xx for this text) is about one record only.
+    /// same sweep would fail too, and no record's `embed_attempts` should be
+    /// spent on it. Only a bad body, a wrong size, or a 400, 413 or 422 for
+    /// this text is about one record.
     pub fn is_server_unavailable(&self) -> bool {
         match self {
             EmbedError::Timeout | EmbedError::Unauthorized => true,
-            EmbedError::Http(c) => *c == 0 || *c >= 500,
+            EmbedError::Http(c) => !matches!(c, 400 | 413 | 422),
             EmbedError::BadBody | EmbedError::WrongDim(_) => false,
         }
     }
@@ -263,6 +264,20 @@ mod tests {
         assert!(!dbg.contains("s3cret-pw"));
         assert!(!dbg.contains("incisive:"));
         assert!(dbg.contains("embeddinggemma"));
+    }
+
+    #[test]
+    fn only_a_fault_of_this_text_counts_against_it() {
+        for c in [0, 301, 403, 404, 405, 408, 429, 500, 503] {
+            assert!(EmbedError::Http(c).is_server_unavailable(), "{c}");
+        }
+        assert!(EmbedError::Timeout.is_server_unavailable());
+        assert!(EmbedError::Unauthorized.is_server_unavailable());
+        for c in [400, 413, 422] {
+            assert!(!EmbedError::Http(c).is_server_unavailable(), "{c}");
+        }
+        assert!(!EmbedError::BadBody.is_server_unavailable());
+        assert!(!EmbedError::WrongDim(384).is_server_unavailable());
     }
 
     #[test]
