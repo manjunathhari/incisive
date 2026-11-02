@@ -45,6 +45,12 @@ jobs:
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
+          MEMORY: ${{ vars.MEMORY }}
+          GEMMA_URL: ${{ vars.GEMMA_URL }}
+          EMBED_MODEL: ${{ vars.EMBED_MODEL }}
+          MEMORY_TOPIC_MATCH: ${{ vars.MEMORY_TOPIC_MATCH }}
+          MEMORY_GATE_MATCH: ${{ vars.MEMORY_GATE_MATCH }}
+          HAS_GEMMA_KEY: ${{ vars.HAS_GEMMA_KEY }}
         run: |
           missing=0
           for v in PROJECT_ID WIF_PROVIDER DEPLOY_SA CLAUDE_MODEL IAP_AUDIENCE OWNER_EMAIL \
@@ -177,7 +183,27 @@ jobs:
             echo "::error::vars.TEMPORAL_MAX_TOKENS must be a whole number from 2000 to 32000 (see infra/README.md section 13)"; exit 1
           fi
           # Optional switches: unset, true or false (a typo must not silently mean off).
-          for v in HAS_NCBI_KEY CPU_ALWAYS; do
+          # Optional memory layer (infra/README.md, "Memory layer"): MEMORY unset
+          # (off), off or on; GEMMA_URL unset or https://; thresholds 0-1.
+          mm="${MEMORY//[[:space:]]/}"
+          case "$mm" in
+            ""|on|off) ;;
+            *) echo "::error::vars.MEMORY must be on or off (see infra/README.md, Memory layer)"; exit 1 ;;
+          esac
+          gu="${GEMMA_URL//[[:space:]]/}"
+          if [ -n "$gu" ] && [[ "$gu" != https://* ]]; then
+            echo "::error::vars.GEMMA_URL must start with https:// (see infra/README.md, Memory layer)"; exit 1
+          fi
+          for v in MEMORY_TOPIC_MATCH MEMORY_GATE_MATCH; do
+            t="${!v//[[:space:]]/}"
+            if [ -n "$t" ] && ! python3 -c 'import sys; x=float(sys.argv[1]); assert 0.0 <= x <= 1.0' "$t" 2>/dev/null; then
+              echo "::error::vars.$v must be a number from 0 to 1 (see infra/README.md, Memory layer)"; exit 1
+            fi
+          done
+          if [ "${HAS_GEMMA_KEY//[[:space:]]/}" = "true" ] && [ -z "$gu" ]; then
+            echo "::error::vars.HAS_GEMMA_KEY is true but vars.GEMMA_URL is empty (see infra/README.md, Memory layer)"; exit 1
+          fi
+          for v in HAS_NCBI_KEY CPU_ALWAYS HAS_GEMMA_KEY; do
             case "${!v//[[:space:]]/}" in
               ""|true|false) ;;
               *) echo "::error::vars.$v must be true or false (see infra/README.md section 11)"; exit 1 ;;
@@ -227,6 +253,12 @@ jobs:
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
+          MEMORY: ${{ vars.MEMORY }}
+          GEMMA_URL: ${{ vars.GEMMA_URL }}
+          EMBED_MODEL: ${{ vars.EMBED_MODEL }}
+          MEMORY_TOPIC_MATCH: ${{ vars.MEMORY_TOPIC_MATCH }}
+          MEMORY_GATE_MATCH: ${{ vars.MEMORY_GATE_MATCH }}
+          HAS_GEMMA_KEY: ${{ vars.HAS_GEMMA_KEY }}
         run: |
           set -euo pipefail
           # MODEL_PRICES is JSON and contains commas, which `--set-env-vars=A=x,B=y`
@@ -244,6 +276,8 @@ jobs:
           optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE", "COMPLETENESS"]
           # Temporal T2/T3 (infra/README.md section 13): optional too.
           optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
+          # Memory layer: optional too (GEMMA_AUTH is a secret, below).
+          optional += ["MEMORY", "GEMMA_URL", "EMBED_MODEL", "MEMORY_TOPIC_MATCH", "MEMORY_GATE_MATCH"]
           lines = [f"APP_ENV: {json.dumps('prod')}"]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}" for n in names]
           lines += [f"{n}: {json.dumps(os.environ[n].strip())}"
@@ -257,6 +291,12 @@ jobs:
           secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest,DATABASE_URL=database-url:latest"
           if [ "$HAS_NCBI_KEY" = "true" ]; then
             secrets="${secrets},NCBI_API_KEY=ncbi-api-key:latest"
+          fi
+          # The Gemma embedding password, only once the owner has created the
+          # gemma-auth secret and set HAS_GEMMA_KEY=true (infra/README.md, Memory layer).
+          HAS_GEMMA_KEY="${HAS_GEMMA_KEY//[[:space:]]/}"
+          if [ "$HAS_GEMMA_KEY" = "true" ]; then
+            secrets="${secrets},GEMMA_AUTH=gemma-auth:latest"
           fi
           # CPU always on lets a run keep working after its HTTP response; it
           # costs more, so the owner turns it on after checking the price.

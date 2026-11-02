@@ -605,6 +605,18 @@ read -s -p "Gemma password: " P; printf 'incisive:%s' "$P" | gcloud secrets crea
 gcloud secrets add-iam-policy-binding gemma-auth --member=serviceAccount:incisive-run@incisive-prod-512902.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor --project=incisive-prod-512902
 ```
 
-TODO (only after the `gemma-auth` secret exists, otherwise every deploy breaks): change the deploy
-workflow to add `GEMMA_AUTH=gemma-auth:latest` to `--set-secrets`, and pass `GEMMA_URL` and `MEMORY`
-as environment values taken from repository variables.
+Repository variables read by the deploy workflow (all optional; unset means the app default):
+
+| Variable | Values | Meaning |
+|---|---|---|
+| `MEMORY` | `on` / `off` (default off) | Turns the memory layer on. Needs `TEMPORAL=on` to create records. |
+| `GEMMA_URL` | `https://ollama-s9os.srv2117610.hstgr.cloud` | The Gemma server (https only). |
+| `HAS_GEMMA_KEY` | `true` / `false` | Set `true` **only after** the `gemma-auth` secret exists; the deploy then mounts it as `GEMMA_AUTH`. |
+| `EMBED_MODEL` | default `embeddinggemma` | Embedding model name on the server. |
+| `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH` | 0–1 (defaults 0.80, 0.85) | Match thresholds; placeholders until calibration. |
+
+Order: create the secret and its binding (above) → set `GEMMA_URL` and `HAS_GEMMA_KEY=true` → set
+`MEMORY=on` → re-run Deploy. Then queue existing Full runs once:
+`DATABASE_URL=… cargo run -p incisive-app --bin memory_backfill` (prints only the count).
+
+Rollback: `MEMORY=off` and re-run Deploy (tables and records stay).
