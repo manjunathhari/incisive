@@ -177,6 +177,10 @@ async fn main() {
         lit,
     };
 
+    if state.memory.on {
+        tokio::spawn(incisive_app::memory::job::memory_loop(state.clone()));
+    }
+
     let app = build_router(
         Arc::new(PgReadiness::new(pool, migrated)),
         state,
