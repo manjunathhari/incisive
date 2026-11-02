@@ -102,6 +102,24 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// The embedding server carries basic-auth credentials, so the URL must be
+/// `https://`; plain `http://` is allowed only for `localhost` or `127.0.0.1`
+/// (local development and tests).
+fn gemma_url_allowed(u: &str) -> bool {
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = lower.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop any user:pass@ prefix, then the port.
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1"
+}
+
 impl Config {
     pub fn from_env() -> Result<Config, ConfigError> {
         Config::from_lookup(|k| std::env::var(k).ok())
@@ -254,11 +272,21 @@ impl Config {
                     }),
             };
             let defaults = MemorySettings::default();
+            let gemma_url = lookup("GEMMA_URL")
+                .map(|u| u.trim().trim_end_matches('/').to_string())
+                .filter(|u| !u.is_empty());
+            if let Some(u) = &gemma_url
+                && !gemma_url_allowed(u)
+            {
+                return Err(ConfigError::Invalid {
+                    var: "GEMMA_URL",
+                    reason: "expected an https:// URL (http only for localhost or 127.0.0.1)"
+                        .to_string(),
+                });
+            }
             MemorySettings {
                 on,
-                gemma_url: lookup("GEMMA_URL")
-                    .map(|u| u.trim_end_matches('/').to_string())
-                    .filter(|u| !u.is_empty()),
+                gemma_url,
                 gemma_auth: lookup("GEMMA_AUTH").map(SecretString::from),
                 embed_model: lookup("EMBED_MODEL").unwrap_or(defaults.embed_model),
                 topic_match: threshold("MEMORY_TOPIC_MATCH", defaults.topic_match)?,
@@ -1009,6 +1037,41 @@ mod tests {
                 .memory
                 .embeddings_enabled()
         );
+    }
+
+    #[test]
+    fn gemma_url_must_be_https_or_loopback() {
+        for ok in [
+            "https://gemma.example.org",
+            "http://localhost:11434",
+            "http://127.0.0.1:8080/",
+        ] {
+            let mut p = full();
+            p.push(("GEMMA_URL", ok));
+            assert!(Config::from_lookup(lookup(&p)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://gemma.example.org",
+            "ftp://gemma.example.org",
+            "gemma.example.org",
+            "http://localhost@evil.example.org",
+            "http://127.0.0.1.evil.example.org",
+        ] {
+            let mut p = full();
+            p.push(("GEMMA_URL", bad));
+            let err = Config::from_lookup(lookup(&p)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        var: "GEMMA_URL",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+            assert!(!err.to_string().contains(bad));
+        }
     }
 
     #[test]

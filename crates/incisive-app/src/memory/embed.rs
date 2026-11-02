@@ -22,6 +22,17 @@ pub enum EmbedError {
 }
 
 impl EmbedError {
+    /// The server itself is unavailable or refusing us, so more calls in the
+    /// same sweep would fail too. Anything else (a bad body, a wrong size, a
+    /// 4xx for this text) is about one record only.
+    pub fn is_server_unavailable(&self) -> bool {
+        match self {
+            EmbedError::Timeout | EmbedError::Unauthorized => true,
+            EmbedError::Http(c) => *c == 0 || *c >= 500,
+            EmbedError::BadBody | EmbedError::WrongDim(_) => false,
+        }
+    }
+
     pub fn code(&self) -> &'static str {
         match self {
             EmbedError::Timeout => "timeout",

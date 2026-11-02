@@ -235,8 +235,9 @@ async fn embed_best_effort(state: &AppState, text: &str) -> Option<Vec<f32>> {
     }
 }
 
-/// Fills up to 20 records that have no embedding. Stops at the first embed
-/// failure (the server is probably down). Returns how many were filled.
+/// Fills up to 20 records that have no embedding. Stops when the server is
+/// unavailable (timeout, 401, connection error, 5xx); skips a record whose own
+/// failure is not that (bad body, wrong size, other 4xx) and goes on. Returns how many were filled.
 pub async fn sweep_embeddings(state: &AppState) -> usize {
     let Some(e) = state.embedder.as_ref() else {
         return 0;
@@ -262,13 +263,54 @@ pub async fn sweep_embeddings(state: &AppState) -> usize {
                 }
                 filled += 1;
             }
-            Err(err) => {
+            Err(err) if err.is_server_unavailable() => {
                 tracing::warn!(code = err.code(), "embedding sweep stopped");
                 break;
+            }
+            Err(err) => {
+                // A poison record must not block the ones after it.
+                tracing::warn!(code = err.code(), "record skipped by embedding sweep");
             }
         }
     }
     filled
+}
+
+/// `write_record` with its error classified as `process` does (a foreign-key
+/// violation is `Failed("run_gone")`). Exposed so tests can reach the
+/// in-transaction path directly, e.g. with a run deleted after the job
+/// loaded its data.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn write_record_classified(
+    pool: &PgPool,
+    run_id: Uuid,
+    ex: &extract::Extracted,
+    matched: Option<i64>,
+    question: &str,
+    body: &Value,
+    answer_version: i16,
+    board: &Value,
+    table: &Value,
+    created_at: DateTime<Utc>,
+) -> JobOutcome {
+    match write_record(
+        pool,
+        run_id,
+        ex,
+        matched,
+        question,
+        body,
+        answer_version,
+        board,
+        table,
+        created_at,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => JobOutcome::Failed(classify(&e)),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -362,11 +404,48 @@ pub async fn memory_loop(state: AppState) {
                 tracing::warn!(code = "finish", "memory job not finished");
             }
         }
-        sweep_embeddings(&state).await;
-        if store::backfill_topic_embeddings(&state.pool).await.is_err() {
-            tracing::warn!(code = "topic_embed", "topic embedding backfill failed");
+        sweep_tick(&state).await;
+    }
+}
+
+/// Fixed key of the session advisory lock that lets one instance at a time
+/// run the record sweep and topic backfill (ASCII "INCMEM01").
+pub const SWEEP_LOCK_KEY: i64 = 0x494E_434D_454D_3031;
+
+/// The record sweep and topic backfill, under a Postgres advisory lock held
+/// on one dedicated pooled connection. Returns false when another instance
+/// holds the lock (this tick's sweep is skipped).
+pub async fn sweep_tick(state: &AppState) -> bool {
+    let Ok(mut conn) = state.pool.acquire().await else {
+        tracing::warn!(code = "sweep_conn", "sweep connection failed");
+        return false;
+    };
+    match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(SWEEP_LOCK_KEY)
+        .fetch_one(&mut *conn)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return false,
+        Err(_) => {
+            tracing::warn!(code = "sweep_lock", "sweep lock failed");
+            return false;
         }
     }
+    sweep_embeddings(state).await;
+    if store::backfill_topic_embeddings(&state.pool).await.is_err() {
+        tracing::warn!(code = "topic_embed", "topic embedding backfill failed");
+    }
+    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(SWEEP_LOCK_KEY)
+        .fetch_one(&mut *conn)
+        .await;
+    if !matches!(unlocked, Ok(true)) {
+        // Never return a connection that may still hold the lock to the pool.
+        tracing::warn!(code = "sweep_unlock", "sweep unlock failed");
+        let _ = conn.detach();
+    }
+    true
 }
 
 /// Queue every existing Full run with a `done` Expert Opinion that has no

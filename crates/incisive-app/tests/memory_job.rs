@@ -89,6 +89,11 @@ const HERNIA: Fx = Fx {
     slim: include_str!("fixtures/temporal/hernia.json"),
     board: include_str!("fixtures/temporal/boards/hernia-board.json"),
 };
+const CHOLE: Fx = Fx {
+    body: include_str!("fixtures/temporal/full/cholecystitis.json"),
+    slim: include_str!("fixtures/temporal/cholecystitis.json"),
+    board: include_str!("fixtures/temporal/boards/cholecystitis-board.json"),
+};
 const ACHALASIA: Fx = Fx {
     body: include_str!("fixtures/temporal/full/achalasia.json"),
     slim: include_str!("fixtures/temporal/achalasia.json"),
@@ -589,4 +594,185 @@ async fn inline_and_sweep_send_identical_input() {
         .await;
     assert_eq!(job::sweep_embeddings(&st).await, 1);
     drop(m);
+}
+
+fn fx_extract(fx: &Fx) -> incisive_app::memory::extract::Extracted {
+    let input = incisive_app::temporal::TemporalInput::from_json(fx.slim).unwrap();
+    let table = serde_json::to_value(incisive_app::temporal::build(&input)).unwrap();
+    let body: Value = serde_json::from_str(fx.body).unwrap();
+    let wrapped: Value = serde_json::from_str(fx.board).unwrap();
+    incisive_app::memory::extract::extract(&body, &table, &wrapped["board"]).unwrap()
+}
+
+#[tokio::test]
+async fn every_extracted_claim_is_stored() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let st = state(pool.clone(), true);
+    for fx in [&CHOLE, &HERNIA, &ACHALASIA] {
+        let want = fx_extract(fx).claims.len() as i64;
+        assert!(want > 0);
+        let run = seed(&pool, fx, "focused", Some("done")).await;
+        let JobOutcome::Done { record_id, .. } = job::process(&st, run).await else {
+            panic!("expected Done");
+        };
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM incisive.ledger_claims WHERE record_id = $1")
+                .bind(record_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(n, want);
+    }
+}
+
+/// Full-text-only mode (no embedder): a second identical run finds its topic.
+#[tokio::test]
+async fn second_identical_run_joins_topic_fts_only() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let st = state(pool.clone(), true);
+    assert!(st.embedder.is_none());
+    for fx in [&CHOLE, &HERNIA, &ACHALASIA] {
+        let r1 = seed(&pool, fx, "focused", Some("done")).await;
+        let JobOutcome::Done { topic_id: t1, .. } = job::process(&st, r1).await else {
+            panic!("first");
+        };
+        let r2 = seed(&pool, fx, "focused", Some("done")).await;
+        let JobOutcome::Done {
+            topic_id: t2,
+            new_topic,
+            ..
+        } = job::process(&st, r2).await
+        else {
+            panic!("second");
+        };
+        assert!(!new_topic);
+        assert_eq!(t1, t2);
+        // Each fixture is its own topic.
+        sqlx::query("TRUNCATE incisive.ledger_claims, incisive.ledger_studies, incisive.evidence_records, incisive.topics, incisive.memory_jobs CASCADE")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn run_deleted_before_write_is_run_gone() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let ex = fx_extract(&HERNIA);
+    let body: Value = serde_json::from_str(HERNIA.body).unwrap();
+    let wrapped: Value = serde_json::from_str(HERNIA.board).unwrap();
+    let input = incisive_app::temporal::TemporalInput::from_json(HERNIA.slim).unwrap();
+    let table = serde_json::to_value(incisive_app::temporal::build(&input)).unwrap();
+    // The job has loaded everything; then the run expires.
+    sqlx::query("DELETE FROM incisive.runs WHERE id = $1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let out = job::write_record_classified(
+        &pool,
+        run,
+        &ex,
+        None,
+        "q",
+        &body,
+        3,
+        &wrapped["board"],
+        &table,
+        chrono::Utc::now(),
+    )
+    .await;
+    assert_eq!(out, JobOutcome::Failed("run_gone"));
+    // The transaction rolled back: no record and no orphan topic.
+    for t in ["evidence_records", "topics", "ledger_claims"] {
+        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM incisive.{t}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{t}");
+    }
+}
+
+#[tokio::test]
+async fn sweep_skips_poison_record_and_continues() {
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    // Two records with no embedding (no embedder yet).
+    let plain = state(pool.clone(), true);
+    let r1 = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let r2 = seed(&pool, &ACHALASIA, "focused", Some("done")).await;
+    let JobOutcome::Done { record_id: a, .. } = job::process(&plain, r1).await else {
+        panic!("a");
+    };
+    let JobOutcome::Done { record_id: b, .. } = job::process(&plain, r2).await else {
+        panic!("b");
+    };
+    let (first, text): (i64, String) =
+        sqlx::query_as("SELECT id, embed_text FROM incisive.evidence_records ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(first, a.min(b));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .and(body_partial_json(serde_json::json!({ "input": text })))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": [vec![0.25f32; 768]] })),
+        )
+        .mount(&server)
+        .await;
+    let st = embed_state(pool.clone(), &server.uri());
+    assert_eq!(job::sweep_embeddings(&st).await, 1);
+    let flags: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT id, embedding IS NOT NULL FROM incisive.evidence_records ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(flags.len(), 2);
+    assert!(!flags[0].1 && flags[1].1, "{flags:?}");
+}
+
+#[tokio::test]
+async fn sweep_tick_holds_an_advisory_lock() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let st = state(pool.clone(), true);
+    // Another instance holds the lock: this tick's sweep is skipped.
+    let mut other = pool.acquire().await.unwrap();
+    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(job::SWEEP_LOCK_KEY)
+        .fetch_one(&mut *other)
+        .await
+        .unwrap();
+    assert!(got);
+    assert!(!job::sweep_tick(&st).await);
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+        .bind(job::SWEEP_LOCK_KEY)
+        .fetch_one(&mut *other)
+        .await
+        .unwrap();
+    assert!(released);
+    drop(other);
+    // Free again, and released after the sweep so the next tick can run.
+    assert!(job::sweep_tick(&st).await);
+    assert!(job::sweep_tick(&st).await);
 }

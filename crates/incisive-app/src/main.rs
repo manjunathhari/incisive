@@ -75,21 +75,6 @@ async fn main() {
     };
     let migrated = Arc::new(AtomicBool::new(false));
     let (base, cap) = (Duration::from_secs(1), Duration::from_secs(30));
-    // Migrations first, then the owner row (which needs the users table) and
-    // run recovery: abandoned runs (stale heartbeat, by the database clock)
-    // become interrupted and release their reservations, at startup and then
-    // every minute. Live runs of other instances are left alone.
-    tokio::spawn({
-        let (pool, migrated) = (pool.clone(), migrated.clone());
-        let (owner_email,) = (config.owner_email.clone(),);
-        async move {
-            migrate_until_done(pool.clone(), migrated, base, cap).await;
-            tokio::spawn(recovery_loop(pool.clone(), base, cap));
-            tokio::spawn(retention_loop(pool.clone()));
-            ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
-        }
-    });
-
     let verifier = IapVerifier::new(
         config.iap_audience.clone(),
         JwkSource::Remote(IAP_JWK_URL.parse().expect("IAP JWK url")),
@@ -179,9 +164,25 @@ async fn main() {
         lit,
     };
 
-    if state.memory.on {
-        tokio::spawn(incisive_app::memory::job::memory_loop(state.clone()));
-    }
+    // Migrations first, then the owner row (which needs the users table) and
+    // run recovery: abandoned runs (stale heartbeat, by the database clock)
+    // become interrupted and release their reservations, at startup and then
+    // every minute. Live runs of other instances are left alone.
+    tokio::spawn({
+        let (pool, migrated) = (pool.clone(), migrated.clone());
+        let (owner_email,) = (config.owner_email.clone(),);
+        let state = state.clone();
+        async move {
+            migrate_until_done(pool.clone(), migrated, base, cap).await;
+            tokio::spawn(recovery_loop(pool.clone(), base, cap));
+            tokio::spawn(retention_loop(pool.clone()));
+            // The memory loop also waits for migrations: it reads the 0013 tables.
+            if state.memory.on {
+                tokio::spawn(incisive_app::memory::job::memory_loop(state));
+            }
+            ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
+        }
+    });
 
     let app = build_router(
         Arc::new(PgReadiness::new(pool, migrated)),
