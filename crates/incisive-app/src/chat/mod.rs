@@ -9,6 +9,7 @@ pub mod lines;
 pub mod passages;
 pub mod prompt;
 pub mod retrieve;
+pub mod service;
 pub mod settings;
 pub mod store;
 

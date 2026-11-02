@@ -36,18 +36,26 @@ fn reference_pmids(answer: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Builds and stores one record's passages. The pairs come from the
-/// record's own era table, exactly as the memory layer extracted them (the
-/// topic's merged pairs could tag a one-pair record as a many-pair one).
-/// `Err` is a fixed code for a `failed` prep row.
-async fn prep_one(state: &AppState, rec: &store::RecordForPrep) -> Result<(), &'static str> {
+/// A record's comparison pairs: from its own era table, exactly as the memory
+/// layer extracted them (the topic's merged pairs could tag a one-pair record
+/// as a many-pair one). `Err` is a fixed code.
+pub(crate) fn record_pairs(
+    rec: &store::RecordForPrep,
+) -> Result<Vec<(String, String)>, &'static str> {
     let ex = extract::extract(&rec.answer, &rec.era_table, &rec.board).map_err(|e| e.code())?;
+    Ok(ex.pairs)
+}
+
+/// Builds and stores one record's passages. `Err` is a fixed code for a
+/// `failed` prep row.
+async fn prep_one(state: &AppState, rec: &store::RecordForPrep) -> Result<(), &'static str> {
+    let pairs = record_pairs(rec)?;
     let pmids = reference_pmids(&rec.answer);
     let abstracts = store::read_abstracts(&state.pool, &pmids)
         .await
         .map_err(|_| "store")?;
     let built =
-        passages::build(&rec.answer, &rec.board, &ex.pairs, &abstracts).map_err(|e| e.code())?;
+        passages::build(&rec.answer, &rec.board, &pairs, &abstracts).map_err(|e| e.code())?;
     // Ok(false): a concurrent tick got there first, which is fine.
     store::prep_record(&state.pool, rec.id, &built)
         .await

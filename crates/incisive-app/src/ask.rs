@@ -255,10 +255,10 @@ mod server {
     }
 
     /// The red-box message, plus each distinct kind's extra hint as a sentence.
-    fn blocked_message(findings: &[FindingView]) -> String {
+    pub fn blocked_message(kinds: impl IntoIterator<Item = FindingKind>) -> String {
         let mut message = BLOCKED_MESSAGE.to_string();
         let mut seen: Vec<&str> = Vec::new();
-        for h in findings.iter().filter_map(|f| deid::hint(f.kind)) {
+        for h in kinds.into_iter().filter_map(deid::hint) {
             if seen.contains(&h) {
                 continue;
             }
@@ -324,7 +324,7 @@ mod server {
                 })
                 .collect();
             return Ok(AskOutcome::BlockedIdentifiers {
-                message: blocked_message(&findings),
+                message: blocked_message(findings.iter().map(|f| f.kind)),
                 findings,
             });
         }

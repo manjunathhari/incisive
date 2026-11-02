@@ -65,6 +65,17 @@ static YOU_SHOULD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("you should")
 });
 
+/// A marker and the space before it, for taking markers out of a text.
+static MARKER_AND_SPACE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\s*\[\s*\d+(?:\s*[,\-\u{2013}]\s*\d+)*\s*\]").expect("marker and space")
+});
+
+/// `text` without its citation markers. An earlier reply's numbers point at
+/// that turn's passages, so they must not reach a later prompt.
+pub fn strip_citations(text: &str) -> String {
+    MARKER_AND_SPACE.replace_all(text, "").trim().to_string()
+}
+
 fn marker_numbers(m: &str) -> Vec<u32> {
     let mut out = Vec::new();
     // Split into comma-separated parts; "a-b" expands to a..=b.
@@ -210,6 +221,20 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_citations_removes_every_marker_form() {
+        assert_eq!(
+            strip_citations("Lower [1]. Stay [2, 3] fell [1-2]"),
+            "Lower. Stay fell"
+        );
+        assert_eq!(strip_citations("[1] First."), "First.");
+        assert_eq!(
+            strip_citations("Grade [a] and 5 [ 4 \u{2013} 6 ]"),
+            "Grade [a] and 5"
+        );
+        assert_eq!(strip_citations("none"), "none");
+    }
 
     fn pairs() -> Vec<(String, String)> {
         Vec::new()

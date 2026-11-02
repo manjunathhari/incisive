@@ -11,6 +11,14 @@ pub const BUSY: &str = "Gemma is busy, try again in a minute.";
 pub const FOOTER: &str =
     "Answers come only from this run's evidence. Educational, not medical advice.";
 
+/// Whether a reply is, as a whole, the not-covered sentence (with or without
+/// its full stop, in any case).
+pub fn is_not_covered(reply: &str) -> bool {
+    let t = reply.trim();
+    let t = t.strip_suffix('.').unwrap_or(t);
+    t.eq_ignore_ascii_case(NOT_COVERED.trim_end_matches('.'))
+}
+
 /// Symptom words and phrases that mean "act now" when a patient names them.
 /// Matched on the lower-cased question, whole words only. "pain" alone is
 /// not here: only the qualified forms are.
@@ -119,6 +127,26 @@ pub fn personal(q: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_covered_is_the_whole_reply_only() {
+        for r in [
+            "Not covered in this evidence.",
+            "Not covered in this evidence",
+            "not covered in this evidence",
+            " NOT COVERED IN THIS EVIDENCE.\n",
+        ] {
+            assert!(is_not_covered(r), "{r:?}");
+        }
+        for r in [
+            "",
+            "Not covered",
+            "Not covered in this evidence, but [1] says",
+            "Not covered in this evidence..",
+        ] {
+            assert!(!is_not_covered(r), "{r:?}");
+        }
+    }
 
     #[test]
     fn exact_strings() {
