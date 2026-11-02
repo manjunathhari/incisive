@@ -3,3 +3,4 @@
 pub mod extract;
 pub mod matcher;
 pub mod settings;
+pub mod store;
