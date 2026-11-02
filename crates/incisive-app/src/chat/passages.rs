@@ -3,7 +3,8 @@
 //!
 //! The answer's own citation markers (`[12345678]`, `[PMID 1; 2]`, `[3]`) are
 //! stripped here and kept as `ref_ns`; a number the answer marked "not traced"
-//! stays marked in words; a retracted paper's abstract is left out.
+//! stays marked in words; a retracted paper's abstract is left out, and any
+//! passage resting on that paper says so.
 
 use std::collections::HashMap;
 
@@ -96,6 +97,8 @@ pub const ABSTRACT_WORDS: usize = 120;
 /// checks read them, so a marked number never vouches for a reply.
 pub const NOT_TRACED_MARK: &str = "(not traced)";
 const NOT_TRACED: &str = " (not traced)";
+/// Ends every passage that rests on a retracted paper; the reply checks read it.
+pub const RETRACTED_MARK: &str = "(Rests on a retracted paper.)";
 
 struct Ctx<'a> {
     /// PMID to reference number.
@@ -791,6 +794,19 @@ pub fn build(
         }
     }
 
+    // ---- last: whatever rests on a retracted paper says so ----
+    let retracted: Vec<i32> = a
+        .references
+        .iter()
+        .filter(|r| r.retracted)
+        .map(|r| i32::from(r.n))
+        .collect();
+    for p in &mut c.out {
+        if p.ref_ns.iter().any(|n| retracted.contains(n)) {
+            p.text = format!("{} {RETRACTED_MARK}", p.text);
+        }
+    }
+
     Ok(c.out)
 }
 
@@ -1245,6 +1261,28 @@ mod tests {
             !ps.iter()
                 .any(|p| p.kind == PassageKind::Abstract && p.text.contains("Retracted claim"))
         );
+    }
+
+    #[test]
+    fn a_passage_resting_on_a_retracted_paper_says_so() {
+        let mut b = body("hernia");
+        b["references"][0]["retracted"] = json!(true);
+        let n = b["references"][0]["n"].as_i64().unwrap() as i32;
+        let ps = build(&b, &board("hernia"), &pairs("hernia"), &[]).unwrap();
+        let resting: Vec<_> = ps.iter().filter(|p| p.ref_ns.contains(&n)).collect();
+        assert!(resting.len() > 1, "more than the reference row itself");
+        assert!(resting.iter().any(|p| p.kind != PassageKind::Reference));
+        for p in &ps {
+            assert_eq!(
+                p.text.ends_with(RETRACTED_MARK),
+                p.ref_ns.contains(&n),
+                "{:?} {}",
+                p.kind,
+                p.seq
+            );
+        }
+        // No retraction, no mark.
+        assert!(!built("hernia").iter().any(|p| p.text.contains(RETRACTED_MARK)));
     }
 
     #[test]

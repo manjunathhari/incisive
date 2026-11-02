@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::comparison::arms_named;
-use super::passages::NOT_TRACED_MARK;
+use super::passages::{NOT_TRACED_MARK, RETRACTED_MARK};
 use crate::agent::extractor::has_own_sign;
 use crate::agent::temporal_writer::{text_numbers, traced};
 
@@ -20,6 +20,8 @@ pub struct Checks {
     pub comparison_mismatch: Vec<String>,
     pub you_should: bool,
     pub uncited: bool,
+    /// A cited passage rests on a retracted paper.
+    pub retracted_source: bool,
 }
 
 impl Checks {
@@ -30,6 +32,7 @@ impl Checks {
             && self.comparison_mismatch.is_empty()
             && !self.you_should
             && !self.uncited
+            && !self.retracted_source
     }
 }
 
@@ -195,6 +198,7 @@ pub fn run(
     let mut allowed: Vec<f64> = Vec::new();
     for n in &cited {
         if let Some(p) = n.checked_sub(1).and_then(|i| passages.get(i as usize)) {
+            out.retracted_source |= p.contains(RETRACTED_MARK);
             // The mark does not say how far back its run goes, and it can
             // follow a whole field, so such a passage vouches for no number.
             if p.contains(NOT_TRACED_MARK) {
@@ -380,6 +384,19 @@ mod tests {
             let c = run(t, &[P2], None, &pairs());
             assert!(c.not_traced.is_empty(), "{t}: {:?}", c.not_traced);
         }
+    }
+
+    #[test]
+    fn citing_a_passage_on_a_retracted_paper_is_flagged() {
+        let bad = format!("Stay 4.17 days. {RETRACTED_MARK}");
+        let c = run("Stay 4.17 days [1].", &[&bad], None, &pairs());
+        assert!(c.retracted_source);
+        assert!(c.not_traced.is_empty(), "{:?}", c.not_traced);
+        assert!(!c.is_clean());
+        // Retrieved but not cited: nothing to flag.
+        let c = run("Mean stay 4.17 days [1].", &[P1, &bad], None, &pairs());
+        assert!(!c.retracted_source);
+        assert!(c.is_clean(), "{c:?}");
     }
 
     #[test]
