@@ -182,3 +182,12 @@ Each stage is its own PR, behind `MEMORY=off` until M6 is accepted.
 - Date-limited "update" search (D9), as a separate engine change.
 - "Ask this evidence" chat on Gemma, reading only stored records.
 - Training-data export of owner-written text (verdicts, notes, owner revisions). Claude-written answers are not training targets under Anthropic's terms; the owner may request written permission from Anthropic for a narrow surgical explanation model, and if granted, the export can include reviewed Claude text.
+
+## 12. Known upstream issues (handover 2 Nov 2026, 20:30 IST)
+
+The ledger copies the temporal era table as built by T1, so it inherits T1's open bugs until the T1 fix lands:
+- meta-analyses written "SR/MA of …", "MA of …", "NMA", "Cochrane … review", and practice updates (AGA) are classed as primary studies, so era cells pool overlapping meta-analyses as new patients;
+- ratio measures with unit "ratio" / "relative rate" are handled as differences;
+- robotic-vs-open studies are drawn into robotic-vs-laparoscopic tables (this also adds an (open, robotic) pair to the topic's arms).
+
+Handling: records keep the answer and Expert Opinion verbatim (unaffected). Ledger studies and claims are derived data. The T1 fix should bump `TEMPORAL_VERSION` (now 1) so stale records are recognisable from `era_table->>'version'`. PR B adds a "rebuild ledger" command that re-runs the fixed `temporal::build` on each record's stored answer and replaces that record's ledger rows (the only other place ledger rows are rewritten besides a split).
