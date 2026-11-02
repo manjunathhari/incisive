@@ -12,7 +12,7 @@ use super::{
     take_rerun_fragment,
 };
 use crate::agent::answer::{initial_mode, mode_label};
-use crate::ask::AskOutcome;
+use crate::ask::{AskOutcome, FullWords, full_words_text, word_count};
 use crate::library::{self as lib, ASK_LATEST, RunGroup, TodayCounts};
 use crate::question_check::{self as qc, PICO_FIELDS, Pico, STARTERS};
 use crate::runs::RunMode;
@@ -115,6 +115,23 @@ pub fn AskPage() -> impl IntoView {
         });
     };
     let check = Memo::new(move |_| question.with(|q| pico.with(|p| qc::check(q, p))));
+    let words = Memo::new(move |_| question.with(|q| word_count(q)));
+    // Full only: over FULL_MAX_WORDS turns Send off (the server refuses it too).
+    let full_too_long =
+        move || mode.get() == RunMode::Focused && FullWords::of(words.get()) == FullWords::TooLong;
+    // The Full word counter (none for Quick). The server renders it at 0 words.
+    let counter = move || {
+        (mode.get() == RunMode::Focused).then(|| {
+            let state = move || FullWords::of(words.get());
+            view! {
+                <div class=move || format!("iv-count {}", state().class()) id="word-count" aria-live="polite">
+                    <span class="iv-count-msg">{move || state().message()}</span>
+                    <span class="iv-count-n">{move || full_words_text(words.get())}</span>
+                </div>
+            }
+            .into_any()
+        })
+    };
 
     let chips = move || {
         PICO_FIELDS
@@ -370,6 +387,7 @@ pub fn AskPage() -> impl IntoView {
                             prop:value=question
                             on:input=move |ev| set_question.set(event_target_value(&ev))
                         ></textarea>
+                        {counter}
                         <div class="iv-pico-row">
                             <span class="iv-pico-k">"PICO"</span>
                             {chips}
@@ -394,7 +412,9 @@ pub fn AskPage() -> impl IntoView {
                         <button
                             type="submit"
                             class="iv-send"
-                            disabled=move || pending.get() || question.with(|q| q.trim().is_empty())
+                            disabled=move || {
+                                pending.get() || question.with(|q| q.trim().is_empty()) || full_too_long()
+                            }
                         >
                             {move || {
                                 if pending.get() {

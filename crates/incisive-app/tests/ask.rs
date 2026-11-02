@@ -20,7 +20,10 @@ use axum::{
 };
 use claude_client::{Client, RetryPolicy, Usage};
 use http_body_util::BodyExt;
-use incisive_app::ask::{AskFailure, AskOutcome, gate_estimate, run_ask};
+use incisive_app::ask::{
+    AskFailure, AskOutcome, FULL_TOO_LONG_MESSAGE, FullWords, full_words_text, gate_estimate,
+    run_ask, word_count,
+};
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::{Classifier, ClaudeClassifier, GateDecision, GateError, Verdict};
 use incisive_app::identity::{IapVerifier, JwkSource, Role, User};
@@ -1316,7 +1319,268 @@ async fn home_page_renders_question_box() {
     let body =
         String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains("Incisive"));
-    assert!(body.contains("Medical literature \u{2014} searched, checked, summarised"));
+    assert!(body.contains(TAGLINE), "{body}");
     assert!(body.contains("<textarea"), "{body}");
     assert!(body.contains("Read the evidence"));
+}
+
+/// The wide tagline as rendered (the CI smoke greps `searched, checked, summarised`).
+const TAGLINE: &str =
+    "Medical literature \u{2014} searched, checked, summarised \u{b7} <b>Educational tool only</b>";
+
+// ---------- the Full word limit (Ask UI, 2 Nov) ----------
+
+/// The owner's two test questions, verbatim: 96 and 111 words.
+const OWNER_96: &str = "In adults undergoing elective cholecystectomy for symptomatic gallstones, how does robotic cholecystectomy compare with laparoscopic cholecystectomy for bile duct injury, conversion to open surgery, subtotal cholecystectomy, postoperative complications, length of hospital stay, and return to normal activity? Please assess the randomized evidence first, then large registry and database studies, and explain whether any differences reflect surgeon experience, the learning curve, case selection, or the difficulty of the gallbladder. Also comment on acute cholecystitis versus elective cases, on obese patients, and on what a surgeon early in a robotic programme should expect when starting robotic gallbladder surgery.";
+const OWNER_111: &str = "In adults undergoing elective cholecystectomy for symptomatic gallstones, how does robotic cholecystectomy compare with laparoscopic cholecystectomy for bile duct injury, conversion to open surgery, subtotal cholecystectomy, postoperative complications, length of hospital stay, and return to normal activity? Please assess the randomized evidence first, then large registry and database studies, and explain whether any differences reflect surgeon experience, the learning curve, case selection, or the difficulty of the gallbladder. Also comment on acute cholecystitis versus elective cases, on obese patients, and on what a surgeon early in a robotic programme should expect when starting robotic gallbladder surgery. Finally, compare readmission, reoperation and bile leak rates, and say which outcomes are still unknown.";
+
+fn words(n: usize) -> String {
+    vec!["hernia"; n].join(" ")
+}
+
+fn too_long_full() -> AskOutcome {
+    AskOutcome::InvalidInput {
+        message: FULL_TOO_LONG_MESSAGE.into(),
+    }
+}
+
+#[test]
+fn owner_questions_are_96_and_111_words() {
+    assert_eq!(word_count(OWNER_96), 96);
+    assert_eq!(word_count(OWNER_111), 111);
+    assert_eq!(FullWords::of(96), FullWords::Long);
+    assert_eq!(FullWords::of(111), FullWords::TooLong);
+    assert_eq!(
+        FULL_TOO_LONG_MESSAGE,
+        "That question is too long for a Full answer (100 words max). Please shorten it, or name up to 4\u{2013}5 outcomes."
+    );
+}
+
+#[tokio::test]
+async fn full_word_limit_is_checked_before_anything_else() {
+    // No database: past step 0 the first audit or spend write fails (a
+    // record failure); the gate would panic (MustNotCall). A refusal here
+    // therefore means nothing was scanned, audited, reserved or gated.
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), true);
+    let user = User {
+        id: 1,
+        email: "x@example.com".into(),
+        display_name: "X".into(),
+        role: Role::Surgeon,
+        daily_cap_paise: 30_000,
+        monthly_cap_paise: None,
+        active: true,
+    };
+    // Full: 100 words go on to the next step; 101 are refused at step 0.
+    for q in [
+        words(100),
+        format!("  {}\n", words(100)),
+        OWNER_96.to_string(),
+    ] {
+        assert_eq!(
+            run_ask(&st, &user, &q, RunMode::Focused).await,
+            Err(AskFailure::Record),
+            "{} words",
+            word_count(&q)
+        );
+    }
+    for q in [words(101), OWNER_111.to_string()] {
+        assert_eq!(
+            run_ask(&st, &user, &q, RunMode::Focused).await,
+            Ok(too_long_full()),
+            "{} words",
+            word_count(&q)
+        );
+    }
+    // Even with an identifier in it, the word limit refuses first (no scan).
+    let named = format!("Mrs. Lakshmi ph 9845012345 {}", words(100));
+    assert_eq!(
+        run_ask(&st, &user, &named, RunMode::Focused).await,
+        Ok(too_long_full())
+    );
+    // Quick has no word limit: 101+ words go on to the next step.
+    for q in [words(101), words(400), OWNER_111.to_string()] {
+        assert_eq!(
+            run_ask(&st, &user, &q, RunMode::Quick).await,
+            Err(AskFailure::Record),
+            "Quick, {} words",
+            word_count(&q)
+        );
+    }
+    // The 4,000-character check still comes first for Full.
+    let long = words(1_000);
+    assert!(long.chars().count() > 4_000);
+    assert!(matches!(
+        run_ask(&st, &user, &long, RunMode::Focused).await,
+        Ok(AskOutcome::InvalidInput { message }) if message.contains("4,000 characters")
+    ));
+}
+
+#[tokio::test]
+async fn too_long_full_question_is_not_audited_reserved_or_gated() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "fullwords", Role::Surgeon, 30_000).await;
+    let app = || api_routes(state_with(pool.clone(), Arc::new(MustNotCall), true));
+    for mode in [None, Some("focused")] {
+        let mut body = json!({ "question": OWNER_111 });
+        if let Some(m) = mode {
+            body["mode"] = json!(m);
+        }
+        let req = Request::post("/api/ask")
+            .header("content-type", "application/json")
+            .header("x-dev-user-email", &u.email)
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let (s, b) = call(app(), req).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            b,
+            json!({"status": "invalid_input", "message": FULL_TOO_LONG_MESSAGE}),
+            "{mode:?}"
+        );
+    }
+    assert!(audit_for(&pool, u.id).await.is_empty());
+    assert!(spend_for(&pool, u.id).await.is_empty());
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM incisive.runs WHERE user_id = $1")
+        .bind(u.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0);
+}
+
+async fn home_html() -> String {
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), false);
+    let res = router(st)
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn header_and_full_word_counter_render_on_the_server() {
+    let body = home_html().await;
+    // The CI container smoke's two greps.
+    assert!(body.contains("searched, checked, summarised"));
+    assert!(body.contains(r#"<textarea id="question""#), "{body}");
+    // Header: the wide tagline and the phone line.
+    assert!(body.contains(TAGLINE), "{body}");
+    assert!(!body.contains("Medical literature, summarised"));
+    let phone = body.find(r#"class="iv-sub phone""#).expect("phone sub");
+    let phone = &body[phone..phone + body[phone..].find("</span>").unwrap()];
+    assert!(
+        phone.contains("\u{b7} <b>Educational tool only</b>"),
+        "{phone}"
+    );
+    // Ask: the server renders Full, so the counter is there at 0 words,
+    // inside the question card, under the textarea.
+    assert!(
+        body.contains(r#"<h1 class="iv-h1" id="ask-title">"#),
+        "{body}"
+    );
+    let ta = body.find(r#"<textarea id="question""#).unwrap();
+    let count = body.find(r#"id="word-count""#).expect("word counter");
+    let pico = body.find(r#"class="iv-pico-row""#).unwrap();
+    assert!(ta < count && count < pico);
+    let counter = &body[body[..count].rfind("<div").unwrap()..pico];
+    assert!(counter.contains(r#"class="iv-count ok""#), "{counter}");
+    assert!(counter.contains(r#"aria-live="polite""#), "{counter}");
+    assert!(counter.contains("Full questions work best under 50 words."));
+    assert!(counter.contains(&full_words_text(0)), "{counter}");
+    assert!(counter.contains("0 / 100 words"));
+}
+
+// ---------- the owner's static preview (Ask UI, 2 Nov) ----------
+
+/// With `ASK_UI_PREVIEW=1` and a test database: write the SSR-rendered Ask
+/// page (Full, the counter at 0, 23, 64 and 111 words) and the Library to
+/// `.superpowers/ask-ui/preview/`, scripts taken out and fonts relative.
+/// The server renders the counter at 0 words; for the other states the
+/// question is put in the textarea and the counter's class, message and
+/// count (and Send's `disabled`) set from the same shared `FullWords` the
+/// page uses, which is what the page shows after hydration.
+#[tokio::test]
+async fn ask_ui_write_the_static_preview() {
+    if !std::env::var("ASK_UI_PREVIEW").is_ok_and(|v| v == "1") {
+        return;
+    }
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "preview", Role::Surgeon, 30_000).await;
+    let root = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    let out = format!("{root}/.superpowers/ask-ui/preview");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(format!("{out}/fonts/figtree")).unwrap();
+    let fonts = format!("{}/public/fonts/figtree", env!("CARGO_MANIFEST_DIR"));
+    for f in std::fs::read_dir(&fonts).unwrap() {
+        let f = f.unwrap();
+        std::fs::copy(
+            f.path(),
+            format!("{out}/fonts/figtree/{}", f.file_name().to_string_lossy()),
+        )
+        .unwrap();
+    }
+    let links = regex::Regex::new(r#"<link rel="(?:modulepreload|preload)"[^>]*>"#).unwrap();
+    let scripts = regex::Regex::new(r#"(?s)<script\b.*?</script>"#).unwrap();
+    let make_static = |html: &str| {
+        let html = links.replace_all(html, "");
+        scripts
+            .replace_all(&html, "")
+            .replace("url(/fonts/", "url(fonts/")
+    };
+    let get = |path: &'static str| {
+        let st = state_with(pool.clone(), Arc::new(MustNotCall), true);
+        let email = u.email.clone();
+        async move {
+            let res = router(st)
+                .oneshot(
+                    Request::get(path)
+                        .header("x-dev-user-email", email)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+        }
+    };
+    let ask = make_static(&get("/").await);
+    let write = |file: &str, html: &str| std::fs::write(format!("{out}/{file}"), html).unwrap();
+    write("ask-empty.html", &ask);
+    write("library.html", &make_static(&get("/history").await));
+
+    const Q23: &str = "Does robotic umbilical or small ventral hernia repair improve postoperative pain, complications, recurrence, or return to normal activity compared with standard laparoscopic repair?";
+    const Q64: &str = "In adults with primary umbilical or small ventral hernia, does robotic repair improve postoperative pain, complications (seroma, surgical site infection, mesh-related problems), recurrence, length of stay and return to normal activity compared with laparoscopic onlay mesh repair? Please weigh randomized trials first, then large registry studies, and say whether differences reflect defect size, surgeon experience or the learning curve of a new robotic programme.";
+    let fine = FullWords::Fine;
+    let send = regex::Regex::new(r#"<button type="submit"[^>]*class="iv-send"[^>]*>"#).unwrap();
+    let empty_send = send.find(&ask).expect("Send button").as_str().to_string();
+    assert!(empty_send.contains("disabled"), "{empty_send}");
+    for (n, q) in [(23, Q23), (64, Q64), (111, OWNER_111)] {
+        assert_eq!(word_count(q), n);
+        let state = FullWords::of(n);
+        let send_tag = if state == FullWords::TooLong {
+            empty_send.clone()
+        } else {
+            r#"<button type="submit" class="iv-send">"#.to_string()
+        };
+        let html = ask
+            .replacen("></textarea>", &format!(">{q}</textarea>"), 1)
+            .replacen(
+                &format!(r#"class="iv-count {}""#, fine.class()),
+                &format!(r#"class="iv-count {}""#, state.class()),
+                1,
+            )
+            .replacen(fine.message(), state.message(), 1)
+            .replacen(&full_words_text(0), &full_words_text(n), 1)
+            .replacen(&empty_send, &send_tag, 1);
+        assert!(html.contains(&full_words_text(n)));
+        write(&format!("ask-{n}.html"), &html);
+    }
+    eprintln!("Ask UI preview written to {out}");
 }

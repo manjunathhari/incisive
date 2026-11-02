@@ -26,6 +26,7 @@ pub const IVORY_STYLE: &str = r#"
 @font-face { font-family:'Figtree'; font-style:normal; font-display:swap; font-weight:700; src:url(/fonts/figtree/figtree-latin-700-normal.woff2) format('woff2'); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
 :root { --iv-ground:#F5F3EF; --iv-card:#FFFFFF; --iv-border:#E7E3DC; --iv-ink:#1C1B19; --iv-body:#4A4741; --iv-muted:#6B675F;
   --iv-accent:#2C4A85; --iv-tint:#ECEFF8; --iv-alert:#B42318; --iv-rule:#EFECE6; --iv-soft:#FAF8F5; --iv-line:#D9D3C8; --iv-off:#E8E4DC;
+  --iv-warn:#8A5A00; --iv-warn-bg:#FDF6E7;
   --iv-r:20px; --iv-r-sm:16px; --iv-font:'Figtree',system-ui,-apple-system,"Segoe UI",sans-serif; }
 body { background:var(--iv-ground); }
 .iv-sr { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
@@ -33,10 +34,12 @@ body { background:var(--iv-ground); }
 .iv-head { font-family:var(--iv-font); color:var(--iv-ink); }
 .iv-head-in { max-width:1180px; margin:0 auto; padding:20px 24px 4px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:14px; }
 .iv-head a:focus-visible, .iv-wrap a:focus-visible, .iv-wrap button:focus-visible, .run-chrome a:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
-.iv-brand { display:flex; align-items:center; gap:12px; color:inherit; text-decoration:none; min-height:44px; }
-.iv-tile { flex:none; width:40px; height:40px; border-radius:12px; background:var(--iv-tint); display:flex; align-items:center; justify-content:center; }
-.iv-name { display:block; font-weight:700; font-size:20px; line-height:1.1; color:var(--iv-ink); }
+.iv-brand { display:flex; align-items:center; gap:12px; min-width:0; color:inherit; text-decoration:none; min-height:44px; }
+.iv-brand-text { min-width:0; }
+.iv-tile { flex:none; width:46px; height:46px; border-radius:13px; background:var(--iv-tint); display:flex; align-items:center; justify-content:center; }
+.iv-name { display:block; font-weight:700; font-size:30px; line-height:1.1; color:var(--iv-ink); }
 .iv-sub { display:block; font-size:12px; color:var(--iv-muted); }
+.iv-sub b { font-weight:600; color:var(--iv-body); }
 .iv-sub.phone { display:none; }
 .iv-head-right { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .iv-nav { display:flex; gap:2px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:999px; padding:4px; }
@@ -52,7 +55,7 @@ main.wide { max-width:1180px; margin:0 auto; padding:24px 24px 40px; }
 .iv-wrap { font-family:var(--iv-font); color:var(--iv-ink); }
 .iv-wrap a { color:var(--iv-accent); }
 .iv-wrap a:hover { color:var(--iv-ink); }
-.iv-h1 { margin:0; font-weight:600; font-size:28px; line-height:1.2; color:var(--iv-ink); }
+.iv-h1 { margin:0; font-weight:600; font-size:21px; line-height:1.2; color:var(--iv-ink); }
 .iv-intro { margin:6px 0 0; font-size:14px; line-height:1.5; color:var(--iv-body); }
 .iv-card { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:var(--iv-r); }
 .iv-kicker { margin:0; font-size:11px; font-weight:600; letter-spacing:1.2px; text-transform:uppercase; color:var(--iv-muted); }
@@ -72,6 +75,10 @@ main.wide { max-width:1180px; margin:0 auto; padding:24px 24px 40px; }
 .iv-qbox label.iv-qlabel { display:block; margin:0; padding:12px 16px 0; font-size:12px; font-weight:600; color:var(--iv-body); }
 .iv-qbox textarea { display:block; width:100%; border:0; border-radius:0; resize:vertical; padding:6px 16px 12px; font-family:var(--iv-font); font-size:17px; line-height:1.5; color:var(--iv-ink); background:transparent; min-height:92px; }
 .iv-qbox textarea:focus { outline:2px solid var(--iv-accent); outline-offset:-2px; }
+.iv-count { display:flex; align-items:flex-start; gap:8px; border-top:1px dashed var(--iv-border); padding:8px 16px 10px; font-size:12px; line-height:1.4; color:var(--iv-muted); }
+.iv-count-n { margin-left:auto; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.iv-count.hint { background:var(--iv-warn-bg); color:var(--iv-warn); }
+.iv-count.over { background:#FDECEA; color:var(--iv-alert); font-weight:600; }
 .iv-pico-row { border-top:1px solid var(--iv-rule); padding:8px 12px 8px 16px; display:flex; flex-wrap:wrap; align-items:center; gap:6px; background:var(--iv-soft); }
 .iv-pico-k { font-size:12px; font-weight:600; color:var(--iv-muted); margin-right:4px; }
 .iv-chip { display:inline-flex; gap:4px; align-items:center; font-size:12px; padding:5px 10px; border-radius:999px; background:var(--iv-card); color:var(--iv-muted); border:1px dashed var(--iv-line); }
@@ -221,8 +228,9 @@ details.iv-thread[open] .iv-thread-toggle::after { content:'Hide'; }
   body { padding-bottom:84px; }
   .iv-head-in { padding:16px 16px 6px; flex-wrap:nowrap; gap:10px; }
   .iv-brand { flex:1; min-width:0; gap:10px; }
-  .iv-tile { width:36px; height:36px; border-radius:11px; }
-  .iv-name { font-size:18px; }
+  .iv-tile { width:42px; height:42px; border-radius:12px; }
+  .iv-tile svg { width:23px; height:23px; }
+  .iv-name { font-size:25px; }
   .iv-sub { font-size:11px; }
   .iv-sub.wide, .iv-date { display:none; }
   .iv-sub.phone { display:block; }
@@ -233,12 +241,13 @@ details.iv-thread[open] .iv-thread-toggle::after { content:'Hide'; }
   .iv-nav-icon { display:flex; width:44px; height:28px; border-radius:999px; align-items:center; justify-content:center; }
   .iv-nav a[aria-current="page"] .iv-nav-icon { background:var(--iv-tint); }
   main.wide { padding:10px 16px 16px; }
-  .iv-h1 { font-size:24px; font-weight:700; }
+  .iv-h1 { font-size:19px; font-weight:700; }
   .iv-intro { font-size:13px; }
   .iv-ask, .iv-ask-main, .iv-form { gap:14px; }
   .iv-side { max-width:none; }
   .iv-today { display:none; }
   .iv-qbox textarea { font-size:16px; padding:6px 14px 12px; }
+  .iv-count { padding:8px 14px 10px; }
   .iv-pico-k, .iv-chip .iv-chip-label { display:none; }
   .iv-chip { width:26px; height:26px; padding:0; justify-content:center; font-size:11px; }
   .iv-wrap button.iv-ghost { border-radius:999px; }
@@ -303,7 +312,7 @@ pub fn is_wide(path: &str) -> bool {
 
 fn mark_svg() -> impl IntoView {
     view! {
-        <svg width="22" height="22" viewBox="0 0 30 30" aria-hidden="true" focusable="false">
+        <svg width="25" height="25" viewBox="0 0 30 30" aria-hidden="true" focusable="false">
             <path d="M8 22 L22 8" stroke="#2C4A85" stroke-width="2.6" stroke-linecap="round"></path>
             <circle cx="22" cy="8" r="2.4" fill="#2C4A85"></circle>
         </svg>
@@ -345,7 +354,7 @@ pub fn SiteHeader() -> impl IntoView {
     let path = use_location().pathname;
     let current = move || nav_page(&path.get());
     let date = lib::header_date(lib::now_utc());
-    let phone_sub = format!("{date} \u{b7} Medical literature, summarised");
+    let phone_sub = format!("{date} \u{b7} ");
     let link = move |page: NavPage, href: &'static str, label: &'static str| {
         view! {
             <a href=href aria-current=move || (current() == page).then_some("page")>
@@ -359,10 +368,13 @@ pub fn SiteHeader() -> impl IntoView {
             <div class="iv-head-in">
                 <a class="iv-brand" href="/">
                     <span class="iv-tile" aria-hidden="true">{mark_svg()}</span>
-                    <span>
+                    <span class="iv-brand-text">
                         <span class="iv-name">"Incisive"</span>
-                        <span class="iv-sub wide">"Medical literature \u{2014} searched, checked, summarised"</span>
-                        <span class="iv-sub phone">{phone_sub}</span>
+                        <span class="iv-sub wide">
+                            "Medical literature \u{2014} searched, checked, summarised \u{b7} "
+                            <b>"Educational tool only"</b>
+                        </span>
+                        <span class="iv-sub phone">{phone_sub} <b>"Educational tool only"</b></span>
                     </span>
                 </a>
                 <div class="iv-head-right">
