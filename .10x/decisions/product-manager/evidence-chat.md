@@ -11,3 +11,4 @@ Goal (owner, 2 Nov 2026): a "Chat" option next to Answer | Expert opinion on the
 - Warm answer ≈ 15 s (prompt 268 tokens at 42.7 tok/s ≈ 6 s; 103 tokens out at 11.8 tok/s ≈ 9 s); cold load +8.6 s → keep_alive.
 - Grounding: 2 of 3 sentences faithful with citations and uncertainty kept; sentence 3 used a robotic-vs-laparoscopic passage for a robotic-vs-open question; jargon ("TAR") left unexplained.
 - Design consequences: 2–3 most relevant passages only; prompt names the comparison; plain-language rules; code checks (numbers traced, citations real, comparison match).
+- C4 Visibility (2 Nov): each conversation is private to its user (no other user sees it); the owner can read all conversations. Sign-up notice must say the owner can read chats. Chat replies join the shared knowledge base only after owner approval ("Suggest for library" → owner approves/edits in his own words). Chats follow the 12-month rule like runs.
