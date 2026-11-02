@@ -250,6 +250,8 @@ async fn vec_literal_round_trip() {
     let t = new_topic(&pool).await;
     let (r, _) = rec(&pool, t, run, "emb label").await;
     let v: Vec<f32> = (0..768).map(|i| (i as f32) * 0.001 - 0.3).collect();
+    let mut v = v;
+    v[0] = (Uuid::new_v4().as_u128() % 10_000) as f32 / 10_000.0;
     store::set_record_embedding(&pool, r, &v, "m")
         .await
         .unwrap();
@@ -270,10 +272,87 @@ async fn vec_literal_round_trip() {
         assert!((a - b).abs() < 1e-6);
     }
     assert!(store::vec_literal(&[0.5, 1.0]).starts_with("[0.5,1"));
-    let c = store::topic_candidates(&pool, "", Some(&v), 5)
+}
+
+#[tokio::test]
+async fn candidates_by_vector_and_missing_embedding() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    let t = new_topic(&pool).await;
+    let label = format!("miss {}", Uuid::new_v4());
+    let (r, _) = rec(&pool, t, run, &label).await;
+    let missing = store::records_missing_embedding(&pool, 100_000)
         .await
         .unwrap();
-    assert!(c.iter().any(|f| f.topic_id == t && f.embedding.is_some()));
-    let missing = store::records_missing_embedding(&pool, 1000).await.unwrap();
+    let hit = missing.iter().find(|(id, _)| *id == r).expect("returned");
+    assert_eq!(hit.1, format!("{label}\n"));
+    store::set_record_embedding(&pool, r, &[0.1; 768], "m")
+        .await
+        .unwrap();
+    let missing = store::records_missing_embedding(&pool, 100_000)
+        .await
+        .unwrap();
     assert!(!missing.iter().any(|(id, _)| *id == r));
+    // vector-only candidate: an exact-match unique vector is nearest
+    let mut v = vec![0.0_f32; 768];
+    v[1] = 1.0;
+    v[2] = (Uuid::new_v4().as_u128() % 10_000) as f32 / 10_000.0 + 0.5;
+    store::set_topic_embedding(&pool, t, &v, "m").await.unwrap();
+    let c = store::topic_candidates(&pool, "", Some(&v), 1)
+        .await
+        .unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].topic_id, t);
+    assert_eq!(c[0].fts_rank, 0.0);
+    assert!(c[0].embedding.is_some());
+}
+
+#[tokio::test]
+async fn ledger_keeps_study_without_year_or_era() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    let t = new_topic(&pool).await;
+    let (r, _) = rec(&pool, t, run, "L").await;
+    let s = LedgerStudy {
+        pub_year: None,
+        era_id: None,
+        ..study("999")
+    };
+    let mut tx = pool.begin().await.unwrap();
+    store::upsert_ledger(&mut tx, t, r, &[s], &[])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let row: (Option<i32>, Option<String>) = sqlx::query_as(
+        "SELECT pub_year, era_id FROM incisive.ledger_studies WHERE topic_id=$1 AND pmid='999'",
+    )
+    .bind(t)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (None, None));
+}
+
+#[tokio::test]
+async fn stale_exhausted_running_job_is_given_up() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    store::enqueue_job(&pool, run).await.unwrap();
+    sqlx::query(
+        "UPDATE incisive.memory_jobs SET status='running', attempts=3, \
+         claimed_at = now() - interval '20 minutes' WHERE run_id=$1",
+    )
+    .bind(run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let got = store::claim_jobs(&pool, 100).await.unwrap();
+    assert!(!got.contains(&run));
+    let (s, e): (String, Option<String>) =
+        sqlx::query_as("SELECT status, last_error_kind FROM incisive.memory_jobs WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((s.as_str(), e.as_deref()), ("failed", Some("gave_up")));
 }

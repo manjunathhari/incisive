@@ -196,7 +196,7 @@ pub async fn insert_record(tx: &mut PgConnection, r: &NewRecord<'_>) -> sqlx::Re
 
 /// Upsert studies on (topic, pmid) keeping `first_record_id`; insert claims
 /// for this record. Repeated pmids in `studies` keep the first occurrence;
-/// studies without a publication year cannot be placed and are skipped.
+/// every study is stored, with a missing year or era left NULL.
 pub async fn upsert_ledger(
     tx: &mut PgConnection,
     topic_id: i64,
@@ -206,7 +206,6 @@ pub async fn upsert_ledger(
 ) -> sqlx::Result<()> {
     let mut seen = HashSet::new();
     for s in studies {
-        let Some(pub_year) = s.pub_year else { continue };
         if !seen.insert(s.pmid.as_str()) {
             continue;
         }
@@ -223,11 +222,11 @@ pub async fn upsert_ledger(
         )
         .bind(topic_id)
         .bind(&s.pmid)
-        .bind(pub_year)
+        .bind(s.pub_year)
         .bind(s.treatment_start)
         .bind(s.treatment_end)
         .bind(s.years_assumed)
-        .bind(s.era_id.as_deref().unwrap_or(""))
+        .bind(s.era_id.as_deref())
         .bind(record_id)
         .execute(&mut *tx)
         .await?;
@@ -310,6 +309,15 @@ pub async fn enqueue_job(pool: &PgPool, run_id: Uuid) -> sqlx::Result<bool> {
 /// Claim up to `n` jobs (pending, or running and stale for 10 minutes) that
 /// have fewer than 3 attempts. Concurrent callers never get the same job.
 pub async fn claim_jobs(pool: &PgPool, n: i64) -> sqlx::Result<Vec<Uuid>> {
+    // A job stale in `running` with no attempts left is given up, not left stuck.
+    sqlx::query(
+        "UPDATE incisive.memory_jobs SET status = 'failed', last_error_kind = 'gave_up', \
+                updated_at = now() \
+         WHERE status = 'running' AND claimed_at < now() - interval '10 minutes' \
+           AND attempts >= 3",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query_scalar(
         "UPDATE incisive.memory_jobs SET status = 'running', claimed_at = now(), \
                 attempts = attempts + 1, updated_at = now() \

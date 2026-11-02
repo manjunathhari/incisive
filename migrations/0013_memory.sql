@@ -57,11 +57,11 @@ CREATE INDEX topics_embedding_idx ON incisive.topics USING hnsw (embedding vecto
 CREATE TABLE incisive.ledger_studies (
     topic_id BIGINT NOT NULL REFERENCES incisive.topics(id),
     pmid TEXT NOT NULL,
-    pub_year INT NOT NULL,
+    pub_year INT,
     treatment_start INT,
     treatment_end INT,
     years_assumed BOOLEAN NOT NULL,
-    era_id TEXT NOT NULL,
+    era_id TEXT,
     first_record_id BIGINT NOT NULL REFERENCES incisive.evidence_records(id),
     last_record_id BIGINT NOT NULL REFERENCES incisive.evidence_records(id),
     PRIMARY KEY (topic_id, pmid)
