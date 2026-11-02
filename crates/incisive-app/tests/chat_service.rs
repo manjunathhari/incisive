@@ -677,6 +677,39 @@ async fn safety_line_on_every_path() {
         ChatError::DailyLimit { safety_line: true }
     );
 
+    // Too long: the symptom may sit past any point, so all of it is read.
+    let long = format!("{} I am bleeding heavily", "a ".repeat(1000));
+    assert_eq!(
+        service::ask(&st, &user, run, &long, ChatMode::Clinical)
+            .await
+            .unwrap_err(),
+        ChatError::TooLong { safety_line: true }
+    );
+
+    // Not offered.
+    let quick = seed_run(&pool, &user, "quick").await;
+    assert_eq!(
+        service::ask(
+            &st,
+            &user,
+            quick,
+            "I am bleeding heavily",
+            ChatMode::Clinical
+        )
+        .await
+        .unwrap_err(),
+        ChatError::NotOffered { safety_line: true }
+    );
+
+    // A reply already in flight.
+    add_turn(&pool, run, user.id, 100, "pending", "", 0).await;
+    assert_eq!(
+        service::ask(&st, &user, run, "I am bleeding heavily", ChatMode::Clinical)
+            .await
+            .unwrap_err(),
+        ChatError::InFlight { safety_line: true }
+    );
+
     // Busy.
     for _ in 0..3 {
         other_pending(&pool, run, 0).await;
@@ -784,7 +817,7 @@ async fn empty_and_too_long_are_refused_first() {
         )
         .await
         .unwrap_err(),
-        ChatError::TooLong
+        ChatError::TooLong { safety_line: false }
     );
     // 1000 is allowed through (then stops for no Gemma). Characters, not bytes.
     assert_eq!(
@@ -841,7 +874,7 @@ async fn second_ask_while_pending_is_in_flight() {
         service::ask(&st, &user, run, ZEBRA_Q, ChatMode::Clinical)
             .await
             .unwrap_err(),
-        ChatError::InFlight
+        ChatError::InFlight { safety_line: false }
     );
     assert_eq!(turn_count(&pool, user.id).await, 1);
     let v = service::turn_view(&st, &user, a.turn_id).await.unwrap();
@@ -863,7 +896,7 @@ async fn dead_instance_turn_unblocks_user() {
         service::ask(&st, &user, run, ZEBRA_Q, ChatMode::Clinical)
             .await
             .unwrap_err(),
-        ChatError::InFlight
+        ChatError::InFlight { safety_line: false }
     );
     // Written 91 s ago: its instance is dead; the ask itself frees the slot.
     sqlx::query(
@@ -1254,6 +1287,25 @@ async fn http_429_shows_the_busy_line() {
     let v = finished(&st, &user, a).await;
     assert_eq!(v.status, "unavailable");
     assert_eq!(v.reply, lines::BUSY);
+    assert!(v.lines.is_empty());
+    // The busy marker is not a reply flag.
+    assert_eq!(v.checks, None);
+
+    // With symptoms the line goes with the busy reply.
+    let a = service::ask(
+        &st,
+        &user,
+        run,
+        "chest pain and the zebra recurrence?",
+        ChatMode::Clinical,
+    )
+    .await
+    .unwrap();
+    assert!(a.safety_line);
+    let v = finished(&st, &user, a).await;
+    assert_eq!(v.reply, lines::BUSY);
+    assert!(v.safety_line);
+    assert!(v.lines.contains(&lines::WARNING_LINE));
 }
 
 #[tokio::test]
@@ -1466,7 +1518,7 @@ async fn quick_run_and_run_without_opinion_not_offered() {
             service::ask(&st, &user, run, ZEBRA_Q, ChatMode::Clinical)
                 .await
                 .unwrap_err(),
-            ChatError::NotOffered
+            ChatError::NotOffered { safety_line: false }
         );
     }
     // Not offered wins over Gemma being absent: the option is simply not there.

@@ -7,9 +7,11 @@
 //! finish it. The browser can leave; the turn still finishes, and a dead
 //! instance's turn is resolved by the stale sweep.
 //!
-//! Safety: once a question has been read, every way out says whether it
-//! carries the safety line, including a database failure (`Unavailable`).
-//! `Failed` is only for the calls that have no question to look at.
+//! Safety: every refusal of a question says whether it carries the safety
+//! line, including one too long to accept and a database failure
+//! (`Unavailable`). The exceptions are `Empty` (no question) and `NotFound`
+//! (nothing about the run may be implied). `Failed` is only for the calls
+//! that have no question to look at.
 //!
 //! Nothing here logs question, reply or passage text; logs carry ids and
 //! fixed codes, and a panic's payload is dropped unread.
@@ -64,15 +66,23 @@ pub enum ChatState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatError {
+    /// Plain: nothing about the run may be implied.
     NotFound,
-    NotOffered,
+    NotOffered {
+        safety_line: bool,
+    },
+    /// Plain: there is no question.
     Empty,
-    TooLong,
+    TooLong {
+        safety_line: bool,
+    },
     Identifiers {
         message: String,
         safety_line: bool,
     },
-    InFlight,
+    InFlight {
+        safety_line: bool,
+    },
     DailyLimit {
         safety_line: bool,
     },
@@ -283,11 +293,13 @@ pub async fn ask_limited(
     if text.is_empty() {
         return Err(ChatError::Empty);
     }
+    // Read before the length check, over the whole text: a very long question
+    // may carry the symptom past any point.
+    let safety_line = lines::warning_symptoms(text);
     if text.chars().count() > MAX_QUESTION_CHARS {
-        return Err(ChatError::TooLong);
+        return Err(ChatError::TooLong { safety_line });
     }
 
-    let safety_line = lines::warning_symptoms(text);
     let personal = lines::personal(text);
     // From here on a store failure is "unavailable" with the line, not a
     // bare failure: the person may have symptoms.
@@ -319,7 +331,7 @@ pub async fn ask_limited(
         .map_err(|_| unavailable("run_facts"))?
         .ok_or(ChatError::NotFound)?;
     let record = match (decide(&facts, state.gemma.is_some()), facts.record) {
-        (ChatState::NotOffered, _) => return Err(ChatError::NotOffered),
+        (ChatState::NotOffered, _) => return Err(ChatError::NotOffered { safety_line }),
         (ChatState::Ready, Some(record)) => record,
         // Getting ready, or a client or prep problem: no answer for now.
         _ => return Err(ChatError::Unavailable { safety_line }),
@@ -357,7 +369,7 @@ pub async fn ask_limited(
     )
     .await
     .map_err(|_| unavailable("insert"))?
-    .ok_or(ChatError::InFlight)?;
+    .ok_or(ChatError::InFlight { safety_line })?;
 
     let job = TurnJob {
         state: state.clone(),
