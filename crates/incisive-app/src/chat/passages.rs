@@ -1282,7 +1282,11 @@ mod tests {
             );
         }
         // No retraction, no mark.
-        assert!(!built("hernia").iter().any(|p| p.text.contains(RETRACTED_MARK)));
+        assert!(
+            !built("hernia")
+                .iter()
+                .any(|p| p.text.contains(RETRACTED_MARK))
+        );
     }
 
     #[test]
