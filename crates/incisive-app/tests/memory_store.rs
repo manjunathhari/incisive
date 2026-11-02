@@ -109,6 +109,9 @@ async fn ledger_dedups_pmids() {
     let (r1, _) = rec(&pool, t, run, "L").await;
     let (r2, _) = rec(&pool, t, run, "L").await;
     let claim = LedgerClaim {
+        group_id: "g-o0-robotic-lap-ratio--higher_worse".into(),
+        unit_key: "".into(),
+        polarity: "higher_worse".into(),
         outcome: "o".into(),
         intervention: "robotic".into(),
         comparator: "lap".into(),
@@ -161,6 +164,51 @@ async fn ledger_dedups_pmids() {
 }
 
 #[tokio::test]
+async fn ledger_claims_keyed_by_group() {
+    let Some(pool) = connect().await else { return };
+    let (_, run) = seed_run(&pool).await;
+    let t = new_topic(&pool).await;
+    let (r, _) = rec(&pool, t, run, "L").await;
+    let claim = |g: &str| LedgerClaim {
+        group_id: g.into(),
+        unit_key: "u".into(),
+        polarity: "higher_worse".into(),
+        outcome: "o".into(),
+        intervention: "robotic".into(),
+        comparator: "lap".into(),
+        era_id: "e1".into(),
+        era_start: 2010,
+        era_end: 2020,
+        estimate: Some(1.0),
+        lo: None,
+        hi: None,
+        effect_type: "diff".into(),
+        n_studies: 1,
+        label: "stable".into(),
+    };
+    // Same outcome, arms and era in two groups: both are kept.
+    let mut tx = pool.begin().await.unwrap();
+    store::upsert_ledger(&mut tx, t, r, &[], &[claim("g-a"), claim("g-b")])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM incisive.ledger_claims WHERE record_id=$1")
+            .bind(r)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 2);
+    // The same group and era twice is an error, not a silent drop.
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        store::upsert_ledger(&mut tx, t, r, &[], &[claim("g-a")])
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn resolve_follows_chain() {
     let Some(pool) = connect().await else { return };
     let (a, b, c) = (
@@ -209,7 +257,20 @@ async fn candidates_exclude_merged() {
         .unwrap();
     let ids: Vec<i64> = got.iter().map(|t| t.topic_id).collect();
     assert_eq!(ids, vec![live]);
-    assert!((got[0].fts_rank - 1.0).abs() < 1e-6);
+    // Absolute rank, rank/(rank+1): a lone hit is never a perfect 1.0.
+    assert!(
+        got[0].fts_rank > 0.0 && got[0].fts_rank < 1.0,
+        "{}",
+        got[0].fts_rank
+    );
+    // Any query word matches (OR), and punctuation cannot break the query.
+    let any = store::topic_candidates(&pool, &format!("nomatchword, \"{word}\"; ' --"), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        any.iter().map(|t| t.topic_id).collect::<Vec<_>>(),
+        vec![live]
+    );
     assert_eq!(got[0].pairs, pairs());
     assert!(
         store::topic_candidates(&pool, "  ", None, 10)
@@ -219,9 +280,36 @@ async fn candidates_exclude_merged() {
     );
 }
 
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Tests that call `claim_jobs` claim across the whole database, so they run
+/// one at a time on an empty job queue.
+async fn begin_jobs() -> Option<(tokio::sync::MutexGuard<'static, ()>, PgPool)> {
+    let guard = SERIAL.lock().await;
+    let pool = connect().await?;
+    sqlx::query("TRUNCATE incisive.memory_jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    Some((guard, pool))
+}
+
+#[test]
+fn fts_words_tokenise() {
+    assert_eq!(
+        store::fts_words("Robotic vs. Lap-Chole (2021) a  or ROBOTIC; it's \"x\" ' --"),
+        vec!["robotic", "vs", "lap", "chole", "2021", "it"]
+    );
+    assert!(store::fts_words(" ,; a - ").is_empty());
+    let long: String = (0..100).map(|i| format!("word{i} ")).collect();
+    assert_eq!(store::fts_words(&long).len(), 40);
+}
+
 #[tokio::test]
 async fn claim_is_exclusive() {
-    let Some(pool) = connect().await else { return };
+    let Some((_g, pool)) = begin_jobs().await else {
+        return;
+    };
     let (_, run) = seed_run(&pool).await;
     assert!(store::enqueue_job(&pool, run).await.unwrap());
     assert!(!store::enqueue_job(&pool, run).await.unwrap());
@@ -338,7 +426,9 @@ async fn ledger_keeps_study_without_year_or_era() {
 
 #[tokio::test]
 async fn stale_exhausted_running_job_is_given_up() {
-    let Some(pool) = connect().await else { return };
+    let Some((_g, pool)) = begin_jobs().await else {
+        return;
+    };
     let (_, run) = seed_run(&pool).await;
     store::enqueue_job(&pool, run).await.unwrap();
     sqlx::query(

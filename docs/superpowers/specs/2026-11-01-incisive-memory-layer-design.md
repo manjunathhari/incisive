@@ -45,7 +45,7 @@ All tables in schema `incisive`. No existing table changes.
 - `id BIGSERIAL PK`, `label TEXT NOT NULL` (from the Expert Opinion `board.topic`; owner can rename)
 - `pairs JSONB NOT NULL`: sorted, normalised intervention–comparator pairs from the era table
 - `embedding vector(768) NULL`, `embed_model TEXT NULL`
-- `merged_into BIGINT NULL REFERENCES topics(id)` (a merged topic stays as a pointer, never deleted)
+- `merged_into BIGINT NULL REFERENCES topics(id)` (a merged topic stays as a pointer, never deleted); `CHECK (merged_into IS NULL OR merged_into <> id)`
 - `created_at`, `updated_at`
 
 **`evidence_records`**: the permanent library copy
@@ -66,9 +66,9 @@ All tables in schema `incisive`. No existing table changes.
 - `topic_id`, `pmid TEXT`, `pub_year INT`, `treatment_start INT NULL`, `treatment_end INT NULL`, `years_assumed BOOL`, `era_id TEXT`, `first_record_id BIGINT` (the record that first found it), `last_record_id BIGINT`
 - PK `(topic_id, pmid)`; a study found again is counted once, `last_record_id` updated.
 
-**`ledger_claims`**: per outcome, per era, per record
-- `record_id`, `topic_id`, `outcome TEXT`, `intervention TEXT`, `comparator TEXT`, `era_id TEXT`, `era_start INT`, `era_end INT`, `estimate NUMERIC NULL`, `lo NUMERIC NULL`, `hi NUMERIC NULL`, `effect_type TEXT`, `n_studies INT`, `label TEXT` (the trajectory label)
-- PK `(record_id, outcome, intervention, comparator, era_id)`
+**`ledger_claims`**: per group, per era, per record (one group = outcome x arms x measure family x unit x polarity, so one outcome can hold several claims in an era)
+- `record_id`, `topic_id`, `group_id TEXT` (the temporal `GroupResult.id`), `outcome TEXT`, `intervention TEXT`, `comparator TEXT`, `era_id TEXT`, `era_start INT`, `era_end INT`, `estimate NUMERIC NULL`, `lo NUMERIC NULL`, `hi NUMERIC NULL`, `effect_type TEXT`, `unit_key TEXT DEFAULT ''`, `polarity TEXT DEFAULT ''`, `n_studies INT`, `label TEXT` (the trajectory label)
+- PK `(record_id, group_id, era_id)`; index on `topic_id`. A key collision is an error; nothing is dropped silently.
 - Taken directly from the stored `TemporalTable`; never recomputed differently.
 
 **`topic_verdicts`**: the expert layer, append-only

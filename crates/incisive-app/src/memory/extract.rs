@@ -19,6 +19,8 @@ pub struct LedgerStudy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LedgerClaim {
+    /// `GroupResult.id`: one outcome x arms x family x unit x polarity.
+    pub group_id: String,
     pub outcome: String,
     pub intervention: String,
     pub comparator: String,
@@ -29,6 +31,9 @@ pub struct LedgerClaim {
     pub lo: Option<f64>,
     pub hi: Option<f64>,
     pub effect_type: String,
+    pub unit_key: String,
+    /// Serde string of the group's polarity.
+    pub polarity: String,
     pub n_studies: i32,
     pub label: String,
 }
@@ -177,6 +182,7 @@ pub fn extract(
                 sids.sort_unstable();
                 sids.dedup();
                 claims.push(LedgerClaim {
+                    group_id: g.id.clone(),
                     outcome: o.outcome.clone(),
                     intervention: g.intervention.clone(),
                     comparator: g.comparator.clone(),
@@ -187,6 +193,8 @@ pub fn extract(
                     lo,
                     hi,
                     effect_type: serde_text(&g.family),
+                    unit_key: g.unit_key.clone(),
+                    polarity: serde_text(&g.polarity),
                     n_studies: sids.len() as i32,
                     label: serde_text(&g.label),
                 });
@@ -198,6 +206,15 @@ pub fn extract(
 
     let glance = first_glance_line(&board);
     let mut fts = outcome_names.clone();
+    // Both arms of every pair, so a run's own topic words (e.g. `lhm`, `pd`)
+    // are in the record's full-text and a full-text-only match can find them.
+    let arm_words: Vec<&str> = pairs
+        .iter()
+        .flat_map(|(i, c)| [i.as_str(), c.as_str()])
+        .collect();
+    if !arm_words.is_empty() {
+        fts.push(arm_words.join(" "));
+    }
     if !glance.is_empty() {
         fts.push(glance);
     }
@@ -302,6 +319,93 @@ mod tests {
         assert_eq!(pooled[0].outcome, "Postoperative and chronic pain");
         assert!(pooled[0].lo.unwrap() < pooled[0].hi.unwrap());
         assert!(pooled[0].n_studies >= 1);
+    }
+
+    #[test]
+    fn fts_extra_carries_pair_words() {
+        let (_, r) = run("achalasia");
+        let x = r.unwrap();
+        for (i, c) in &x.pairs {
+            for w in i.split_whitespace().chain(c.split_whitespace()) {
+                assert!(x.fts_extra.split_whitespace().any(|t| t == w), "{w}");
+            }
+        }
+        assert!(x.fts_extra.contains("lhm") && x.fts_extra.contains("pd"));
+    }
+
+    #[test]
+    fn claims_pin_group_identity() {
+        use std::collections::HashSet;
+        for f in ["cholecystitis", "hernia", "achalasia"] {
+            let (t, r) = run(f);
+            let x = r.unwrap();
+            // Every claim is a distinct (group, era); none is dropped.
+            let keys: HashSet<(&str, &str)> = x
+                .claims
+                .iter()
+                .map(|c| (c.group_id.as_str(), c.era_id.as_str()))
+                .collect();
+            assert_eq!(keys.len(), x.claims.len(), "{f}");
+            let cells: usize = t
+                .outcomes
+                .iter()
+                .flat_map(|o| &o.groups)
+                .map(|g| {
+                    g.cells
+                        .iter()
+                        .filter(|c| !c.empty && t.eras.iter().any(|e| e.id == c.era_id))
+                        .count()
+                })
+                .sum();
+            assert_eq!(x.claims.len(), cells, "{f}");
+            assert!(x.claims.iter().all(|c| !c.group_id.is_empty()), "{f}");
+        }
+        let (_, r) = run("hernia");
+        let x = r.unwrap();
+        let mut pain: Vec<(String, String, String, f64)> = x
+            .claims
+            .iter()
+            .filter(|c| c.outcome == "Postoperative and chronic pain" && c.era_id == "e-2021-2026")
+            .map(|c| {
+                (
+                    c.group_id.clone(),
+                    c.effect_type.clone(),
+                    c.unit_key.clone(),
+                    (c.estimate.unwrap() * 1e4).round() / 1e4,
+                )
+            })
+            .collect();
+        pain.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+        let want: Vec<(&str, &str, &str, f64)> = vec![
+            (
+                "g-o0-robotic-laparoscopic-diff-nrs-points-higher_worse",
+                "difference",
+                "nrs-points",
+                -1.0,
+            ),
+            (
+                "g-o0-robotic-laparoscopic-diff-points-higher_worse",
+                "difference",
+                "points",
+                0.28,
+            ),
+            (
+                "g-o0-robotic-laparoscopic-diff-pp-higher_worse",
+                "difference",
+                "pp",
+                2.7,
+            ),
+        ];
+        let got: Vec<(&str, &str, &str, f64)> = pain
+            .iter()
+            .map(|p| (p.0.as_str(), p.1.as_str(), p.2.as_str(), p.3))
+            .collect();
+        assert_eq!(got, want);
+        assert!(
+            x.claims
+                .iter()
+                .all(|c| c.polarity == "higher_worse" || !c.polarity.is_empty())
+        );
     }
 
     #[test]

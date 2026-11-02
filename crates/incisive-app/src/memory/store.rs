@@ -55,9 +55,28 @@ pub async fn resolve_topic(pool: &PgPool, topic_id: i64) -> sqlx::Result<i64> {
     Ok(cur)
 }
 
-/// Candidate live topics by full-text rank over their records and, when an
-/// embedding is given, by vector nearness. `fts_rank` is normalised by the max
-/// in the result (all 0 if the max is 0); vector-only topics get 0.
+/// Words of the query text for an OR full-text search: alphanumeric runs,
+/// lowercased, deduped, at least 2 characters, at most 40.
+pub fn fts_words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in text
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+    {
+        if w.chars().count() >= 2 && w != "or" && !out.contains(&w) {
+            out.push(w);
+            if out.len() == 40 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Candidate live topics by full-text rank over their records (any query word
+/// matches) and, when an embedding is given, by vector nearness. `fts_rank`
+/// is absolute, `ts_rank_cd(.., 32)` = rank/(rank+1) in [0,1), the max over
+/// the topic's records; vector-only topics get 0.
 pub async fn topic_candidates(
     pool: &PgPool,
     fts_query: &str,
@@ -65,26 +84,24 @@ pub async fn topic_candidates(
     limit: i64,
 ) -> sqlx::Result<Vec<TopicFeatures>> {
     let mut ranks: Vec<(i64, f32)> = Vec::new();
-    if !fts_query.trim().is_empty() {
+    let words = fts_words(fts_query);
+    if !words.is_empty() {
+        // Alphanumerics only, joined by `or`, bound as a parameter.
         let rows = sqlx::query(
             "WITH q AS (SELECT websearch_to_tsquery('english', $1) AS q) \
-             SELECT r.topic_id, max(ts_rank_cd(r.fts, q.q))::float4 AS rank \
+             SELECT r.topic_id, max(ts_rank_cd(r.fts, q.q, 32))::float4 AS rank \
              FROM incisive.evidence_records r \
              JOIN incisive.topics t ON t.id = r.topic_id AND t.merged_into IS NULL, q \
              WHERE r.fts @@ q.q \
              GROUP BY r.topic_id ORDER BY rank DESC, r.topic_id LIMIT $2",
         )
-        .bind(fts_query)
+        .bind(words.join(" or "))
         .bind(limit)
         .fetch_all(pool)
         .await?;
         for r in rows {
             ranks.push((r.try_get("topic_id")?, r.try_get("rank")?));
         }
-    }
-    let max = ranks.iter().map(|(_, r)| *r).fold(0.0_f32, f32::max);
-    for (_, r) in ranks.iter_mut() {
-        *r = if max > 0.0 { *r / max } else { 0.0 };
     }
     if let Some(e) = embedding {
         let ids: Vec<i64> = sqlx::query_scalar(
@@ -198,7 +215,8 @@ pub async fn insert_record(tx: &mut PgConnection, r: &NewRecord<'_>) -> sqlx::Re
 }
 
 /// Upsert studies on (topic, pmid) keeping `first_record_id`; insert claims
-/// for this record. Repeated pmids in `studies` keep the first occurrence;
+/// for this record (a key collision is an error, never silently dropped).
+/// Repeated pmids in `studies` keep the first occurrence;
 /// every study is stored, with a missing year or era left NULL.
 pub async fn upsert_ledger(
     tx: &mut PgConnection,
@@ -237,11 +255,11 @@ pub async fn upsert_ledger(
     for c in claims {
         sqlx::query(
             "INSERT INTO incisive.ledger_claims \
-             (record_id, topic_id, outcome, intervention, comparator, era_id, era_start, era_end, \
-              estimate, lo, hi, effect_type, n_studies, label) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::float8::numeric, $10::float8::numeric, \
-                     $11::float8::numeric, $12, $13, $14) \
-             ON CONFLICT DO NOTHING",
+             (record_id, topic_id, group_id, unit_key, polarity, outcome, intervention, \
+              comparator, era_id, era_start, era_end, estimate, lo, hi, effect_type, n_studies, \
+              label) \
+             VALUES ($1, $2, $15, $16, $17, $3, $4, $5, $6, $7, $8, $9::float8::numeric, \
+                     $10::float8::numeric, $11::float8::numeric, $12, $13, $14)",
         )
         .bind(record_id)
         .bind(topic_id)
@@ -257,6 +275,9 @@ pub async fn upsert_ledger(
         .bind(&c.effect_type)
         .bind(c.n_studies)
         .bind(&c.label)
+        .bind(&c.group_id)
+        .bind(&c.unit_key)
+        .bind(&c.polarity)
         .execute(&mut *tx)
         .await?;
     }

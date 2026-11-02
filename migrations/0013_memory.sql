@@ -15,6 +15,7 @@ CREATE TABLE incisive.topics (
     embed_model TEXT,
     -- A merged topic stays as a pointer, never deleted.
     merged_into BIGINT REFERENCES incisive.topics(id),
+    CHECK (merged_into IS NULL OR merged_into <> id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -75,6 +76,8 @@ CREATE TABLE incisive.ledger_studies (
 CREATE TABLE incisive.ledger_claims (
     record_id BIGINT NOT NULL REFERENCES incisive.evidence_records(id),
     topic_id BIGINT NOT NULL REFERENCES incisive.topics(id),
+    -- GroupResult.id: one outcome x arms x family x unit x polarity.
+    group_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
     intervention TEXT NOT NULL,
     comparator TEXT NOT NULL,
@@ -85,11 +88,14 @@ CREATE TABLE incisive.ledger_claims (
     lo NUMERIC,
     hi NUMERIC,
     effect_type TEXT NOT NULL,
+    unit_key TEXT NOT NULL DEFAULT '',
+    polarity TEXT NOT NULL DEFAULT '',
     n_studies INT NOT NULL,
     -- The trajectory label.
     label TEXT NOT NULL,
-    PRIMARY KEY (record_id, outcome, intervention, comparator, era_id)
+    PRIMARY KEY (record_id, group_id, era_id)
 );
+CREATE INDEX ledger_claims_topic_idx ON incisive.ledger_claims (topic_id);
 
 -- The expert layer, append-only: the current verdict is the newest row.
 CREATE TABLE incisive.topic_verdicts (

@@ -13,7 +13,9 @@ pub struct TopicFeatures {
     pub topic_id: i64,
     pub pairs: Vec<(String, String)>,
     pub embedding: Option<Vec<f32>>,
-    /// The topic's FTS rank against the query, normalised to 0..1 by the store.
+    /// The topic's absolute FTS rank against the query, `ts_rank_cd(.., 32)`
+    /// = rank/(rank+1) in 0..1, the max over its records (not relative to the
+    /// other candidates, so a lone weak hit stays low).
     pub fts_rank: f32,
 }
 
