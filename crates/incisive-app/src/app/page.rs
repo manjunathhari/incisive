@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 
-use super::{Mark, pubmed_link, rupees};
+use super::{Mark, pubmed_link};
 use crate::agent::answer::{DECISION_SUPPORT, date_ist, duration_text, mode_label, rerun_href};
 use crate::agent::answer_v3::{
     ADDED_LABEL, AnswerV3, Certainty, NO_GUIDELINE_SOURCE, Number, Span, WrittenAnswer,
@@ -403,7 +403,6 @@ fn header_view(c: &Ctx) -> AnyView {
             <p class="ap-meta">
                 <span class="ap-mode">{mode_label(a.mode)}</span>
                 " " <span>{date_ist(a.created_at)}</span>
-                " \u{b7} " <span>{rupees(a.cost_paise)}</span>
                 " \u{b7} " <span>{duration_text(a.elapsed_s)}</span>
             </p>
             <p class="ap-decision">{DECISION_SUPPORT}</p>

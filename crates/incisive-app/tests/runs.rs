@@ -2985,10 +2985,12 @@ async fn ssr_progress_folds_once_the_run_has_ended() {
     .await;
     assert_eq!(s, StatusCode::OK);
     let m = page(&body);
-    assert!(m.contains("<h3>Progress</h3>"), "{m}");
+    // Running: the Progress pill, always folded, the list inside it.
+    assert!(!m.contains("<h3>Progress</h3>"), "{m}");
+    assert!(m.contains(r#"<details class="rk-fold""#), "{m}");
     assert!(
         !m.contains(r#"<details class="run-fold""#),
-        "running: not folded"
+        "running: the pill, not today's fold"
     );
     assert!(m.contains("<li>step &lt;one&gt;</li><li>step two</li><li>step three</li>"));
     assert!(
@@ -3720,13 +3722,14 @@ async fn ssr_answer_v3_page_escapes_text_and_links_citations() {
         at += i + h.len();
     }
     // Folding follow-up item 3: Search trail, Cost and time and Checks are
-    // in the original run view only; the cost and time stay in the
-    // header's meta line.
+    // in the original run view only; the time stays in the header's meta
+    // line, and no money is on the page above it.
     for gone in [">Search trail<", ">Cost and time<", ">Checks<"] {
         assert!(!page.contains(gone), "new page: {gone}");
     }
     assert!(orig.contains("Search trail (1 searches)") && orig.contains("Cost and time"));
-    assert!(page.find("₹23.45").unwrap() < page.find(">Bottom line<").unwrap());
+    assert!(!page.contains("₹23.45"));
+    assert!(orig.contains("₹23.45"));
     // Tables scroll sideways on a phone (the earlier layout only).
     assert_eq!(
         orig.matches(r#"<div class="scroll"><table class="wide">"#)

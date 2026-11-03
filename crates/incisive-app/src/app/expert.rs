@@ -26,8 +26,10 @@ use uuid::Uuid;
 
 use super::chat::Chat;
 use super::page::open_sheet;
+use super::tracker::{self, AnswerPill, Pill, TrackerUi};
 use super::{error_text, get_my_run_temporal};
 use crate::expert_page::{self as xp, Board, Opened, OptionState, Piece};
+use crate::run_tracker::{self as rt, PillState};
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, TemporalView};
 use crate::temporal::TemporalTable;
 
@@ -41,13 +43,8 @@ pub const EXPERT_STYLE: &str = r##"
   --rt-res:#2f5d50; --rt-res-soft:#e3ede8; --rt-skp:#7a4a8c; --rt-skp-soft:#eee4f2; --rt-warn:#a4522c; --rt-warn-soft:#f3e2d8;
   --rt-era1:#ece4cf; --rt-era2:#e2e9e0; --rt-era3:#dde6ef; }
 .rx-answer[hidden], .rx-expert[hidden], .rx-hint[hidden] { display:none; }
-.rx-seg, .rx-hint, .rx-expert { font-family:var(--iv-font); }
-.rx-seg { display:grid; grid-template-columns:1fr 1fr; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:999px; padding:4px; gap:4px; margin:4px 0 10px; max-width:560px; }
-.rx .rx-tab { font:inherit; font-size:.86rem; font-weight:700; border:0; border-radius:999px; padding:6px 10px; min-height:44px; background:none; color:var(--iv-muted); cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:2px 6px; text-align:center; text-decoration:none; line-height:1.25; }
-.rx .rx-tab.on { background:var(--iv-tint); color:var(--iv-accent); }
-.rx .rx-tab[disabled] { cursor:default; opacity:1; font-weight:600; }
+.rx-hint, .rx-expert { font-family:var(--iv-font); }
 .rx-late { flex-basis:100%; font-size:.72rem; font-weight:500; color:var(--rt-warn); }
-.rx-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--rx-ok); }
 .rx-hint { border:1px dashed var(--iv-accent); background:var(--iv-tint); border-radius:14px; padding:10px 12px; font-size:.84rem; color:var(--iv-accent); display:flex; gap:8px; align-items:flex-start; margin:0 0 10px; max-width:560px; }
 .rx-expert { display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
 .rx-op { background:var(--iv-tint); border-radius:16px; padding:12px 14px; display:flex; flex-direction:column; gap:6px; }
@@ -224,6 +221,9 @@ pub(super) struct Expert {
     gave_up: RwSignal<bool>,
     /// The answer's reference numbers (their sheets are on the page).
     answer_refs: StoredValue<BTreeSet<u16>>,
+    /// The tracker's state, and the Answer pill.
+    pub ui: TrackerUi,
+    pub answer: StoredValue<AnswerPill>,
 }
 
 /// The current hash (browser only; empty elsewhere).
@@ -269,7 +269,13 @@ impl Expert {
     /// (`#expert` opens the view; `#ref-n` opens study sheet `n`, the board
     /// page's citation links), follows later hash changes, and polls while
     /// the opinion is being written.
-    pub fn new(run_id: Uuid, t: TemporalView, answer_refs: BTreeSet<u16>) -> Expert {
+    pub fn new(
+        run_id: Uuid,
+        t: TemporalView,
+        answer_refs: BTreeSet<u16>,
+        ui: TrackerUi,
+        answer: AnswerPill,
+    ) -> Expert {
         let state = RwSignal::new(t);
         let opened = Memo::new(move |_| state.with(xp::open));
         let option = Memo::new(move |_| {
@@ -289,6 +295,8 @@ impl Expert {
             hydrated: RwSignal::new(false),
             gave_up: RwSignal::new(false),
             answer_refs: StoredValue::new(answer_refs),
+            ui,
+            answer: StoredValue::new(answer),
         };
         // Effects run in the browser only: the server renders the Answer
         // view (the hash never reaches it).
@@ -420,15 +428,17 @@ impl Expert {
 /// The id of the option's Expert opinion tab (labels the view's panel).
 const EXPERT_TAB_ID: &str = "rx-tab-expert";
 
-/// The "Answer | Expert opinion" option, and the ready hint under it
-/// (Answer view only). Before hydration both are links (`#answer`,
-/// `#expert`); after it they switch the view in place and keep `#expert`
-/// in the address. An opinion that is not ready is a disabled button that
-/// says why.
+/// The "Answer | Expert opinion | Chat with me" pills. Before hydration the
+/// ready ones are links (`#answer`, `#expert`); after it they switch the view
+/// in place and keep `#expert` in the address. An opinion that is not ready is
+/// a disabled button. Each pill fills while it gets ready and turns dull sage
+/// when ready; a border shows only on the pill last clicked.
 ///
-/// With `chat` (`CHAT=on`) the Chat option is the third; with it off the
-/// markup is exactly as before.
+/// With `chat` (`CHAT=on`) the third pill is live; with it off, Chat with me
+/// is visible and not clickable.
 pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
+    let ui = x.ui;
+    let answer = x.answer.get_value();
     let close_chat = move || {
         if let Some(c) = chat {
             c.open.set(false);
@@ -436,12 +446,14 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
     };
     let to_answer = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
+        ui.clicked.set(Some(Pill::Answer));
         x.expert.set(false);
         close_chat();
         set_hash(false);
     };
     let to_expert = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
+        ui.clicked.set(Some(Pill::Expert));
         x.expert.set(true);
         close_chat();
         set_hash(true);
@@ -457,6 +469,9 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                     role="tab"
                     aria-selected=move || x.expert.get().to_string()
                     aria-controls="expert"
+                    aria-label=PillState::Ready.aria(s.text())
+                    data-state=PillState::Ready.as_str()
+                    data-clicked=ui.clicked_attr(Pill::Expert)
                     href="#expert"
                     rel="external"
                     on:click=to_expert
@@ -467,8 +482,34 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
             }
             .into_any()
         } else {
+            // Being written: fills by the usual time, short of full until
+            // the row says done. Otherwise the fill has stopped: white.
+            let state = if s.polls() && !x.gave_up.get() {
+                PillState::Filling
+            } else {
+                PillState::Stopped
+            };
+            let ready_at = answer.ready_at;
+            let style = move || {
+                if state == PillState::Filling {
+                    let secs = (ui.now.get() - ready_at).num_seconds();
+                    rt::fill_background(rt::timed_fill(secs, rt::EXPERT_USUAL_SECS))
+                } else {
+                    String::new()
+                }
+            };
             view! {
-                <button class="rx-tab" id=EXPERT_TAB_ID type="button" role="tab" aria-selected="false" disabled=true>
+                <button
+                    class="rx-tab"
+                    id=EXPERT_TAB_ID
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    aria-label=state.aria(s.text())
+                    data-state=state.as_str()
+                    style=style
+                    disabled=true
+                >
                     {s.text()}
                     {move || {
                         (x.gave_up.get() && x.option.get().polls())
@@ -488,25 +529,21 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                     class:on=on_answer
                     role="tab"
                     aria-selected=move || on_answer().to_string()
+                    aria-label=answer.state.aria("Answer")
+                    data-state=answer.state.as_str()
+                    data-clicked=ui.clicked_attr(Pill::Answer)
+                    style=answer.style(ui)
                     href="#answer"
                     rel="external"
                     on:click=to_answer
                 >
+                    {answer.dot()}
                     "Answer"
                 </a>
                 {expert_tab}
                 {c.tab(x)}
             </div>
             {c.note()}
-            {move || {
-                (x.option.get().dot() && on_answer())
-                    .then(|| view! {
-                        <p class="rx-hint" role="status">
-                            <span aria-hidden="true">"\u{25cf}"</span>
-                            <span>{xp::READY_HINT}</span>
-                        </p>
-                    })
-            }}
         }
         .into_any();
     }
@@ -517,23 +554,20 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                 class:on=move || !x.expert.get()
                 role="tab"
                 aria-selected=move || (!x.expert.get()).to_string()
+                aria-label=answer.state.aria("Answer")
+                data-state=answer.state.as_str()
+                data-clicked=ui.clicked_attr(Pill::Answer)
+                style=answer.style(ui)
                 href="#answer"
                 rel="external"
                 on:click=to_answer
             >
+                {answer.dot()}
                 "Answer"
             </a>
             {expert_tab}
+            {tracker::chat_pill_off()}
         </div>
-        {move || {
-            (x.option.get().dot() && !x.expert.get())
-                .then(|| view! {
-                    <p class="rx-hint" role="status">
-                        <span aria-hidden="true">"\u{25cf}"</span>
-                        <span>{xp::READY_HINT}</span>
-                    </p>
-                })
-        }}
     }
     .into_any()
 }

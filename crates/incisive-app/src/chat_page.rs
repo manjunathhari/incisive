@@ -60,9 +60,8 @@ impl ChatState {
     /// The option's text; `None` when there is no option at all.
     pub fn tab_label(self) -> Option<&'static str> {
         match self {
-            ChatState::Ready => Some("Chat"),
-            ChatState::GettingReady => Some("Chat \u{b7} Getting ready"),
-            ChatState::Unavailable => Some("Chat \u{b7} Unavailable"),
+            ChatState::Ready | ChatState::GettingReady => Some("Chat with me"),
+            ChatState::Unavailable => Some("Chat with me \u{b7} Unavailable"),
             ChatState::NotOffered => None,
         }
     }
@@ -755,14 +754,11 @@ mod tests {
 
     #[test]
     fn tab_labels_and_notes_are_the_mocks() {
-        assert_eq!(ChatState::Ready.tab_label(), Some("Chat"));
-        assert_eq!(
-            ChatState::GettingReady.tab_label(),
-            Some("Chat \u{b7} Getting ready")
-        );
+        assert_eq!(ChatState::Ready.tab_label(), Some("Chat with me"));
+        assert_eq!(ChatState::GettingReady.tab_label(), Some("Chat with me"));
         assert_eq!(
             ChatState::Unavailable.tab_label(),
-            Some("Chat \u{b7} Unavailable")
+            Some("Chat with me \u{b7} Unavailable")
         );
         assert_eq!(ChatState::NotOffered.tab_label(), None);
         assert!(ChatState::Ready.selectable());

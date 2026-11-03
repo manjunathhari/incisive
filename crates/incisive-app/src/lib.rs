@@ -47,6 +47,8 @@ pub mod chat {
 pub mod chat_page;
 /// The Ask page's advisory Question check and PICO helper (no Leptos).
 pub mod question_check;
+/// The run page's tracker rules (no Leptos).
+pub mod run_tracker;
 pub mod runs;
 #[cfg(feature = "ssr")]
 pub mod server;

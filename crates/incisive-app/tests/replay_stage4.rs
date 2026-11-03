@@ -2213,13 +2213,11 @@ fn folding_three_sections_leave_the_new_page_only() {
             1,
             "{name}"
         );
-        // The cost and time in the header's meta line.
+        // The time in the header's meta line; no money on the screen (the
+        // cost stays in the Original run view).
         let meta = &page[page.find(r#"<p class="ap-meta">"#).unwrap()..];
         let meta = &meta[..meta.find("</p>").unwrap()];
-        assert!(
-            meta.contains(&incisive_app::agent::answer::rupees(a.cost_paise)),
-            "{name}"
-        );
+        assert!(!meta.contains('\u{20b9}'), "{name}");
         assert!(meta.contains(&incisive_app::agent::answer::duration_text(a.elapsed_s)));
         // Every moved line is in Other notable findings, escaped, in full.
         let lines = check_lines(&a);
@@ -2343,7 +2341,8 @@ fn ivory_fingerprints(a: &AnswerV3) -> serde_json::Value {
 /// Ivory redesign (owner decision 2): the answer content is byte-identical.
 /// The whole answer, its `.ap-main` and the original run view, rendered
 /// from the replay answers, match the fingerprints captured on main 420f0bb
-/// before the redesign (`tests/fixtures/part_a/before_ivory.json`), and
+/// before the redesign (`tests/fixtures/part_a/before_ivory.json`, re-recorded
+/// 3 Nov with only the money span gone from the `.ap-main` meta line), and
 /// Copy as text matches the folding fixture.
 #[test]
 fn ivory_redesign_keeps_the_answer_content_byte_identical() {
