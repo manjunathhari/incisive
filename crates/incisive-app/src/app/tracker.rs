@@ -45,6 +45,7 @@ pub const TRACKER_STYLE: &str = r##"
 .rk-pend { font-size:15px; line-height:1.3; font-weight:500; color:var(--iv-muted); margin-top:8px; }
 .rk-bar { height:6px; margin-top:8px; border-radius:999px; background:var(--iv-off); overflow:hidden; }
 .rk-bar > span { display:block; height:100%; border-radius:999px; background:var(--iv-accent); }
+.rk-tag[hidden] { display:none; }
 .rk-tag { margin:12px 0 0; padding:10px 14px; border-radius:12px; background:var(--iv-tint); color:var(--iv-accent); font-size:14px; line-height:1.4; font-weight:600; }
 .rk-leave { margin:14px 0 0; padding-top:12px; border-top:1px solid var(--iv-rule); font-size:13px; line-height:1.4; color:var(--iv-body); }
 .rk-leave a { color:var(--iv-accent); }
@@ -73,7 +74,7 @@ pub const TRACKER_STYLE: &str = r##"
   .rk-cell { padding:10px 0; display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:12px; align-items:baseline; }
   .rk-name, .rk-sub { grid-column:1; }
   .rk-sub { margin-top:2px; }
-  .rk-val, .rk-state, .rk-pend { grid-column:2; grid-row:1; margin:0; text-align:right; }
+  .rk-val, .rk-state, .rk-pend { grid-column:2; grid-row:1; margin:0; text-align:right; max-width:45vw; overflow-wrap:anywhere; }
   .rk-val { font-size:22px; }
   .rk-of { font-size:14px; }
   .rk-state, .rk-pend { font-size:13px; }
@@ -85,6 +86,7 @@ pub const TRACKER_STYLE: &str = r##"
   .rk-card[data-done="true"] .rk-cell { display:block; padding:9px 0; }
   .rk-card[data-done="true"] .rk-name { font-size:12px; line-height:1.3; font-weight:500; color:var(--iv-muted); }
   .rk-card[data-done="true"] .rk-sub { display:none; }
+  .rk-card[data-done="true"] .rk-sub.keep { display:block; margin-top:2px; font-size:12px; line-height:1.3; }
   .rk-card[data-done="true"] .rk-val { font-size:20px; line-height:1.15; margin-top:2px; text-align:left; }
   .rk-card[data-done="true"] .rk-of { font-size:13px; }
   .rk-card[data-done="true"] .rk-state, .rk-card[data-done="true"] .rk-pend { font-size:14px; line-height:1.25; color:var(--iv-ink); margin-top:3px; text-align:left; }
@@ -138,6 +140,21 @@ impl TrackerUi {
             show_all: RwSignal::new(false),
             clicked: RwSignal::new(None),
             seen: StoredValue::new(None),
+        }
+    }
+
+    /// The address moved (browser Back or a link): a border on another view's
+    /// pill is stale. Other hashes (study sheets) leave it.
+    #[cfg(feature = "hydrate")]
+    pub fn follow_hash(self, hash: &str) {
+        let shown = match hash {
+            "#expert" => Pill::Expert,
+            "#chat" => Pill::Chat,
+            "" | "#answer" => Pill::Answer,
+            _ => return,
+        };
+        if self.clicked.get_untracked().is_some_and(|p| p != shown) {
+            self.clicked.set(None);
         }
     }
 
@@ -247,7 +264,10 @@ pub(super) fn plain_bar(ui: TrackerUi, mode: RunMode, answer: AnswerPill) -> Any
 
 /// One row of the card.
 fn row_view(r: Row) -> AnyView {
-    let off = matches!(r.value, Value::Pending | Value::NotReached);
+    let off = matches!(
+        r.value,
+        Value::Pending | Value::NotReached | Value::NotWritten
+    );
     let name_class = if off { "rk-name off" } else { "rk-name" };
     let value = match r.value {
         Value::Number { n, of } => view! {
@@ -260,15 +280,17 @@ fn row_view(r: Row) -> AnyView {
         Value::State(s) => view! { <div class="rk-state">{s}</div> }.into_any(),
         Value::Pending => view! { <div class="rk-pend">"pending"</div> }.into_any(),
         Value::NotReached => view! { <div class="rk-pend">"not reached"</div> }.into_any(),
+        Value::NotWritten => view! { <div class="rk-pend">"no answer written"</div> }.into_any(),
     };
     let bar = r.bar.map(|pct| {
         let width = format!("width:{pct}%");
         view! { <div class="rk-bar"><span style=width></span></div> }
     });
+    let sub_class = if r.keep_sub { "rk-sub keep" } else { "rk-sub" };
     let sub = r
         .sub
         .filter(|_| !off)
-        .map(|s| view! { <div class="rk-sub">{s}</div> });
+        .map(|s| view! { <div class=sub_class>{s}</div> });
     view! {
         <div class="rk-cell">
             <div class=name_class>{r.name}</div>
@@ -300,7 +322,7 @@ pub(super) fn results_card(
             total_secs
         }
     };
-    let ended_well = !working && tracker.sentence == "Answer ready";
+    let ended_well = tracker.ended_well;
     let title = if working { "Results so far" } else { "Results" };
     // A redraw keeps the pulse in step with the clock's own beat.
     let pulse = format!(
@@ -324,10 +346,15 @@ pub(super) fn results_card(
     } else {
         "total time"
     };
-    let tagline = move || {
-        (working && rt::tagline_due(mode, secs()))
-            .then(|| view! { <p class="rk-tag">{rt::TAGLINE}</p> })
-    };
+    // Always drawn while working, shown by the clock: the server's clock and
+    // the browser's differ, and the page's structure must not depend on them.
+    let tagline = working.then(|| {
+        view! {
+            <p class="rk-tag" hidden=move || !rt::tagline_due(mode, secs())>
+                {rt::TAGLINE}
+            </p>
+        }
+    });
     let leave = working.then(|| {
         view! {
             <p class="rk-leave">

@@ -42,11 +42,9 @@ pub const EXPERT_STYLE: &str = r##"
 :root { --rx-ok:#2F6B4F; --rx-ok-tint:#E6F1EB;
   --rt-res:#2f5d50; --rt-res-soft:#e3ede8; --rt-skp:#7a4a8c; --rt-skp-soft:#eee4f2; --rt-warn:#a4522c; --rt-warn-soft:#f3e2d8;
   --rt-era1:#ece4cf; --rt-era2:#e2e9e0; --rt-era3:#dde6ef; }
-.rx-answer[hidden], .rx-expert[hidden], .rx-hint[hidden] { display:none; }
-.rx-hint, .rx-expert { font-family:var(--iv-font); }
+.rx-answer[hidden], .rx-expert[hidden] { display:none; }
 .rx-late { flex-basis:100%; font-size:.72rem; font-weight:500; color:var(--rt-warn); }
-.rx-hint { border:1px dashed var(--iv-accent); background:var(--iv-tint); border-radius:14px; padding:10px 12px; font-size:.84rem; color:var(--iv-accent); display:flex; gap:8px; align-items:flex-start; margin:0 0 10px; max-width:560px; }
-.rx-expert { display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
+.rx-expert { font-family:var(--iv-font); display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
 .rx-op { background:var(--iv-tint); border-radius:16px; padding:12px 14px; display:flex; flex-direction:column; gap:6px; }
 .rx-who { font-size:.72rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--iv-accent); }
 .rx-verdict { margin:0; color:var(--iv-ink); font-weight:600; font-size:.98rem; line-height:1.45; }
@@ -71,7 +69,7 @@ pub const EXPERT_STYLE: &str = r##"
 .rx-seg a:focus-visible, .rx-seg button:focus-visible, .rx-expert a:focus-visible, .rx-expert button:focus-visible, .rt a:focus-visible, .rt summary:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
 /* Before hydration: #expert opens a ready view (CSS :target) and hides the answer. */
 .rx-pre .rx-expert:target:not(:empty)[hidden] { display:flex; }
-.rx-pre:has(.rx-expert:target:not(:empty)) .rx-answer, .rx-pre:has(.rx-expert:target:not(:empty)) .rx-hint { display:none; }
+.rx-pre:has(.rx-expert:target:not(:empty)) .rx-answer { display:none; }
 .rx-pre:has(.rx-expert:target:not(:empty)) .rx-tab.on { background:none; color:var(--iv-muted); }
 .rx-pre:has(.rx-expert:target:not(:empty)) a.rx-tab[href="#expert"] { background:var(--iv-tint); color:var(--iv-accent); }
 /* ---- the Temporal board ---- */
@@ -313,7 +311,10 @@ impl Expert {
         });
         #[cfg(feature = "hydrate")]
         {
-            let listener = window_event_listener(leptos::ev::hashchange, move |_| x.follow_hash());
+            let listener = window_event_listener(leptos::ev::hashchange, move |_| {
+                x.follow_hash();
+                x.ui.follow_hash(&current_hash());
+            });
             on_cleanup(move || listener.remove());
         }
         x.poll();
@@ -401,6 +402,11 @@ impl Expert {
     }
 
     /// The opinion is still being written, as of now.
+    /// The opinion is ready (tracked).
+    pub(super) fn opinion_ready(self) -> bool {
+        self.option.get().selectable()
+    }
+
     pub(super) fn opinion_writing_now(self) -> bool {
         self.option.get_untracked().polls()
     }
@@ -489,6 +495,11 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
             } else {
                 PillState::Stopped
             };
+            let aria = if x.gave_up.get() && s.polls() {
+                format!("{}. {}", s.text(), xp::POLL_GAVE_UP_NOTE)
+            } else {
+                state.aria(s.text())
+            };
             let ready_at = answer.ready_at;
             let style = move || {
                 if state == PillState::Filling {
@@ -505,7 +516,7 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                     type="button"
                     role="tab"
                     aria-selected="false"
-                    aria-label=state.aria(s.text())
+                    aria-label=aria
                     data-state=state.as_str()
                     style=style
                     disabled=true

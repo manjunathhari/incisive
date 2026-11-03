@@ -1070,7 +1070,7 @@ async fn tracker_quick_has_two_pills_and_a_queued_run_waits() {
     assert!(bar.contains(">Answer</a>") && bar.contains(">Chat with me</button>"));
     assert!(!bar.contains("Expert opinion"), "{bar}");
     assert!(m.contains("usually about 2 min"));
-    assert!(!m.contains("Studies read in full"));
+    assert!(!m.contains("Studies read"));
     assert!(!m.contains('\u{20b9}'));
 
     let (other, email) = new_user(&pool).await;
@@ -1174,4 +1174,97 @@ async fn tracker_an_old_run_has_no_card() {
     let m = tracker_page(&st, run, &email).await;
     assert!(!m.contains(r#"class="rk-card""#));
     assert!(m.contains("Screening 12 abstracts"));
+}
+
+/// A run interrupted after the checks: no answer stored, so never "written"
+/// and never a tick.
+#[tokio::test]
+async fn tracker_an_interrupted_run_is_not_written() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Focused,
+        RunStatus::Interrupted,
+        &[
+            "Researcher: selected 12 studies (7 RCTs, 4 meta-analyses)",
+            "Writer: writing the answer from 12 studies (12 with an abstract)",
+            "Citation check: every citation is one of the selected studies",
+        ],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    assert!(m.contains("The run ended before the answer was ready"));
+    assert!(m.contains(r#"<div class="rk-state">all matched</div>"#));
+    assert!(!m.contains(r#"<div class="rk-state">written</div>"#));
+    assert!(!m.contains("Answer ready") && !m.contains("M3 8.5"));
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="stopped""#), "{bar}");
+    assert!(!bar.contains(r#"class="rk-dot""#), "{bar}");
+}
+
+/// A body with nothing written, which the engine ends with "Answer ready":
+/// its reason shows, no tick, a white pill.
+#[tokio::test]
+async fn tracker_a_stored_empty_answer_is_not_written() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let mut body = fixture("hernia");
+    body["answer"] = Value::Null;
+    body["empty_reason"] = Value::String("The answer could not be finished.".into());
+    let run = create_run(&pool, uid, "Q?", RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for s in [
+        "Researcher: selected 12 studies (7 RCTs, 4 meta-analyses)",
+        "The writer's answer was cut off by its output limit",
+        "Answer ready",
+    ] {
+        add_step(&pool, run, StepKind::Note, s).await.unwrap();
+    }
+    assert!(save_answer(&pool, run, &body).await.unwrap());
+    assert!(
+        set_status(&pool, run, RunStatus::Partial, None)
+            .await
+            .unwrap()
+    );
+    let m = tracker_page(&st, run, &email).await;
+    let card = &m[m.find(r#"class="rk-card""#).unwrap()..];
+    let card = &card[..card.find("</section>").unwrap()];
+    assert!(card.contains("The answer could not be finished."), "{card}");
+    assert!(card.contains(">no answer written<"), "{card}");
+    assert!(!card.contains("M3 8.5"), "no tick: {card}");
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="stopped""#), "{bar}");
+    assert!(!bar.contains(r#"class="rk-dot""#), "{bar}");
+}
+
+/// The tagline is always drawn while working, hidden by the clock, so the
+/// page's structure never depends on it.
+#[tokio::test]
+async fn tracker_the_tagline_is_always_drawn_while_working() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Quick,
+        RunStatus::Running,
+        &["Researcher: 2 searches so far (turn 1 of 8)"],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    let i = m.find(r#"class="rk-tag""#).expect("the tagline");
+    let tag = &m[m[..i].rfind('<').unwrap()..i + m[i..].find('>').unwrap()];
+    assert!(tag.contains("hidden"), "{tag}");
 }

@@ -89,7 +89,7 @@ pub const CHAT_STYLE: &str = r##"
 .rx-chaton .run-chrome > :not(.run-question):not(.rx-seg):not(.rx-chat-note) { display:none; }
 /* Before hydration: #chat opens a ready view (CSS :target) and hides the rest. */
 .rx-pre .rx-chat:target:not(:empty)[hidden] { display:flex; }
-.rx-pre:has(.rx-chat:target:not(:empty)) .rx-answer, .rx-pre:has(.rx-chat:target:not(:empty)) .rx-hint { display:none; }
+.rx-pre:has(.rx-chat:target:not(:empty)) .rx-answer { display:none; }
 .rx-pre:has(.rx-chat:target:not(:empty)) .rx-tab.on { background:none; color:var(--iv-muted); }
 .rx-pre:has(.rx-chat:target:not(:empty)) a.rx-tab[href="#chat"] { background:var(--iv-tint); color:var(--iv-accent); }
 .rx-pre:has(.rx-chat:target:not(:empty)) .run-chrome { max-width:760px; margin-inline:auto; }
@@ -660,6 +660,8 @@ impl Chat {
     /// button; visible and not clickable where chat is not offered.
     pub fn tab(self, x: Expert) -> impl IntoView {
         let ui = x.ui;
+        // When this page first saw the opinion ready.
+        let since: StoredValue<Option<chrono::DateTime<chrono::Utc>>> = StoredValue::new(None);
         let to_chat = move |ev: leptos::ev::MouseEvent| {
             ev.prevent_default();
             ui.clicked.set(Some(Pill::Chat));
@@ -694,18 +696,23 @@ impl Chat {
                 }
                 .into_any()
             } else {
-                // Getting ready: fills by the usual time once the opinion's
-                // has passed; unavailable: the fill has stopped.
+                // Getting ready: fills by the usual time from when this page
+                // saw the opinion ready; unavailable: the fill has stopped.
                 let state = if s == cp::ChatState::GettingReady {
                     PillState::Filling
                 } else {
                     PillState::Stopped
                 };
-                let ready_at = x.answer.get_value().ready_at;
                 let style = move || {
                     if state == PillState::Filling {
-                        let secs =
-                            (ui.now.get() - ready_at).num_seconds() - rt::EXPERT_USUAL_SECS as i64;
+                        let now = ui.now.get();
+                        let secs = if x.opinion_ready() {
+                            let from = since.get_value().unwrap_or(now);
+                            since.set_value(Some(from));
+                            (now - from).num_seconds()
+                        } else {
+                            0
+                        };
                         rt::fill_background(rt::timed_fill(secs, rt::CHAT_USUAL_SECS))
                     } else {
                         String::new()

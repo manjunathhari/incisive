@@ -879,6 +879,10 @@ fn rupees(paise: i64) -> String {
 /// How often the run page asks for news while the run is queued or running.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long after a Full run's last step the page waits for its expert
+/// opinion row.
+const ROW_DUE_WITHIN_SECS: i64 = 20;
+
 #[component]
 fn RunPage() -> impl IntoView {
     let params = use_params_map();
@@ -924,7 +928,15 @@ fn RunPage() -> impl IntoView {
     };
     Effect::new(move |_| match data.get() {
         Some(Ok(v)) => {
-            let active = v.run.summary.status.is_active();
+            // A Full run that has just ended: its expert opinion row comes
+            // moments later, so ask until it is there or a short time passes.
+            let row_due = v.temporal.is_none()
+                && v.run.summary.mode == RunMode::Focused
+                && matches!(v.run.summary.status, RunStatus::Done | RunStatus::Partial)
+                && v.run.steps.last().is_some_and(|s| {
+                    (crate::library::now_utc() - s.at).num_seconds() < ROW_DUE_WITHIN_SECS
+                });
+            let active = v.run.summary.status.is_active() || row_due;
             last_good.set(Some(v));
             if active { start() } else { stop() }
         }
@@ -1104,6 +1116,21 @@ fn run_view(
         Some(Body::V3(a)) => Some(a.elapsed_s),
         None => None,
     };
+    // How each study was read (only a finished, readable Phase 3 answer).
+    let evidence_texts: Vec<String> = match answer.as_ref() {
+        Some(Some(Body::V3(a))) => a.evidence.iter().map(|e| e.text.clone()).collect(),
+        _ => Vec::new(),
+    };
+    // Written: a stored body that holds an answer, not just any body.
+    let (written, empty_reason) = match answer.as_ref() {
+        Some(Some(Body::V3(a))) => (a.answer.is_some(), a.empty_reason.clone()),
+        Some(Some(Body::V2(_))) => (true, None),
+        Some(None) => (
+            false,
+            Some("This answer can't be shown. Please ask the question again.".to_string()),
+        ),
+        None => (false, None),
+    };
     let answer_block = answer.map(|a| match a {
         Some(Body::V2(a)) => answer_view(a).into_any(),
         Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
@@ -1124,20 +1151,26 @@ fn run_view(
     let mode = v.summary.mode;
     // The tracker: from the stored step lines and the status only.
     let working = status.is_active();
-    let answered = matches!(status, RunStatus::Done | RunStatus::Partial) && has_answer;
+    let answered = matches!(status, RunStatus::Done | RunStatus::Partial) && written;
+    let ended_empty = matches!(status, RunStatus::Done | RunStatus::Partial) && !written;
     let run_state = if status == RunStatus::Queued {
         crate::run_tracker::RunState::Waiting
     } else if working {
         crate::run_tracker::RunState::Working
     } else if answered {
         crate::run_tracker::RunState::Answered
+    } else if ended_empty {
+        crate::run_tracker::RunState::EndedEmpty
     } else {
         crate::run_tracker::RunState::Stopped
     };
     let created_at = v.summary.created_at;
+    // The clock starts at the first step, as `elapsed_s` nearly does, so a
+    // queue wait cannot make it step back at the end.
+    let clock_from = v.steps.first().map_or(created_at, |s| s.at);
     let last_step_at = v.steps.last().map_or(created_at, |s| s.at);
-    let total_secs = elapsed_s.map_or((last_step_at - created_at).num_seconds(), |s| s as i64);
-    let read = {
+    let total_secs = elapsed_s.map_or((last_step_at - clock_from).num_seconds(), |s| s as i64);
+    let mut read = {
         let lines: Vec<crate::run_tracker::Step<'_>> = v
             .steps
             .iter()
@@ -1146,11 +1179,17 @@ fn run_view(
                 line: s.line.as_str(),
             })
             .collect();
-        crate::run_tracker::read(mode, &lines, run_state)
+        crate::run_tracker::read(mode, &lines, run_state, empty_reason.as_deref())
     };
+    if answered {
+        let texts: Vec<&str> = evidence_texts.iter().map(String::as_str).collect();
+        read.read_from_evidence(&texts);
+    }
     let answer_pill = tracker::AnswerPill {
         state: if answered {
             crate::run_tracker::PillState::Ready
+        } else if status == RunStatus::Queued {
+            crate::run_tracker::PillState::Idle
         } else if working {
             crate::run_tracker::PillState::Filling
         } else {
@@ -1171,7 +1210,7 @@ fn run_view(
             read,
             working,
             status == RunStatus::Queued,
-            created_at,
+            clock_from,
             total_secs,
         )
     });
