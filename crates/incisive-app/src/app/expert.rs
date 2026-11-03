@@ -24,6 +24,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 use uuid::Uuid;
 
+use super::chat::Chat;
 use super::page::open_sheet;
 use super::{error_text, get_my_run_temporal};
 use crate::expert_page::{self as xp, Board, Opened, OptionState, Piece};
@@ -226,7 +227,7 @@ pub(super) struct Expert {
 }
 
 /// The current hash (browser only; empty elsewhere).
-fn current_hash() -> String {
+pub(super) fn current_hash() -> String {
     #[cfg(feature = "hydrate")]
     {
         web_sys::window()
@@ -240,26 +241,27 @@ fn current_hash() -> String {
 /// Set the address's hash without a new history entry or a scroll
 /// (browser only): `#expert`, or none.
 fn set_hash(expert: bool) {
+    replace_hash(if expert { "#expert" } else { "" });
+}
+
+/// Set the address's hash (`hash` with its `#`, or empty) without a new
+/// history entry or a scroll (browser only).
+pub(super) fn replace_hash(hash: &str) {
     #[cfg(feature = "hydrate")]
     {
         let Some(w) = web_sys::window() else { return };
         let loc = w.location();
-        let base = format!(
-            "{}{}",
+        let url = format!(
+            "{}{}{hash}",
             loc.pathname().unwrap_or_default(),
             loc.search().unwrap_or_default()
         );
-        let url = if expert {
-            format!("{base}#expert")
-        } else {
-            base
-        };
         if let Ok(h) = w.history() {
             let _ = h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
         }
     }
     #[cfg(not(feature = "hydrate"))]
-    let _ = expert;
+    let _ = hash;
 }
 
 impl Expert {
@@ -385,6 +387,16 @@ impl Expert {
         }
     }
 
+    /// The opinion is still being written (tracked).
+    pub(super) fn opinion_writing(self) -> bool {
+        self.option.get().polls()
+    }
+
+    /// The opinion is still being written, as of now.
+    pub(super) fn opinion_writing_now(self) -> bool {
+        self.option.get_untracked().polls()
+    }
+
     /// The `class` of the wrapper (`rx-pre` until the browser takes over).
     pub fn wrapper_class(self) -> impl Fn() -> &'static str + Send + Sync + 'static {
         move || {
@@ -413,15 +425,25 @@ const EXPERT_TAB_ID: &str = "rx-tab-expert";
 /// `#expert`); after it they switch the view in place and keep `#expert`
 /// in the address. An opinion that is not ready is a disabled button that
 /// says why.
-pub(super) fn option_bar(x: Expert) -> AnyView {
+///
+/// With `chat` (`CHAT=on`) the Chat option is the third; with it off the
+/// markup is exactly as before.
+pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
+    let close_chat = move || {
+        if let Some(c) = chat {
+            c.open.set(false);
+        }
+    };
     let to_answer = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
         x.expert.set(false);
+        close_chat();
         set_hash(false);
     };
     let to_expert = move |ev: leptos::ev::MouseEvent| {
         ev.prevent_default();
         x.expert.set(true);
+        close_chat();
         set_hash(true);
     };
     let expert_tab = move || {
@@ -457,6 +479,37 @@ pub(super) fn option_bar(x: Expert) -> AnyView {
             .into_any()
         }
     };
+    if let Some(c) = chat {
+        let on_answer = move || !x.expert.get() && !c.open.get();
+        return view! {
+            <div class="rx-seg" class:rx-seg3=move || c.offered() role="tablist" aria-label="Run views">
+                <a
+                    class="rx-tab"
+                    class:on=on_answer
+                    role="tab"
+                    aria-selected=move || on_answer().to_string()
+                    href="#answer"
+                    rel="external"
+                    on:click=to_answer
+                >
+                    "Answer"
+                </a>
+                {expert_tab}
+                {c.tab(x)}
+            </div>
+            {c.note()}
+            {move || {
+                (x.option.get().dot() && on_answer())
+                    .then(|| view! {
+                        <p class="rx-hint" role="status">
+                            <span aria-hidden="true">"\u{25cf}"</span>
+                            <span>{xp::READY_HINT}</span>
+                        </p>
+                    })
+            }}
+        }
+        .into_any();
+    }
     view! {
         <div class="rx-seg" role="tablist" aria-label="Run views">
             <a

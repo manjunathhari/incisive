@@ -37,6 +37,14 @@ pub mod memory;
 /// The evidence chat (off by default).
 #[cfg(feature = "ssr")]
 pub mod chat;
+/// Without `ssr` only the chat's fixed lines are built (the window draws
+/// them); the path is the same `chat/lines.rs`.
+#[cfg(not(feature = "ssr"))]
+pub mod chat {
+    pub mod lines;
+}
+/// The chat window's rules and shared types (no Leptos).
+pub mod chat_page;
 /// The Ask page's advisory Question check and PICO helper (no Leptos).
 pub mod question_check;
 pub mod runs;

@@ -14,7 +14,7 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Title, provide_meta_context};
 use leptos_router::{
     components::{A, Route, Router, Routes},
-    hooks::use_params_map,
+    hooks::{use_params_map, use_query_map},
     path,
 };
 
@@ -33,12 +33,16 @@ use crate::ask::{ActivityView, AskOutcome, MeView};
 // The ivory redesign: header and tokens, the Ask page and the Library.
 mod ask_page;
 mod details;
+// The evidence chat's option and window.
+mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
 mod expert;
 mod ivory;
 mod library_page;
 mod page;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
+/// The chat window's styles (exported for the scope test).
+pub use chat::CHAT_STYLE;
 /// The Expert Opinion screens' styles (exported for the scope test).
 pub use expert::{ANSWER_VIEW, EXPERT_STYLE};
 /// The ivory styles (exported for the scope test: none of them reach the
@@ -478,6 +482,126 @@ pub async fn get_my_run_temporal(
         .map_err(run_api_error)
 }
 
+/// The chat of one of the user's runs: `None` with `CHAT=off` (no chat query
+/// is made). Same as `GET /api/runs/{id}/chat`; someone else's run is "not
+/// found".
+#[server(prefix = "/api/fn", endpoint = "my_run_chat")]
+pub async fn get_my_run_chat(
+    run_id: Uuid,
+) -> Result<Option<crate::chat_page::ChatPageView>, ServerFnError> {
+    let on = use_context::<crate::server::AppState>().is_some_and(|s| s.chat.on);
+    if !on {
+        return Ok(None);
+    }
+    let (state, user) = chat_signed_in().await?;
+    crate::chat::service::state_for(&state, &user, run_id)
+        .await
+        .map(|v| Some(v.into()))
+        .map_err(chat_error)
+}
+
+/// Ask a question of a run's evidence. Same as `POST /api/runs/{id}/chat`, as
+/// a form post too: a refusal is a value the page shows in the conversation,
+/// and a browser that has not hydrated is sent back to the run page. A starter
+/// button sends its question as `starter`.
+#[server(prefix = "/api/fn", endpoint = "chat_ask")]
+pub async fn chat_ask(
+    run_id: Uuid,
+    #[server(default)] question: String,
+    #[server(default)] mode: String,
+    #[server(default)] starter: Option<String>,
+) -> Result<crate::chat_page::AskReply, ServerFnError> {
+    use crate::chat::{ChatMode, api, lines, service};
+    use crate::chat_page::{self as cp, AskReply, ChatTurn, Refusal};
+    let (state, user) = chat_signed_in().await?;
+    let question = starter.filter(|s| !s.trim().is_empty()).unwrap_or(question);
+    let asked = match ChatMode::parse(&mode) {
+        Some(m) => service::ask(&state, &user, run_id, &question, m).await,
+        // The question was readable, so it still gets the safety line.
+        None => Err(service::ChatError::BadMode {
+            safety_line: lines::warning_symptoms(&question),
+        }),
+    };
+    Ok(match asked {
+        Ok(a) => {
+            if is_form_post() {
+                leptos_axum::redirect(&cp::accepted_url(run_id));
+            }
+            AskReply::Accepted(ChatTurn::just_asked(
+                a.turn_id,
+                &question,
+                &mode,
+                a.safety_line,
+            ))
+        }
+        Err(e) => {
+            let (_, code, message, safety_line) = api::parts(e);
+            if is_form_post() {
+                leptos_axum::redirect(&cp::refused_url(run_id, code, safety_line));
+            }
+            AskReply::Refused(Refusal {
+                question,
+                message,
+                safety_line,
+            })
+        }
+    })
+}
+
+/// One of the user's turns. Same as `GET /api/chat/turns/{id}`.
+#[server(prefix = "/api/fn", endpoint = "chat_turn")]
+pub async fn chat_turn(turn_id: i64) -> Result<crate::chat_page::ChatTurn, ServerFnError> {
+    let (state, user) = chat_signed_in().await?;
+    crate::chat::service::turn_view(&state, &user, turn_id)
+        .await
+        .map(Into::into)
+        .map_err(chat_error)
+}
+
+/// What a citation opens, if it is in one of the user's turns. Same rule as
+/// `GET /api/chat/passages/{id}`.
+#[server(prefix = "/api/fn", endpoint = "chat_source")]
+pub async fn chat_source(stored_id: i64) -> Result<crate::chat_page::SheetSource, ServerFnError> {
+    use crate::chat::store::CitedSource;
+    use crate::chat_page::{paper_name, passage_sheet, qa_sheet};
+    let (state, user) = chat_signed_in().await?;
+    let source = crate::chat::service::cited_source(&state, &user, stored_id)
+        .await
+        .map_err(chat_error)?;
+    Ok(match source {
+        CitedSource::Passage {
+            kind,
+            text,
+            references,
+            ..
+        } => passage_sheet(&kind, &text, paper_name(&references).as_deref()),
+        CitedSource::Qa { text, .. } => qa_sheet(&text),
+    })
+}
+
+/// A thumb on the user's own turn. Same as `POST /api/chat/turns/{id}/feedback`.
+#[server(prefix = "/api/fn", endpoint = "chat_feedback")]
+pub async fn chat_feedback(run_id: Uuid, turn_id: i64, value: i64) -> Result<(), ServerFnError> {
+    let (state, user) = chat_signed_in().await?;
+    chat_action_done(
+        run_id,
+        crate::chat::service::give_feedback(&state, &user, turn_id, value).await,
+    )
+}
+
+/// Suggest the user's own finished turn for the library. Same as
+/// `POST /api/chat/turns/{id}/suggest`.
+#[server(prefix = "/api/fn", endpoint = "chat_suggest")]
+pub async fn chat_suggest(run_id: Uuid, turn_id: i64) -> Result<(), ServerFnError> {
+    let (state, user) = chat_signed_in().await?;
+    chat_action_done(
+        run_id,
+        crate::chat::service::suggest(&state, &user, turn_id)
+            .await
+            .map(|_| ()),
+    )
+}
+
 /// Delete one of the user's runs (cancelling it if active). Same as `DELETE /api/runs/{id}`.
 #[server(prefix = "/api/fn", endpoint = "delete_my_run")]
 pub async fn delete_my_run(run_id: Uuid) -> Result<(), ServerFnError> {
@@ -514,6 +638,68 @@ fn run_api_error(e: crate::runs::api::RunApiError) -> ServerFnError {
         RunApiError::Failed => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     });
     ServerFnError::new(e.message())
+}
+
+/// The state and user of a chat call. With `CHAT=off` these functions behave
+/// as the REST routes do there: nothing is known.
+#[cfg(feature = "ssr")]
+async fn chat_signed_in() -> Result<(crate::server::AppState, crate::identity::User), ServerFnError>
+{
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    if !state.chat.on {
+        set_status(axum::http::StatusCode::NOT_FOUND);
+        return Err(ServerFnError::new(crate::chat::lines::NOT_FOUND_MESSAGE));
+    }
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    Ok((state, user))
+}
+
+/// A chat refusal as a server-function error: the REST routes' status and
+/// message.
+#[cfg(feature = "ssr")]
+fn chat_error(e: crate::chat::service::ChatError) -> ServerFnError {
+    let (status, _, message, _) = crate::chat::api::parts(e);
+    set_status(status);
+    ServerFnError::new(message)
+}
+
+/// A plain form post from a page that has not hydrated (the page's own code
+/// never asks for `text/html`).
+#[cfg(feature = "ssr")]
+fn is_form_post() -> bool {
+    use_context::<axum::http::request::Parts>().is_some_and(|p| {
+        p.headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/html"))
+    })
+}
+
+/// The end of a thumb or a suggestion: a form post goes back to the chat, with
+/// the refusal's code if there was one.
+#[cfg(feature = "ssr")]
+fn chat_action_done(
+    run_id: Uuid,
+    done: Result<(), crate::chat::service::ChatError>,
+) -> Result<(), ServerFnError> {
+    use crate::chat_page as cp;
+    match (done, is_form_post()) {
+        (Ok(()), true) => {
+            leptos_axum::redirect(&cp::chat_url(run_id));
+            Ok(())
+        }
+        (Ok(()), false) => Ok(()),
+        (Err(e), true) => {
+            let (_, code, _, safety) = crate::chat::api::parts(e);
+            leptos_axum::redirect(&cp::refused_url(run_id, code, safety));
+            Ok(())
+        }
+        (Err(e), false) => Err(chat_error(e)),
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -698,6 +884,7 @@ fn RunPage() -> impl IntoView {
             .get("id")
             .and_then(|s| Uuid::parse_str(&s).ok())
     };
+    let query = use_query_map();
     let tick = RwSignal::new(0u32);
     let data = Resource::new(
         move || (run_id(), tick.get()),
@@ -750,16 +937,18 @@ fn RunPage() -> impl IntoView {
             {move || {
                 data.get()
                     .map(|r| match r {
-                        Ok(RunPageData { run, temporal }) => run_view(run, temporal).into_any(),
+                        Ok(RunPageData { run, temporal, chat }) => {
+                            run_view(run, temporal, chat, query).into_any()
+                        }
                         Err(e) if is_not_found(&e) => {
                             view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
                         }
                         Err(e) => match last_good.get() {
-                            Some(RunPageData { run, temporal }) => view! {
+                            Some(RunPageData { run, temporal, chat }) => view! {
                                 <p class="hint" role="status">
                                     "Connection problem \u{2014} retrying. " {error_text(&e)}
                                 </p>
-                                {run_view(run, temporal)}
+                                {run_view(run, temporal, chat, query)}
                             }
                                 .into_any(),
                             None => view! {
@@ -779,11 +968,13 @@ fn RunPage() -> impl IntoView {
 ///
 /// On the wire (the run resource's hydration payload) a run with no row is
 /// the bare `RunView`, exactly as before T4; one with a row is
-/// `{"t4_run": RunView, "t4_temporal": TemporalView}`.
+/// `{"t4_run": RunView, "t4_temporal": TemporalView}`, with `t4_chat` only
+/// when `CHAT=on`.
 #[derive(Clone)]
 struct RunPageData {
     run: RunView,
     temporal: Option<crate::runs::TemporalView>,
+    chat: Option<crate::chat_page::ChatPageView>,
 }
 
 impl serde::Serialize for RunPageData {
@@ -792,12 +983,15 @@ impl serde::Serialize for RunPageData {
         struct With<'a> {
             t4_run: &'a RunView,
             t4_temporal: &'a crate::runs::TemporalView,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            t4_chat: Option<&'a crate::chat_page::ChatPageView>,
         }
         match &self.temporal {
             None => self.run.serialize(s),
             Some(t) => With {
                 t4_run: &self.run,
                 t4_temporal: t,
+                t4_chat: self.chat.as_ref(),
             }
             .serialize(s),
         }
@@ -806,12 +1000,16 @@ impl serde::Serialize for RunPageData {
 
 impl<'de> serde::Deserialize<'de> for RunPageData {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Short-lived: read once, then taken apart.
+        #[allow(clippy::large_enum_variant)]
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum Wire {
             With {
                 t4_run: RunView,
                 t4_temporal: crate::runs::TemporalView,
+                #[serde(default)]
+                t4_chat: Option<crate::chat_page::ChatPageView>,
             },
             Plain(RunView),
         }
@@ -819,20 +1017,24 @@ impl<'de> serde::Deserialize<'de> for RunPageData {
             Wire::With {
                 t4_run,
                 t4_temporal,
+                t4_chat,
             } => RunPageData {
                 run: t4_run,
                 temporal: Some(t4_temporal),
+                chat: t4_chat,
             },
             Wire::Plain(run) => RunPageData {
                 run,
                 temporal: None,
+                chat: None,
             },
         })
     }
 }
 
-/// The run, and its temporal row once the run has ended (an error reading
-/// the row reads as no row: the page shows the answer as before).
+/// The run, its temporal row once the run has ended, and with `CHAT=on` its
+/// chat if it has a row (an error reading either reads as none: the page shows
+/// the answer as before).
 async fn run_with_temporal(id: Uuid) -> Result<RunPageData, ServerFnError> {
     let v = get_my_run(id).await?;
     let t = if v.summary.status.is_active() || v.summary.mode != RunMode::Focused {
@@ -840,9 +1042,15 @@ async fn run_with_temporal(id: Uuid) -> Result<RunPageData, ServerFnError> {
     } else {
         get_my_run_temporal(id).await.ok().flatten()
     };
+    let chat = if t.is_some() {
+        get_my_run_chat(id).await.ok().flatten()
+    } else {
+        None
+    };
     Ok(RunPageData {
         run: v,
         temporal: t,
+        chat,
     })
 }
 
@@ -851,7 +1059,12 @@ fn is_not_found(e: &ServerFnError) -> bool {
     error_text(e) == RUN_NOT_FOUND_MESSAGE
 }
 
-fn run_view(v: RunView, temporal: Option<crate::runs::TemporalView>) -> AnyView {
+fn run_view(
+    v: RunView,
+    temporal: Option<crate::runs::TemporalView>,
+    chat: Option<crate::chat_page::ChatPageView>,
+    query: Memo<leptos_router::params::ParamsMap>,
+) -> AnyView {
     let status = v.summary.status;
     let run_id = v.summary.id;
     let ended_without_answer = v.answer.is_none() && !status.is_active();
@@ -919,6 +1132,43 @@ fn run_view(v: RunView, temporal: Option<crate::runs::TemporalView>) -> AnyView 
         .into_any();
     };
     let x = expert::Expert::new(run_id, t, answer_refs);
+    // With `CHAT=on`: the third option and its view, in the same wrapper. A
+    // run chat will never be offered on has none of it (one whose opinion is
+    // still being written may yet).
+    let chat = chat
+        .filter(|c| c.state != crate::chat_page::ChatState::NotOffered || x.opinion_writing_now());
+    if let Some(chat) = chat {
+        let asked = query.with_untracked(|q| {
+            chat::ChatQuery::read(
+                q.get("chat_wait"),
+                q.get("chat_refused"),
+                q.get("chat_safety"),
+            )
+        });
+        let c = chat::Chat::new(run_id, chat, asked, x);
+        return view! {
+            <div class=x.wrapper_class() class:rx-chaton=move || c.open.get()>
+                <style>{expert::EXPERT_STYLE}</style>
+                <style>{chat::CHAT_STYLE}</style>
+                <div class="run-chrome">
+                    <h1 class="run-question">{heading}</h1>
+                    <p>
+                        {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
+                        <span class="meta">{rupees(cost)}</span>
+                    </p>
+                    {expert::option_bar(x, Some(c))}
+                    {progress}
+                </div>
+                {expert::expert_view(x)}
+                {c.section()}
+                <div class="rx-answer" hidden=move || x.expert.get() || c.open.get()>
+                    {answer_block}
+                    {ended}
+                </div>
+            </div>
+        }
+        .into_any();
+    }
     // The answer is drawn unchanged inside a wrapper the Expert opinion view
     // hides (outside `.ap-main`).
     view! {
@@ -930,7 +1180,7 @@ fn run_view(v: RunView, temporal: Option<crate::runs::TemporalView>) -> AnyView 
                     {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
                     <span class="meta">{rupees(cost)}</span>
                 </p>
-                {expert::option_bar(x)}
+                {expert::option_bar(x, None)}
                 {progress}
             </div>
             {expert::expert_view(x)}

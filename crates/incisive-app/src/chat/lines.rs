@@ -14,6 +14,15 @@ pub const UNAVAILABLE: &str = "Chat is unavailable right now.";
 pub const BUSY: &str = "Gemma is busy, try again in a minute.";
 pub const FOOTER: &str =
     "Answers come only from this run's evidence. Educational, not medical advice.";
+pub const NOT_FOUND_MESSAGE: &str = "Not found.";
+pub const BAD_REQUEST_MESSAGE: &str = "That request could not be read.";
+pub const EMPTY_MESSAGE: &str = "Type a question first.";
+pub const TOO_LONG_MESSAGE: &str = "That question is too long. Please shorten it.";
+pub const DAILY_LIMIT_MESSAGE: &str = "You have reached today's chat limit. It resets at midnight.";
+pub const NOT_OFFERED_MESSAGE: &str = "Chat is not offered for this run.";
+pub const IN_FLIGHT_MESSAGE: &str = "Wait for the current reply to finish.";
+pub const NOT_SUGGESTABLE_MESSAGE: &str = "Only a finished answer can be suggested.";
+pub const FAILED_MESSAGE: &str = "Chat couldn't load. Please try again.";
 
 /// Whether a reply is, as a whole, the not-covered sentence (with or without
 /// its full stop, in any case).
