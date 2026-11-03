@@ -590,6 +590,41 @@ touches the run: the run's row, status, timing, cost and answer bytes are the sa
 Both are checked like `COMPLETENESS` (only the ends trimmed) before the build, and the app refuses
 any other value at startup. The `temporal` model, default or set, must be priced in `MODEL_PRICES`.
 
+## 14. Introduction agent
+
+While a run works, one separate call writes a short plain introduction to the question. It shows at
+the top of the run page, folds after the run, and is never fed to the engine: no engine request,
+step line, stored answer, status, run cost or check changes with it on or off.
+
+- **Stored** in `incisive.run_intros` (migration 0015, additive), one row per run, cascading on the
+  run's delete and the 12-month retention. Status `pending`, `done`, `failed`, `skipped` or
+  `cap_blocked`. Only a `done` row shows; anything else shows nothing at all, with no message. Not
+  read by the evidence library, the memory records or Chat.
+- **Started** after every check has passed and the run holds its reservation, in a detached task: a
+  blocked question never reaches it, and nothing on the request path waits for the model.
+- **Money.** The call's hold (about 55 paise at Sonnet prices) is reserved against the user's daily
+  and monthly caps and the global cap, under the job's own request id (spend purpose `intro`), after
+  the run's own hold, so it can neither block a run nor change its hold. At a cap: `cap_blocked`, no
+  introduction, and the run goes on. The charge row's purpose reads `run:<request_id>`, where
+  `request_id` is `run_intros.request_id`, never the run's id. The run's `cost_paise` is never
+  changed. No screen shows the amount by itself, but the owner's Activity log lists its `charged`
+  and `intro_*` entries, as for every call. Audit events `intro_done`, `intro_failed`,
+  `intro_skipped`, `intro_cap_blocked` carry ids, a reason kind and paise only.
+- **One attempt, 30 s, 600 `max_tokens`, low effort.** Its own Claude client, no retry. Thinking
+  counts toward `max_tokens`; low effort keeps it short. A reply cut off at `max_tokens`, an empty
+  one, a refusal, an API error or the time limit ends the row `failed` and shows nothing. A `pending`
+  row older than 5 minutes is failed by recovery and its reservation released.
+- **No code checks on the text** (owner's choice) and no word filters. The page draws it as escaped
+  plain paragraphs.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `INTRO` | no | `off` or `on`. With `off`: no call, no row, no card, and pages unchanged. | `off` |
+| `INTRO_MODEL` | no | The model of the call. Must be priced in `MODEL_PRICES` when `INTRO=on`. | `claude-sonnet-5-5` |
+
+Both are checked before the build (only the ends trimmed), and the app refuses any other `INTRO`
+value at startup. Rolling back: set `INTRO=off`; stored rows stay but are not shown.
+
 ## Memory layer (Gemma embeddings)
 
 The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama

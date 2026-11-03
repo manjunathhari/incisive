@@ -43,6 +43,8 @@ jobs:
           COMPLETENESS: ${{ vars.COMPLETENESS }}
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
+          INTRO: ${{ vars.INTRO }}
+          INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
           MEMORY: ${{ vars.MEMORY }}
@@ -187,6 +189,27 @@ jobs:
           if [ -n "$tm" ] && ! { [[ "$tm" =~ ^[0-9]+$ ]] && [ "$tm" -ge 2000 ] && [ "$tm" -le 32000 ]; }; then
             echo "::error::vars.TEMPORAL_MAX_TOKENS must be a whole number from 2000 to 32000 (see infra/README.md section 13)"; exit 1
           fi
+          # Optional introduction agent (infra/README.md section 14): unset (off), off
+          # or on. The same trim. When on, INTRO_MODEL (default claude-sonnet-5-5,
+          # mirrors runs::intro::DEFAULT_MODEL) must be priced, as the app refuses
+          # to start otherwise. With it off the model is never called.
+          ia="${INTRO#"${INTRO%%[![:space:]]*}"}"
+          ia="${ia%"${ia##*[![:space:]]}"}"
+          case "$ia" in
+            ""|on|off) ;;
+            *) echo "::error::vars.INTRO must be on or off (see infra/README.md section 14)"; exit 1 ;;
+          esac
+          im="${INTRO_MODEL#"${INTRO_MODEL%%[![:space:]]*}"}"
+          im="${im%"${im##*[![:space:]]}"}"
+          case "$im" in
+            *[[:space:]]*) echo "::error::vars.INTRO_MODEL must be a model name without spaces (see infra/README.md section 14)"; exit 1 ;;
+          esac
+          if [ "$ia" = "on" ] && ! INTRO_MODEL_CHECK="${im:-claude-sonnet-5-5}" python3 -c '
+          import json, os, sys
+          sys.exit(0 if os.environ["INTRO_MODEL_CHECK"] in json.loads(os.environ["MODEL_PRICES"]) else 1)
+          '; then
+            echo "::error::vars.MODEL_PRICES has no price for INTRO_MODEL ${im:-claude-sonnet-5-5} (see infra/README.md section 14)"; exit 1
+          fi
           # Optional switches: unset, true or false (a typo must not silently mean off).
           # Optional memory layer (infra/README.md, "Memory layer"): MEMORY unset
           # (off), off or on; GEMMA_URL unset or https://; thresholds 0-1.
@@ -277,6 +300,8 @@ jobs:
           COMPLETENESS: ${{ vars.COMPLETENESS }}
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
+          INTRO: ${{ vars.INTRO }}
+          INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
           MEMORY: ${{ vars.MEMORY }}
@@ -307,6 +332,8 @@ jobs:
           optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE", "COMPLETENESS"]
           # Temporal T2/T3 (infra/README.md section 13): optional too.
           optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
+          # The introduction agent (infra/README.md section 14): optional too.
+          optional += ["INTRO", "INTRO_MODEL"]
           # Memory layer: optional too (GEMMA_AUTH is a secret, below).
           optional += ["MEMORY", "GEMMA_URL", "EMBED_MODEL", "MEMORY_TOPIC_MATCH", "MEMORY_GATE_MATCH"]
           # Evidence chat: optional too; it reuses GEMMA_URL and GEMMA_AUTH.
