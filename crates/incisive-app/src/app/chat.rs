@@ -261,15 +261,33 @@ fn clear_question() {
 
 /// Bring the end of the conversation into view, above the sticky question box
 /// (browser only). On the next frame: what was just added is not drawn yet.
+/// The box grows with its draft, so its height is measured now and sets the
+/// end's scroll margin; the CSS value stands until then and if this fails.
 fn scroll_to_end() {
     #[cfg(feature = "hydrate")]
     request_animation_frame(|| {
-        if let Some(e) = web_sys::window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id(END_ID))
-        {
-            e.scroll_into_view_with_bool(false);
+        use wasm_bindgen::JsCast;
+        let Some(w) = web_sys::window() else { return };
+        let Some(d) = w.document() else { return };
+        let Some(end) = d.get_element_by_id(END_ID) else {
+            return;
+        };
+        if let (Some(form), Ok(end)) = (
+            d.get_element_by_id(FORM_ID),
+            end.clone().dyn_into::<web_sys::HtmlElement>(),
+        ) {
+            let under = w
+                .get_computed_style(&form)
+                .ok()
+                .flatten()
+                .and_then(|s| s.get_property_value("bottom").ok())
+                .map_or(0.0, |b| cp::px_of(&b));
+            let margin = cp::end_scroll_margin(form.get_bounding_client_rect().height(), under);
+            let _ = end
+                .style()
+                .set_property("scroll-margin-bottom", &format!("{margin}px"));
         }
+        end.scroll_into_view_with_bool(false);
     });
 }
 
@@ -547,19 +565,26 @@ impl Chat {
         let Ok(Some(read)) = get_my_run_chat(self.run_id).await else {
             return;
         };
-        let stored = self.view.try_maybe_update(|v| {
+        let merged = self.view.try_maybe_update(|v| {
             let stored = cp::stored_unseen(&v.turns, &read.turns, &question);
-            (cp::merge_turns(&mut v.turns, read.turns), stored)
+            let changed = cp::merge_turns(&mut v.turns, read.turns);
+            (changed, (changed, stored))
         });
-        if stored == Some(true) {
+        let Some((changed, stored)) = merged else {
+            return;
+        };
+        if stored {
             let _ = self
                 .refusals
                 .try_update(|l| l.retain(|(_, r)| r.question != question));
-            if typed {
+            // Only if it is still this question: the reader may have typed on.
+            if typed && read_form().is_some_and(|(q, _)| cp::box_holds(&q, &question)) {
                 clear_question();
             }
         }
-        scroll_to_end();
+        if changed {
+            scroll_to_end();
+        }
     }
 
     fn give_feedback(self, id: i64, value: i64) {

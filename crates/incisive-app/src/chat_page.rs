@@ -27,6 +27,8 @@ pub const CONNECTION_AFTER_FAILURES: u32 = 3;
 const MAX_TICKS_BETWEEN_READS: u32 = 32;
 /// The run page's wording for the same trouble.
 pub const CONNECTION_RETRYING: &str = "Connection problem \u{2014} retrying. ";
+/// The gap between the conversation's end and the question box.
+pub const END_GAP_PX: f64 = 12.0;
 /// The longest range of citations read as citations (`[1-3]`).
 const MAX_CITE_RANGE: u32 = 20;
 
@@ -639,6 +641,30 @@ impl ChatTurn {
     }
 }
 
+/// A CSS length as the browser reports it, in pixels; anything else is none.
+pub fn px_of(value: &str) -> f64 {
+    value
+        .trim()
+        .strip_suffix("px")
+        .and_then(|n| n.parse::<f64>().ok())
+        .filter(|n| n.is_finite())
+        .unwrap_or(0.0)
+}
+
+/// How far above the conversation's end the page must stop so the end clears
+/// the sticky question box: the box as tall as it is now, whatever stands
+/// under it (the phone's nav) and a small gap.
+pub fn end_scroll_margin(composer_height: f64, stuck_bottom: f64) -> f64 {
+    let part = |n: f64| if n.is_finite() { n.max(0.0) } else { 0.0 };
+    part(composer_height) + part(stuck_bottom) + END_GAP_PX
+}
+
+/// Whether the question box still holds `question`: if not, the reader has
+/// typed something else, which must not be cleared.
+pub fn box_holds(in_box: &str, question: &str) -> bool {
+    in_box.trim() == question.trim()
+}
+
 /// Merge a fresh read of the chat's turns into what the page holds, in the
 /// order they were asked. Returns whether anything changed.
 pub fn merge_turns(held: &mut Vec<ChatTurn>, read: Vec<ChatTurn>) -> bool {
@@ -1161,6 +1187,44 @@ mod tests {
         assert!(!stored_unseen(&held, &read, "c"));
         // A turn the page already had is not news, even with the same text.
         assert!(!stored_unseen(&held, &read, "a"));
+    }
+
+    #[test]
+    fn the_end_stops_clear_of_the_box_as_tall_as_it_is() {
+        // The empty box on a phone, above its 78 px nav.
+        assert_eq!(end_scroll_margin(156.0, 78.0), 246.0);
+        // A draft grows it, and the margin with it.
+        assert_eq!(end_scroll_margin(250.0, 78.0), 340.0);
+        // On a desktop nothing stands under it.
+        assert_eq!(end_scroll_margin(139.0, 0.0), 151.0);
+        // Never less than the gap, whatever the browser reports.
+        assert_eq!(end_scroll_margin(f64::NAN, -5.0), END_GAP_PX);
+    }
+
+    #[test]
+    fn lengths_read_from_the_browser() {
+        assert_eq!(px_of("78px"), 78.0);
+        assert_eq!(px_of(" 112.5px "), 112.5);
+        assert_eq!(px_of("0px"), 0.0);
+        for other in [
+            "auto",
+            "",
+            "px",
+            "calc(78px + 1px)",
+            "NaNpx",
+            "infpx",
+            "5em",
+        ] {
+            assert_eq!(px_of(other), 0.0, "{other}");
+        }
+    }
+
+    #[test]
+    fn the_box_is_cleared_only_if_it_still_holds_the_question() {
+        assert!(box_holds("  what next?\n", "what next?"));
+        assert!(box_holds("what next?", "  what next? "));
+        assert!(!box_holds("what next? and also", "what next?"));
+        assert!(!box_holds("", "what next?"));
     }
 
     #[test]
