@@ -537,7 +537,9 @@ pub async fn chat_ask(
         Err(e) => {
             let (_, code, message, safety_line) = api::parts(e);
             if is_form_post() {
-                leptos_axum::redirect(&cp::refused_url(run_id, code, safety_line));
+                // Fixed codes only: the question never goes in the address.
+                let hints = cp::hint_codes(crate::deid::scan(&question).iter().map(|f| f.kind));
+                leptos_axum::redirect(&cp::refused_url(run_id, code, safety_line, &hints));
             }
             AskReply::Refused(Refusal {
                 question,
@@ -695,7 +697,7 @@ fn chat_action_done(
         (Ok(()), false) => Ok(()),
         (Err(e), true) => {
             let (_, code, _, safety) = crate::chat::api::parts(e);
-            leptos_axum::redirect(&cp::refused_url(run_id, code, safety));
+            leptos_axum::redirect(&cp::refused_url(run_id, code, safety, &[]));
             Ok(())
         }
         (Err(e), false) => Err(chat_error(e)),
@@ -1134,17 +1136,21 @@ fn run_view(
     let x = expert::Expert::new(run_id, t, answer_refs);
     // With `CHAT=on`: the third option and its view, in the same wrapper. A
     // run chat will never be offered on has none of it (one whose opinion is
-    // still being written may yet).
-    let chat = chat
-        .filter(|c| c.state != crate::chat_page::ChatState::NotOffered || x.opinion_writing_now());
+    // still being written may yet), unless a refusal must still show.
+    let asked = query.with_untracked(|q| {
+        chat::ChatQuery::read(
+            q.get("chat_wait"),
+            q.get("chat_refused"),
+            q.get("chat_safety"),
+            q.get("chat_hints"),
+        )
+    });
+    let chat = chat.filter(|c| {
+        c.state != crate::chat_page::ChatState::NotOffered
+            || x.opinion_writing_now()
+            || asked.refused.is_some()
+    });
     if let Some(chat) = chat {
-        let asked = query.with_untracked(|q| {
-            chat::ChatQuery::read(
-                q.get("chat_wait"),
-                q.get("chat_refused"),
-                q.get("chat_safety"),
-            )
-        });
         let c = chat::Chat::new(run_id, chat, asked, x);
         return view! {
             <div class=x.wrapper_class() class:rx-chaton=move || c.open.get()>

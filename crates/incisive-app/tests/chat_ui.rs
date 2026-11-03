@@ -1479,6 +1479,99 @@ async fn chat_form_post_is_refused_cross_site() {
     assert_eq!(count_turns(&pool, uid).await, 0);
 }
 
+#[tokio::test]
+async fn a_refusal_shows_when_the_chat_is_not_ready() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (uid, email) = new_user(&pool).await;
+
+    // The server went down between the page and the form post: the view
+    // stays shut, and the message and its safety line still show.
+    let down = chat_on(pool.clone());
+    let (run, _) = record_run(&pool, uid, true).await;
+    let path = format!("/runs/{run}?chat_refused=unavailable&chat_safety=1");
+    let (_, html) = send(router(down.clone()), &path, &email).await;
+    let m = no_style(&markup(&html, run).replace("<!---->", ""));
+    assert!(m.contains(lines::UNAVAILABLE), "the message");
+    assert!(m.contains(lines::WARNING_LINE), "the safety line");
+    assert!(m.contains("Chat \u{b7} Unavailable"));
+    assert!(
+        m.contains(r#"<div class="ap">"#),
+        "the answer is still shown"
+    );
+    // Before the chat section, which stays empty for `:target`.
+    let at = m.find(r#"id="chat""#).unwrap();
+    assert!(m.find(lines::WARNING_LINE).unwrap() < at);
+    assert!(!chat_section(&m).contains(lines::WARNING_LINE));
+
+    // A run chat is not offered on: the same.
+    let failed = full_run(&pool, uid, "hernia").await;
+    temporal_row(&pool, failed, "hernia", Some(JobStatus::Failed), None).await;
+    let path = format!("/runs/{failed}?chat_refused=not_offered&chat_safety=1");
+    let (_, html) = send(router(down.clone()), &path, &email).await;
+    let m = no_style(&markup(&html, failed).replace("<!---->", ""));
+    assert!(m.contains(lines::NOT_OFFERED_MESSAGE));
+    assert!(m.contains(lines::WARNING_LINE));
+    assert!(!m.contains(r##"href="#chat""##) && !m.contains("Chat \u{b7}"));
+
+    // Nothing named: nothing drawn, and the page is as it was.
+    let (_, html) = send(router(down.clone()), &format!("/runs/{failed}"), &email).await;
+    assert!(!markup(&html, failed).contains("rx-chat"));
+}
+
+#[tokio::test]
+async fn a_form_refusal_keeps_the_identifier_hint_as_a_code() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (uid, email) = new_user(&pool).await;
+    let server = gemma_says("x", Duration::ZERO).await;
+    let st = chat_on_gemma(pool.clone(), &server.uri());
+    let (run, _) = record_run(&pool, uid, true).await;
+    let question = "Secretword\u{200b}here about the hernia?";
+    let (status, loc) = form_post(
+        &st,
+        "chat_ask",
+        &format!("run_id={run}&question={}&mode=clinical", urlenc(question)),
+        &email,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(
+        loc,
+        format!("/runs/{run}?chat_refused=identifiers&chat_hints=unusual_characters#chat")
+    );
+    assert!(!loc.contains("Secretword"));
+    assert_eq!(count_turns(&pool, uid).await, 0);
+    let (_, html) = send(router(st.clone()), loc.split('#').next().unwrap(), &email).await;
+    let m = markup(&html, run).replace("<!---->", "");
+    let c = chat_section(&m);
+    // The same message as the page's own code gets.
+    let (_, v) = call_fn(
+        &st,
+        "chat_ask",
+        &format!("run_id={run}&question={}&mode=clinical", urlenc(question)),
+        &email,
+    )
+    .await;
+    let message = v["refused"]["message"].as_str().unwrap();
+    assert!(
+        message.len() > incisive_app::ask::BLOCKED_MESSAGE.len(),
+        "{message}"
+    );
+    assert!(c.contains(message), "{c}");
+
+    // A code that is not one adds nothing.
+    let path = format!("/runs/{run}?chat_refused=identifiers&chat_hints=%3Cb%3Ehi,phone");
+    let (_, html) = send(router(st.clone()), &path, &email).await;
+    let m = markup(&html, run).replace("<!---->", "");
+    let c = chat_section(&m);
+    assert!(c.contains(incisive_app::ask::BLOCKED_MESSAGE));
+    assert!(!m.contains("<b>hi") && !m.contains("&lt;b&gt;hi"));
+    assert!(!c.contains(message));
+}
+
 /// The chat's styles reach neither the answer content nor the whole page.
 #[test]
 fn chat_style_is_scoped() {
@@ -1503,8 +1596,10 @@ fn chat_style_is_scoped() {
     assert!(style.contains(".rx-composer { bottom:calc(78px"));
 }
 
-/// With `CHAT_UI_PREVIEW=<dir>`: each state's raw page, for a look in a browser.
+/// With `CHAT_UI_PREVIEW=<dir>` and `--ignored`: each state's raw page, for a
+/// look in a browser.
 #[tokio::test]
+#[ignore = "writes the preview pages; run by hand"]
 async fn write_the_static_preview() {
     let Ok(out) = std::env::var("CHAT_UI_PREVIEW") else {
         return;

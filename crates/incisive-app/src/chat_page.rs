@@ -14,11 +14,19 @@
 use serde::{Deserialize, Serialize};
 
 use crate::chat::lines;
+use crate::deid::FindingKind;
 
 /// How often a pending turn is read.
 pub const POLL_TURN_MS: u64 = 700;
 /// Seconds between a pre-hydration page's reloads while its turn is pending.
 pub const REFRESH_SECS: u32 = 3;
+/// Reads of a pending turn that may fail in a row before the page says so and
+/// starts to slow down.
+pub const CONNECTION_AFTER_FAILURES: u32 = 3;
+/// The slowest a failing read goes: this many ticks of [`POLL_TURN_MS`].
+const MAX_TICKS_BETWEEN_READS: u32 = 32;
+/// The run page's wording for the same trouble.
+pub const CONNECTION_RETRYING: &str = "Connection problem \u{2014} retrying. ";
 /// The longest range of citations read as citations (`[1-3]`).
 const MAX_CITE_RANGE: u32 = 20;
 
@@ -339,6 +347,53 @@ pub fn should_poll(pending: bool, hidden: bool) -> bool {
     pending && !hidden
 }
 
+/// Ticks of [`POLL_TURN_MS`] to the next read after `failures` failed reads in
+/// a row: every tick at first, then doubling up to about 22 s.
+pub fn ticks_between_reads(failures: u32) -> u32 {
+    match failures.checked_sub(CONNECTION_AFTER_FAILURES) {
+        None => 1,
+        Some(over) => 2u32
+            .checked_pow(over + 1)
+            .map_or(MAX_TICKS_BETWEEN_READS, |t| t.min(MAX_TICKS_BETWEEN_READS)),
+    }
+}
+
+/// Whether the page reads the chat's state. Getting ready, or not offered yet
+/// while the opinion is being written or since it finished on this page: its
+/// record may still make the chat ready.
+pub fn reads_state(state: ChatState, writing: bool, was_writing: bool) -> bool {
+    match state {
+        ChatState::GettingReady => true,
+        ChatState::NotOffered => writing || was_writing,
+        ChatState::Ready | ChatState::Unavailable => false,
+    }
+}
+
+/// The reload of a page that arrived by a form post before hydration. Once
+/// hydrated the page reads its turn itself, so the reload tag is never drawn
+/// again, whatever is asked later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageReload {
+    wait: bool,
+}
+
+impl PageReload {
+    /// From the address's `chat_wait`.
+    pub fn from_address(wait: bool) -> PageReload {
+        PageReload { wait }
+    }
+
+    /// The browser has taken over.
+    pub fn hydrated(self) -> PageReload {
+        PageReload { wait: false }
+    }
+
+    /// Whether the reload tag is drawn.
+    pub fn tag(self, pending: bool) -> bool {
+        self.wait && pending
+    }
+}
+
 /// The style a new question starts in: the last one asked, else Clinical.
 pub fn default_mode(turns: &[ChatTurn]) -> &str {
     turns.last().map_or("clinical", |t| t.mode.as_str())
@@ -411,15 +466,44 @@ pub fn paper_name(references: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// The fixed code of a finding kind that has its own hint.
+fn hint_code(kind: FindingKind) -> Option<&'static str> {
+    match kind {
+        FindingKind::UnusualCharacters => Some("unusual_characters"),
+        _ => None,
+    }
+}
+
+/// The distinct hint codes of what the identifier scan found.
+pub fn hint_codes(kinds: impl IntoIterator<Item = FindingKind>) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for code in kinds.into_iter().filter_map(hint_code) {
+        if !out.contains(&code) {
+            out.push(code);
+        }
+    }
+    out
+}
+
 /// The refusal named in the address after a form post; `None` for a code that
-/// is not one. The address names a code only, so what shows is fixed text.
-pub fn refusal_from_code(code: &str, safety: bool) -> Option<Refusal> {
+/// is not one. The address names codes only (`hints`: comma-separated hint
+/// codes; unknown ones are ignored), so what shows is fixed text.
+pub fn refusal_from_code(code: &str, safety: bool, hints: &str) -> Option<Refusal> {
+    let identifiers;
     let message = match code {
         "not_found" => lines::NOT_FOUND_MESSAGE,
         "bad_request" => lines::BAD_REQUEST_MESSAGE,
         "empty" => lines::EMPTY_MESSAGE,
         "too_long" => lines::TOO_LONG_MESSAGE,
-        "identifiers" => crate::ask::BLOCKED_MESSAGE,
+        "identifiers" => {
+            identifiers = crate::ask::blocked_message(
+                hints
+                    .split(',')
+                    .filter(|h| *h == "unusual_characters")
+                    .map(|_| FindingKind::UnusualCharacters),
+            );
+            identifiers.as_str()
+        }
         "in_flight" => lines::IN_FLIGHT_MESSAGE,
         "not_offered" => lines::NOT_OFFERED_MESSAGE,
         "daily_limit" => lines::DAILY_LIMIT_MESSAGE,
@@ -446,11 +530,21 @@ pub fn chat_url(run: impl std::fmt::Display) -> String {
     format!("/runs/{run}#chat")
 }
 
-/// Where a refused form post lands. `code` is one of the service's fixed
-/// codes; the question never goes in the address.
-pub fn refused_url(run: impl std::fmt::Display, code: &str, safety: bool) -> String {
+/// Where a refused form post lands. `code` and `hints` are fixed codes; the
+/// question never goes in the address.
+pub fn refused_url(
+    run: impl std::fmt::Display,
+    code: &str,
+    safety: bool,
+    hints: &[&str],
+) -> String {
     let safety = if safety { "&chat_safety=1" } else { "" };
-    format!("/runs/{run}?chat_refused={code}{safety}#chat")
+    let hints = if hints.is_empty() {
+        String::new()
+    } else {
+        format!("&chat_hints={}", hints.join(","))
+    };
+    format!("/runs/{run}?chat_refused={code}{safety}{hints}#chat")
 }
 
 /// The pre-hydration reload's `content` value.
@@ -882,7 +976,7 @@ mod tests {
 
     #[test]
     fn refusal_codes_name_fixed_text_only() {
-        let r = refusal_from_code("busy", true).unwrap();
+        let r = refusal_from_code("busy", true, "").unwrap();
         assert_eq!(r.message, lines::BUSY);
         assert!(r.safety_line);
         assert!(r.question.is_empty());
@@ -899,12 +993,12 @@ mod tests {
             ("unavailable", lines::UNAVAILABLE),
             ("identifiers", crate::ask::BLOCKED_MESSAGE),
         ] {
-            let r = refusal_from_code(code, false).unwrap();
+            let r = refusal_from_code(code, false, "").unwrap();
             assert_eq!(r.message, msg, "{code}");
             assert!(!r.safety_line);
         }
-        assert_eq!(refusal_from_code("<b>hi", true), None);
-        assert_eq!(refusal_from_code("", true), None);
+        assert_eq!(refusal_from_code("<b>hi", true, ""), None);
+        assert_eq!(refusal_from_code("", true, ""), None);
     }
 
     #[test]
@@ -912,14 +1006,90 @@ mod tests {
         assert_eq!(accepted_url("R"), "/runs/R?chat_wait=1#chat");
         assert_eq!(chat_url("R"), "/runs/R#chat");
         assert_eq!(
-            refused_url("R", "busy", true),
+            refused_url("R", "busy", true, &[]),
             "/runs/R?chat_refused=busy&chat_safety=1#chat"
         );
         assert_eq!(
-            refused_url("R", "empty", false),
+            refused_url("R", "empty", false, &[]),
             "/runs/R?chat_refused=empty#chat"
         );
         assert_eq!(refresh_content("R"), "3;url=/runs/R?chat_wait=1#chat");
+    }
+
+    #[test]
+    fn hints_travel_as_fixed_codes() {
+        use FindingKind::*;
+        // Every kind with a hint of its own has a code, and the code brings
+        // that hint back.
+        for kind in [
+            Aadhaar,
+            Pan,
+            Phone,
+            Email,
+            CalendarDate,
+            HospitalId,
+            PersonName,
+            Address,
+            UnusualCharacters,
+        ] {
+            assert_eq!(
+                hint_code(kind).is_some(),
+                crate::deid::hint(kind).is_some(),
+                "{kind:?}"
+            );
+            let codes = hint_codes([kind, kind]);
+            assert!(codes.len() <= 1, "{kind:?}");
+            let r = refusal_from_code("identifiers", false, &codes.join(",")).unwrap();
+            assert_eq!(r.message, crate::ask::blocked_message([kind]), "{kind:?}");
+        }
+        assert_eq!(
+            refused_url("R", "identifiers", true, &["unusual_characters"]),
+            "/runs/R?chat_refused=identifiers&chat_safety=1&chat_hints=unusual_characters#chat"
+        );
+        // A code that is not one adds nothing, and only identifiers read them.
+        let r = refusal_from_code("identifiers", false, "<b>hi,phone").unwrap();
+        assert_eq!(r.message, crate::ask::BLOCKED_MESSAGE);
+        let r = refusal_from_code("busy", false, "unusual_characters").unwrap();
+        assert_eq!(r.message, lines::BUSY);
+    }
+
+    #[test]
+    fn the_reload_tag_is_never_drawn_again_after_hydration() {
+        let arrived = PageReload::from_address(true);
+        assert!(arrived.tag(true), "before hydration, while pending");
+        assert!(!arrived.tag(false), "finished");
+        let hydrated = arrived.hydrated();
+        // The next question asked in place is pending too: no tag.
+        assert!(!hydrated.tag(true));
+        assert!(!hydrated.hydrated().tag(true));
+        assert!(!PageReload::from_address(false).tag(true));
+    }
+
+    #[test]
+    fn failing_reads_slow_down_and_recover() {
+        assert_eq!(ticks_between_reads(0), 1);
+        assert_eq!(ticks_between_reads(2), 1);
+        assert_eq!(ticks_between_reads(3), 2);
+        assert_eq!(ticks_between_reads(4), 4);
+        assert_eq!(ticks_between_reads(7), 32);
+        assert_eq!(ticks_between_reads(8), 32);
+        assert_eq!(ticks_between_reads(u32::MAX), 32);
+        assert_eq!(
+            CONNECTION_RETRYING,
+            "Connection problem \u{2014} retrying. "
+        );
+    }
+
+    #[test]
+    fn state_is_read_until_the_chat_can_settle() {
+        use ChatState::*;
+        assert!(reads_state(GettingReady, false, false));
+        assert!(reads_state(NotOffered, true, false), "being written");
+        // Finished on this page, record still to come: the tab must appear.
+        assert!(reads_state(NotOffered, false, true));
+        assert!(!reads_state(NotOffered, false, false));
+        assert!(!reads_state(Ready, true, true));
+        assert!(!reads_state(Unavailable, true, true));
     }
 
     #[test]

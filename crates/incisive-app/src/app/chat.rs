@@ -80,6 +80,8 @@ pub const CHAT_STYLE: &str = r##"
 .rx .rx-close { font:inherit; flex:none; border:0; background:var(--iv-tint); color:var(--iv-accent); font-size:14px; font-weight:700; border-radius:999px; padding:0 14px; min-height:44px; cursor:pointer; }
 .rx-sheet-text { font-size:15px; line-height:1.5; color:var(--iv-ink); white-space:pre-wrap; }
 .rx-end { scroll-margin-bottom:170px; }
+.rx-retry { margin:0; }
+.rx-refusals { font-family:var(--iv-font); display:flex; flex-direction:column; gap:10px; max-width:760px; margin:0 0 10px; overflow-wrap:anywhere; }
 .rx-chat a:focus-visible, .rx-chat button:focus-visible, .rx-chat textarea:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
 /* The chat view shows the title and the option only, as in the mockup. */
 .rx-chaton .run-chrome { max-width:760px; margin-inline:auto; }
@@ -118,11 +120,18 @@ pub(super) struct ChatQuery {
 }
 
 impl ChatQuery {
-    pub fn read(wait: Option<String>, refused: Option<String>, safety: Option<String>) -> Self {
+    pub fn read(
+        wait: Option<String>,
+        refused: Option<String>,
+        safety: Option<String>,
+        hints: Option<String>,
+    ) -> Self {
         ChatQuery {
             wait: wait.as_deref() == Some("1"),
-            refused: refused
-                .and_then(|c| cp::refusal_from_code(&c, safety.as_deref() == Some("1"))),
+            refused: refused.and_then(|c| {
+                let hints = hints.as_deref().unwrap_or_default();
+                cp::refusal_from_code(&c, safety.as_deref() == Some("1"), hints)
+            }),
         }
     }
 }
@@ -143,8 +152,12 @@ pub(super) struct Chat {
     hidden: RwSignal<bool>,
     state: Memo<cp::ChatState>,
     pending: Memo<Option<i64>>,
-    /// Came from a form post (see [`ChatQuery`]).
-    wait: bool,
+    /// Came from a form post (see [`ChatQuery`]); cleared on hydration.
+    wait: RwSignal<cp::PageReload>,
+    /// The citation read the sheet is waiting for: a stale reply is dropped.
+    sheet_request: StoredValue<u64>,
+    /// Reads of a pending turn are failing: why.
+    connection: RwSignal<Option<String>>,
 }
 
 /// `tick` every `period` while `run` says so (browser only: effects run only
@@ -276,11 +289,14 @@ impl Chat {
             pending: Memo::new(move |_| {
                 view.with(|v| v.turns.iter().find(|t| t.pending()).map(|t| t.id))
             }),
-            wait: query.wait,
+            wait: RwSignal::new(cp::PageReload::from_address(query.wait)),
+            sheet_request: StoredValue::new(0),
+            connection: RwSignal::new(None),
         };
         // Effects run in the browser only: the server draws the Answer view.
         Effect::new(move |_| {
             clean_address();
+            c.wait.set(c.wait.get_untracked().hydrated());
             c.hidden.set(page_hidden());
         });
         Effect::new(move |_| {
@@ -314,8 +330,17 @@ impl Chat {
 
     /// While a turn is pending and the page is visible: read it every 700 ms,
     /// one read at a time. Coming back to the page reads the stored result.
+    /// Repeated failures slow the reads down and say so, as the run page does.
     fn poll_turn(self) {
         let reading = StoredValue::new(false);
+        let failures = StoredValue::new(0u32);
+        let skip = StoredValue::new(0u32);
+        // Coming back to the page reads at the next tick.
+        Effect::new(move |_| {
+            if !self.hidden.get() {
+                skip.set_value(0);
+            }
+        });
         ticker(
             Duration::from_millis(cp::POLL_TURN_MS),
             move || cp::should_poll(self.pending.get().is_some(), self.hidden.get()),
@@ -326,45 +351,79 @@ impl Chat {
                 if reading.get_value() {
                     return;
                 }
+                if skip.get_value() > 0 {
+                    return skip.update_value(|s| *s -= 1);
+                }
                 reading.set_value(true);
                 leptos::task::spawn_local(async move {
-                    match chat_turn(id).await {
-                        Ok(t) => self.put_turn(t),
+                    let failed = match chat_turn(id).await {
+                        Ok(t) => {
+                            self.put_turn(t);
+                            None
+                        }
                         // The turn or its run has gone: stop asking.
-                        Err(e) if error_text(&e) == lines::NOT_FOUND_MESSAGE => self.drop_turn(id),
-                        // A transient error keeps the last text; the next tick
-                        // asks again.
-                        Err(_) => {}
-                    }
+                        Err(e) if error_text(&e) == lines::NOT_FOUND_MESSAGE => {
+                            self.drop_turn(id);
+                            None
+                        }
+                        // A transient error keeps the last text.
+                        Err(e) => Some(error_text(&e)),
+                    };
+                    let n = match failed {
+                        None => 0,
+                        Some(_) => failures
+                            .try_get_value()
+                            .unwrap_or_default()
+                            .saturating_add(1),
+                    };
+                    let _ = failures.try_update_value(|f| *f = n);
+                    let _ = skip.try_update_value(|s| *s = cp::ticks_between_reads(n) - 1);
+                    let shown = failed.filter(|_| n >= cp::CONNECTION_AFTER_FAILURES);
+                    let _ = self.connection.try_maybe_update(|c| {
+                        let changed = *c != shown;
+                        *c = shown;
+                        (changed, ())
+                    });
                     let _ = reading.try_update_value(|r| *r = false);
                 });
             },
         );
     }
 
-    /// While the chat is getting ready, or its opinion is still being written:
-    /// read its state on the opinion's own schedule, so "Chat · Getting ready"
-    /// turns into Chat with no reload.
+    /// While the chat is getting ready, or its opinion is being written or has
+    /// finished on this page: read its state on the opinion's own schedule,
+    /// while the page is visible, so "Chat · Getting ready" turns into Chat and
+    /// the option appears with no reload.
     fn watch_state(self, x: Expert) {
         let count = RwSignal::new(0u32);
+        let was_writing = RwSignal::new(false);
+        // The opinion finishing starts the wait for its record afresh.
+        Effect::new(move |before: Option<bool>| {
+            let writing = x.opinion_writing();
+            if writing {
+                was_writing.set(true);
+            } else if before == Some(true) {
+                count.set(0);
+            }
+            writing
+        });
         ticker(
             Duration::from_secs(POLL_EVERY_SECS),
             move || {
-                let waiting = match self.state.get() {
-                    cp::ChatState::GettingReady => true,
-                    cp::ChatState::NotOffered => x.opinion_writing(),
-                    _ => false,
-                };
-                waiting && count.get() < POLL_MAX
+                cp::reads_state(self.state.get(), x.opinion_writing(), was_writing.get())
+                    && count.get() < POLL_MAX
+                    && !self.hidden.get()
             },
             move || {
                 count.update(|n| *n += 1);
                 let id = self.run_id;
                 leptos::task::spawn_local(async move {
                     if let Ok(Some(v)) = get_my_run_chat(id).await {
-                        let _ = self.view.try_update(|c| {
+                        let _ = self.view.try_maybe_update(|c| {
+                            let changed = c.state != v.state || c.starters != v.starters;
                             c.state = v.state;
                             c.starters = v.starters;
+                            (changed, ())
                         });
                     }
                 });
@@ -372,14 +431,23 @@ impl Chat {
         );
     }
 
+    /// Store a turn just read. An unchanged read touches nothing, so the
+    /// conversation is not redrawn and focus stays where it is.
     fn put_turn(self, new: ChatTurn) {
-        let _ = self
-            .view
-            .try_update(|v| match v.turns.iter_mut().find(|t| t.id == new.id) {
-                Some(t) if *t == new => {}
-                Some(t) => *t = new,
-                None => v.turns.push(new),
-            });
+        let _ = self.view.try_maybe_update(|v| {
+            let changed = match v.turns.iter_mut().find(|t| t.id == new.id) {
+                Some(t) if *t == new => false,
+                Some(t) => {
+                    *t = new;
+                    true
+                }
+                None => {
+                    v.turns.push(new);
+                    true
+                }
+            };
+            (changed, ())
+        });
     }
 
     fn drop_turn(self, id: i64) {
@@ -392,7 +460,10 @@ impl Chat {
 
     /// Show a refusal at the end of the conversation.
     fn refuse(self, r: Refusal) {
-        let at = self.view.with_untracked(|v| v.turns.len());
+        // After an await: the page may have gone.
+        let Some(at) = self.view.try_with_untracked(|v| v.turns.len()) else {
+            return;
+        };
         let _ = self.refusals.try_update(|l| l.push((at, r)));
         scroll_to_end();
     }
@@ -475,6 +546,8 @@ impl Chat {
     /// Open a citation's sheet. Its text comes from the same scoped read as
     /// the REST route.
     fn open_source(self, stored_id: i64) {
+        self.sheet_request.update_value(|n| *n += 1);
+        let request = self.sheet_request.get_value();
         self.sheet.set(Some(SheetSource {
             label: String::new(),
             text: "Loading\u{2026}".to_string(),
@@ -487,6 +560,10 @@ impl Chat {
                     text: error_text(&e),
                 },
             };
+            // A newer citation's sheet, or the page gone: this reply is stale.
+            if self.sheet_request.try_get_value() != Some(request) {
+                return;
+            }
             let _ = self.sheet.try_update(|s| {
                 if s.is_some() {
                     *s = Some(shown);
@@ -550,10 +627,29 @@ impl Chat {
         }
     }
 
-    /// The chat view (`#chat`): drawn once ready, hidden unless chosen.
+    /// The chat view (`#chat`): drawn once ready, hidden unless chosen. A
+    /// refusal shows whatever the state, above it: its safety line must be
+    /// seen even when the view stays shut.
     pub fn section(self) -> AnyView {
         let ready = Memo::new(move |_| self.state.get().selectable());
         view! {
+            {move || {
+                (!ready.get())
+                    .then(|| {
+                        self.refusals
+                            .with(|l| {
+                                (!l.is_empty())
+                                    .then(|| {
+                                        let shown = l
+                                            .iter()
+                                            .map(|(_, r)| refusal_view(r))
+                                            .collect_view();
+                                        view! { <div class="rx-refusals">{shown}</div> }
+                                    })
+                            })
+                    })
+                    .flatten()
+            }}
             <section
                 class="rx-chat"
                 id="chat"
@@ -571,10 +667,17 @@ impl Chat {
         let reload = cp::refresh_content(self.run_id);
         view! {
             {move || {
-                (self.wait && self.pending.get().is_some())
+                self.wait
+                    .get()
+                    .tag(self.pending.get().is_some())
                     .then(|| view! { <meta http-equiv="refresh" content=reload.clone() /> })
             }}
             <div class="rx-convo">{move || self.entries()}</div>
+            {move || {
+                self.connection
+                    .get()
+                    .map(|e| view! { <p class="hint rx-retry" role="status">{cp::CONNECTION_RETRYING} {e}</p> })
+            }}
             <div class="rx-end" id=END_ID></div>
             {composer(self)}
             {move || self.sheet.get().map(|s| sheet_view(self, s))}
