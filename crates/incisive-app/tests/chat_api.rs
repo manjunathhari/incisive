@@ -426,8 +426,9 @@ async fn cross_site_post_refused() {
     };
     let (user, run, _) = ready(&pool, &HERNIA).await;
     let turn = done_turn(&pool, run, &user, 1, &[]).await;
-    let server = gemma_says(ZEBRA_REPLY, 0).await;
-    let st = with_gemma(pool.clone(), &server.uri());
+    // No Gemma client: the same-origin ask below is refused 503 past the check
+    // and starts no task, so nothing outlives the test.
+    let st = no_gemma(pool.clone());
     for (uri, body) in [
         (format!("/api/runs/{run}/chat"), ask_body(ZEBRA_Q)),
         (

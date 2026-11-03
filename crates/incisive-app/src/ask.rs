@@ -194,6 +194,26 @@ pub struct ActivityView {
     pub chain: ChainView,
 }
 
+/// The red-box message, plus each distinct kind's extra hint as a sentence.
+pub fn blocked_message(kinds: impl IntoIterator<Item = FindingKind>) -> String {
+    let mut message = BLOCKED_MESSAGE.to_string();
+    let mut seen: Vec<&str> = Vec::new();
+    for h in kinds.into_iter().filter_map(crate::deid::hint) {
+        if seen.contains(&h) {
+            continue;
+        }
+        seen.push(h);
+        let mut chars = h.chars();
+        if let Some(first) = chars.next() {
+            message.push(' ');
+            message.extend(first.to_uppercase());
+            message.push_str(chars.as_str());
+            message.push('.');
+        }
+    }
+    message
+}
+
 #[cfg(feature = "ssr")]
 pub use server::*;
 
@@ -252,26 +272,6 @@ mod server {
                 tracing::error!(%request_id, event = event.as_str(), "audit append failed");
                 AskFailure::Record
             })
-    }
-
-    /// The red-box message, plus each distinct kind's extra hint as a sentence.
-    pub fn blocked_message(kinds: impl IntoIterator<Item = FindingKind>) -> String {
-        let mut message = BLOCKED_MESSAGE.to_string();
-        let mut seen: Vec<&str> = Vec::new();
-        for h in kinds.into_iter().filter_map(deid::hint) {
-            if seen.contains(&h) {
-                continue;
-            }
-            seen.push(h);
-            let mut chars = h.chars();
-            if let Some(first) = chars.next() {
-                message.push(' ');
-                message.extend(first.to_uppercase());
-                message.push_str(chars.as_str());
-                message.push('.');
-            }
-        }
-        message
     }
 
     /// The whole pipeline after identity. Never returns `RunStarted` unless every

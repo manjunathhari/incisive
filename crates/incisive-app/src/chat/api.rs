@@ -31,19 +31,16 @@ use super::{ChatMode, lines};
 use crate::identity::CurrentUser;
 use crate::server::AppState;
 
-pub const NOT_FOUND_MESSAGE: &str = "Not found.";
-pub const BAD_REQUEST_MESSAGE: &str = "That request could not be read.";
-pub const EMPTY_MESSAGE: &str = "Type a question first.";
-pub const TOO_LONG_MESSAGE: &str = "That question is too long. Please shorten it.";
-pub const DAILY_LIMIT_MESSAGE: &str = "You have reached today's chat limit. It resets at midnight.";
-pub const NOT_OFFERED_MESSAGE: &str = "Chat is not offered for this run.";
-pub const IN_FLIGHT_MESSAGE: &str = "Wait for the current reply to finish.";
-pub const NOT_SUGGESTABLE_MESSAGE: &str = "Only a finished answer can be suggested.";
-pub const FAILED_MESSAGE: &str = "Chat couldn't load. Please try again.";
+pub use super::lines::{
+    BAD_REQUEST_MESSAGE, DAILY_LIMIT_MESSAGE, EMPTY_MESSAGE, FAILED_MESSAGE, IN_FLIGHT_MESSAGE,
+    NOT_FOUND_MESSAGE, NOT_OFFERED_MESSAGE, NOT_SUGGESTABLE_MESSAGE, TOO_LONG_MESSAGE,
+};
 /// Seconds a busy refusal asks the client to wait.
 const BUSY_RETRY_SECS: &str = "60";
 
-fn parts(e: ChatError) -> (StatusCode, &'static str, String, bool) {
+/// A refusal's status, code, message and whether it carries the safety line.
+/// The page's server functions use the same table.
+pub fn parts(e: ChatError) -> (StatusCode, &'static str, String, bool) {
     use ChatError::*;
     match e {
         NotFound => (

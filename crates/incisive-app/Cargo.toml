@@ -56,7 +56,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 # Copy-to-clipboard on the run page (with its textarea fallback); the Edit &
 # re-run fragment; the remembered Quick/Focused choice (browser only).
-web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "Location", "History", "Storage", "Document", "Element", "HtmlElement", "HtmlTextAreaElement", "HtmlDocument"], optional = true }
+web-sys = { version = "0.3", features = ["Window", "Navigator", "Clipboard", "Location", "History", "Storage", "Document", "Element", "HtmlElement", "HtmlTextAreaElement", "HtmlDocument", "DomRect", "CssStyleDeclaration"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"], optional = true }
 # `v4` (random ids) is enabled by `ssr` only: the browser build just deserializes ids.
 uuid = { version = "1", features = ["serde"], optional = true }
