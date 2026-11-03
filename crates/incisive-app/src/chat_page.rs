@@ -639,6 +639,37 @@ impl ChatTurn {
     }
 }
 
+/// Merge a fresh read of the chat's turns into what the page holds, in the
+/// order they were asked. Returns whether anything changed.
+pub fn merge_turns(held: &mut Vec<ChatTurn>, read: Vec<ChatTurn>) -> bool {
+    let mut changed = false;
+    for new in read {
+        match held.iter_mut().find(|t| t.id == new.id) {
+            Some(t) if *t == new => {}
+            Some(t) => {
+                *t = new;
+                changed = true;
+            }
+            None => {
+                held.push(new);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        held.sort_by_key(|t| t.id);
+    }
+    changed
+}
+
+/// Whether a fresh read holds a turn the page did not know of for `question`:
+/// the server stored it although the answer to the ask never arrived.
+pub fn stored_unseen(held: &[ChatTurn], read: &[ChatTurn], question: &str) -> bool {
+    let question = question.trim();
+    read.iter()
+        .any(|t| t.question == question && !held.iter().any(|h| h.id == t.id))
+}
+
 /// One entry of the conversation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Entry<'a> {
@@ -1090,6 +1121,46 @@ mod tests {
         assert!(!reads_state(NotOffered, false, false));
         assert!(!reads_state(Ready, true, true));
         assert!(!reads_state(Unavailable, true, true));
+    }
+
+    fn asked(id: i64, status: &str, question: &str) -> ChatTurn {
+        let mut t = turn(status, "", None);
+        t.id = id;
+        t.question = question.into();
+        t
+    }
+
+    #[test]
+    fn a_fresh_read_merges_in_asking_order() {
+        let mut held = vec![asked(1, "done", "a"), asked(3, "pending", "c")];
+        let read = vec![
+            asked(1, "done", "a"),
+            asked(2, "done", "b"),
+            asked(3, "done", "c"),
+        ];
+        assert!(merge_turns(&mut held, read.clone()));
+        assert_eq!(held, read);
+        // The same read again changes nothing, so nothing is redrawn.
+        assert!(!merge_turns(&mut held, read.clone()));
+        // A turn only the page knows of stays.
+        let mut held = vec![asked(5, "pending", "new")];
+        assert!(merge_turns(&mut held, vec![asked(4, "done", "old")]));
+        assert_eq!(
+            held,
+            vec![asked(4, "done", "old"), asked(5, "pending", "new")]
+        );
+    }
+
+    #[test]
+    fn a_lost_answer_is_found_by_its_question() {
+        let held = vec![asked(1, "done", "a")];
+        let read = vec![asked(1, "done", "a"), asked(2, "pending", "b")];
+        assert!(stored_unseen(&held, &read, "b"));
+        assert!(stored_unseen(&held, &read, "  b \n"), "stored trimmed");
+        // Another question's turn is in flight: this one was not stored.
+        assert!(!stored_unseen(&held, &read, "c"));
+        // A turn the page already had is not news, even with the same text.
+        assert!(!stored_unseen(&held, &read, "a"));
     }
 
     #[test]

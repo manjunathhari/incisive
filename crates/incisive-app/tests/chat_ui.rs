@@ -1572,6 +1572,54 @@ async fn a_form_refusal_keeps_the_identifier_hint_as_a_code() {
     assert!(!c.contains(message));
 }
 
+#[tokio::test]
+async fn a_thumb_form_post_returns_to_the_chat() {
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let (uid, email) = new_user(&pool).await;
+    let (_, other) = new_user(&pool).await;
+    let server = gemma_says("x", Duration::ZERO).await;
+    let st = chat_on_gemma(pool.clone(), &server.uri());
+    let (run, _) = record_run(&pool, uid, true).await;
+    let turn = add_turn(
+        &pool,
+        run,
+        uid,
+        1,
+        T {
+            question: "Q",
+            reply: "R",
+            status: "done",
+            checks: Some(json!({})),
+            ..T::default()
+        },
+    )
+    .await;
+    let stored = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Option<i16>>(
+            "SELECT feedback FROM incisive.chat_turns WHERE id = $1",
+        )
+        .bind(turn)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let body = format!("run_id={run}&turn_id={turn}&value=-1");
+    // Someone else's turn: not stored, and "not found" on the way back.
+    let (status, loc) = form_post(&st, "chat_feedback", &body, &other).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(loc, format!("/runs/{run}?chat_refused=not_found#chat"));
+    assert_eq!(stored(pool.clone()).await, None);
+    // The owner's: stored, back at the chat, and the page shows it pressed.
+    let (status, loc) = form_post(&st, "chat_feedback", &body, &email).await;
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(loc, format!("/runs/{run}#chat"));
+    assert_eq!(stored(pool.clone()).await, Some(-1));
+    let m = page(&st, run, &email).await;
+    assert!(chat_section(&m).contains(r#"aria-pressed="true""#));
+}
+
 /// The chat's styles reach neither the answer content nor the whole page.
 #[test]
 fn chat_style_is_scoped() {
@@ -1592,6 +1640,21 @@ fn chat_style_is_scoped() {
     assert!(rule.contains("overflow-wrap:anywhere"));
     // The frozen desktop column.
     assert!(rule.contains("max-width:760px"));
+    // A phone does not zoom on focus (under 16 px it does).
+    let phone = &style[style.find("@media (max-width:640px)").unwrap()..];
+    assert!(phone.contains(".rx .rx-ask textarea { font-size:16px; }"));
+    // A citation's touch area is as wide as the chip: neighbours stay apart.
+    let i = style.find(".rx .rx-source::after").unwrap();
+    let rule = &style[i..i + style[i..].find('}').unwrap()];
+    assert!(
+        rule.contains("left:0") && rule.contains("right:0"),
+        "{rule}"
+    );
+    assert!(rule.contains("height:44px") && !rule.contains("width:44px"));
+    // A long passage's Close stays in reach.
+    let i = style.find(".rx-sheet-head {").unwrap();
+    let rule = &style[i..i + style[i..].find('}').unwrap()];
+    assert!(rule.contains("position:sticky") && rule.contains("background:"));
     // On a phone the question box stays above the fixed nav.
     assert!(style.contains(".rx-composer { bottom:calc(78px"));
 }

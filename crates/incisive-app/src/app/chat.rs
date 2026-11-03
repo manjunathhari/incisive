@@ -49,7 +49,7 @@ pub const CHAT_STYLE: &str = r##"
 .rx-wait { font-size:14px; color:var(--iv-muted); line-height:1.4; }
 .rx-text { font-size:15.5px; line-height:1.5; color:var(--iv-ink); white-space:pre-wrap; }
 .rx .rx-source { position:relative; font:inherit; border:0; background:var(--iv-tint); color:var(--iv-accent); font-size:13px; font-weight:700; border-radius:8px; padding:3px 8px; margin:0 2px; cursor:pointer; }
-.rx .rx-source::after { content:''; position:absolute; left:50%; top:50%; width:44px; height:44px; transform:translate(-50%,-50%); }
+.rx .rx-source::after { content:''; position:absolute; left:0; right:0; top:50%; height:44px; transform:translateY(-50%); }
 .rx-writing { font-size:13px; font-weight:600; color:var(--iv-warn); background:var(--iv-warn-bg); border-radius:10px; padding:7px 10px; }
 .rx-cut { font-size:13px; line-height:1.35; color:var(--iv-muted); }
 .rx-flags { background:var(--iv-warn-bg); border-radius:10px; padding:8px 10px; display:flex; flex-direction:column; gap:4px; }
@@ -75,7 +75,7 @@ pub const CHAT_STYLE: &str = r##"
 .rx-foot { font-size:12px; line-height:1.35; color:var(--iv-muted); }
 .rx-back { position:fixed; inset:0; z-index:50; background:rgba(28,27,25,.42); display:flex; align-items:flex-end; justify-content:center; }
 .rx-sheet { background:var(--iv-card); width:100%; max-width:760px; max-height:80vh; overflow-y:auto; border-radius:20px 20px 0 0; padding:16px 16px 20px; display:flex; flex-direction:column; gap:10px; }
-.rx-sheet-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.rx-sheet-head { position:sticky; top:0; z-index:1; background:var(--iv-card); display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .rx-sheet-src { font-size:13px; font-weight:700; color:var(--iv-muted); }
 .rx .rx-close { font:inherit; flex:none; border:0; background:var(--iv-tint); color:var(--iv-accent); font-size:14px; font-weight:700; border-radius:999px; padding:0 14px; min-height:44px; cursor:pointer; }
 .rx-sheet-text { font-size:15px; line-height:1.5; color:var(--iv-ink); white-space:pre-wrap; }
@@ -98,7 +98,9 @@ pub const CHAT_STYLE: &str = r##"
 @media (max-width:640px) {
   /* Above the phone's fixed nav. */
   .rx-composer { bottom:calc(78px + env(safe-area-inset-bottom)); }
-  .rx-end { scroll-margin-bottom:250px; }
+  .rx-end { scroll-margin-bottom:calc(250px + env(safe-area-inset-bottom)); }
+  /* Under 16 px an iPhone zooms on focus. */
+  .rx .rx-ask textarea { font-size:16px; }
   .rx-chaton .run-question, .rx-pre:has(.rx-chat:target:not(:empty)) .run-question { font-size:15px; }
 }
 "##;
@@ -108,6 +110,7 @@ const TAB_ID: &str = "rx-tab-chat";
 const FORM_ID: &str = "rx-chat-form";
 const QUESTION_ID: &str = "rx-chat-q";
 const END_ID: &str = "rx-chat-end";
+const CLOSE_ID: &str = "rx-sheet-close";
 /// Thumb values as stored.
 const UP: i64 = 1;
 const DOWN: i64 = -1;
@@ -256,15 +259,34 @@ fn clear_question() {
     }
 }
 
-/// Bring the end of the conversation into view (browser only).
+/// Bring the end of the conversation into view, above the sticky question box
+/// (browser only). On the next frame: what was just added is not drawn yet.
 fn scroll_to_end() {
     #[cfg(feature = "hydrate")]
-    if let Some(e) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id(END_ID))
-    {
-        e.scroll_into_view();
-    }
+    request_animation_frame(|| {
+        if let Some(e) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(END_ID))
+        {
+            e.scroll_into_view_with_bool(false);
+        }
+    });
+}
+
+/// Move focus to the sheet's Close on the next frame, once it is drawn
+/// (browser only).
+fn focus_close() {
+    #[cfg(feature = "hydrate")]
+    request_animation_frame(|| {
+        use wasm_bindgen::JsCast;
+        if let Some(e) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(CLOSE_ID))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = e.focus();
+        }
+    });
 }
 
 impl Chat {
@@ -335,10 +357,12 @@ impl Chat {
         let reading = StoredValue::new(false);
         let failures = StoredValue::new(0u32);
         let skip = StoredValue::new(0u32);
-        // Coming back to the page reads at the next tick.
+        // Coming back to the page reads at the next tick, even if a read
+        // from before never settled.
         Effect::new(move |_| {
             if !self.hidden.get() {
                 skip.set_value(0);
+                reading.set_value(false);
             }
         });
         ticker(
@@ -484,23 +508,58 @@ impl Chat {
         self.sending.set(true);
         let run = self.run_id;
         leptos::task::spawn_local(async move {
-            match chat_ask(run, question.clone(), mode, None).await {
+            let lost = match chat_ask(run, question.clone(), mode, None).await {
                 Ok(AskReply::Accepted(t)) => {
                     if typed {
                         clear_question();
                     }
                     self.put_turn(t);
                     scroll_to_end();
+                    false
                 }
-                Ok(AskReply::Refused(r)) => self.refuse(r),
-                Err(e) => self.refuse(Refusal {
-                    safety_line: lines::warning_symptoms(&question),
-                    question,
-                    message: error_text(&e),
-                }),
-            }
+                Ok(AskReply::Refused(r)) => {
+                    let in_flight = r.message == lines::IN_FLIGHT_MESSAGE;
+                    self.refuse(r);
+                    in_flight
+                }
+                // The line shows now, whatever the read below finds.
+                Err(e) => {
+                    self.refuse(Refusal {
+                        safety_line: lines::warning_symptoms(&question),
+                        question: question.clone(),
+                        message: error_text(&e),
+                    });
+                    true
+                }
+            };
             let _ = self.sending.try_set(false);
+            if lost {
+                self.recover(question, typed).await;
+            }
         });
+    }
+
+    /// The ask's answer was lost, or another reply is in flight: the server may
+    /// hold a turn this page has not seen. Read the chat and merge it, so
+    /// polling picks up a pending one. If this very question was stored, its
+    /// turn replaces the refusal.
+    async fn recover(self, question: String, typed: bool) {
+        let Ok(Some(read)) = get_my_run_chat(self.run_id).await else {
+            return;
+        };
+        let stored = self.view.try_maybe_update(|v| {
+            let stored = cp::stored_unseen(&v.turns, &read.turns, &question);
+            (cp::merge_turns(&mut v.turns, read.turns), stored)
+        });
+        if stored == Some(true) {
+            let _ = self
+                .refusals
+                .try_update(|l| l.retain(|(_, r)| r.question != question));
+            if typed {
+                clear_question();
+            }
+        }
+        scroll_to_end();
     }
 
     fn give_feedback(self, id: i64, value: i64) {
@@ -920,7 +979,9 @@ fn composer(c: Chat) -> AnyView {
     };
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
-        if let Some((q, _)) = read_form() {
+        // An empty question is no question: nothing to refuse, and the
+        // starters stay. (A form post before hydration gets its message.)
+        if let Some((q, _)) = read_form().filter(|(q, _)| !q.trim().is_empty()) {
             c.ask(q, true);
         }
     };
@@ -948,12 +1009,14 @@ fn composer(c: Chat) -> AnyView {
 
 /// A citation's bottom sheet.
 fn sheet_view(c: Chat, s: SheetSource) -> AnyView {
+    // Drawn afresh when its text arrives, so each draw takes the focus back.
+    focus_close();
     view! {
         <div class="rx-back">
             <div class="rx-sheet" role="dialog" aria-label="Source passage">
                 <div class="rx-sheet-head">
                     <div class="rx-sheet-src">{s.label}</div>
-                    <button class="rx-close" type="button" on:click=move |_| c.sheet.set(None)>"Close"</button>
+                    <button class="rx-close" id=CLOSE_ID type="button" on:click=move |_| c.sheet.set(None)>"Close"</button>
                 </div>
                 <div class="rx-sheet-text">{s.text}</div>
             </div>
