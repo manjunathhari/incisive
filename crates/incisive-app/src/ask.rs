@@ -637,6 +637,9 @@ mod server {
 
         // 5. The worker owns it from here.
         state.worker.spawn(state.clone(), run_id);
+        // Every check has passed and the run holds its reservation. Detached and
+        // not waited for: it can neither fail nor slow the run.
+        crate::runs::intro::start(state, run_id, user.id, question);
         Ok(AskOutcome::RunStarted {
             run_id,
             message: RUN_STARTED_MESSAGE.to_string(),

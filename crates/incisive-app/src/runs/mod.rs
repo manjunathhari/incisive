@@ -13,6 +13,8 @@ pub mod api;
 #[cfg(feature = "ssr")]
 pub mod budget;
 #[cfg(feature = "ssr")]
+pub mod intro;
+#[cfg(feature = "ssr")]
 pub mod store;
 #[cfg(feature = "ssr")]
 pub mod temporal;
@@ -493,6 +495,19 @@ pub struct RunView {
     /// Phase 3 `AnswerV3` (2 when there is no answer).
     #[serde(default = "phase2_version")]
     pub answer_version: i16,
+    /// The introduction, on the run page only (`INTRO=on`). Absent from the
+    /// wire when there is nothing to show, so a page without one is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<IntroView>,
+}
+
+/// What the run page may know of a run's introduction. A failed, skipped or
+/// cap-blocked one is nothing at all (`None`), with no reason sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum IntroView {
+    Pending,
+    Done { text: String },
 }
 
 fn phase2_version() -> i16 {

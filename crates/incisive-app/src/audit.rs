@@ -91,6 +91,11 @@ pub enum Event {
     TemporalFailed,
     TemporalSkipped,
     TemporalCapBlocked,
+    /// The introduction's job ended (ids and kinds only).
+    IntroDone,
+    IntroFailed,
+    IntroSkipped,
+    IntroCapBlocked,
 }
 
 impl Event {
@@ -110,6 +115,10 @@ impl Event {
             Event::TemporalFailed => "temporal_failed",
             Event::TemporalSkipped => "temporal_skipped",
             Event::TemporalCapBlocked => "temporal_cap_blocked",
+            Event::IntroDone => "intro_done",
+            Event::IntroFailed => "intro_failed",
+            Event::IntroSkipped => "intro_skipped",
+            Event::IntroCapBlocked => "intro_cap_blocked",
         }
     }
 
@@ -129,6 +138,10 @@ impl Event {
             "temporal_failed" => Event::TemporalFailed,
             "temporal_skipped" => Event::TemporalSkipped,
             "temporal_cap_blocked" => Event::TemporalCapBlocked,
+            "intro_done" => Event::IntroDone,
+            "intro_failed" => Event::IntroFailed,
+            "intro_skipped" => Event::IntroSkipped,
+            "intro_cap_blocked" => Event::IntroCapBlocked,
             _ => return None,
         })
     }
@@ -320,6 +333,16 @@ pub fn temporal_detail(
         "reason": reason,
         "cost_paise": cost_paise,
         "flags": flags,
+    })
+}
+
+/// How the introduction's job of a run ended: the run id, a fixed reason kind
+/// (`None` when done) and what it cost. Never the question or the text.
+pub fn intro_detail(run_id: Uuid, reason: Option<&'static str>, cost_paise: i64) -> Value {
+    json!({
+        "run_id": run_id.to_string(),
+        "reason": reason,
+        "cost_paise": cost_paise,
     })
 }
 

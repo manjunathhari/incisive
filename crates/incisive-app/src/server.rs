@@ -53,6 +53,8 @@ pub struct AppState {
     /// `temporal_writer::ATTEMPT_TIMEOUT` (`temporal_writer::client`).
     /// `None` (tests, dev without a key): the agent's client is used.
     pub temporal_client: Option<std::sync::Arc<dyn crate::agent::llm::LlmClient>>,
+    /// The introduction agent (`INTRO`, default off; `INTRO_MODEL`).
+    pub intro: crate::runs::intro::IntroRuntime,
     /// The memory layer's settings (`MEMORY`, default off).
     pub memory: crate::memory::settings::MemorySettings,
     /// Gemma embeddings client; `None` when `GEMMA_URL`/`GEMMA_AUTH` are unset.

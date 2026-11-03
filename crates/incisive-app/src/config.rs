@@ -55,6 +55,9 @@ pub struct Config {
     /// (`TEMPORAL`: `off`, the default, or `on`; `TEMPORAL_MAX_TOKENS`
     /// optional, 2,000–32,000, default 20,000).
     pub temporal: crate::agent::temporal_writer::TemporalSettings,
+    /// The introduction agent (`INTRO`: `off`, the default, or `on`;
+    /// `INTRO_MODEL`, default `claude-sonnet-5-5`, priced when `INTRO=on`).
+    pub intro: crate::runs::intro::IntroSettings,
     /// The memory layer (`MEMORY`, default off; `GEMMA_URL`, `GEMMA_AUTH`,
     /// `EMBED_MODEL`, `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH`).
     pub memory: crate::memory::settings::MemorySettings,
@@ -385,6 +388,43 @@ impl Config {
             }
         };
 
+        let intro = {
+            use crate::runs::intro::IntroSettings;
+            let on = match lookup("INTRO").as_deref() {
+                None | Some("off") => false,
+                Some("on") => true,
+                Some(_) => {
+                    return Err(ConfigError::Invalid {
+                        var: "INTRO",
+                        reason: "expected `on` or `off`".to_string(),
+                    });
+                }
+            };
+            let defaults = IntroSettings::default();
+            let model = lookup("INTRO_MODEL").unwrap_or(defaults.model);
+            if model.chars().any(char::is_whitespace) {
+                return Err(ConfigError::Invalid {
+                    var: "INTRO_MODEL",
+                    reason: "expected a model id without spaces".to_string(),
+                });
+            }
+            // Only when on: with `INTRO=off` the model is never called, and an
+            // unpriced default must not stop a deploy that has it off.
+            if on && app_env == AppEnv::Prod && model_prices.get(&model).is_none() {
+                return Err(ConfigError::Invalid {
+                    var: "MODEL_PRICES",
+                    reason: format!(
+                        "no entry for INTRO_MODEL `{model}`; add it to MODEL_PRICES or change INTRO_MODEL"
+                    ),
+                });
+            }
+            IntroSettings {
+                on,
+                model,
+                ..defaults
+            }
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -462,6 +502,7 @@ impl Config {
             full_engine,
             completeness,
             temporal,
+            intro,
             memory,
             chat,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
@@ -1230,6 +1271,84 @@ mod tests {
         p.push(("GEMMA_AUTH", "s3cr3t-gemma-token"));
         let c = Config::from_lookup(lookup(&p)).unwrap();
         assert!(!format!("{:?}", c.memory).contains("s3cr3t-gemma-token"));
+    }
+
+    /// `INTRO` is `off` (default) or `on`, trimmed; anything else refuses at
+    /// startup. `INTRO_MODEL` defaults to Sonnet and must be priced in prod
+    /// when `INTRO=on`.
+    #[test]
+    fn intro_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.intro.on, "off by default");
+        assert_eq!(c.intro.model, "claude-sonnet-5-5");
+        for (v, on) in [
+            ("on", true),
+            ("off", false),
+            ("  on\n", true),
+            (" off ", false),
+        ] {
+            let mut pairs = full();
+            pairs.push(("INTRO", v));
+            assert_eq!(
+                Config::from_lookup(lookup(&pairs)).unwrap().intro.on,
+                on,
+                "{v}"
+            );
+        }
+        for bad in ["ON", "true", "1", "o n"] {
+            let mut pairs = full();
+            pairs.push(("INTRO", bad));
+            assert_eq!(
+                Config::from_lookup(lookup(&pairs)).unwrap_err(),
+                ConfigError::Invalid {
+                    var: "INTRO",
+                    reason: "expected `on` or `off`".to_string(),
+                },
+                "{bad}"
+            );
+        }
+        let mut pairs = full();
+        pairs.push(("INTRO_MODEL", "claude-opus-5-5"));
+        assert_eq!(
+            Config::from_lookup(lookup(&pairs)).unwrap().intro.model,
+            "claude-opus-5-5"
+        );
+        let mut pairs = full();
+        pairs.push(("INTRO_MODEL", "two words"));
+        assert!(matches!(
+            Config::from_lookup(lookup(&pairs)).unwrap_err(),
+            ConfigError::Invalid {
+                var: "INTRO_MODEL",
+                ..
+            }
+        ));
+        // Prod: priced when on; with it off an unpriced model stops nothing.
+        let prod = |intro: &'static str, model: &'static str| {
+            let mut v: Vec<_> = full()
+                .into_iter()
+                .filter(|(k, _)| *k != "APP_ENV")
+                .collect();
+            v.extend([
+                ("APP_ENV", "prod"),
+                ("IAP_AUDIENCE", "/projects/1/apps/2"),
+                ("MODEL_PRICES", PROD_PRICES),
+                ("USD_INR", "88"),
+                ("GLOBAL_MONTHLY_CAP_INR", "10000"),
+                ("UNPAYWALL_EMAIL", "a@example.com"),
+                ("INTRO", intro),
+                ("INTRO_MODEL", model),
+            ]);
+            Config::from_lookup(lookup(&v))
+        };
+        assert!(prod("on", "claude-sonnet-5-5").unwrap().intro.on);
+        assert!(!prod("off", "unpriced").unwrap().intro.on);
+        match prod("on", "unpriced").unwrap_err() {
+            ConfigError::Invalid { var, reason } => {
+                assert_eq!(var, "MODEL_PRICES");
+                assert!(reason.contains("INTRO_MODEL"));
+            }
+            e => panic!("{e:?}"),
+        }
     }
 
     /// Temporal T2: `TEMPORAL` is `off` (default) or `on`, trimmed;

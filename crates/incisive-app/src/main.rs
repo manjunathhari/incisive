@@ -111,6 +111,14 @@ async fn main() {
             Arc::new(incisive_app::agent::temporal_writer::client(key))
                 as Arc<dyn incisive_app::agent::llm::LlmClient>
         });
+    // The introduction: its own client too (one attempt, about 30 s).
+    let intro = incisive_app::runs::intro::IntroRuntime {
+        settings: config.intro.clone(),
+        client: config.anthropic_api_key.clone().map(|key| {
+            Arc::new(incisive_app::runs::intro::client(key))
+                as Arc<dyn incisive_app::agent::llm::LlmClient>
+        }),
+    };
     let llm = claude.map(|client| {
         Arc::new(AgentLlm {
             client,
@@ -161,6 +169,7 @@ async fn main() {
         completeness: config.completeness,
         temporal: config.temporal,
         temporal_client,
+        intro,
         memory: config.memory.clone(),
         chat: config.chat.clone(),
         embedder: incisive_app::memory::embed::Embedder::from_settings(&config.memory)
