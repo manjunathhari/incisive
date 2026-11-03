@@ -166,7 +166,9 @@ pub(super) fn wait_for_intro(
                         let _ = tick.try_update(|t| *t += 1);
                     }
                     // Failed, skipped, cap blocked or gone: nothing to show.
-                    Ok(None) | Err(_) => stop(),
+                    Ok(None) => stop(),
+                    // A failed poll says nothing: the next attempt asks again.
+                    Err(_) => {}
                 }
             });
         },

@@ -447,6 +447,9 @@ async fn a_panicking_call_fails_only_the_introduction() {
     let (st_, _, text, _) = wait_row_finished(&pool, run_id).await;
     assert_eq!(st_, "failed");
     assert_eq!(text, None);
+    // The panic stays in the call's own task (reported as unrecorded), so the
+    // job still ends normally: nothing stays held.
+    assert!(reservations(&pool, user.id).await.is_empty());
 }
 
 // ---------- the switch ----------
