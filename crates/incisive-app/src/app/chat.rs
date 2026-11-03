@@ -22,6 +22,7 @@ use leptos::prelude::*;
 use uuid::Uuid;
 
 use super::expert::{Expert, current_hash, replace_hash};
+use super::tracker::{Pill, chat_pill_off};
 use super::{
     chat_ask, chat_feedback, chat_source, chat_suggest, chat_turn, error_text, get_my_run_chat,
 };
@@ -30,12 +31,11 @@ use crate::chat_page::{
     self as cp, AskReply, ChatPageView, ChatTurn, Entry, Phase, Refusal, ReplyPiece, SheetSource,
 };
 use crate::expert_page::{POLL_EVERY_SECS, POLL_MAX};
+use crate::run_tracker::{self as rt, PillState};
 
 /// The chat's styles: the frozen mockup's sizes on the ivory tokens. Scoped to
 /// `.rx-chat` and its own option pieces; nothing here matches the answer.
 pub const CHAT_STYLE: &str = r##"
-.rx-seg.rx-seg3 { display:flex; width:fit-content; max-width:100%; gap:2px; padding:3px; }
-.rx .rx-seg3 .rx-tab { flex:0 1 auto; min-width:0; font-size:14px; padding:6px 12px; }
 .rx-chat-note { font-family:var(--iv-font); margin:0 0 10px; font-size:14.5px; line-height:1.45; color:var(--iv-body); }
 .rx-chat[hidden] { display:none; }
 .rx-chat { font-family:var(--iv-font); color:var(--iv-ink); display:flex; flex-direction:column; gap:14px; width:100%; max-width:760px; margin:6px auto 0; min-width:0; overflow-wrap:anywhere; }
@@ -89,7 +89,7 @@ pub const CHAT_STYLE: &str = r##"
 .rx-chaton .run-chrome > :not(.run-question):not(.rx-seg):not(.rx-chat-note) { display:none; }
 /* Before hydration: #chat opens a ready view (CSS :target) and hides the rest. */
 .rx-pre .rx-chat:target:not(:empty)[hidden] { display:flex; }
-.rx-pre:has(.rx-chat:target:not(:empty)) .rx-answer, .rx-pre:has(.rx-chat:target:not(:empty)) .rx-hint { display:none; }
+.rx-pre:has(.rx-chat:target:not(:empty)) .rx-answer { display:none; }
 .rx-pre:has(.rx-chat:target:not(:empty)) .rx-tab.on { background:none; color:var(--iv-muted); }
 .rx-pre:has(.rx-chat:target:not(:empty)) a.rx-tab[href="#chat"] { background:var(--iv-tint); color:var(--iv-accent); }
 .rx-pre:has(.rx-chat:target:not(:empty)) .run-chrome { max-width:760px; margin-inline:auto; }
@@ -656,19 +656,25 @@ impl Chat {
         });
     }
 
-    /// The Chat option: nothing when chat is not offered, a link once it is
-    /// ready, otherwise a disabled button that says why.
+    /// The Chat with me pill: a link once it is ready, otherwise a disabled
+    /// button; visible and not clickable where chat is not offered.
     pub fn tab(self, x: Expert) -> impl IntoView {
+        let ui = x.ui;
+        // When this page first saw the opinion ready.
+        let since: StoredValue<Option<chrono::DateTime<chrono::Utc>>> = StoredValue::new(None);
         let to_chat = move |ev: leptos::ev::MouseEvent| {
             ev.prevent_default();
+            ui.clicked.set(Some(Pill::Chat));
             x.expert.set(false);
             self.open.set(true);
             replace_hash("#chat");
         };
         move || {
             let s = self.state.get();
-            let label = s.tab_label()?;
-            Some(if s.selectable() {
+            let Some(label) = s.tab_label() else {
+                return chat_pill_off();
+            };
+            if s.selectable() {
                 view! {
                     <a
                         class="rx-tab"
@@ -677,22 +683,58 @@ impl Chat {
                         role="tab"
                         aria-selected=move || self.open.get().to_string()
                         aria-controls="chat"
+                        aria-label=PillState::Ready.aria(label)
+                        data-state=PillState::Ready.as_str()
+                        data-clicked=ui.clicked_attr(Pill::Chat)
                         href="#chat"
                         rel="external"
                         on:click=to_chat
                     >
+                        <span class="rk-dot" aria-hidden="true"></span>
                         {label}
                     </a>
                 }
                 .into_any()
             } else {
+                // Getting ready: fills by the usual time from when this page
+                // saw the opinion ready; unavailable: the fill has stopped.
+                let state = if s == cp::ChatState::GettingReady {
+                    PillState::Filling
+                } else {
+                    PillState::Stopped
+                };
+                let style = move || {
+                    if state == PillState::Filling {
+                        let now = ui.now.get();
+                        let secs = if x.opinion_ready() {
+                            let from = since.get_value().unwrap_or(now);
+                            since.set_value(Some(from));
+                            (now - from).num_seconds()
+                        } else {
+                            0
+                        };
+                        rt::fill_background(rt::timed_fill(secs, rt::CHAT_USUAL_SECS))
+                    } else {
+                        String::new()
+                    }
+                };
                 view! {
-                    <button class="rx-tab" id=TAB_ID type="button" role="tab" aria-selected="false" disabled=true>
+                    <button
+                        class="rx-tab"
+                        id=TAB_ID
+                        type="button"
+                        role="tab"
+                        aria-selected="false"
+                        aria-label=state.aria(label)
+                        data-state=state.as_str()
+                        style=style
+                        disabled=true
+                    >
                         {label}
                     </button>
                 }
                 .into_any()
-            })
+            }
         }
     }
 

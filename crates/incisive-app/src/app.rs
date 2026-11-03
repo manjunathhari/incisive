@@ -40,6 +40,7 @@ mod expert;
 mod ivory;
 mod library_page;
 mod page;
+mod tracker;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 /// The chat window's styles (exported for the scope test).
 pub use chat::CHAT_STYLE;
@@ -330,6 +331,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <style>{STYLE}</style>
                 <style>{ivory::IVORY_STYLE}</style>
+                <style>{tracker::TRACKER_STYLE}</style>
                 <AutoReload options=options.clone() />
                 <HydrationScripts options />
                 <MetaTags />
@@ -877,6 +879,66 @@ fn rupees(paise: i64) -> String {
 /// How often the run page asks for news while the run is queued or running.
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How many times, one per poll interval, the page asks for a just-ended Full
+/// run's expert opinion row.
+const ROW_WAIT_ATTEMPTS: u32 = 10;
+
+/// The wait for the expert opinion row: once per page.
+#[derive(Default)]
+struct RowWait {
+    started: bool,
+    attempts: u32,
+    timer: Option<leptos::leptos_dom::helpers::IntervalHandle>,
+}
+
+/// A row can still come: a Full run that has ended with a written answer.
+fn row_is_due(run: &RunView) -> bool {
+    run.summary.mode == RunMode::Focused
+        && matches!(run.summary.status, RunStatus::Done | RunStatus::Partial)
+        && run.answer_version == crate::agent::answer_v3::ANSWER_VERSION
+        && run
+            .answer
+            .as_ref()
+            .is_some_and(|a| !a.get("answer").is_none_or(serde_json::Value::is_null))
+}
+
+/// Ask only for the row, a fixed number of times; the page is left alone
+/// (nothing the surgeon opened closes) and redrawn once, when a row appears.
+fn wait_for_row(id: Uuid, tick: RwSignal<u32>, wait: StoredValue<RowWait, LocalStorage>) {
+    if wait.with_value(|w| w.started) {
+        return;
+    }
+    let stop = move || {
+        if let Some(h) = wait.try_update_value(|w| w.timer.take()).flatten() {
+            h.clear();
+        }
+    };
+    let h = leptos::leptos_dom::helpers::set_interval_with_handle(
+        move || {
+            let attempts = wait
+                .try_update_value(|w| {
+                    w.attempts += 1;
+                    w.attempts
+                })
+                .unwrap_or(ROW_WAIT_ATTEMPTS);
+            if attempts >= ROW_WAIT_ATTEMPTS {
+                stop();
+            }
+            leptos::task::spawn_local(async move {
+                if let Ok(Some(_)) = get_my_run_temporal(id).await {
+                    stop();
+                    let _ = tick.try_update(|t| *t += 1);
+                }
+            });
+        },
+        POLL_EVERY,
+    );
+    wait.update_value(|w| {
+        w.started = true;
+        w.timer = h.ok();
+    });
+}
+
 #[component]
 fn RunPage() -> impl IntoView {
     let params = use_params_map();
@@ -888,6 +950,7 @@ fn RunPage() -> impl IntoView {
     };
     let query = use_query_map();
     let tick = RwSignal::new(0u32);
+    let ui = tracker::TrackerUi::new();
     let data = Resource::new(
         move || (run_id(), tick.get()),
         |(id, _)| async move {
@@ -905,6 +968,12 @@ fn RunPage() -> impl IntoView {
     let timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage> =
         StoredValue::new_local(None);
     let last_good: RwSignal<Option<RunPageData>> = RwSignal::new(None);
+    let row_wait: StoredValue<RowWait, LocalStorage> = StoredValue::new_local(RowWait::default());
+    on_cleanup(move || {
+        if let Some(h) = row_wait.try_update_value(|w| w.timer.take()).flatten() {
+            h.clear();
+        }
+    });
     let stop = move || {
         if let Some(h) = timer.try_update_value(|t| t.take()).flatten() {
             h.clear();
@@ -922,8 +991,19 @@ fn RunPage() -> impl IntoView {
     Effect::new(move |_| match data.get() {
         Some(Ok(v)) => {
             let active = v.run.summary.status.is_active();
+            // A Full run that ended with a written answer: its expert opinion
+            // row comes moments later.
+            let row_due = v.temporal.is_none() && row_is_due(&v.run);
+            let id = v.run.summary.id;
             last_good.set(Some(v));
-            if active { start() } else { stop() }
+            if active {
+                start()
+            } else {
+                stop()
+            }
+            if row_due {
+                wait_for_row(id, tick, row_wait);
+            }
         }
         Some(Err(e)) if is_not_found(&e) => stop(),
         Some(Err(_)) => start(),
@@ -940,7 +1020,7 @@ fn RunPage() -> impl IntoView {
                 data.get()
                     .map(|r| match r {
                         Ok(RunPageData { run, temporal, chat }) => {
-                            run_view(run, temporal, chat, query).into_any()
+                            run_view(run, temporal, chat, query, ui).into_any()
                         }
                         Err(e) if is_not_found(&e) => {
                             view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
@@ -950,7 +1030,7 @@ fn RunPage() -> impl IntoView {
                                 <p class="hint" role="status">
                                     "Connection problem \u{2014} retrying. " {error_text(&e)}
                                 </p>
-                                {run_view(run, temporal, chat, query)}
+                                {run_view(run, temporal, chat, query, ui)}
                             }
                                 .into_any(),
                             None => view! {
@@ -1066,6 +1146,7 @@ fn run_view(
     temporal: Option<crate::runs::TemporalView>,
     chat: Option<crate::chat_page::ChatPageView>,
     query: Memo<leptos_router::params::ParamsMap>,
+    ui: tracker::TrackerUi,
 ) -> AnyView {
     let status = v.summary.status;
     let run_id = v.summary.id;
@@ -1095,6 +1176,30 @@ fn run_view(
             _ => Default::default(),
         };
     let has_answer = answer.is_some();
+    let elapsed_s = match answer.as_ref().and_then(Option::as_ref) {
+        Some(Body::V2(a)) => Some(a.elapsed_s),
+        Some(Body::V3(a)) => Some(a.elapsed_s),
+        None => None,
+    };
+    // How each study was read (only a finished, readable Phase 3 answer).
+    let evidence: Vec<(String, u32)> = match answer.as_ref() {
+        Some(Some(Body::V3(a))) => a
+            .evidence
+            .iter()
+            .map(|e| (e.text.clone(), e.verified_quotes))
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Written: a stored body that holds an answer, not just any body.
+    let (written, empty_reason) = match answer.as_ref() {
+        Some(Some(Body::V3(a))) => (a.answer.is_some(), a.empty_reason.clone()),
+        Some(Some(Body::V2(_))) => (true, None),
+        Some(None) => (
+            false,
+            Some("This answer can't be shown. Please ask the question again.".to_string()),
+        ),
+        None => (false, None),
+    };
     let answer_block = answer.map(|a| match a {
         Some(Body::V2(a)) => answer_view(a).into_any(),
         Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
@@ -1112,20 +1217,89 @@ fn run_view(
             </p>
         }
     });
-    let (mode, cost) = (v.summary.mode, v.summary.cost_paise);
-    let progress = progress_view(status, has_answer, v.steps);
+    let mode = v.summary.mode;
+    // The tracker: from the stored step lines and the status only.
+    let working = status.is_active();
+    let answered = matches!(status, RunStatus::Done | RunStatus::Partial) && written;
+    let ended_empty = matches!(status, RunStatus::Done | RunStatus::Partial) && !written;
+    let run_state = if status == RunStatus::Queued {
+        crate::run_tracker::RunState::Waiting
+    } else if working {
+        crate::run_tracker::RunState::Working
+    } else if answered {
+        crate::run_tracker::RunState::Answered
+    } else if ended_empty {
+        crate::run_tracker::RunState::EndedEmpty
+    } else {
+        crate::run_tracker::RunState::Stopped
+    };
+    let created_at = v.summary.created_at;
+    let no_steps = v.steps.is_empty();
+    // The clock starts at the first step, as `elapsed_s` nearly does, so a
+    // queue wait cannot make it step back at the end.
+    let clock_from = v.steps.first().map_or(created_at, |s| s.at);
+    let last_step_at = v.steps.last().map_or(created_at, |s| s.at);
+    let total_secs = elapsed_s.map_or((last_step_at - clock_from).num_seconds(), |s| s as i64);
+    let mut read = {
+        let lines: Vec<crate::run_tracker::Step<'_>> = v
+            .steps
+            .iter()
+            .map(|s| crate::run_tracker::Step {
+                at: s.at,
+                line: s.line.as_str(),
+            })
+            .collect();
+        crate::run_tracker::read(mode, &lines, run_state, empty_reason.as_deref())
+    };
+    if answered {
+        let studies: Vec<crate::run_tracker::StudyRead<'_>> = evidence
+            .iter()
+            .map(|(text, verified_quotes)| crate::run_tracker::StudyRead {
+                text,
+                verified_quotes: *verified_quotes,
+            })
+            .collect();
+        read.read_from_evidence(&studies);
+    }
+    let answer_pill = tracker::AnswerPill {
+        state: if answered {
+            crate::run_tracker::PillState::Ready
+        } else if status == RunStatus::Queued {
+            crate::run_tracker::PillState::Idle
+        } else if working {
+            crate::run_tracker::PillState::Filling
+        } else {
+            crate::run_tracker::PillState::Stopped
+        },
+        fill: read.fill,
+        ready_at: last_step_at,
+    };
+    let progress = if working {
+        tracker::progress_pill(ui, &read, v.steps)
+    } else {
+        progress_view(status, has_answer, v.steps)
+    };
+    let card = (read.recognised || status == RunStatus::Queued).then(|| {
+        tracker::results_card(
+            ui,
+            mode,
+            read,
+            working,
+            status == RunStatus::Queued || no_steps,
+            clock_from,
+            total_secs,
+        )
+    });
     let Some(t) = temporal else {
-        // No expert opinion row: the page exactly as before T4 (the same
-        // elements and the same view structure, so the same markup and
-        // hydration markers).
         return view! {
             // Page chrome (ivory redesign): Figtree; the answer below is untouched.
             <div class="run-chrome">
                 <h1 class="run-question">{heading}</h1>
                 <p>
-                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
-                    <span class="meta">{rupees(cost)}</span>
+                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span>
                 </p>
+                {tracker::plain_bar(ui, mode, answer_pill)}
+                {card}
                 {progress}
             </div>
             {answer_block}
@@ -1133,7 +1307,7 @@ fn run_view(
         }
         .into_any();
     };
-    let x = expert::Expert::new(run_id, t, answer_refs);
+    let x = expert::Expert::new(run_id, t, answer_refs, ui, answer_pill);
     // With `CHAT=on`: the third option and its view, in the same wrapper. A
     // run chat will never be offered on has none of it (one whose opinion is
     // still being written may yet), unless a refusal must still show.
@@ -1159,10 +1333,10 @@ fn run_view(
                 <div class="run-chrome">
                     <h1 class="run-question">{heading}</h1>
                     <p>
-                        {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
-                        <span class="meta">{rupees(cost)}</span>
+                        {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span>
                     </p>
                     {expert::option_bar(x, Some(c))}
+                    {card}
                     {progress}
                 </div>
                 {expert::expert_view(x)}
@@ -1183,10 +1357,10 @@ fn run_view(
             <div class="run-chrome">
                 <h1 class="run-question">{heading}</h1>
                 <p>
-                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span> " "
-                    <span class="meta">{rupees(cost)}</span>
+                    {status_badge(status)} " " <span class="badge mode">{mode_label(mode)}</span>
                 </p>
                 {expert::option_bar(x, None)}
+                {card}
                 {progress}
             </div>
             {expert::expert_view(x)}

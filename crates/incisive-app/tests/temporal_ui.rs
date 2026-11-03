@@ -436,7 +436,7 @@ async fn t4_each_status_renders_its_option() {
     let st = state(pool.clone());
     let (uid, email) = new_user(&pool).await;
     let cases = [
-        (None, "Expert opinion \u{b7} being written", false),
+        (None, "Expert opinion", false),
         (Some(JobStatus::Done), "Expert opinion", true),
         (
             Some(JobStatus::Skipped),
@@ -471,7 +471,24 @@ async fn t4_each_status_renders_its_option() {
         assert_eq!(bar.contains("rx-dot"), ready, "{text}");
         // Selectable: a link to #expert; otherwise a disabled button.
         assert_eq!(bar.contains(r##"href="#expert""##), ready, "{text}");
-        assert_eq!(bar.contains("disabled"), !ready, "{text}");
+        let at = bar.find(r#"id="rx-tab-expert""#).unwrap();
+        let tag = &bar[bar[..at].rfind('<').unwrap()..at + bar[at..].find('>').unwrap()];
+        assert_eq!(tag.contains("disabled"), !ready, "{text}");
+        // A pill is green only when ready.
+        assert_eq!(tag.contains(r#"data-state="ready""#), ready, "{text}");
+        assert_eq!(
+            tag.contains(r#"data-state="filling""#),
+            status.is_none(),
+            "{text}"
+        );
+        if !ready && status.is_some() {
+            assert!(tag.contains(r#"data-state="stopped""#), "{text}");
+        }
+        // Chat with me is visible and not clickable with CHAT off.
+        assert!(bar.contains(">Chat with me</button>"), "{text}");
+        assert!(!bar.contains(r##"href="#chat""##), "{text}");
+        // Nothing is outlined on first load.
+        assert!(!bar.contains(r#"data-clicked="true""#), "{text}");
         // The Expert opinion tab labels the view's panel.
         assert!(bar.contains(r#"id="rx-tab-expert""#), "{text}");
         // The SSR page never says polling gave up.
@@ -485,11 +502,8 @@ async fn t4_each_status_renders_its_option() {
         );
         // The Answer view is shown first (the server never sees the hash).
         assert!(bar.contains(r#"class="rx-tab on""#) || bar.contains(r#"class="on rx-tab""#));
-        assert_eq!(
-            m.contains("Expert opinion ready: how this evidence moved over time"),
-            ready,
-            "{text}"
-        );
+        // The ready hint is gone: the pill says it.
+        assert!(!m.contains("Expert opinion ready"), "{text}");
         // The option sits outside the answer content, above it.
         let ap = m.find(r#"<div class="ap-main">"#).unwrap();
         assert!(element_at(&m, "rx-seg").unwrap() < ap);
@@ -568,7 +582,7 @@ async fn t4_answer_content_is_unchanged_with_a_row() {
         // With a row the answer wrapper and the page wrapper close after it.
         assert_eq!(cb.strip_suffix("</div></div>"), Some(ca), "{name}");
         assert!(b.contains(r#"<div class="rx-answer">"#));
-        assert!(!a.contains("rx-answer") && !a.contains("rx-seg") && !a.contains(".rt-panel"));
+        assert!(!a.contains("rx-answer") && !a.contains(".rt-panel"));
     }
 }
 
@@ -933,4 +947,370 @@ async fn t4_write_the_static_preview() {
         ),
     );
     eprintln!("T4 preview written to {out}");
+}
+
+// ---------- the run tracker (3 Nov) ----------
+
+use incisive_app::runs::StepKind;
+use incisive_app::runs::store::add_step;
+
+const FULL_STEPS: [&str; 5] = [
+    "Researcher: 11 searches so far (turn 7 of 15)",
+    "Researcher: selected 12 studies (7 RCTs, 4 meta-analyses)",
+    "Extractor and skeptic: extracting 12 studies and challenging the conclusion",
+    "Skeptic: 7 searches so far (turn 3 of 8)",
+    "Extractor: 4/12 studies (17 verified outcomes, 0 not verified, 4 numbers not verified; all kept, labelled)",
+];
+
+/// A run of `uid` still in `status`, with `steps` written.
+async fn working_run(
+    pool: &PgPool,
+    uid: i64,
+    mode: RunMode,
+    status: RunStatus,
+    steps: &[&str],
+) -> Uuid {
+    let run = create_run(pool, uid, "What is the role of surgery?", mode, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    if status != RunStatus::Queued {
+        assert!(
+            set_status(pool, run, RunStatus::Running, None)
+                .await
+                .unwrap()
+        );
+    }
+    for s in steps {
+        add_step(pool, run, StepKind::Note, s).await.unwrap();
+    }
+    if status != RunStatus::Queued && status != RunStatus::Running {
+        assert!(set_status(pool, run, status, None).await.unwrap());
+    }
+    run
+}
+
+/// The page without the style blocks (they name the classes).
+fn no_styles(m: &str) -> String {
+    regex::Regex::new(r"(?s)<style>.*?</style>")
+        .unwrap()
+        .replace_all(m, "")
+        .into_owned()
+}
+
+async fn tracker_page(st: &AppState, run: Uuid, email: &str) -> String {
+    let (s, html) = send(router(st.clone()), &format!("/runs/{run}"), email).await;
+    assert_eq!(s, StatusCode::OK);
+    dump(&format!("tracker-{run}"), &markup(&html, run));
+    no_styles(&markup(&html, run).replace("<!---->", ""))
+}
+
+/// A working Full run: three pills, the card filling in, Progress folded
+/// with the role and the latest step, and no money.
+#[tokio::test]
+async fn tracker_a_working_full_run() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Focused,
+        RunStatus::Running,
+        &FULL_STEPS,
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="filling""#), "{bar}");
+    assert!(bar.contains(">Answer</a>"), "{bar}");
+    assert!(bar.contains(">Expert opinion</button>"), "{bar}");
+    assert!(bar.contains(">Chat with me</button>"), "{bar}");
+    assert!(!bar.contains(r#"data-state="ready""#), "{bar}");
+    assert!(!bar.contains(r#"data-clicked="true""#), "{bar}");
+    assert!(m.contains("Results so far"));
+    assert!(m.contains("The researchers are discussing the best answer"));
+    assert!(m.contains("usually 5 min"));
+    assert!(m.contains("7 RCTs, 4 meta-analyses"));
+    assert!(m.contains(r#"<div class="rk-state">7 searches</div>"#));
+    assert!(m.contains(">pending<"));
+    assert!(m.contains("You can leave this page."));
+    // Progress: one folded pill, the original lines inside it.
+    let fold = m.find(r#"class="rk-fold""#).expect("the Progress pill");
+    let tag = &m[m[..fold].rfind('<').unwrap()..fold + m[fold..].find('>').unwrap()];
+    assert!(!tag.contains("open"), "{tag}");
+    assert!(m.contains("Progress \u{b7} 5 steps"));
+    assert!(m.contains(r#"<span class="rk-role">Extractor</span>"#));
+    assert!(m.contains("4/12 studies (17 verified outcomes"));
+    let list = &m[m[fold..].find(r#"<ol class="steps">"#).unwrap() + fold..];
+    for s in FULL_STEPS {
+        assert!(list.contains(s), "{s}");
+    }
+    assert!(!m.contains("<h3>Progress"));
+    assert!(!m.contains('\u{20b9}'), "no money on the screen");
+    assert!(!m.contains("rx-answer"));
+}
+
+/// Quick has two pills; a queued run waits; past nothing, no ready pill.
+#[tokio::test]
+async fn tracker_quick_has_two_pills_and_a_queued_run_waits() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Quick,
+        RunStatus::Running,
+        &["Researcher: 2 searches so far (turn 1 of 8)"],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    let bar = option_markup(&m);
+    assert!(bar.contains(">Answer</a>") && bar.contains(">Chat with me</button>"));
+    assert!(!bar.contains("Expert opinion"), "{bar}");
+    assert!(m.contains("usually about 2 min"));
+    assert!(!m.contains("Studies read"));
+    assert!(!m.contains('\u{20b9}'));
+
+    let (other, email) = new_user(&pool).await;
+    let queued = working_run(&pool, other, RunMode::Focused, RunStatus::Queued, &[]).await;
+    let m = tracker_page(&st, queued, &email).await;
+    assert!(m.contains("Waiting to start"));
+    assert!(m.contains(r#"<div class="rk-clock">0:00</div>"#));
+    assert!(
+        option_markup(&m).contains(r#"data-state="idle""#),
+        "queued: the Answer pill has not started"
+    );
+    assert!(m.contains("Nothing yet. This page updates by itself."));
+}
+
+/// A failed run: the card keeps what was reached, the rest says so, the
+/// list stays open as today, the Answer pill never goes green.
+#[tokio::test]
+async fn tracker_a_failed_run_stays_white() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(&pool, uid, RunMode::Focused, RunStatus::Failed, &FULL_STEPS).await;
+    let m = tracker_page(&st, run, &email).await;
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="stopped""#), "{bar}");
+    assert!(!bar.contains(r#"data-state="ready""#), "{bar}");
+    assert!(m.contains(">not reached<"));
+    assert!(m.contains(r#"<div class="rk-state">7 searches</div>"#));
+    assert!(!m.contains("You can leave this page."));
+    assert!(m.contains("<h3>Progress"));
+    assert!(m.contains("This question ended without an answer."));
+}
+
+/// A finished run: the card stays above the answer, Progress folds as
+/// today, the Answer pill is ready, and money shows only in the Original
+/// run view.
+#[tokio::test]
+async fn tracker_the_card_stays_after_the_run() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let body = fixture("hernia");
+    let run = create_run(
+        &pool,
+        uid,
+        body["question"].as_str().unwrap(),
+        RunMode::Focused,
+        4000,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for s in FULL_STEPS {
+        add_step(&pool, run, StepKind::Note, s).await.unwrap();
+    }
+    add_step(
+        &pool,
+        run,
+        StepKind::Check,
+        "Number check: 6 of 398 numbers not traced to a verified quote, structured number or abstract (marked \"not traced\"; nothing removed)",
+    )
+    .await
+    .unwrap();
+    assert!(save_answer(&pool, run, &body).await.unwrap());
+    assert!(set_status(&pool, run, RunStatus::Done, None).await.unwrap());
+    let m = tracker_page(&st, run, &email).await;
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="ready""#), "{bar}");
+    assert!(bar.contains(r#"class="rk-dot""#), "{bar}");
+    assert!(m.contains(r#"<div class="rk-state">392 of 398 traced</div>"#));
+    assert!(m.contains("Answer ready") && m.contains("total time"));
+    assert!(!m.contains("Results so far") && !m.contains("You can leave this page."));
+    // Card, then the folded Progress, then the answer.
+    let card = m.find(r#"class="rk-card""#).unwrap();
+    let fold = m.find(r#"<details class="run-fold""#).unwrap();
+    let answer = m.find(r#"<div class="ap">"#).unwrap();
+    assert!(card < fold && fold < answer);
+    let original = m.find(r#"<details class="ap-original""#).unwrap();
+    assert!(
+        !m[..original].contains('\u{20b9}'),
+        "money only in the raw run"
+    );
+    assert!(m.contains("Cost and time"), "the raw run keeps its cost");
+}
+
+/// An old run with no line this page knows: no card, the fold as today.
+#[tokio::test]
+async fn tracker_an_old_run_has_no_card() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Focused,
+        RunStatus::Failed,
+        &["Searching", "Screening 12 abstracts"],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    assert!(!m.contains(r#"class="rk-card""#));
+    assert!(m.contains("Screening 12 abstracts"));
+}
+
+/// A run interrupted after the checks: no answer stored, so never "written"
+/// and never a tick.
+#[tokio::test]
+async fn tracker_an_interrupted_run_is_not_written() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Focused,
+        RunStatus::Interrupted,
+        &[
+            "Researcher: selected 12 studies (7 RCTs, 4 meta-analyses)",
+            "Writer: writing the answer from 12 studies (12 with an abstract)",
+            "Citation check: every citation is one of the selected studies",
+        ],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    assert!(m.contains("The run ended before the answer was ready"));
+    assert!(m.contains(r#"<div class="rk-state">all matched</div>"#));
+    assert!(!m.contains(r#"<div class="rk-state">written</div>"#));
+    assert!(!m.contains("Answer ready") && !m.contains("M3 8.5"));
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="stopped""#), "{bar}");
+    assert!(!bar.contains(r#"class="rk-dot""#), "{bar}");
+}
+
+/// A body with nothing written, which the engine ends with "Answer ready":
+/// its reason shows, no tick, a white pill.
+#[tokio::test]
+async fn tracker_a_stored_empty_answer_is_not_written() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let mut body = fixture("hernia");
+    body["answer"] = Value::Null;
+    body["empty_reason"] = Value::String("The answer could not be finished.".into());
+    let run = create_run(&pool, uid, "Q?", RunMode::Focused, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(&pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for s in [
+        "Researcher: selected 12 studies (7 RCTs, 4 meta-analyses)",
+        "The writer's answer was cut off by its output limit",
+        "Answer ready",
+    ] {
+        add_step(&pool, run, StepKind::Note, s).await.unwrap();
+    }
+    assert!(save_answer(&pool, run, &body).await.unwrap());
+    assert!(
+        set_status(&pool, run, RunStatus::Partial, None)
+            .await
+            .unwrap()
+    );
+    let m = tracker_page(&st, run, &email).await;
+    let card = &m[m.find(r#"class="rk-card""#).unwrap()..];
+    let card = &card[..card.find("</section>").unwrap()];
+    assert!(card.contains("The answer could not be finished."), "{card}");
+    assert!(card.contains(">no answer written<"), "{card}");
+    assert!(!card.contains("M3 8.5"), "no tick: {card}");
+    let bar = option_markup(&m);
+    assert!(bar.contains(r#"data-state="stopped""#), "{bar}");
+    assert!(!bar.contains(r#"class="rk-dot""#), "{bar}");
+}
+
+/// The tagline is always drawn while working, hidden by the clock, so the
+/// page's structure never depends on it.
+#[tokio::test]
+async fn tracker_the_tagline_is_always_drawn_while_working() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(
+        &pool,
+        uid,
+        RunMode::Quick,
+        RunStatus::Running,
+        &["Researcher: 2 searches so far (turn 1 of 8)"],
+    )
+    .await;
+    let m = tracker_page(&st, run, &email).await;
+    let i = m.find(r#"class="rk-tag""#).expect("the tagline");
+    let tag = &m[m[..i].rfind('<').unwrap()..i + m[i..].find('>').unwrap()];
+    assert!(tag.contains("hidden"), "{tag}");
+}
+
+/// Running with no step yet: the clock holds at 0:00, so it cannot fall back
+/// when the first step starts it.
+#[tokio::test]
+async fn tracker_the_clock_waits_for_the_first_step() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(&pool, uid, RunMode::Focused, RunStatus::Running, &[]).await;
+    sqlx::query(
+        "UPDATE incisive.runs SET created_at = now() - interval '40 seconds' WHERE id = $1",
+    )
+    .bind(run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = tracker_page(&st, run, &email).await;
+    let card = m.contains(r#"class="rk-card""#);
+    // No line recognised yet: no card; with one, the clock is from that line.
+    assert!(!card, "no card before the first line");
+    let run2_user = new_user(&pool).await;
+    let run2 = working_run(
+        &pool,
+        run2_user.0,
+        RunMode::Focused,
+        RunStatus::Running,
+        &["Researcher: searching PubMed and Europe PMC"],
+    )
+    .await;
+    sqlx::query(
+        "UPDATE incisive.runs SET created_at = now() - interval '40 seconds' WHERE id = $1",
+    )
+    .bind(run2)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = tracker_page(&st, run2, &run2_user.1).await;
+    assert!(
+        m.contains(r#"<div class="rk-clock">0:0"#),
+        "from the first step, not from created_at"
+    );
 }

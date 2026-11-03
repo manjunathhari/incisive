@@ -341,10 +341,6 @@ pub fn next_poll(ticks: u32, state: OptionState) -> Poll {
     }
 }
 
-/// The hint under the option once the opinion is ready.
-pub const READY_HINT: &str =
-    "Expert opinion ready: how this evidence moved over time, and what to conclude today.";
-
 impl OptionState {
     /// The state for a stored status.
     pub fn from_status(status: &str) -> OptionState {
@@ -369,7 +365,7 @@ impl OptionState {
     /// The option's text.
     pub fn text(self) -> &'static str {
         match self {
-            OptionState::Pending => "Expert opinion \u{b7} being written",
+            OptionState::Pending => "Expert opinion",
             OptionState::Ready => "Expert opinion",
             OptionState::Skipped => "Expert opinion \u{b7} not enough studies",
             OptionState::Failed => "Expert opinion \u{b7} unavailable",
@@ -1477,13 +1473,7 @@ mod tests {
     fn option_state_per_status() {
         use OptionState::*;
         let cases = [
-            (
-                "pending",
-                Pending,
-                "Expert opinion \u{b7} being written",
-                false,
-                true,
-            ),
+            ("pending", Pending, "Expert opinion", false, true),
             ("done", Ready, "Expert opinion", true, false),
             (
                 "skipped",

@@ -662,13 +662,13 @@ async fn option_absent_on_quick_and_no_opinion() {
     for run in [no_row, failed, quick] {
         let m = page(&st, run, &email).await;
         assert!(!m.contains(r##"href="#chat""##), "a Chat tab on {run}");
-        assert!(!m.contains("Chat \u{b7}"), "a Chat state on {run}");
+        assert!(!m.contains("Chat with me \u{b7}"), "a Chat state on {run}");
         assert!(!m.contains("rx-chat"), "chat markup on {run}");
     }
     // Still being written: no option yet, and an empty view ready for it.
     let m = no_style(&page(&st, writing, &email).await);
     assert!(!m.contains(r##"href="#chat""##));
-    assert!(!m.contains("Chat \u{b7}"));
+    assert!(!m.contains("Chat with me \u{b7}"));
     assert!(!m.contains("rx-composer") && !m.contains("rx-seg3"));
 }
 
@@ -685,8 +685,8 @@ async fn option_states_match_the_board() {
     let (ready, _) = record_run(&pool, uid, true).await;
     let m = page(&on, ready, &email).await;
     assert!(m.contains(r##"href="#chat""##), "ready tab");
-    assert!(m.contains(">Chat</a>"), "ready label");
-    assert!(!m.contains("Chat \u{b7}"), "ready has no state");
+    assert!(m.contains(">Chat with me</a>"), "ready label");
+    assert!(!m.contains("Chat with me \u{b7}"), "ready has no state");
     assert!(
         m.contains(r#"<div class="ap">"#),
         "the answer is still drawn"
@@ -699,7 +699,10 @@ async fn option_states_match_the_board() {
     // The record is there but passages are not built yet.
     let (preparing, _) = record_run(&pool, uid, false).await;
     let m = no_style(&page(&on, preparing, &email).await);
-    assert!(m.contains("Chat \u{b7} Getting ready"), "getting ready");
+    assert!(
+        m.contains(r#"aria-label="Chat with me, being prepared""#),
+        "getting ready"
+    );
     assert!(!m.contains(r##"href="#chat""##));
 
     // The opinion is done and its record is still to come.
@@ -711,12 +714,15 @@ async fn option_states_match_the_board() {
         .await
         .unwrap();
     let m = page(&on, coming, &email).await;
-    assert!(m.contains("Chat \u{b7} Getting ready"), "record to come");
+    assert!(
+        m.contains(r#"aria-label="Chat with me, being prepared""#),
+        "record to come"
+    );
 
     // No Gemma client: unavailable, and the answer is untouched.
     let down = chat_on(pool.clone());
     let m = no_style(&page(&down, ready, &email).await);
-    assert!(m.contains("Chat \u{b7} Unavailable"), "unavailable");
+    assert!(m.contains("Chat with me \u{b7} Unavailable"), "unavailable");
     assert!(
         m.contains(
             "Chat is unavailable right now. The answer and Expert Opinion are not affected."
@@ -1495,7 +1501,7 @@ async fn a_refusal_shows_when_the_chat_is_not_ready() {
     let m = no_style(&markup(&html, run).replace("<!---->", ""));
     assert!(m.contains(lines::UNAVAILABLE), "the message");
     assert!(m.contains(lines::WARNING_LINE), "the safety line");
-    assert!(m.contains("Chat \u{b7} Unavailable"));
+    assert!(m.contains("Chat with me \u{b7} Unavailable"));
     assert!(
         m.contains(r#"<div class="ap">"#),
         "the answer is still shown"
@@ -1513,7 +1519,7 @@ async fn a_refusal_shows_when_the_chat_is_not_ready() {
     let m = no_style(&markup(&html, failed).replace("<!---->", ""));
     assert!(m.contains(lines::NOT_OFFERED_MESSAGE));
     assert!(m.contains(lines::WARNING_LINE));
-    assert!(!m.contains(r##"href="#chat""##) && !m.contains("Chat \u{b7}"));
+    assert!(!m.contains(r##"href="#chat""##) && !m.contains("Chat with me \u{b7}"));
 
     // Nothing named: nothing drawn, and the page is as it was.
     let (_, html) = send(router(down.clone()), &format!("/runs/{failed}"), &email).await;
