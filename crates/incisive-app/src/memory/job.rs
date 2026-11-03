@@ -236,8 +236,9 @@ async fn embed_best_effort(state: &AppState, text: &str) -> Option<Vec<f32>> {
 }
 
 /// Fills up to 20 records that have no embedding. Stops when the server is
-/// unavailable (timeout, 401, connection error, 5xx); skips a record whose own
-/// failure is not that (bad body, wrong size, other 4xx) and goes on. Returns how many were filled.
+/// unavailable or refusing (see `EmbedError::is_server_unavailable`); skips a
+/// record whose own failure is not that (bad body, wrong size, 400, 413, 422)
+/// and goes on. Returns how many were filled.
 pub async fn sweep_embeddings(state: &AppState) -> usize {
     let Some(e) = state.embedder.as_ref() else {
         return 0;
@@ -270,6 +271,9 @@ pub async fn sweep_embeddings(state: &AppState) -> usize {
             Err(err) => {
                 // A poison record must not block the ones after it.
                 tracing::warn!(code = err.code(), "record skipped by embedding sweep");
+                if store::note_embed_attempt(&state.pool, id).await.is_err() {
+                    tracing::warn!(code = "embed_attempt", "embedding attempt not noted");
+                }
             }
         }
     }
@@ -412,39 +416,90 @@ pub async fn memory_loop(state: AppState) {
 /// run the record sweep and topic backfill (ASCII "INCMEM01").
 pub const SWEEP_LOCK_KEY: i64 = 0x494E_434D_454D_3031;
 
+/// A session advisory lock held on one dedicated pooled connection. The guard
+/// owns the connection for its whole life: unless `release` unlocks cleanly,
+/// dropping it (a panic, a cancelled future, a failed unlock) detaches the
+/// connection, so one that may still hold the lock never goes back to the pool.
+pub(crate) struct SweepLock {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    key: i64,
+}
+
+impl SweepLock {
+    /// `Ok(Some)` when the lock was taken, `Ok(None)` when another session
+    /// holds it, `Err(code)` when the connection or the lock query failed.
+    pub(crate) async fn try_acquire(pool: &PgPool, key: i64) -> Result<Option<Self>, &'static str> {
+        let conn = pool.acquire().await.map_err(|_| "sweep_conn")?;
+        // The guard owns the connection before the query runs, so a future
+        // cancelled mid-query detaches it instead of pooling it.
+        let mut guard = SweepLock {
+            conn: Some(conn),
+            key,
+        };
+        let conn = guard.conn.as_mut().ok_or("sweep_conn")?;
+        match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(key)
+            .fetch_one(&mut **conn)
+            .await
+        {
+            Ok(true) => Ok(Some(guard)),
+            Ok(false) => {
+                // Not ours: the connection holds nothing and may be pooled.
+                guard.conn.take();
+                Ok(None)
+            }
+            Err(_) => Err("sweep_lock"),
+        }
+    }
+
+    /// The connection, for work that must run on the lock's session.
+    #[allow(dead_code)]
+    pub(crate) fn conn(&mut self) -> Option<&mut sqlx::PgConnection> {
+        self.conn.as_deref_mut()
+    }
+
+    /// Unlocks; the connection is pooled only when Postgres confirms.
+    pub(crate) async fn release(mut self) {
+        let Some(mut conn) = self.conn.take() else {
+            return;
+        };
+        let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+            .bind(self.key)
+            .fetch_one(&mut *conn)
+            .await;
+        if matches!(unlocked, Ok(true)) {
+            return;
+        }
+        tracing::warn!(code = "sweep_unlock", "sweep unlock failed");
+        let _ = conn.detach();
+    }
+}
+
+impl Drop for SweepLock {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let _ = conn.detach();
+        }
+    }
+}
+
 /// The record sweep and topic backfill, under a Postgres advisory lock held
 /// on one dedicated pooled connection. Returns false when another instance
 /// holds the lock (this tick's sweep is skipped).
 pub async fn sweep_tick(state: &AppState) -> bool {
-    let Ok(mut conn) = state.pool.acquire().await else {
-        tracing::warn!(code = "sweep_conn", "sweep connection failed");
-        return false;
-    };
-    match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(SWEEP_LOCK_KEY)
-        .fetch_one(&mut *conn)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => return false,
-        Err(_) => {
-            tracing::warn!(code = "sweep_lock", "sweep lock failed");
+    let lock = match SweepLock::try_acquire(&state.pool, SWEEP_LOCK_KEY).await {
+        Ok(Some(l)) => l,
+        Ok(None) => return false,
+        Err(code) => {
+            tracing::warn!(code, "sweep lock not taken");
             return false;
         }
-    }
+    };
     sweep_embeddings(state).await;
     if store::backfill_topic_embeddings(&state.pool).await.is_err() {
         tracing::warn!(code = "topic_embed", "topic embedding backfill failed");
     }
-    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(SWEEP_LOCK_KEY)
-        .fetch_one(&mut *conn)
-        .await;
-    if !matches!(unlocked, Ok(true)) {
-        // Never return a connection that may still hold the lock to the pool.
-        tracing::warn!(code = "sweep_unlock", "sweep unlock failed");
-        let _ = conn.detach();
-    }
+    lock.release().await;
     true
 }
 
@@ -462,4 +517,54 @@ pub async fn backfill(pool: &PgPool) -> sqlx::Result<u64> {
     .execute(pool)
     .await?;
     Ok(r.rows_affected())
+}
+
+#[cfg(test)]
+mod sweep_lock_tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn sweep_lock_released_when_guard_dropped_unreleased() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        let key = 0x5445_5354_4C4B_0001_i64;
+        let guard = SweepLock::try_acquire(&pool, key)
+            .await
+            .unwrap()
+            .expect("lock free");
+        // A second attempt sees it held.
+        assert!(SweepLock::try_acquire(&pool, key).await.unwrap().is_none());
+        // Dropped mid-way (as on panic or cancellation): never released cleanly.
+        drop(guard);
+        let mut other = sqlx::PgConnection::connect(&url).await.unwrap();
+        let mut got = false;
+        for _ in 0..20 {
+            got = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(key)
+                .fetch_one(&mut other)
+                .await
+                .unwrap();
+            if got {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(got, "lock still held after guard drop");
+        // The pool is not poisoned: a clean acquire/release cycle works.
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(key)
+            .execute(&mut other)
+            .await
+            .unwrap();
+        let g = SweepLock::try_acquire(&pool, key).await.unwrap().unwrap();
+        g.release().await;
+        assert!(SweepLock::try_acquire(&pool, key).await.unwrap().is_some());
+    }
 }

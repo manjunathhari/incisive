@@ -31,6 +31,11 @@ async fn retention_loop(pool: sqlx::PgPool) {
             Ok(pruned) => tracing::info!(pruned, "paper cache prune"),
             Err(_) => tracing::error!("paper cache prune failed"),
         }
+        // Whatever CHAT's value: rows left without an owner must still go.
+        match incisive_app::chat::store::retention_pass(&pool).await {
+            Ok((qas, priors)) => tracing::info!(qas, priors, "chat retention pass"),
+            Err(_) => tracing::error!("chat retention pass failed"),
+        }
     }
 }
 
@@ -157,7 +162,10 @@ async fn main() {
         temporal: config.temporal,
         temporal_client,
         memory: config.memory.clone(),
+        chat: config.chat.clone(),
         embedder: incisive_app::memory::embed::Embedder::from_settings(&config.memory)
+            .map(std::sync::Arc::new),
+        gemma: incisive_app::chat::gemma::GemmaChat::from_settings(&config.memory, &config.chat)
             .map(std::sync::Arc::new),
         worker: WorkerHandle::default(),
         llm,
@@ -178,7 +186,10 @@ async fn main() {
             tokio::spawn(retention_loop(pool.clone()));
             // The memory loop also waits for migrations: it reads the 0013 tables.
             if state.memory.on {
-                tokio::spawn(incisive_app::memory::job::memory_loop(state));
+                tokio::spawn(incisive_app::memory::job::memory_loop(state.clone()));
+            }
+            if state.chat.on {
+                tokio::spawn(incisive_app::chat::job::chat_loop(state));
             }
             ensure_owner_until_done(pool, owner_email, "Owner".to_string(), base, cap).await;
         }

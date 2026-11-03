@@ -835,7 +835,7 @@ fn decimals(token: &str) -> i32 {
 /// whole number exactly; a decimal as written or rounded to `dp` decimals
 /// (a computed table value is written rounded). With no sign of its own,
 /// up to the sign.
-fn traced(v: f64, dp: i32, own_sign: bool, allowed: &[f64]) -> bool {
+pub fn traced(v: f64, dp: i32, own_sign: bool, allowed: &[f64]) -> bool {
     let tol = if dp == 0 {
         1e-9
     } else {

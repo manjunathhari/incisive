@@ -33,3 +33,9 @@ Final scoped re-review: all findings addressed; ready to merge behind MEMORY=off
 
 ## Parked for PR B
 GEMMA_URL backslash parsing; advisory-lock drop guard; per-record embedding attempt cap.
+
+## Live (2 Nov 2026, 22:30 IST)
+- PR #18 merged (55e1b7b), deployed; tagged **v0.7.0** (owner). pgvector 0.8.2 in `public` confirmed. `gemma-auth` secret + binding created; repo variables `GEMMA_URL`, `HAS_GEMMA_KEY=true`, then `MEMORY=on` + Deploy re-run.
+- Backfill (SQL equivalent of `memory_backfill`): 7 Full runs with a done Expert Opinion → 7 jobs done, 0 errors.
+- Result: 7 records in 6 topics; every record and topic has a Gemma vector. Two umbilical/small ventral runs joined one topic (28 studies, 27 estimates). Bilateral TAR kept separate.
+- Calibration data point 1 (owner): "Neoadjuvant vs adjuvant chemotherapy for locally advanced (r…)" and "Neoadjuvant vs adjuvant therapy for rectal cancer: survival…" are **different questions** — kept apart correctly at the default thresholds.

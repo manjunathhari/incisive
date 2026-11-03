@@ -113,6 +113,16 @@ fn first_glance_line(b: &ExpertBoardV1) -> String {
         .to_string()
 }
 
+/// The Expert Opinion board: the `ExpertBoardV1` itself, or wrapped as
+/// `{"board": {...}}`.
+pub fn parse_board(board_json: &Value) -> Result<ExpertBoardV1, ExtractError> {
+    let board_val = match board_json.get("board") {
+        Some(b) if b.is_object() => b,
+        _ => board_json,
+    };
+    serde_json::from_value(board_val.clone()).map_err(|_| ExtractError::BadBoard)
+}
+
 pub fn extract(
     body: &Value,
     table_json: &Value,
@@ -126,13 +136,7 @@ pub fn extract(
     }
     let table: TemporalTable =
         serde_json::from_value(table_json.clone()).map_err(|_| ExtractError::BadTable)?;
-    // The board is the ExpertBoardV1 itself, or wrapped as {"board": {...}}.
-    let board_val = match board_json.get("board") {
-        Some(b) if b.is_object() => b,
-        _ => board_json,
-    };
-    let board: ExpertBoardV1 =
-        serde_json::from_value(board_val.clone()).map_err(|_| ExtractError::BadBoard)?;
+    let board = parse_board(board_json)?;
     let topic = board.topic.trim();
     if topic.is_empty() {
         return Err(ExtractError::NoTopic);
@@ -405,6 +409,18 @@ mod tests {
             x.claims
                 .iter()
                 .all(|c| c.polarity == "higher_worse" || !c.polarity.is_empty())
+        );
+    }
+
+    #[test]
+    fn parse_board_unwraps_and_rejects() {
+        let b = board("hernia");
+        let bare = parse_board(&b).unwrap();
+        assert!(!bare.topic.is_empty());
+        assert_eq!(parse_board(&json!({ "board": b })).unwrap(), bare);
+        assert_eq!(
+            parse_board(&json!({"topic": 5})).unwrap_err(),
+            ExtractError::BadBoard
         );
     }
 

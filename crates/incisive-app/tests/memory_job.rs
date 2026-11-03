@@ -67,11 +67,13 @@ fn state(pool: PgPool, on: bool) -> AppState {
         completeness: false,
         temporal: TemporalSettings::default(),
         temporal_client: None,
+        chat: incisive_app::chat::settings::ChatSettings::default(),
         memory: MemorySettings {
             on,
             ..MemorySettings::default()
         },
         embedder: None,
+        gemma: None,
         worker: WorkerHandle::with_pipeline(placeholder_pipeline),
         llm: None,
         lit: offline_literature(),
@@ -775,4 +777,104 @@ async fn sweep_tick_holds_an_advisory_lock() {
     // Free again, and released after the sweep so the next tick can run.
     assert!(job::sweep_tick(&st).await);
     assert!(job::sweep_tick(&st).await);
+}
+
+#[tokio::test]
+async fn record_stops_being_swept_after_five_failed_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let plain = state(pool.clone(), true);
+    let run = seed(&pool, &HERNIA, "focused", Some("done")).await;
+    let JobOutcome::Done { record_id, .. } = job::process(&plain, run).await else {
+        panic!("done");
+    };
+    let attempts = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT embed_attempts FROM incisive.evidence_records WHERE id = $1",
+        )
+        .bind(record_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let listed = |pool: PgPool| async move {
+        store::records_missing_embedding(&pool, 100_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| *id == record_id)
+    };
+    // Server unavailable (500): does not count.
+    let down = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&down)
+        .await;
+    let st = embed_state(pool.clone(), &down.uri());
+    for _ in 0..6 {
+        assert_eq!(job::sweep_embeddings(&st).await, 0);
+    }
+    assert_eq!(attempts(pool.clone()).await, 0);
+    assert!(listed(pool.clone()).await);
+    // Record-specific failure (400): counts, and stops at five.
+    let bad = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/embed"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&bad)
+        .await;
+    let st = embed_state(pool.clone(), &bad.uri());
+    for i in 1..=5 {
+        assert_eq!(job::sweep_embeddings(&st).await, 0);
+        assert_eq!(attempts(pool.clone()).await, i);
+    }
+    assert!(!listed(pool.clone()).await);
+    assert_eq!(job::sweep_embeddings(&st).await, 0);
+    assert_eq!(attempts(pool.clone()).await, 5);
+}
+
+/// A server refusing every call (a proxy's 403, a missing model's 404, 408, a
+/// rate limit's 429) is not the record's fault: the sweep stops at the first
+/// one and no attempt is spent.
+#[tokio::test]
+async fn sweep_refused_by_the_server_spends_no_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let Some((_g, pool)) = begin().await else {
+        return;
+    };
+    let plain = state(pool.clone(), true);
+    for fx in [&HERNIA, &ACHALASIA] {
+        let run = seed(&pool, fx, "focused", Some("done")).await;
+        assert!(matches!(
+            job::process(&plain, run).await,
+            JobOutcome::Done { .. }
+        ));
+    }
+    for code in [403u16, 404, 408, 429] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        let st = embed_state(pool.clone(), &server.uri());
+        assert_eq!(job::sweep_embeddings(&st).await, 0, "{code}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{code} stops the sweep"
+        );
+        let spent: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(embed_attempts), 0)::bigint FROM incisive.evidence_records",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(spent, 0, "{code} spends no attempt");
+    }
 }

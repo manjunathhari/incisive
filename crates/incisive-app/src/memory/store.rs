@@ -415,13 +415,26 @@ pub async fn retry_or_fail_job(
     Ok(())
 }
 
-/// Records with no embedding yet, with the text to embed.
+/// Records with no embedding yet (fewer than five failed attempts), with the
+/// text to embed.
 pub async fn records_missing_embedding(pool: &PgPool, n: i64) -> sqlx::Result<Vec<(i64, String)>> {
     sqlx::query_as(
         "SELECT id, embed_text FROM incisive.evidence_records \
-         WHERE embedding IS NULL ORDER BY id LIMIT $1",
+         WHERE embedding IS NULL AND embed_attempts < 5 ORDER BY id LIMIT $1",
     )
     .bind(n)
     .fetch_all(pool)
     .await
+}
+
+/// Counts one failed embedding attempt that was the record's own fault
+/// (bad body, wrong size, 4xx). After five the sweep stops picking it up.
+pub async fn note_embed_attempt(pool: &PgPool, record_id: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE incisive.evidence_records SET embed_attempts = embed_attempts + 1 WHERE id = $1",
+    )
+    .bind(record_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

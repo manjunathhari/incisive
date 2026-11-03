@@ -967,7 +967,9 @@ fn app_state(pool: PgPool) -> AppState {
         temporal: Default::default(),
         temporal_client: None,
         memory: incisive_app::memory::settings::MemorySettings::default(),
+        chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,
+        gemma: None,
         // Runs started by `run_ask` use the deterministic placeholder.
         worker: WorkerHandle::with_pipeline(incisive_app::agent::testing::placeholder_pipeline),
         llm: Some(incisive_app::agent::testing::idle_llm("m-test")),
@@ -3861,6 +3863,43 @@ fn deploy_workflow_wires_the_completeness_switch() {
         "COMPLETENESS must reach both the check and the deploy step"
     );
     assert!(check.contains(r#""completeness": "claude-sonnet-5-5""#));
+}
+
+/// Chat's replies are written after the request has returned, so the deploy
+/// refuses `CHAT=on` unless the CPU stays on between requests.
+#[test]
+fn deploy_check_refuses_chat_without_cpu_always() {
+    let deploy = workflow("deploy.yml");
+    let scripts = run_scripts(&deploy);
+    let check = &scripts
+        .iter()
+        .find(|(n, _)| n == "Check required repository variables")
+        .expect("check step")
+        .1;
+    let start = check.find("for v in CHAT CHAT_PRIOR").expect("chat check");
+    let end = start + check[start..].find("cl=").expect("after chat check");
+    for (chat, cpu, ok) in [
+        ("on", "true", true),
+        (" on ", " true ", true),
+        ("on", "false", false),
+        ("on", "", false),
+        ("off", "", true),
+        ("off", "false", true),
+        ("", "", true),
+    ] {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{}\nexit 0", &check[start..end]))
+            .env("CHAT", chat)
+            .env("CHAT_PRIOR", "")
+            .env("CPU_ALWAYS", cpu)
+            .output()
+            .expect("bash");
+        assert_eq!(out.status.success(), ok, "CHAT={chat:?} CPU_ALWAYS={cpu:?}");
+        if !ok {
+            assert!(String::from_utf8_lossy(&out.stdout).contains("::error::"));
+        }
+    }
 }
 
 // ---------- Phase 3 Stage 3: the Full additions to the AnswerV3 page ----------

@@ -23,12 +23,13 @@ pub enum EmbedError {
 
 impl EmbedError {
     /// The server itself is unavailable or refusing us, so more calls in the
-    /// same sweep would fail too. Anything else (a bad body, a wrong size, a
-    /// 4xx for this text) is about one record only.
+    /// same sweep would fail too, and no record's `embed_attempts` should be
+    /// spent on it. Only a bad body, a wrong size, or a 400, 413 or 422 for
+    /// this text is about one record.
     pub fn is_server_unavailable(&self) -> bool {
         match self {
             EmbedError::Timeout | EmbedError::Unauthorized => true,
-            EmbedError::Http(c) => *c == 0 || *c >= 500,
+            EmbedError::Http(c) => !matches!(c, 400 | 413 | 422),
             EmbedError::BadBody | EmbedError::WrongDim(_) => false,
         }
     }
@@ -42,6 +43,17 @@ impl EmbedError {
             EmbedError::WrongDim(_) => "wrong_dim",
         }
     }
+}
+
+/// `GEMMA_AUTH` is `user:password`, split on the first `:`. `None` (with a
+/// fixed-code warning, never the value) when there is no colon. Shared with
+/// the chat client.
+pub(crate) fn parse_auth(raw: &SecretString) -> Option<(String, SecretString)> {
+    let Some((user, password)) = raw.expose_secret().split_once(':') else {
+        tracing::warn!(code = "bad_auth", "GEMMA_AUTH is not user:password");
+        return None;
+    };
+    Some((user.to_string(), SecretString::from(password.to_string())))
 }
 
 pub struct Embedder {
@@ -69,11 +81,7 @@ impl Embedder {
             return None;
         }
         let url = s.gemma_url.as_ref()?.trim_end_matches('/').to_string();
-        let raw = s.gemma_auth.as_ref()?.expose_secret();
-        let Some((user, password)) = raw.split_once(':') else {
-            tracing::warn!(code = "bad_auth", "GEMMA_AUTH is not user:password");
-            return None;
-        };
+        let (user, password) = parse_auth(s.gemma_auth.as_ref()?)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -81,8 +89,8 @@ impl Embedder {
         Some(Embedder {
             client,
             url,
-            user: user.to_string(),
-            password: SecretString::from(password.to_string()),
+            user,
+            password,
             model: s.embed_model.clone(),
         })
     }
@@ -256,6 +264,28 @@ mod tests {
         assert!(!dbg.contains("s3cret-pw"));
         assert!(!dbg.contains("incisive:"));
         assert!(dbg.contains("embeddinggemma"));
+    }
+
+    #[test]
+    fn only_a_fault_of_this_text_counts_against_it() {
+        for c in [0, 301, 403, 404, 405, 408, 429, 500, 503] {
+            assert!(EmbedError::Http(c).is_server_unavailable(), "{c}");
+        }
+        assert!(EmbedError::Timeout.is_server_unavailable());
+        assert!(EmbedError::Unauthorized.is_server_unavailable());
+        for c in [400, 413, 422] {
+            assert!(!EmbedError::Http(c).is_server_unavailable(), "{c}");
+        }
+        assert!(!EmbedError::BadBody.is_server_unavailable());
+        assert!(!EmbedError::WrongDim(384).is_server_unavailable());
+    }
+
+    #[test]
+    fn parse_auth_splits_on_first_colon() {
+        let (u, p) = parse_auth(&SecretString::from("incisive:pw:with:colons")).unwrap();
+        assert_eq!(u, "incisive");
+        assert_eq!(p.expose_secret(), "pw:with:colons");
+        assert!(parse_auth(&SecretString::from("nocolon")).is_none());
     }
 
     #[test]

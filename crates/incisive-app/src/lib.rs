@@ -33,6 +33,10 @@ pub mod lit;
 /// The memory layer (off by default).
 #[cfg(feature = "ssr")]
 pub mod memory;
+
+/// The evidence chat (off by default).
+#[cfg(feature = "ssr")]
+pub mod chat;
 /// The Ask page's advisory Question check and PICO helper (no Leptos).
 pub mod question_check;
 pub mod runs;
