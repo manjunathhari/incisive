@@ -602,7 +602,7 @@ step line, stored answer, status, run cost or check changes with it on or off.
   read by the evidence library, the memory records or Chat.
 - **Started** after every check has passed and the run holds its reservation, in a detached task: a
   blocked question never reaches it, and nothing on the request path waits for the model.
-- **Money.** The call's hold (about 55 paise at Sonnet prices) is reserved against the user's daily
+- **Money.** The call's hold (about 60 paise at Sonnet prices) is reserved against the user's daily
   and monthly caps and the global cap, under the job's own request id (spend purpose `intro`), after
   the run's own hold, so it can neither block a run nor change its hold. At a cap: `cap_blocked`, no
   introduction, and the run goes on. The charge row's purpose reads `run:<request_id>`, where

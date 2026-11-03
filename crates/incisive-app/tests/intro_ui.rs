@@ -325,6 +325,31 @@ async fn finished_folds_in_its_place() {
     }
 }
 
+/// With an expert opinion row the page has another layout: the same place.
+#[tokio::test]
+async fn folds_in_its_place_beside_an_expert_opinion() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone(), true);
+    let (uid, email) = new_user(&pool).await;
+    let run = finished_run(&pool, uid, RunMode::Focused).await;
+    done_row(&pool, run).await;
+    sqlx::query("INSERT INTO incisive.run_temporal (run_id, status) VALUES ($1, 'pending')")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m = markup(&page(&st, run, &email).await, run);
+    in_order(
+        &m,
+        &[
+            "rx-seg",
+            r#"<details class="in-fold""#,
+            "</details>",
+            r#"class="rk-card""#,
+        ],
+    );
+}
+
 #[tokio::test]
 async fn a_failed_run_with_a_text_still_folds() {
     let Some(pool) = connect().await else { return };

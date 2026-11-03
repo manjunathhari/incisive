@@ -365,6 +365,24 @@ async fn every_failure_leaves_nothing_to_show() {
 }
 
 #[tokio::test]
+async fn an_unpriced_model_makes_no_call_and_reserves_nothing() {
+    let Some(pool) = connect().await else { return };
+    let user = new_user(&pool, 100_000).await;
+    let run = new_run(&pool, user.id).await;
+    let llm = Arc::new(ScriptedLlm::new().reply_text(TEXT, usage()));
+    let mut st = state(pool.clone(), llm.clone(), true, placeholder_pipeline);
+    st.intro.settings.model = "no-price".into();
+    let req = Uuid::new_v4();
+    assert!(insert_pending(&pool, run, req).await.unwrap());
+    let status = run_job(&st, st.llm.as_ref().unwrap(), run, user.id, req, QUESTION).await;
+    assert_eq!(status, JobStatus::Failed);
+    let why = row(&pool, run).await.unwrap().1;
+    assert_eq!(why.as_deref(), Some(reason::UNPRICED));
+    assert!(llm.requests().is_empty());
+    assert!(reservations(&pool, user.id).await.is_empty());
+}
+
+#[tokio::test]
 async fn timeout_fails_and_its_late_charge_is_booked() {
     let Some(pool) = connect().await else { return };
     let user = new_user(&pool, 100_000).await;
@@ -862,7 +880,7 @@ async fn a_run_deleted_mid_call_leaves_no_row_and_no_reservation() {
 async fn recovery_fails_a_stale_row_and_releases_its_hold() {
     let Some(pool) = connect().await else { return };
     let user = new_user(&pool, 100_000).await;
-    let (stale, fresh) = (new_run(&pool, user.id).await, Uuid::nil());
+    let stale = new_run(&pool, user.id).await;
     let req = Uuid::new_v4();
     assert!(insert_pending(&pool, stale, req).await.unwrap());
     let reserve = |request: Uuid, age: &'static str| {
@@ -916,7 +934,6 @@ async fn recovery_fails_a_stale_row_and_releases_its_hold() {
     .await
     .unwrap();
     assert_eq!(event, "intro_failed");
-    let _ = fresh;
 }
 
 #[tokio::test]
@@ -937,6 +954,8 @@ async fn the_audit_carries_ids_and_kinds_only() {
     let names: Vec<&str> = details.iter().map(|(e, _)| e.as_str()).collect();
     assert!(names.contains(&"intro_done"), "{names:?}");
     assert!(names.contains(&"charged"), "{names:?}");
+    // The new events read back (the Activity log parses every entry).
+    incisive_app::audit::recent(&pool, 50).await.unwrap();
     for (_, d) in &details {
         let t = d.to_string();
         assert!(!t.contains(&marker), "{t}");
@@ -1009,13 +1028,20 @@ async fn not_in_memory_records_or_chat_passages() {
     else {
         panic!("memory job did not record the run");
     };
-    incisive_app::chat::job::tick(&st).await;
-    let passages: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM incisive.chat_passages WHERE record_id = $1")
-            .bind(record_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // A tick takes a few records, oldest first, and the database is shared.
+    let mut passages = 0_i64;
+    for _ in 0..200 {
+        incisive_app::chat::job::tick(&st).await;
+        passages =
+            sqlx::query_scalar("SELECT count(*) FROM incisive.chat_passages WHERE record_id = $1")
+                .bind(record_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if passages > 0 {
+            break;
+        }
+    }
     assert!(passages > 0, "the chat prep ran on this record");
     for table in [
         "evidence_records",
