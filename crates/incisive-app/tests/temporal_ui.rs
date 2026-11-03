@@ -1078,6 +1078,10 @@ async fn tracker_quick_has_two_pills_and_a_queued_run_waits() {
     let m = tracker_page(&st, queued, &email).await;
     assert!(m.contains("Waiting to start"));
     assert!(m.contains(r#"<div class="rk-clock">0:00</div>"#));
+    assert!(
+        option_markup(&m).contains(r#"data-state="idle""#),
+        "queued: the Answer pill has not started"
+    );
     assert!(m.contains("Nothing yet. This page updates by itself."));
 }
 
@@ -1267,4 +1271,46 @@ async fn tracker_the_tagline_is_always_drawn_while_working() {
     let i = m.find(r#"class="rk-tag""#).expect("the tagline");
     let tag = &m[m[..i].rfind('<').unwrap()..i + m[i..].find('>').unwrap()];
     assert!(tag.contains("hidden"), "{tag}");
+}
+
+/// Running with no step yet: the clock holds at 0:00, so it cannot fall back
+/// when the first step starts it.
+#[tokio::test]
+async fn tracker_the_clock_waits_for_the_first_step() {
+    let Some(pool) = connect().await else { return };
+    let st = state(pool.clone());
+    let (uid, email) = new_user(&pool).await;
+    let run = working_run(&pool, uid, RunMode::Focused, RunStatus::Running, &[]).await;
+    sqlx::query(
+        "UPDATE incisive.runs SET created_at = now() - interval '40 seconds' WHERE id = $1",
+    )
+    .bind(run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = tracker_page(&st, run, &email).await;
+    let card = m.contains(r#"class="rk-card""#);
+    // No line recognised yet: no card; with one, the clock is from that line.
+    assert!(!card, "no card before the first line");
+    let run2_user = new_user(&pool).await;
+    let run2 = working_run(
+        &pool,
+        run2_user.0,
+        RunMode::Focused,
+        RunStatus::Running,
+        &["Researcher: searching PubMed and Europe PMC"],
+    )
+    .await;
+    sqlx::query(
+        "UPDATE incisive.runs SET created_at = now() - interval '40 seconds' WHERE id = $1",
+    )
+    .bind(run2)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = tracker_page(&st, run2, &run2_user.1).await;
+    assert!(
+        m.contains(r#"<div class="rk-clock">0:0"#),
+        "from the first step, not from created_at"
+    );
 }

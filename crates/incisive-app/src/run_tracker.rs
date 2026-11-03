@@ -270,6 +270,9 @@ struct Seen {
     first_of: u32,
     first_outcomes: u32,
     second_wave: bool,
+    /// The wave timed out. Its line writer outlives the cancellation, so a
+    /// progress line stored after the note must not count.
+    wave_abandoned: bool,
     wave_read: u32,
     wave_of: u32,
     skeptic: Option<String>,
@@ -320,6 +323,7 @@ impl Seen {
                 self.read_of = Some(self.first_of);
                 self.outcomes = Some(self.first_outcomes);
                 self.second_wave = false;
+                self.wave_abandoned = true;
             } else if line.contains("not extracted (extraction failed)") {
                 self.not_read(lead_number(line).unwrap_or(0));
             }
@@ -385,6 +389,8 @@ impl Seen {
                     self.sentence = Some(format!("Reading {n} more {noun} the skeptic found"));
                     self.skeptic_sub = Some(format!("Found {n} more {noun}"));
                     self.raise(first_end);
+                } else if self.wave_abandoned {
+                    // A late line from the abandoned wave.
                 } else if let Some(n) = lead_number(body) {
                     let Some((_, rest)) = body.split_once('/') else {
                         return;
@@ -540,31 +546,53 @@ fn number_value(n: Option<u32>, of: Option<u32>, state: RunState) -> Value {
     }
 }
 
+/// What the stored answer says about one study.
+#[derive(Debug, Clone, Copy)]
+pub struct StudyRead<'a> {
+    pub text: &'a str,
+    pub verified_quotes: u32,
+}
+
 impl Tracker {
-    /// A finished run: "Studies read" is the stored total and how each was
-    /// read, from `AnswerV3.evidence[].text`. Only "full text" counts as full
-    /// text; everything else ("abstract only", "not extracted") was read from
-    /// the abstract. With no evidence the last count stays, with no sub-line.
-    pub fn read_from_evidence(&mut self, texts: &[&str]) {
-        if texts.is_empty() {
+    /// A finished run: the stored evidence is the final authority for
+    /// "Studies read" (the total, and how each was read, as stored) and for
+    /// "Outcomes verified" (the sum over the stored studies). The stored
+    /// "not extracted" is a mix (failed, stopped, or no text at all), so it
+    /// is never called an abstract. With no evidence the last counts stay,
+    /// with no sub-line.
+    pub fn read_from_evidence(&mut self, studies: &[StudyRead<'_>]) {
+        if studies.is_empty() {
             return;
         }
-        let Some(r) = self.rows.iter_mut().find(|r| r.name == "Studies read") else {
-            return;
+        let count = |f: &dyn Fn(&str) -> bool| {
+            u32::try_from(studies.iter().filter(|s| f(s.text)).count()).unwrap_or(u32::MAX)
         };
-        let total = u32::try_from(texts.len()).unwrap_or(u32::MAX);
-        let full =
-            u32::try_from(texts.iter().filter(|t| **t == "full text").count()).unwrap_or(u32::MAX);
-        let abstract_only = total - full;
-        let sub = match (full, abstract_only) {
-            (f, 0) => format!("{f} full text"),
-            (0, a) => format!("{a} abstract only"),
-            (f, a) => format!("{f} full text, {a} abstract only"),
-        };
-        r.value = Value::Number { n: total, of: None };
-        r.bar = None;
-        r.sub = Some(sub);
-        r.keep_sub = true;
+        let full = count(&|t| t == "full text");
+        let abstract_only = count(&|t| t == "abstract only");
+        let total = u32::try_from(studies.len()).unwrap_or(u32::MAX);
+        let other = total - full - abstract_only;
+        let sub = [
+            (full, "full text"),
+            (abstract_only, "abstract only"),
+            (other, "not extracted"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{n} {label}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+        if let Some(r) = self.rows.iter_mut().find(|r| r.name == "Studies read") {
+            r.value = Value::Number { n: total, of: None };
+            r.bar = None;
+            r.sub = Some(sub);
+            r.keep_sub = true;
+        }
+        if let Some(r) = self.rows.iter_mut().find(|r| r.name == "Outcomes verified") {
+            let n = studies
+                .iter()
+                .fold(0u32, |sum, s| sum.saturating_add(s.verified_quotes));
+            r.value = Value::Number { n, of: None };
+        }
     }
 }
 
@@ -1132,14 +1160,30 @@ mod tests {
         );
     }
 
-    fn fixture_texts(json: &str) -> Vec<String> {
+    fn fixture_studies(json: &str) -> Vec<(String, u32)> {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         v["evidence"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|e| e["text"].as_str().unwrap().to_string())
+            .map(|e| {
+                (
+                    e["text"].as_str().unwrap().to_string(),
+                    e["verified_quotes"].as_u64().unwrap() as u32,
+                )
+            })
             .collect()
+    }
+
+    fn finish(tr: &mut Tracker, studies: &[(&str, u32)]) {
+        let s: Vec<StudyRead<'_>> = studies
+            .iter()
+            .map(|(text, verified_quotes)| StudyRead {
+                text,
+                verified_quotes: *verified_quotes,
+            })
+            .collect();
+        tr.read_from_evidence(&s);
     }
 
     #[test]
@@ -1162,26 +1206,75 @@ mod tests {
             ),
         ];
         for (json, total, sub) in cases {
-            let owned = fixture_texts(json);
-            let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+            let owned = fixture_studies(json);
+            let studies: Vec<(&str, u32)> = owned.iter().map(|(t, n)| (t.as_str(), *n)).collect();
             let mut tr = read(RunMode::Focused, &steps(&FULL), RunState::Answered, None);
-            tr.read_from_evidence(&texts);
+            finish(&mut tr, &studies);
             let r = row(&tr, "Studies read");
             assert_eq!(r.value, number(total));
             assert_eq!(r.bar, None);
             assert_eq!(r.sub.as_deref(), Some(sub));
             assert!(r.keep_sub);
+            let sum: u32 = owned.iter().map(|(_, n)| n).sum();
+            assert_eq!(row(&tr, "Outcomes verified").value, number(sum));
         }
     }
 
     #[test]
-    fn only_full_text_counts_as_full_text() {
+    fn stored_labels_are_followed_and_only_full_text_is_full_text() {
         let mut tr = read(RunMode::Focused, &steps(&FULL), RunState::Answered, None);
-        tr.read_from_evidence(&["full text", "not extracted", "something new", "Full Text"]);
+        finish(
+            &mut tr,
+            &[
+                ("full text", 1),
+                ("abstract only", 1),
+                ("not extracted", 0),
+                ("something new", 0),
+                ("Full Text", 0),
+            ],
+        );
         assert_eq!(
             row(&tr, "Studies read").sub.as_deref(),
-            Some("1 full text, 3 abstract only")
+            Some("1 full text, 1 abstract only, 3 not extracted")
         );
+        // A clause only when non-zero.
+        let mut tr = read(RunMode::Focused, &steps(&FULL), RunState::Answered, None);
+        finish(&mut tr, &[("full text", 1), ("full text", 1)]);
+        assert_eq!(row(&tr, "Studies read").sub.as_deref(), Some("2 full text"));
+    }
+
+    #[test]
+    fn a_late_line_after_a_wave_timeout_does_not_count() {
+        let lines = [
+            "Extractor and skeptic: extracting 12 studies and challenging the conclusion",
+            "Extractor: 12/12 studies (42 verified outcomes, 0 not verified, 7 numbers not verified; all kept, labelled)",
+            "Extractor: second wave, extracting 3 studies found by the skeptic",
+            "Extractor: 2/3 studies (4 verified outcomes, 0 not verified, 3 numbers not verified; all kept, labelled)",
+            "3 studies picked by the skeptic were not extracted (time); the writer was given their abstract",
+            // The line writer outlives the cancellation.
+            "Extractor: 3/3 studies (8 verified outcomes, 0 not verified, 3 numbers not verified; all kept, labelled)",
+        ];
+        let tr = read(RunMode::Focused, &steps(&lines), RunState::Working, None);
+        assert_eq!(
+            row(&tr, "Studies read").value,
+            Value::Number {
+                n: 12,
+                of: Some(12)
+            }
+        );
+        assert_eq!(row(&tr, "Outcomes verified").value, number(42));
+        // Finished: the stored evidence has the final word on both rows.
+        let mut studies = vec![("full text", 4); 10];
+        studies.extend([("abstract only", 1), ("abstract only", 1)]);
+        studies.extend([("not extracted", 0); 3]);
+        let mut tr = read(RunMode::Focused, &steps(&lines), RunState::Answered, None);
+        finish(&mut tr, &studies);
+        assert_eq!(row(&tr, "Studies read").value, number(15));
+        assert_eq!(
+            row(&tr, "Studies read").sub.as_deref(),
+            Some("10 full text, 2 abstract only, 3 not extracted")
+        );
+        assert_eq!(row(&tr, "Outcomes verified").value, number(42));
     }
 
     #[test]

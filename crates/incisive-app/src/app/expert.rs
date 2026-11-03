@@ -401,12 +401,12 @@ impl Expert {
         self.option.get().polls()
     }
 
-    /// The opinion is still being written, as of now.
     /// The opinion is ready (tracked).
     pub(super) fn opinion_ready(self) -> bool {
         self.option.get().selectable()
     }
 
+    /// The opinion is still being written, as of now.
     pub(super) fn opinion_writing_now(self) -> bool {
         self.option.get_untracked().polls()
     }
