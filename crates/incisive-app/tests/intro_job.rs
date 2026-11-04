@@ -221,8 +221,8 @@ async fn the_request_is_exactly_the_approved_prompt() {
     assert_eq!(reqs.len(), 1, "one attempt");
     let req = &reqs[0];
     assert_eq!(req.model, INTRO_MODEL);
-    assert_eq!(req.max_tokens, 600);
-    assert_eq!(MAX_TOKENS, 600);
+    assert_eq!(req.max_tokens, 800);
+    assert_eq!(MAX_TOKENS, 800);
     // The approved text, then the rule every budgeted call carries, which is
     // what marks the wrapped question as not to be obeyed.
     assert_eq!(
