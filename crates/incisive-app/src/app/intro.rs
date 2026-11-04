@@ -36,8 +36,8 @@ const INTRO_STYLE: &str = r##"
 }
 "##;
 
-/// A word every this long while the text is revealed.
-const WORD_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
+/// The reveal moves on this often; [`ip::words_at`] says how far.
+const TICK_MS: u32 = 100;
 
 /// How many times, one per poll interval, the page asks for a text still being
 /// written when the run ended (the job's limit is about 30 s).
@@ -50,6 +50,8 @@ pub(super) struct IntroUi {
     shown: RwSignal<usize>,
     reveal: StoredValue<ip::Reveal>,
     timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage>,
+    /// Time the reveal has run.
+    elapsed_ms: StoredValue<u32>,
     /// The folded row, open.
     open: RwSignal<bool>,
 }
@@ -61,6 +63,7 @@ impl IntroUi {
             shown: RwSignal::new(ip::ALL_WORDS),
             reveal: StoredValue::new(ip::Reveal::default()),
             timer: StoredValue::new_local(None),
+            elapsed_ms: StoredValue::new(0),
             open: RwSignal::new(false),
         };
         on_cleanup(move || ui.stop());
@@ -84,7 +87,7 @@ impl IntroUi {
             .try_update_value(|r| r.observe(active, text.is_some(), reduced_motion()))
             .unwrap_or(RevealStep::Nothing);
         match (step, text) {
-            (RevealStep::Start, Some(text)) => self.start(ip::word_total(&ip::paragraphs(text))),
+            (RevealStep::Start, Some(text)) => self.start(ip::reveal_parts(&ip::paragraphs(text))),
             (RevealStep::Finish, _) => {
                 self.stop();
                 self.shown.set(ip::ALL_WORDS);
@@ -93,12 +96,20 @@ impl IntroUi {
         }
     }
 
-    fn start(self, total: usize) {
+    fn start(self, (first, last): (usize, usize)) {
+        let total = first + last;
         self.shown.set(0);
+        self.elapsed_ms.set_value(0);
         let h = leptos::leptos_dom::helpers::set_interval_with_handle(
             move || {
-                let next = self.shown.try_get_untracked().unwrap_or(ip::ALL_WORDS);
-                let next = next.saturating_add(1);
+                let elapsed = self
+                    .elapsed_ms
+                    .try_update_value(|e| {
+                        *e = e.saturating_add(TICK_MS);
+                        *e
+                    })
+                    .unwrap_or(u32::MAX);
+                let next = ip::words_at(elapsed, first, last);
                 if next >= total {
                     self.stop();
                     self.reveal.try_update_value(ip::Reveal::complete);
@@ -107,7 +118,7 @@ impl IntroUi {
                     let _ = self.shown.try_set(next);
                 }
             },
-            WORD_EVERY,
+            std::time::Duration::from_millis(u64::from(TICK_MS)),
         );
         match h {
             Ok(h) => self.timer.set_value(Some(h)),
