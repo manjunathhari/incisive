@@ -643,7 +643,7 @@ fn expert_body(x: Expert, o: &Opened, known: &BTreeSet<u16>) -> AnyView {
             <p class="rx-verdict">{c(&b.opinion.verdict)}</p>
         </div>
         <div class="rx-card">
-            <h2 class="rx-h">"My view on why"</h2>
+            <h2 class="rx-h">"Expert view on why"</h2>
             <p>{c(&b.opinion.why)}</p>
         </div>
         <div class="rx-card">

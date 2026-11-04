@@ -403,7 +403,9 @@ pub fn default_mode(turns: &[ChatTurn]) -> &str {
 /// The headings a stored opinion passage opens with, and how its label reads.
 const OPINION_HEADINGS: &[(&str, &str)] = &[
     ("Expert verdict: ", "Expert verdict"),
-    ("My view on why: ", "My view on why"),
+    ("Expert view on why: ", "Expert view on why"),
+    // Saved chats still hold the old heading.
+    ("My view on why: ", "Expert view on why"),
     ("At a glance, the original view: ", "At a glance"),
     ("At a glance, the expert view: ", "At a glance"),
     ("At a glance, today: ", "At a glance"),
@@ -989,8 +991,12 @@ mod tests {
             "Answer \u{b7} Conflicts"
         );
         // An opinion's own heading moves to the label.
+        let s = passage_sheet("opinion", "Expert view on why: Experience.", None);
+        assert_eq!(s.label, "Expert Opinion \u{b7} Expert view on why");
+        assert_eq!(s.text, "Experience.");
+        // A saved chat's old heading reads the new way.
         let s = passage_sheet("opinion", "My view on why: Experience.", None);
-        assert_eq!(s.label, "Expert Opinion \u{b7} My view on why");
+        assert_eq!(s.label, "Expert Opinion \u{b7} Expert view on why");
         assert_eq!(s.text, "Experience.");
         let s = passage_sheet("opinion", "At a glance, today: Now.", None);
         assert_eq!(s.label, "Expert Opinion \u{b7} At a glance");
