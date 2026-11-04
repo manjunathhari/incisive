@@ -448,7 +448,14 @@ async fn a_panicking_call_fails_only_the_introduction() {
     assert_eq!(st_, "failed");
     assert_eq!(text, None);
     // The panic stays in the call's own task (reported as unrecorded), so the
-    // job still ends normally: nothing stays held.
+    // job still ends normally: nothing stays held. The status is stored before
+    // the hold is released, so wait for the release.
+    for _ in 0..200 {
+        if reservations(&pool, user.id).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(reservations(&pool, user.id).await.is_empty());
 }
 
