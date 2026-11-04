@@ -602,7 +602,7 @@ step line, stored answer, status, run cost or check changes with it on or off.
   read by the evidence library, the memory records or Chat.
 - **Started** after every check has passed and the run holds its reservation, in a detached task: a
   blocked question never reaches it, and nothing on the request path waits for the model.
-- **Money.** The call's hold (about 60 paise at Sonnet prices) is reserved against the user's daily
+- **Money.** The call's hold (about 80 paise at Sonnet prices) is reserved against the user's daily
   and monthly caps and the global cap, under the job's own request id (spend purpose `intro`), after
   the run's own hold, so it can neither block a run nor change its hold. At a cap: `cap_blocked`, no
   introduction, and the run goes on. The charge row's purpose reads `run:<request_id>`, where
@@ -610,7 +610,7 @@ step line, stored answer, status, run cost or check changes with it on or off.
   changed. No screen shows the amount by itself, but the owner's Activity log lists its `charged`
   and `intro_*` entries, as for every call. Audit events `intro_done`, `intro_failed`,
   `intro_skipped`, `intro_cap_blocked` carry ids, a reason kind and paise only.
-- **One attempt, 30 s, 600 `max_tokens`, low effort.** Its own Claude client, no retry. Thinking
+- **One attempt, 30 s, 800 `max_tokens`, low effort.** Its own Claude client, no retry. Thinking
   counts toward `max_tokens`; low effort keeps it short. A reply cut off at `max_tokens`, an empty
   one, a refusal, an API error or the time limit ends the row `failed` and shows nothing. A `pending`
   row older than 5 minutes is failed by recovery and its reservation released.

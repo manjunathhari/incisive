@@ -57,7 +57,7 @@ pub const PURPOSE: &str = "intro";
 /// The step name on its Claude call (logs only; not a finishing step).
 pub const STEP: &str = "intro";
 /// `max_tokens` of the call.
-pub const MAX_TOKENS: u32 = 600;
+pub const MAX_TOKENS: u32 = 800;
 /// The call's effort (see the module docs).
 pub const EFFORT: Effort = Effort::Low;
 /// The job gives the call up after this long, and its own client's one

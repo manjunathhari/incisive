@@ -11,7 +11,7 @@ pub const PROMPT: &str = "For the question below, write a simple, brief introduc
 - why the question is important;
 - a few lines on the disease.
 
-Give no numbers, no studies, and no answer: don't say or hint which approach is better. Write nothing else, no title and no closing line.";
+Give no numbers, no studies, and no answer: don't say or hint which approach is better. Write nothing else, no title and no closing line. If you don't recognise an operation or abbreviation, or it could mean more than one thing, don't guess and don't say so: write only one plain sentence restating the question in its own words, and nothing else.";
 
 pub const HEADING: &str = "Introduction";
 pub const TAG_RUNNING: &str =
@@ -186,7 +186,7 @@ mod tests {
              - why the question is important;\n\
              - a few lines on the disease.\n\
              \n\
-             Give no numbers, no studies, and no answer: don't say or hint which approach is better. Write nothing else, no title and no closing line."
+             Give no numbers, no studies, and no answer: don't say or hint which approach is better. Write nothing else, no title and no closing line. If you don't recognise an operation or abbreviation, or it could mean more than one thing, don't guess and don't say so: write only one plain sentence restating the question in its own words, and nothing else."
         );
         assert_eq!(HEADING, "Introduction");
         assert_eq!(
