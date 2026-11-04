@@ -636,7 +636,7 @@ pub fn build(
         let mut ns = Vec::new();
         let t = c.clean(&o.why, "", &none, &mut ns);
         if !t.is_empty() {
-            op(&mut c, format!("My view on why: {t}"), ns);
+            op(&mut c, format!("Expert view on why: {t}"), ns);
         }
         let g = &board.at_a_glance;
         for (label, block) in [
@@ -1300,7 +1300,7 @@ mod tests {
                 "{f}"
             );
             assert!(
-                op.iter().any(|p| p.text.starts_with("My view on why:")),
+                op.iter().any(|p| p.text.starts_with("Expert view on why:")),
                 "{f}"
             );
             let lines: usize = ["original_quote", "expert", "today"]

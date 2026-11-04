@@ -516,8 +516,8 @@ async fn t4_each_status_renders_its_option() {
                 v.find(needle)
                     .unwrap_or_else(|| panic!("missing {needle:?}"))
             };
-            assert!(at("Expert opinion \u{b7} evidence over time") < at("My view on why"));
-            assert!(at("My view on why") < at("At a glance"));
+            assert!(at("Expert opinion \u{b7} evidence over time") < at("Expert view on why"));
+            assert!(at("Expert view on why") < at("At a glance"));
             assert!(at("At a glance") < at(">Original<"));
             assert!(at(">Original<") < at(">Expert<"));
             assert!(at(">Expert<") < at(">Today<"));
@@ -558,7 +558,7 @@ async fn t4_each_status_renders_its_option() {
             let sec = &m[i..];
             let body = &sec[sec.find('>').unwrap() + 1..sec.find("</section>").unwrap()];
             assert!(body.replace("<!---->", "").is_empty(), "{text}: {body}");
-            assert!(!m.contains("My view on why"), "{text}");
+            assert!(!m.contains("Expert view on why"), "{text}");
         }
     }
 }
