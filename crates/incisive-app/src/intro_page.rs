@@ -55,6 +55,45 @@ pub fn word_total(paragraphs: &[String]) -> usize {
         .sum()
 }
 
+/// The reveal's time for everything before the last paragraph (owner, 4 Nov).
+pub const FIRST_PART_MS: u32 = 25_000;
+/// The reveal's time for the last paragraph (owner, 4 Nov).
+pub const LAST_PARA_MS: u32 = 15_000;
+/// A part with few words is never slower than this a word, so that a
+/// one-sentence restatement does not crawl.
+pub const SLOWEST_WORD_MS: u32 = 400;
+
+/// Words before the last paragraph, and words in it.
+pub fn reveal_parts(paragraphs: &[String]) -> (usize, usize) {
+    let total = word_total(paragraphs);
+    let last = paragraphs
+        .last()
+        .map_or(0, |p| p.split_whitespace().count());
+    (total - last, last)
+}
+
+fn part_ms(words: usize, target: u32) -> u32 {
+    u32::try_from(words)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(SLOWEST_WORD_MS)
+        .min(target)
+}
+
+/// Words out after `elapsed_ms` of the reveal: the first part, then the last
+/// paragraph, each evenly over its own time.
+pub fn words_at(elapsed_ms: u32, first: usize, last: usize) -> usize {
+    let first_ms = part_ms(first, FIRST_PART_MS);
+    if elapsed_ms < first_ms {
+        return (first as u64 * u64::from(elapsed_ms) / u64::from(first_ms)) as usize;
+    }
+    let last_ms = part_ms(last, LAST_PARA_MS);
+    let into_last = elapsed_ms - first_ms;
+    if into_last < last_ms {
+        return first + (last as u64 * u64::from(into_last) / u64::from(last_ms)) as usize;
+    }
+    first + last
+}
+
 /// One paragraph and the number of words before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paragraph {
@@ -286,5 +325,45 @@ mod tests {
         assert_eq!(r.observe(true, true, false), RevealStep::Start);
         assert_eq!(r.observe(false, true, false), RevealStep::Finish);
         assert_eq!(r.observe(false, true, false), RevealStep::Nothing);
+    }
+
+    #[test]
+    fn the_reveal_takes_25_s_then_15_s() {
+        let (first, last) = (150, 70);
+        assert_eq!(words_at(0, first, last), 0);
+        assert_eq!(words_at(12_500, first, last), 75);
+        assert!(words_at(24_999, first, last) < first);
+        assert_eq!(words_at(25_000, first, last), first);
+        assert_eq!(words_at(32_500, first, last), first + 35);
+        assert!(words_at(39_999, first, last) < first + last);
+        assert_eq!(words_at(40_000, first, last), first + last);
+    }
+
+    #[test]
+    fn a_short_text_does_not_crawl() {
+        // One plain sentence: no first part, and 400 ms a word.
+        assert_eq!(words_at(0, 0, 20), 0);
+        assert_eq!(words_at(4_000, 0, 20), 10);
+        assert_eq!(words_at(8_000, 0, 20), 20);
+    }
+
+    #[test]
+    fn the_reveal_only_moves_forward_and_ends() {
+        for (first, last) in [(0, 0), (0, 1), (1, 1), (5, 300), (300, 5), (150, 70)] {
+            let mut was = 0;
+            for t in (0..=41_000).step_by(100) {
+                let now = words_at(t, first, last);
+                assert!(now >= was && now <= first + last);
+                was = now;
+            }
+            assert_eq!(was, first + last);
+        }
+    }
+
+    #[test]
+    fn the_parts_split_on_the_last_paragraph() {
+        let p = paragraphs("One two.\n\nThree four five.\n\nSix seven.");
+        assert_eq!(reveal_parts(&p), (5, 2));
+        assert_eq!(reveal_parts(&[]), (0, 0));
     }
 }

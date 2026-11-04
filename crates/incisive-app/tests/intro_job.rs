@@ -543,6 +543,13 @@ async fn the_runs_hold_comes_first_and_is_not_touched() {
     assert_eq!(booked[0].1, row(&pool, run_id).await.unwrap().3);
     RELEASE_RUN.store(true, Ordering::SeqCst);
     wait_run_ended(&pool, user.id, run_id).await;
+    // The run's status is stored just before its hold is released.
+    for _ in 0..200 {
+        if reservations(&pool, user.id).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(reservations(&pool, user.id).await.is_empty());
 }
 
