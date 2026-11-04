@@ -557,6 +557,7 @@ pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
     if super::temporal::recover_stale(pool).await.is_err() {
         tracing::warn!("temporal recovery failed; will retry");
     }
+    super::intro::recover(pool).await;
     Ok(marked.len())
 }
 

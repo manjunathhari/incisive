@@ -66,6 +66,7 @@ fn state(pool: PgPool) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,

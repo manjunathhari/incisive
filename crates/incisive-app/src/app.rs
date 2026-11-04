@@ -37,6 +37,7 @@ mod details;
 mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
 mod expert;
+mod intro;
 mod ivory;
 mod library_page;
 mod page;
@@ -461,7 +462,30 @@ pub async fn get_my_run(run_id: Uuid) -> Result<RunView, ServerFnError> {
         set_status(r.status());
         ServerFnError::new(r.message())
     })?;
-    crate::runs::api::get_view(&state, &user, run_id)
+    let mut run = crate::runs::api::get_view(&state, &user, run_id)
+        .await
+        .map_err(run_api_error)?;
+    // An error reading it reads as none: the page shows the run as before.
+    run.intro = crate::runs::api::intro_view(&state, &user, run_id)
+        .await
+        .ok()
+        .flatten();
+    Ok(run)
+}
+
+/// The introduction of one of the user's runs, alone (the page's short wait
+/// when the run ended before it did). Someone else's run is "not found".
+#[server(prefix = "/api/fn", endpoint = "my_run_intro")]
+pub async fn get_my_run_intro(
+    run_id: Uuid,
+) -> Result<Option<crate::runs::IntroView>, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = signed_in().await?;
+    let CurrentUser(user) = user.map_err(|r| {
+        set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::runs::api::intro_view(&state, &user, run_id)
         .await
         .map_err(run_api_error)
 }
@@ -951,6 +975,7 @@ fn RunPage() -> impl IntoView {
     let query = use_query_map();
     let tick = RwSignal::new(0u32);
     let ui = tracker::TrackerUi::new();
+    let intro_ui = intro::IntroUi::new();
     let data = Resource::new(
         move || (run_id(), tick.get()),
         |(id, _)| async move {
@@ -969,9 +994,12 @@ fn RunPage() -> impl IntoView {
         StoredValue::new_local(None);
     let last_good: RwSignal<Option<RunPageData>> = RwSignal::new(None);
     let row_wait: StoredValue<RowWait, LocalStorage> = StoredValue::new_local(RowWait::default());
+    let intro_wait: StoredValue<RowWait, LocalStorage> = StoredValue::new_local(RowWait::default());
     on_cleanup(move || {
-        if let Some(h) = row_wait.try_update_value(|w| w.timer.take()).flatten() {
-            h.clear();
+        for wait in [row_wait, intro_wait] {
+            if let Some(h) = wait.try_update_value(|w| w.timer.take()).flatten() {
+                h.clear();
+            }
         }
     });
     let stop = move || {
@@ -995,6 +1023,9 @@ fn RunPage() -> impl IntoView {
             // row comes moments later.
             let row_due = v.temporal.is_none() && row_is_due(&v.run);
             let id = v.run.summary.id;
+            intro_ui.observe(active, v.run.intro.as_ref());
+            // The run ended before its introduction did.
+            let intro_due = !active && v.run.intro == Some(crate::runs::IntroView::Pending);
             last_good.set(Some(v));
             if active {
                 start()
@@ -1003,6 +1034,9 @@ fn RunPage() -> impl IntoView {
             }
             if row_due {
                 wait_for_row(id, tick, row_wait);
+            }
+            if intro_due {
+                intro::wait_for_intro(id, tick, intro_wait);
             }
         }
         Some(Err(e)) if is_not_found(&e) => stop(),
@@ -1020,7 +1054,7 @@ fn RunPage() -> impl IntoView {
                 data.get()
                     .map(|r| match r {
                         Ok(RunPageData { run, temporal, chat }) => {
-                            run_view(run, temporal, chat, query, ui).into_any()
+                            run_view(run, temporal, chat, query, ui, intro_ui).into_any()
                         }
                         Err(e) if is_not_found(&e) => {
                             view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
@@ -1030,7 +1064,7 @@ fn RunPage() -> impl IntoView {
                                 <p class="hint" role="status">
                                     "Connection problem \u{2014} retrying. " {error_text(&e)}
                                 </p>
-                                {run_view(run, temporal, chat, query, ui)}
+                                {run_view(run, temporal, chat, query, ui, intro_ui)}
                             }
                                 .into_any(),
                             None => view! {
@@ -1147,9 +1181,11 @@ fn run_view(
     chat: Option<crate::chat_page::ChatPageView>,
     query: Memo<leptos_router::params::ParamsMap>,
     ui: tracker::TrackerUi,
+    intro_ui: intro::IntroUi,
 ) -> AnyView {
     let status = v.summary.status;
     let run_id = v.summary.id;
+    let intro_row = v.intro;
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw: Phase 3
     // answers (version 3) with their own view, everything else as Phase 2.
@@ -1290,6 +1326,8 @@ fn run_view(
             total_secs,
         )
     });
+    // In front of the card, in every layout below; nothing without a text.
+    let card = intro::with_results(intro_ui, working, intro_row, card);
     let Some(t) = temporal else {
         return view! {
             // Page chrome (ivory redesign): Figtree; the answer below is untouched.

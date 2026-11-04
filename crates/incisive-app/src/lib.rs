@@ -45,6 +45,8 @@ pub mod chat {
 }
 /// The chat window's rules and shared types (no Leptos).
 pub mod chat_page;
+/// The introduction's fixed words and page rules (no Leptos).
+pub mod intro_page;
 /// The Ask page's advisory Question check and PICO helper (no Leptos).
 pub mod question_check;
 /// The run page's tracker rules (no Leptos).

@@ -74,6 +74,7 @@ fn state(pool: PgPool, uri: &str) -> AppState {
         completeness: false,
         temporal: TemporalSettings::default(),
         temporal_client: None,
+        intro: Default::default(),
         chat,
         memory,
         embedder: None,

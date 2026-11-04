@@ -95,6 +95,24 @@ pub async fn temporal_view(
     }
 }
 
+/// The introduction of one of the user's runs, for the run page: `Ok(None)`
+/// with `INTRO=off` or when there is nothing to show. Someone else's run is
+/// "not found", as for [`get_view`].
+pub async fn intro_view(
+    state: &AppState,
+    user: &User,
+    run_id: Uuid,
+) -> Result<Option<super::IntroView>, RunApiError> {
+    if !state.intro.settings.on {
+        return Ok(None);
+    }
+    match super::intro::get_for_user(&state.pool, user.id, run_id).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(RunApiError::NotFound),
+        Err(_) => Err(failed("intro", user.id)),
+    }
+}
+
 /// The user's runs as Library cards, newest first (read-only; same scoping
 /// and limit as [`list_view`]).
 pub async fn library_view(

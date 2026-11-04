@@ -62,6 +62,7 @@ fn state(pool: PgPool) -> AppState {
         completeness: false,
         temporal: TemporalSettings::default(),
         temporal_client: None,
+        intro: Default::default(),
         chat: incisive_app::chat::settings::ChatSettings {
             on: true,
             ..Default::default()

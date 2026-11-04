@@ -69,6 +69,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         completeness: false,
         temporal,
         temporal_client: None,
+        intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,

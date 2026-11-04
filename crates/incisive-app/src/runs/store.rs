@@ -232,6 +232,7 @@ pub async fn get_run_for_user(
         steps,
         answer: answer.map(|(b, _)| b),
         answer_version,
+        intro: None,
     }))
 }
 
