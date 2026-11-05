@@ -16,6 +16,8 @@ pub enum BreakKind {
     Idle,
     /// The caller's overall deadline passed.
     Deadline,
+    /// The deadline had already passed: nothing was sent, so nothing is owed.
+    NotSent,
     /// The body ended with no `message_stop`.
     EndedEarly,
     /// An `error` event.
@@ -31,6 +33,7 @@ impl BreakKind {
             BreakKind::Transport => "transport",
             BreakKind::Idle => "idle",
             BreakKind::Deadline => "deadline",
+            BreakKind::NotSent => "not_sent",
             BreakKind::EndedEarly => "ended_early",
             BreakKind::ApiError => "api_error",
             BreakKind::Malformed => "malformed",

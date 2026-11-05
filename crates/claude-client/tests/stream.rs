@@ -491,6 +491,20 @@ async fn the_deadline_ends_a_stream_that_keeps_pinging() {
 }
 
 #[tokio::test]
+async fn a_deadline_already_passed_sends_nothing() {
+    let s = serve(vec![ok(full_reply())]).await;
+    let e = client(&s)
+        .stream_message(&request(), &|_| {}, Some(Instant::now()))
+        .await
+        .unwrap_err();
+    let ClaudeError::StreamInterrupted(b) = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(b.kind, BreakKind::NotSent);
+    assert!(s.bodies.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn silence_before_the_first_event_takes_the_retry_policy() {
     let s = serve(vec![ok(vec![Step::Wait(2_000)]), ok(full_reply())]).await;
     let got = client(&s)

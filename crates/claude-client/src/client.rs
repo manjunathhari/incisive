@@ -182,6 +182,10 @@ impl Client {
         on_text: &(dyn Fn(&str) + Send + Sync),
         deadline: Option<Instant>,
     ) -> Result<MessagesResponse, ClaudeError> {
+        let mut st = StreamState::default();
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(st.interrupted(BreakKind::NotSent));
+        }
         let url = self
             .base_url
             .join("v1/messages")
@@ -200,7 +204,6 @@ impl Client {
             .header("accept", "text/event-stream")
             .body(body)
             .send();
-        let mut st = StreamState::default();
         let (wait, kind) = self.stream_wait(Instant::now(), deadline);
         let mut resp = match tokio::time::timeout(wait, sent).await {
             Ok(r) => r?,

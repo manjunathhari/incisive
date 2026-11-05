@@ -31,7 +31,13 @@ pub(crate) fn is_retryable(err: &ClaudeError) -> bool {
         ClaudeError::Transport(e) => e.is_timeout() || e.is_connect(),
         // Before the first event, as any failed attempt (the caller's deadline
         // is final). Once events have started it is the caller's to decide.
-        ClaudeError::StreamInterrupted(b) => !b.started && b.kind != crate::BreakKind::Deadline,
+        ClaudeError::StreamInterrupted(b) => {
+            !b.started
+                && !matches!(
+                    b.kind,
+                    crate::BreakKind::Deadline | crate::BreakKind::NotSent
+                )
+        }
     }
 }
 
