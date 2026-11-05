@@ -2,7 +2,8 @@
 //! [`crate::draft_page`]). The sections keep the page's order, those not yet
 //! arrived say "Coming", and the unfinished last item is faded.
 //!
-//! Escaped text only; no `inner_html`. No marks, charts or labels: none of the
+//! The text comes from a signal, so a poll that only moves the draft on never
+//! touches the rest of the page. Escaped text only; no `inner_html`. No marks, charts or labels: none of the
 //! checks has run. The styles are drawn only with a draft, so every other page
 //! is unchanged.
 
@@ -117,10 +118,19 @@ fn section_view(s: Section) -> AnyView {
     .into_any()
 }
 
-fn draft_view(sections: Vec<Section>) -> AnyView {
-    let cards = sections
-        .into_iter()
-        .map(section_view)
+/// The banner and the sections of `text()`. Each section is drawn from its own
+/// memo, so new text redraws only the section it changes: what is already
+/// written stays in the page, and can be read and selected.
+fn draft_view(
+    read: fn(&str) -> Vec<Section>,
+    text: impl Fn() -> String + Send + Sync + 'static,
+) -> AnyView {
+    let sections = Memo::new(move |_| read(&text()));
+    let cards = (0..sections.with_untracked(Vec::len))
+        .map(|i| {
+            let one = Memo::new(move |_| sections.with(|s| s.get(i).cloned()));
+            view! { {move || one.get().map(section_view)} }.into_any()
+        })
         .collect::<Vec<AnyView>>();
     view! {
         <style>{DRAFT_STYLE}</style>
@@ -132,14 +142,14 @@ fn draft_view(sections: Vec<Section>) -> AnyView {
     .into_any()
 }
 
-/// The answer as far as it is written.
-pub(super) fn answer_view(reply: &str) -> AnyView {
-    draft_view(read_answer(reply))
+/// The answer as far as it is written, following `live`.
+pub(super) fn answer_view(live: RwSignal<Option<String>>) -> AnyView {
+    draft_view(read_answer, move || live.get().unwrap_or_default())
 }
 
-/// The opinion as far as it is written.
-pub(super) fn opinion_view(reply: &str) -> AnyView {
-    draft_view(read_opinion(reply))
+/// The opinion as far as it is written, following `live`.
+pub(super) fn opinion_view(live: Memo<Option<String>>) -> AnyView {
+    draft_view(read_opinion, move || live.get().unwrap_or_default())
 }
 
 /// The results card folded to a row with the clock; it opens to the card.

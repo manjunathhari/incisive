@@ -283,6 +283,9 @@ fn reveal_answer() {
 pub(super) struct Expert {
     /// Stage S1: the opinion as far as it is written.
     draft: Memo<Option<String>>,
+    /// Whether there is one: for what depends only on that, so a new word
+    /// redraws neither the pill nor the view around the text.
+    has_draft: Memo<bool>,
     run_id: Uuid,
     /// The Expert Opinion view is shown (`#expert`).
     pub expert: RwSignal<bool>,
@@ -370,8 +373,10 @@ impl Expert {
                     .filter(|t| crate::draft_page::has_content(&crate::draft_page::read_opinion(t)))
             })
         });
+        let has_draft = Memo::new(move |_| draft.with(Option::is_some));
         let x = Expert {
             draft,
+            has_draft,
             run_id,
             expert: RwSignal::new(false),
             state,
@@ -410,6 +415,7 @@ impl Expert {
         Effect::new(move |_| {
             if x.expert.get_untracked() && !x.can_open() {
                 x.expert.set(false);
+                set_hash(false);
             }
         });
         x
@@ -422,13 +428,13 @@ impl Expert {
 
     /// A draft to show (tracked): the opinion is still being written.
     fn draft_showing(self) -> bool {
-        self.option.get().polls() && self.draft.with(Option::is_some)
+        self.option.get().polls() && self.has_draft.get()
     }
 
     /// Show the view the hash names (`#expert` once ready).
     fn follow_hash(self) {
         let can_open = self.option.get_untracked().selectable()
-            || (self.option.get_untracked().polls() && self.draft.with_untracked(Option::is_some));
+            || (self.option.get_untracked().polls() && self.has_draft.get_untracked());
         let want = current_hash() == "#expert" && can_open;
         if self.expert.get_untracked() != want {
             self.expert.set(want);
@@ -580,10 +586,18 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
         let s = x.option.get();
         if x.draft_showing() {
             // Being written with text to read: it fills as before, and opens.
+            // Once the page has stopped asking it says so, as the button does,
+            // and what was written can still be read.
+            let gave_up = x.gave_up.get();
+            let (state, aria) = xp::draft_pill(s.text(), gave_up);
             let ready_at = answer.ready_at;
             let style = move || {
-                let secs = (ui.now.get() - ready_at).num_seconds();
-                rt::fill_background(rt::timed_fill(secs, rt::EXPERT_USUAL_SECS))
+                if state == PillState::Filling {
+                    let secs = (ui.now.get() - ready_at).num_seconds();
+                    rt::fill_background(rt::timed_fill(secs, rt::EXPERT_USUAL_SECS))
+                } else {
+                    String::new()
+                }
             };
             view! {
                 <a
@@ -593,8 +607,8 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                     role="tab"
                     aria-selected=move || x.expert.get().to_string()
                     aria-controls="expert"
-                    aria-label=PillState::Filling.aria(s.text())
-                    data-state=PillState::Filling.as_str()
+                    aria-label=aria
+                    data-state=state.as_str()
                     data-clicked=ui.clicked_attr(Pill::Expert)
                     style=style
                     href="#expert"
@@ -602,6 +616,7 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
                     on:click=to_expert
                 >
                     {s.text()}
+                    {gave_up.then(|| view! { <small class="rx-late">{xp::POLL_GAVE_UP_NOTE}</small> })}
                 </a>
             }
             .into_any()
@@ -736,7 +751,7 @@ pub(super) fn expert_view(x: Expert) -> AnyView {
             {move || {
                 x.opened
                     .with(|o| o.as_ref().map(|o| expert_body(x, o, &x.known_refs(o))))
-                    .or_else(|| x.draft.get().map(|t| super::draft::opinion_view(&t)))
+                    .or_else(|| x.has_draft.get().then(|| super::draft::opinion_view(x.draft)))
             }}
         </section>
     }

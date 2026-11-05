@@ -7,8 +7,10 @@
 //! touches the run.
 //!
 //! A draft can be written only while its writer's row is live (the run
-//! `running`, the opinion `pending`), so a late write cannot bring one back
-//! after the final is saved. Each is deleted when the run or the opinion ends
+//! `running`, the opinion `pending`). The write locks that row (`FOR SHARE`),
+//! so it waits for a status change in progress and then sees it, or the change
+//! waits for the write and the delete after it removes the draft: a late write
+//! cannot bring one back after the final is saved. Each is deleted when the run or the opinion ends
 //! ([`clear`]), and recovery removes any left behind ([`sweep`]).
 //!
 //! Privacy: a draft is reply text, like `run_answers`. It is read only through
@@ -50,9 +52,12 @@ impl Part {
 /// Store the draft, only while its writer's row is live. False: nothing stored.
 pub async fn upsert(pool: &PgPool, run_id: Uuid, part: Part, text: &str) -> sqlx::Result<bool> {
     let live = match part {
-        Part::Answer => "SELECT id FROM incisive.runs WHERE id = $1 AND status = 'running'",
+        Part::Answer => {
+            "SELECT id FROM incisive.runs WHERE id = $1 AND status = 'running' FOR SHARE"
+        }
         Part::Opinion => {
-            "SELECT run_id FROM incisive.run_temporal WHERE run_id = $1 AND status = 'pending'"
+            "SELECT run_id FROM incisive.run_temporal WHERE run_id = $1 AND status = 'pending' \
+             FOR SHARE"
         }
     };
     let r = sqlx::query(&format!(

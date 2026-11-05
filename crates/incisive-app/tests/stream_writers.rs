@@ -404,6 +404,59 @@ async fn a_draft_is_stored_only_while_its_writer_is_live() {
     assert_eq!(draft(&pool, run, Part::Answer).await, None);
 }
 
+/// A write racing the run's end: it waits for the status to commit, then finds
+/// the run no longer running, so the clear that follows leaves nothing behind.
+#[tokio::test]
+async fn a_late_write_racing_the_final_status_stores_nothing() {
+    let Some(pool) = pool().await else { return };
+    let (_, _, run) = running(&pool, 1000).await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE incisive.runs SET status = 'done' WHERE id = $1")
+        .bind(run)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let late = {
+        let pool = pool.clone();
+        tokio::spawn(async move { drafts::upsert(&pool, run, Part::Answer, "late").await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+    drafts::clear(&pool, run, Part::Answer).await;
+    assert!(
+        !late.await.unwrap().unwrap(),
+        "it must see the final status"
+    );
+    assert_eq!(draft(&pool, run, Part::Answer).await, None);
+}
+
+/// The same for the opinion.
+#[tokio::test]
+async fn a_late_opinion_write_racing_its_row_finishing_stores_nothing() {
+    let Some(pool) = pool().await else { return };
+    let (_, _, run) = running(&pool, 1000).await;
+    assert!(set_status(&pool, run, RunStatus::Done, None).await.unwrap());
+    assert!(insert_pending(&pool, run, Uuid::new_v4()).await.unwrap());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE incisive.run_temporal SET status = 'failed' WHERE run_id = $1")
+        .bind(run)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let late = {
+        let pool = pool.clone();
+        tokio::spawn(async move { drafts::upsert(&pool, run, Part::Opinion, "late").await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+    drafts::clear(&pool, run, Part::Opinion).await;
+    assert!(
+        !late.await.unwrap().unwrap(),
+        "it must see the final status"
+    );
+    assert_eq!(draft(&pool, run, Part::Opinion).await, None);
+}
+
 #[tokio::test]
 async fn deleting_the_run_cascades_to_its_draft() {
     let Some(pool) = pool().await else { return };
@@ -664,13 +717,9 @@ async fn the_opinion_api_gives_the_draft_to_its_owner_only_while_pending() {
         Err(api::RunApiError::NotFound)
     ));
     let off = state(pool.clone(), false);
-    assert!(
-        !api::temporal_view(&off, &user, run)
-            .await
-            .unwrap()
-            .unwrap()
-            .streaming
-    );
+    let v = api::temporal_view(&off, &user, run).await.unwrap().unwrap();
+    assert!(!v.streaming);
+    assert_eq!(v.draft, None, "with STREAM=off: never");
     // Finished: gone, and the page need not hurry.
     let f = temporal::Finished {
         reason: Some("x"),

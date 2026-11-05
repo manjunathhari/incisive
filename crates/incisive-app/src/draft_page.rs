@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::agent::answer_v3::{Segment, split_citations};
+use crate::runs::RunView;
 
 /// The banner over a draft.
 pub const BANNER: &str = "Being written: checks not yet run";
@@ -261,7 +262,10 @@ impl Reader<'_> {
                     }
                     self.i += 2;
                     let second = self.hex4()?;
-                    let v = 0x10000 + ((first - 0xD800) << 10) + second.wrapping_sub(0xDC00);
+                    if !(0xDC00..0xE000).contains(&second) {
+                        return Some('\u{fffd}');
+                    }
+                    let v = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
                     char::from_u32(v).unwrap_or('\u{fffd}')
                 } else {
                     char::from_u32(first).unwrap_or('\u{fffd}')
@@ -849,6 +853,37 @@ pub fn read_opinion(reply: &str) -> Vec<Section> {
     ]
 }
 
+/// What one poll means for a page showing a draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollStep {
+    /// Nothing changed: leave the page alone.
+    Same,
+    /// Only the draft moved on: redraw what it changes, and nothing else.
+    Draft(String),
+    /// Something else changed (a step line, the status, the answer) or there
+    /// is no draft to show any more: draw the page again.
+    Rebuild,
+}
+
+/// `now` against the page drawn from `drawn`, with `shown` as its draft.
+pub fn poll_step(drawn: &RunView, shown: &str, now: &RunView) -> PollStep {
+    let same = drawn.summary == now.summary
+        && drawn.steps == now.steps
+        && drawn.answer == now.answer
+        && drawn.answer_version == now.answer_version
+        && drawn.intro == now.intro;
+    match &now.draft {
+        Some(t) if same && has_content(&read_answer(t)) => {
+            if t == shown {
+                PollStep::Same
+            } else {
+                PollStep::Draft(t.clone())
+            }
+        }
+        _ => PollStep::Rebuild,
+    }
+}
+
 /// Anything to draw yet.
 pub fn has_content(sections: &[Section]) -> bool {
     sections.iter().any(|s| !s.items.is_empty())
@@ -894,6 +929,67 @@ mod tests {
             ("", Value::Null),
         ] {
             assert_eq!(read_prefix(t).value, want, "{t}");
+        }
+    }
+
+    fn run(draft: Option<&str>) -> RunView {
+        serde_json::from_value(json!({
+            "summary": {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "mode": "focused",
+                "status": "running",
+                "created_at": "2026-11-05T10:00:00Z",
+                "cost_paise": 5,
+                "title": "q"
+            },
+            "steps": [],
+            "answer": null,
+            "answer_version": 2,
+            "draft": draft
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_poll_redraws_only_what_changed() {
+        let t = r#"{"bottom_line":{"text":"So far"#;
+        let longer = r#"{"bottom_line":{"text":"So far and more"#;
+        let drawn = run(Some(t));
+        assert_eq!(poll_step(&drawn, t, &run(Some(t))), PollStep::Same);
+        assert_eq!(
+            poll_step(&drawn, t, &run(Some(longer))),
+            PollStep::Draft(longer.to_string())
+        );
+        // The draft is what was shown last, not what the page was drawn from.
+        assert_eq!(
+            poll_step(&drawn, longer, &run(Some(longer))),
+            PollStep::Same
+        );
+        // No draft any more (a retry started again), or nothing to draw yet.
+        assert_eq!(poll_step(&drawn, t, &run(None)), PollStep::Rebuild);
+        assert_eq!(poll_step(&drawn, t, &run(Some("{"))), PollStep::Rebuild);
+        // Anything else: the whole page, as every poll did.
+        let mut other = run(Some(t));
+        other.summary.status = crate::runs::RunStatus::Done;
+        assert_eq!(poll_step(&drawn, t, &other), PollStep::Rebuild);
+        let mut other = run(Some(t));
+        other.summary.cost_paise = 6;
+        assert_eq!(poll_step(&drawn, t, &other), PollStep::Rebuild);
+        let mut other = run(Some(t));
+        other.answer = Some(json!({"version": 3}));
+        assert_eq!(poll_step(&drawn, t, &other), PollStep::Rebuild);
+    }
+
+    #[test]
+    fn a_broken_surrogate_pair_reads_as_a_replacement_character() {
+        for (t, want) in [
+            (r#"{"a":"\ud83d\u0041"}"#, "\u{fffd}"),
+            (r#"{"a":"\ud83d\ud83d"}"#, "\u{fffd}"),
+            (r#"{"a":"\ud83d\uffff"}"#, "\u{fffd}"),
+            (r#"{"a":"\ud83dA"}"#, "\u{fffd}A"),
+            (r#"{"a":"\ud83d\ude00"}"#, "\u{1f600}"),
+        ] {
+            assert_eq!(read_prefix(t).value, json!({"a": want}), "{t}");
         }
     }
 

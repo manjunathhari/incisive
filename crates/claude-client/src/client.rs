@@ -149,11 +149,20 @@ impl Client {
     ) -> Result<MessagesResponse, ClaudeError> {
         let max_attempts = self.retry.max_attempts.max(1);
         let mut attempt = 1;
+        let mut earlier = None;
         loop {
             let err = match self.stream_once(req, on_text, deadline).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => e,
             };
+            // An attempt that sent nothing says nothing: an earlier one was
+            // sent, and may have been billed, so its error is the one to book.
+            if matches!(
+                &err,
+                ClaudeError::StreamInterrupted(b) if b.kind == BreakKind::NotSent
+            ) {
+                return Err(earlier.unwrap_or(err));
+            }
             if attempt >= max_attempts || !is_retryable(&err) {
                 return Err(err);
             }
@@ -172,6 +181,7 @@ impl Client {
             );
             tokio::time::sleep(delay).await;
             attempt += 1;
+            earlier = Some(err);
         }
     }
 
@@ -212,8 +222,11 @@ impl Client {
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let retry_after = retry_after_of(&resp);
-            let bytes = resp.bytes().await?;
-            return Err(error_of(status, retry_after, &bytes));
+            let (wait, kind) = self.stream_wait(Instant::now(), deadline);
+            return match tokio::time::timeout(wait, resp.bytes()).await {
+                Ok(bytes) => Err(error_of(status, retry_after, &bytes?)),
+                Err(_) => Err(st.interrupted(kind)),
+            };
         }
         let mut sse = stream::SseBuffer::default();
         let mut last_event = Instant::now();

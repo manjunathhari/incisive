@@ -111,6 +111,28 @@ fn the_full_text_equals_the_final() {
     }
 }
 
+/// A section already written does not change as later ones arrive, so the page
+/// has no reason to redraw it.
+#[test]
+fn a_finished_section_stays_the_same_as_later_text_arrives() {
+    for n in NAMES {
+        let reply = answer_reply(n);
+        let cut = reply.find("\"outcomes\":").unwrap();
+        let (early, whole) = (read_answer(&reply[..cut]), read_answer(&reply));
+        for t in [
+            "At a glance",
+            "Bottom line",
+            "Applicability",
+            "Conflicting evidence",
+        ] {
+            let of = |s: &[incisive_app::draft_page::Section]| {
+                s.iter().find(|x| x.title == t).unwrap().clone()
+            };
+            assert_eq!(of(&early), of(&whole), "{n}: {t}");
+        }
+    }
+}
+
 fn shape(s: &[incisive_app::draft_page::Section]) -> Vec<usize> {
     s.iter().map(|x| x.items.len()).collect()
 }

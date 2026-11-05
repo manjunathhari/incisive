@@ -490,6 +490,82 @@ async fn the_deadline_ends_a_stream_that_keeps_pinging() {
     assert!(t.elapsed() < Duration::from_secs(3));
 }
 
+/// A status error whose body stalls: the idle limit ends it, as any other wait.
+#[tokio::test]
+async fn a_stalled_error_body_breaks_after_the_idle_limit() {
+    let s = serve(vec![Script {
+        status: 500,
+        steps: vec![Step::Send("{\"error\":".into()), Step::Wait(5_000)],
+        clean: true,
+    }])
+    .await;
+    let t = Instant::now();
+    let e = client(&s)
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            ..RetryPolicy::default()
+        })
+        .with_stream_idle_timeout(Duration::from_millis(150))
+        .stream_message(&request(), &|_| {}, None)
+        .await
+        .unwrap_err();
+    let ClaudeError::StreamInterrupted(b) = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(b.kind, BreakKind::Idle);
+    assert_eq!(b.usage, None, "nothing known: charged the estimate");
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+/// The same, ended by the caller's deadline.
+#[tokio::test]
+async fn a_stalled_error_body_breaks_at_the_deadline() {
+    let s = serve(vec![Script {
+        status: 500,
+        steps: vec![Step::Send("{".into()), Step::Wait(5_000)],
+        clean: true,
+    }])
+    .await;
+    let e = client(&s)
+        .stream_message(
+            &request(),
+            &|_| {},
+            Some(Instant::now() + Duration::from_millis(150)),
+        )
+        .await
+        .unwrap_err();
+    let ClaudeError::StreamInterrupted(b) = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(b.kind, BreakKind::Deadline);
+}
+
+/// A sent, silent attempt may be billed: a retry that finds the deadline gone
+/// must not hide it, or its hold is dropped with no charge.
+#[tokio::test]
+async fn a_retry_that_cannot_be_sent_keeps_the_earlier_error() {
+    let s = serve(vec![ok(vec![Step::Wait(2_000)])]).await;
+    let e = client(&s)
+        .with_stream_idle_timeout(Duration::from_millis(100))
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(300),
+            max_delay: Duration::from_millis(400),
+        })
+        .stream_message(
+            &request(),
+            &|_| {},
+            Some(Instant::now() + Duration::from_millis(200)),
+        )
+        .await
+        .unwrap_err();
+    let ClaudeError::StreamInterrupted(b) = e else {
+        panic!("{e:?}")
+    };
+    assert_eq!(b.kind, BreakKind::Idle, "the sent attempt's error");
+    assert_eq!(s.bodies.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn a_deadline_already_passed_sends_nothing() {
     let s = serve(vec![ok(full_reply())]).await;

@@ -333,6 +333,18 @@ pub fn poll_plan(streaming: bool) -> (u64, u32) {
 /// still being written after [`POLL_MAX`] polls).
 pub const POLL_GAVE_UP_NOTE: &str = "Taking longer than usual \u{2014} reload later";
 
+/// The opinion's pill while its draft can be opened: its state and its words
+/// for screen readers. Once the page has stopped asking, the fill stops and it
+/// says so.
+pub fn draft_pill(label: &str, gave_up: bool) -> (crate::run_tracker::PillState, String) {
+    use crate::run_tracker::PillState;
+    if gave_up {
+        (PillState::Stopped, format!("{label}. {POLL_GAVE_UP_NOTE}"))
+    } else {
+        (PillState::Filling, PillState::Filling.aria(label))
+    }
+}
+
 /// What the run page does at a poll tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Poll {
@@ -1584,6 +1596,17 @@ mod tests {
             draft: None,
             streaming: false,
         }
+    }
+
+    #[test]
+    fn the_draft_pill_says_when_the_page_has_stopped_asking() {
+        use crate::run_tracker::PillState;
+        let (state, aria) = draft_pill("Expert opinion", false);
+        assert_eq!(state, PillState::Filling);
+        assert_eq!(aria, PillState::Filling.aria("Expert opinion"));
+        let (state, aria) = draft_pill("Expert opinion", true);
+        assert_eq!(state, PillState::Stopped);
+        assert!(aria.contains(POLL_GAVE_UP_NOTE));
     }
 
     #[test]

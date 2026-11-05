@@ -100,6 +100,9 @@ pub async fn temporal_view(
         Ok(Some(mut v)) => {
             if let Some(t) = &mut v {
                 t.streaming = state.stream && t.status == super::temporal::PENDING;
+                if !state.stream {
+                    t.draft = None;
+                }
             }
             Ok(v)
         }
