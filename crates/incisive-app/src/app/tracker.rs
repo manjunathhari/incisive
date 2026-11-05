@@ -116,6 +116,9 @@ pub(super) struct TrackerUi {
     /// The clock: moved once a second in the browser.
     pub now: RwSignal<DateTime<Utc>>,
     show_all: RwSignal<bool>,
+    /// Stage S1: the results row, folded while the answer is being written,
+    /// opened by the reader.
+    pub results_open: RwSignal<bool>,
     /// The pill last clicked: the only one with a border.
     pub clicked: RwSignal<Option<Pill>>,
     /// The steps at the last draw: a new one rolls in.
@@ -138,6 +141,7 @@ impl TrackerUi {
         TrackerUi {
             now,
             show_all: RwSignal::new(false),
+            results_open: RwSignal::new(false),
             clicked: RwSignal::new(None),
             seen: StoredValue::new(None),
         }

@@ -226,6 +226,8 @@ details.rt-checks[open] { display:flex; flex-direction:column; gap:12px; padding
 "##;
 
 /// How a reference number in board text links.
+// Short-lived and copied into each link; the board page's variant is small.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy)]
 enum Cite {
     /// On the run page's Expert Opinion view: the study sheet on the same
@@ -279,6 +281,8 @@ fn reveal_answer() {
 /// The run page's Expert Opinion state (signals; copied into views).
 #[derive(Clone, Copy)]
 pub(super) struct Expert {
+    /// Stage S1: the opinion as far as it is written.
+    draft: Memo<Option<String>>,
     run_id: Uuid,
     /// The Expert Opinion view is shown (`#expert`).
     pub expert: RwSignal<bool>,
@@ -358,7 +362,16 @@ impl Expert {
                 s
             }
         });
+        // Stage S1: the opinion as far as it is written.
+        let draft = Memo::new(move |_| {
+            state.with(|v| {
+                v.draft
+                    .clone()
+                    .filter(|t| crate::draft_page::has_content(&crate::draft_page::read_opinion(t)))
+            })
+        });
         let x = Expert {
+            draft,
             run_id,
             expert: RwSignal::new(false),
             state,
@@ -392,31 +405,52 @@ impl Expert {
             on_cleanup(move || listener.remove());
         }
         x.poll();
+        // Stage S1: an opinion that fails while its draft is open has nothing
+        // to show: back to the answer.
+        Effect::new(move |_| {
+            if x.expert.get_untracked() && !x.can_open() {
+                x.expert.set(false);
+            }
+        });
         x
+    }
+
+    /// The view can be opened: ready, or being written with something to show.
+    fn can_open(self) -> bool {
+        self.option.get().selectable() || self.draft_showing()
+    }
+
+    /// A draft to show (tracked): the opinion is still being written.
+    fn draft_showing(self) -> bool {
+        self.option.get().polls() && self.draft.with(Option::is_some)
     }
 
     /// Show the view the hash names (`#expert` once ready).
     fn follow_hash(self) {
-        let want = current_hash() == "#expert" && self.option.get_untracked().selectable();
+        let can_open = self.option.get_untracked().selectable()
+            || (self.option.get_untracked().polls() && self.draft.with_untracked(Option::is_some));
+        let want = current_hash() == "#expert" && can_open;
         if self.expert.get_untracked() != want {
             self.expert.set(want);
         }
     }
 
     /// While pending: ask again every [`xp::POLL_EVERY_SECS`] seconds, at
-    /// most [`xp::POLL_MAX`] times ([`xp::next_poll`]); stop once the row is
-    /// no longer pending, and say so on the option if it never is.
+    /// most [`xp::POLL_MAX`] times ([`xp::next_poll`]), or with `STREAM=on`
+    /// every [`xp::STREAM_POLL_EVERY_SECS`] seconds for as long; stop once the
+    /// row is no longer pending, and say so on the option if it never is.
     fn poll(self) {
         type Timer = Option<leptos::leptos_dom::helpers::IntervalHandle>;
         let timer: StoredValue<Timer, LocalStorage> = StoredValue::new_local(None);
         let count = StoredValue::new(0u32);
+        let (every, max) = xp::poll_plan(self.state.with_untracked(|v| v.streaming));
         let stop = move || {
             if let Some(h) = timer.try_update_value(|t| t.take()).flatten() {
                 h.clear();
             }
         };
         Effect::new(move |_| {
-            match xp::next_poll(count.get_value(), self.option.get()) {
+            match xp::next_poll_within(count.get_value(), self.option.get(), max) {
                 xp::Poll::Continue => {}
                 xp::Poll::Stop => return stop(),
                 xp::Poll::GiveUp => {
@@ -428,7 +462,11 @@ impl Expert {
                 return;
             }
             let h = leptos::leptos_dom::helpers::set_interval_with_handle(
-                move || match xp::next_poll(count.get_value(), self.option.get_untracked()) {
+                move || match xp::next_poll_within(
+                    count.get_value(),
+                    self.option.get_untracked(),
+                    max,
+                ) {
                     xp::Poll::Stop => stop(),
                     xp::Poll::GiveUp => {
                         stop();
@@ -446,7 +484,7 @@ impl Expert {
                         });
                     }
                 },
-                std::time::Duration::from_secs(xp::POLL_EVERY_SECS),
+                std::time::Duration::from_secs(every),
             );
             timer.set_value(h.ok());
         });
@@ -540,7 +578,34 @@ pub(super) fn option_bar(x: Expert, chat: Option<Chat>) -> AnyView {
     };
     let expert_tab = move || {
         let s = x.option.get();
-        if s.selectable() {
+        if x.draft_showing() {
+            // Being written with text to read: it fills as before, and opens.
+            let ready_at = answer.ready_at;
+            let style = move || {
+                let secs = (ui.now.get() - ready_at).num_seconds();
+                rt::fill_background(rt::timed_fill(secs, rt::EXPERT_USUAL_SECS))
+            };
+            view! {
+                <a
+                    class="rx-tab"
+                    id=EXPERT_TAB_ID
+                    class:on=move || x.expert.get()
+                    role="tab"
+                    aria-selected=move || x.expert.get().to_string()
+                    aria-controls="expert"
+                    aria-label=PillState::Filling.aria(s.text())
+                    data-state=PillState::Filling.as_str()
+                    data-clicked=ui.clicked_attr(Pill::Expert)
+                    style=style
+                    href="#expert"
+                    rel="external"
+                    on:click=to_expert
+                >
+                    {s.text()}
+                </a>
+            }
+            .into_any()
+        } else if s.selectable() {
             view! {
                 <a
                     class="rx-tab"
@@ -668,7 +733,11 @@ pub(super) fn expert_view(x: Expert) -> AnyView {
             aria-labelledby=EXPERT_TAB_ID
             hidden=move || !x.expert.get()
         >
-            {move || x.opened.with(|o| o.as_ref().map(|o| expert_body(x, o, &x.known_refs(o))))}
+            {move || {
+                x.opened
+                    .with(|o| o.as_ref().map(|o| expert_body(x, o, &x.known_refs(o))))
+                    .or_else(|| x.draft.get().map(|t| super::draft::opinion_view(&t)))
+            }}
         </section>
     }
     .into_any()

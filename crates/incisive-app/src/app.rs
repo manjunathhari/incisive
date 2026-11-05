@@ -33,6 +33,7 @@ use crate::ask::{ActivityView, AskOutcome, MeView};
 // The ivory redesign: header and tokens, the Ask page and the Library.
 mod ask_page;
 mod details;
+mod draft;
 // The evidence chat's option and window.
 mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
@@ -1186,6 +1187,11 @@ fn run_view(
     let status = v.summary.status;
     let run_id = v.summary.id;
     let intro_row = v.intro;
+    // Stage S1: the answer as far as it is written (the API sends it only
+    // while the run is running with no answer).
+    let draft_text = v.draft.filter(|t| {
+        status.is_active() && crate::draft_page::has_content(&crate::draft_page::read_answer(t))
+    });
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw: Phase 3
     // answers (version 3) with their own view, everything else as Phase 2.
@@ -1274,7 +1280,11 @@ fn run_view(
     // The clock starts at the first step, as `elapsed_s` nearly does, so a
     // queue wait cannot make it step back at the end.
     let clock_from = v.steps.first().map_or(created_at, |s| s.at);
-    let last_step_at = v.steps.last().map_or(created_at, |s| s.at);
+    let last_step_at = v
+        .steps
+        .iter()
+        .rfind(|s| !crate::run_tracker::is_expert_first_words(&s.line))
+        .map_or(created_at, |s| s.at);
     let total_secs = elapsed_s.map_or((last_step_at - clock_from).num_seconds(), |s| s as i64);
     let mut read = {
         let lines: Vec<crate::run_tracker::Step<'_>> = v
@@ -1326,8 +1336,17 @@ fn run_view(
             total_secs,
         )
     });
+    // Stage S1: once the first words are there, the card and the introduction
+    // fold into rows, so the answer sits near the top.
+    let drafting = draft_text.is_some();
+    let card = if drafting {
+        card.map(|c| draft::fold_results(ui, clock_from, c))
+    } else {
+        card
+    };
     // In front of the card, in every layout below; nothing without a text.
-    let card = intro::with_results(intro_ui, working, intro_row, card);
+    let card = intro::with_results(intro_ui, working && !drafting, intro_row, card);
+    let answer_block = answer_block.or_else(|| draft_text.map(|t| draft::answer_view(&t)));
     let Some(t) = temporal else {
         return view! {
             // Page chrome (ivory redesign): Figtree; the answer below is untouched.
