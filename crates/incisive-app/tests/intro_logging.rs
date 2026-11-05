@@ -57,6 +57,7 @@ fn state(pool: PgPool, llm: Arc<dyn LlmClient>) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: IntroRuntime {
             settings: IntroSettings {
                 on: true,

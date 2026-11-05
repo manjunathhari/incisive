@@ -145,6 +145,25 @@ pub struct Tracker {
     pub ended_well: bool,
 }
 
+/// Stage S1: the words after a writer's role in its first-words step line.
+const FIRST_WORDS: &str = "first words after ";
+/// The role of the Expert Opinion writer's first-words step line.
+const EXPERT_ROLE: &str = "Expert Opinion";
+
+/// A streamed writer's step line: how long until its first words.
+pub fn first_words_line(expert: bool, secs: u64) -> String {
+    let role = if expert { EXPERT_ROLE } else { "Writer" };
+    format!("{role}: {FIRST_WORDS}{secs} s")
+}
+
+/// The Expert Opinion writer's first-words line. It is stored after the run has
+/// ended, so it says nothing about when the answer was ready.
+pub fn is_expert_first_words(line: &str) -> bool {
+    line.strip_prefix(EXPERT_ROLE)
+        .and_then(|l| l.strip_prefix(": "))
+        .is_some_and(|l| l.starts_with(FIRST_WORDS))
+}
+
 /// The usual time to the answer, under the clock.
 pub fn usual_label(mode: RunMode) -> &'static str {
     match mode {
@@ -418,6 +437,8 @@ impl Seen {
                     }
                 }
             }
+            // Stage S1: a note on the writer already counted; the fill goes on.
+            "Writer" if body.starts_with(FIRST_WORDS) => {}
             "Writer" => {
                 self.any = true;
                 self.answer = Some("being written");
@@ -1396,5 +1417,86 @@ mod tests {
         );
         assert_eq!(PillState::Idle.as_str(), "idle");
         assert_eq!(PillState::Filling.as_str(), "filling");
+    }
+
+    // ---------- Stage S1: the first-words step lines ----------
+
+    /// The line a streamed writer adds says nothing new: the card, the sentence
+    /// and the fill read as they did, and the fill never steps back.
+    #[test]
+    fn the_writers_first_words_line_changes_nothing_but_the_rolling_line() {
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-11-05T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let at = |s: i64| t0 + chrono::Duration::seconds(s);
+        let line = "Writer: writing the answer from 15 studies (15 with an abstract)";
+        let first = first_words_line(false, 26);
+        assert_eq!(first, "Writer: first words after 26 s");
+        let base = [
+            Step {
+                at: at(0),
+                line: "Researcher: selected 15 studies (15 RCTs)",
+            },
+            Step { at: at(100), line },
+        ];
+        let with: Vec<Step<'_>> = base
+            .iter()
+            .copied()
+            .chain([Step {
+                at: at(126),
+                line: &first,
+            }])
+            .collect();
+        let a = read(RunMode::Focused, &base, RunState::Working, None);
+        let b = read(RunMode::Focused, &with, RunState::Working, None);
+        assert_eq!(b.rows, a.rows);
+        assert_eq!(b.sentence, a.sentence);
+        assert_eq!(b.fill, a.fill, "the fill goes on from the writer's start");
+        assert_eq!(b.role, "Writer");
+        assert_eq!(b.rolling, "First words after 26 s");
+        let now = at(130);
+        assert_eq!(b.fill.at(now), a.fill.at(now));
+    }
+
+    /// The Expert Opinion's line lands after the run has ended: the finished
+    /// card reads the same.
+    #[test]
+    fn the_expert_first_words_line_leaves_the_finished_card_alone() {
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-11-05T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first = first_words_line(true, 41);
+        assert_eq!(first, "Expert Opinion: first words after 41 s");
+        assert!(is_expert_first_words(&first));
+        assert!(!is_expert_first_words("Writer: first words after 41 s"));
+        assert!(!is_expert_first_words("Expert Opinion: something else"));
+        let base = [
+            Step {
+                at: t0,
+                line: "Writer: writing the answer from 15 studies (15 with an abstract)",
+            },
+            Step {
+                at: t0 + chrono::Duration::seconds(100),
+                line: "Citation check: every citation is one of the selected studies",
+            },
+            Step {
+                at: t0 + chrono::Duration::seconds(101),
+                line: "Answer ready",
+            },
+        ];
+        let with: Vec<Step<'_>> = base
+            .iter()
+            .copied()
+            .chain([Step {
+                at: t0 + chrono::Duration::seconds(141),
+                line: &first,
+            }])
+            .collect();
+        let a = read(RunMode::Focused, &base, RunState::Answered, None);
+        let b = read(RunMode::Focused, &with, RunState::Answered, None);
+        assert_eq!(b.rows, a.rows);
+        assert_eq!(b.sentence, a.sentence);
+        assert_eq!(b.fill.at(t0), a.fill.at(t0));
+        assert!(b.ended_well);
     }
 }

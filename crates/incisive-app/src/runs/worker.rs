@@ -479,6 +479,9 @@ async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise:
         End::Deleted => Some("deleted"),
         End::AlreadyFinished => None,
     };
+    // Stage S1: whatever the end, the half-written answer goes with it. Writes
+    // arriving later store nothing, as the run is no longer running.
+    super::drafts::clear(pool, run_id, super::drafts::Part::Answer).await;
     // The charges stand; only the unused remainder is released, less what
     // calls in flight still hold.
     if spend::release_keeping(pool, user_id, run_id, keep)
@@ -558,6 +561,10 @@ pub async fn recover_stale_runs(pool: &PgPool) -> sqlx::Result<usize> {
         tracing::warn!("temporal recovery failed; will retry");
     }
     super::intro::recover(pool).await;
+    // Stage S1: drafts whose writer has ended. Same rule: retried next sweep.
+    if super::drafts::sweep(pool).await.is_err() {
+        tracing::warn!("draft sweep failed; will retry");
+    }
     Ok(marked.len())
 }
 

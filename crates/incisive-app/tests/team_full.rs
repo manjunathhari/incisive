@@ -164,6 +164,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
@@ -2591,4 +2592,66 @@ async fn a_pick_that_cannot_be_fetched_gets_a_note_and_the_answer_ships() {
         assert!(a.notes.contains(&format!("{note}.")), "{what}");
         assert!(!a.references.iter().any(|r| r.pmid == pick));
     }
+}
+
+// ---------- Stage S1: the writer streamed ----------
+
+#[path = "support/stream_llm.rs"]
+mod stream_llm;
+
+/// Full, streamed or not: the same stored answer, charges and status. Calls
+/// run side by side here, so the charges and steps are compared sorted.
+#[tokio::test]
+async fn a_streamed_full_run_stores_exactly_what_a_plain_one_does() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (qa, qb) = quotes_for(&pool, &server).await;
+    let run = |llm: Arc<dyn LlmClient>, stream: bool| {
+        let (pool, lit) = (pool.clone(), literature(&server));
+        async move {
+            let mut st = app_state(pool.clone(), lit);
+            st.llm = Some(agent_llm(llm, MODEL));
+            st.stream = stream;
+            let (uid, user) = new_user(&pool).await;
+            let AskOutcome::RunStarted { run_id, .. } =
+                start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Focused, None)
+                    .await
+                    .unwrap()
+            else {
+                panic!()
+            };
+            let v = wait_done(&pool, uid, run_id).await;
+            let mut body = v.answer.clone().unwrap();
+            for f in ["elapsed_s", "created_at"] {
+                body.as_object_mut().unwrap().remove(f);
+            }
+            let mut ch = charges(&pool, uid).await;
+            ch.sort_unstable();
+            let mut l = lines(&v.steps);
+            l.sort();
+            (v.summary.status, body, ch, l, v.summary.cost_paise)
+        }
+    };
+    let plain = run(Arc::new(full_script(2, Some((&qa, &qb)))), false).await;
+    assert_eq!(plain.0, RunStatus::Done, "{:?}", plain.3);
+
+    let llm = Arc::new(stream_llm::StreamLlm::new(Arc::new(full_script(
+        2,
+        Some((&qa, &qb)),
+    ))));
+    let streamed = run(llm.clone(), true).await;
+    assert_eq!(streamed.0, plain.0);
+    assert_eq!(streamed.1, plain.1, "the stored answer");
+    assert_eq!(streamed.2, plain.2, "the charges");
+    assert_eq!(streamed.4, plain.4, "the cost");
+    assert_eq!(llm.streamed.lock().unwrap().len(), 1, "the writer only");
+    let mut l = streamed.3.clone();
+    assert_eq!(
+        l.iter()
+            .filter(|x| x.starts_with("Writer: first words after "))
+            .count(),
+        1
+    );
+    l.retain(|x| !x.starts_with("Writer: first words after "));
+    assert_eq!(l, plain.3);
 }

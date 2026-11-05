@@ -518,6 +518,7 @@ pub(crate) fn maybe_billed(e: &claude_client::ClaudeError) -> bool {
         Api { .. } | RateLimited { .. } | Overloaded => false,
         Decode { status, .. } => (200..300).contains(status),
         Transport(t) => !t.is_connect(),
+        StreamInterrupted(_) => true,
     }
 }
 
@@ -585,7 +586,7 @@ fn error_status(e: &claude_client::ClaudeError) -> Option<u16> {
         Api { status, .. } | Decode { status, .. } => Some(*status),
         RateLimited { .. } => Some(429),
         Overloaded => Some(529),
-        Transport(_) => None,
+        Transport(_) | StreamInterrupted(_) => None,
     }
 }
 
@@ -641,6 +642,7 @@ pub(crate) fn error_kind(e: &claude_client::ClaudeError) -> &'static str {
         Overloaded => "overloaded",
         Transport(_) => "transport",
         Decode { .. } => "decode",
+        StreamInterrupted(_) => "stream_interrupted",
     }
 }
 

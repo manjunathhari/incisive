@@ -625,6 +625,43 @@ step line, stored answer, status, run cost or check changes with it on or off.
 Both are checked before the build (only the ends trimmed), and the app refuses any other `INTRO`
 value at startup. Rolling back: set `INTRO=off`; stored rows stay but are not shown.
 
+## 15. Writer streaming
+
+The answer writer and the Expert Opinion writer stream their replies, so the page can show the text
+as it is written. The prompts, schemas, models, effort, `max_tokens` and the final stored answer and
+opinion do not change: the pieces are rebuilt into the same reply, which then takes the same path.
+No other role streams.
+
+- **Time limits.** While streaming, neither writer has a whole-request limit. A call is given up
+  after 60 s with no event (pings count) or at its overall limit: the run's hard stop for the answer
+  writer, the job's time limit (300 s) for the opinion. With `STREAM=off` the plain limits return:
+  120 s an attempt, up to 3 attempts, for the answer writer.
+- **A broken stream.** Before the first event the client's usual retries apply. After it, the answer
+  writer retries once from the start, as a new call with its own hold, if at least its start gate
+  (Quick 150 s, Full 180 s) is left before the hard stop and the budget allows; otherwise the run
+  takes the usual failed-call path. The opinion's one-call rule stands: the job ends `failed`
+  (`api error`), never a second call.
+- **What a broken stream costs.** The real input from `message_start`, and as output the most of
+  what the API last reported and the bytes received at 2 bytes a token, rounded up. The estimate is
+  lowered to fit the call's hold; real reported usage is booked in full, as on every call. With no
+  `message_start` seen, the whole estimate, as for a timeout. Thinking the API does not send cannot
+  be counted, and whether the API bills a broken stream is not known: compare the Console if this
+  starts to happen often.
+- **Drafts.** The text so far is in `incisive.run_drafts` (migration 0016, additive), at most once
+  every 1.5 s per writer and only when it has grown, from a detached task; a failed write is logged
+  with ids only and dropped. It holds reply text, like `run_answers`, cascades on the run's delete,
+  and is deleted when the run or the opinion ends; recovery removes any left behind. It is shown only
+  to the run's owner, while the writer works. The page asks every 2 s.
+- **Step lines.** `Writer: first words after N s` and `Expert Opinion: first words after N s`. The
+  second is added to the run's steps after the run has ended; neither changes the run's row.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `STREAM` | no | `on` or `off`. With `off`: today's plain calls, limits and pages exactly, and no drafts. | `on` |
+
+Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
+Rolling back: set `STREAM=off` and re-run Deploy; old code ignores the empty table.
+
 ## Memory layer (Gemma embeddings)
 
 The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama

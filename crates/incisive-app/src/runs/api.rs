@@ -72,11 +72,19 @@ pub async fn list_view(
 
 /// One of the user's runs with its steps and answer.
 pub async fn get_view(state: &AppState, user: &User, run_id: Uuid) -> Result<RunView, RunApiError> {
-    match store::get_run_for_user(&state.pool, user.id, run_id).await {
-        Ok(Some(v)) => Ok(v),
-        Ok(None) => Err(RunApiError::NotFound),
-        Err(_) => Err(failed("get", user.id)),
+    let mut v = match store::get_run_for_user(&state.pool, user.id, run_id).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return Err(RunApiError::NotFound),
+        Err(_) => return Err(failed("get", user.id)),
+    };
+    // Stage S1: the answer as far as it is written, to its owner (checked
+    // above), only while it is being written. A failed read shows no draft.
+    if state.stream && v.summary.status == super::RunStatus::Running && v.answer.is_none() {
+        v.draft = super::drafts::get(&state.pool, run_id, super::drafts::Part::Answer)
+            .await
+            .unwrap_or_default();
     }
+    Ok(v)
 }
 
 /// Temporal T3 (read path for T4): the expert opinion of one of the
@@ -89,7 +97,12 @@ pub async fn temporal_view(
     run_id: Uuid,
 ) -> Result<Option<super::TemporalView>, RunApiError> {
     match super::temporal::get_for_user(&state.pool, user.id, run_id).await {
-        Ok(Some(v)) => Ok(v),
+        Ok(Some(mut v)) => {
+            if let Some(t) = &mut v {
+                t.streaming = state.stream && t.status == super::temporal::PENDING;
+            }
+            Ok(v)
+        }
         Ok(None) => Err(RunApiError::NotFound),
         Err(_) => Err(failed("temporal", user.id)),
     }

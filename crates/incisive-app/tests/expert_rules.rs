@@ -98,6 +98,8 @@ fn a_done_row_with_a_fixture_board_is_ready() {
             board: Some(s["board"].clone()),
             table: Some(serde_json::to_value(&t).unwrap()),
             flags: Some(s["flags"].clone()),
+            draft: None,
+            streaming: false,
         };
         assert_eq!(OptionState::of(&v), OptionState::Ready, "{name}");
         let o = xp::open(&v).unwrap();

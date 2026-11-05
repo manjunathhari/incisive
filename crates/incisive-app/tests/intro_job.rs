@@ -96,6 +96,7 @@ fn state_with_engine(
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: IntroRuntime {
             settings: intro,
             client: Some(intro_llm),

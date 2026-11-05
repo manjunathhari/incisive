@@ -80,6 +80,7 @@ fn base_state(pool: PgPool, memory: MemorySettings, chat: ChatSettings) -> AppSt
         completeness: false,
         temporal: TemporalSettings::default(),
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         chat,
         memory,
