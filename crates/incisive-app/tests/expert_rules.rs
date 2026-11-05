@@ -537,14 +537,15 @@ fn expert_styles_are_scoped_away_from_the_answer() {
             assert!(scoped, "unscoped selector: {sel}");
             // The run page's wrapper (`.rx`, `.rx-pre`) holds the answer
             // too: a rule under it must name one of the option's or the
-            // view's own `rx-*` elements.
+            // view's own `rx-*` elements, or the page chrome above the
+            // answer (`.run-chrome`, the results card and Progress).
             let mut parts = sel.split_whitespace();
             let first = parts.next().unwrap();
             let base = first.split([':', '[']).next().unwrap();
             if base == ".rx" || base == ".rx-pre" {
                 let next = parts.next().unwrap_or("");
                 assert!(
-                    next.starts_with(".rx-") || next.contains(".rx-"),
+                    next.starts_with(".rx-") || next.contains(".rx-") || next == ".run-chrome",
                     "a rule under the run page wrapper reaches the answer: {sel}"
                 );
             }

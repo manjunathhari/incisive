@@ -522,12 +522,18 @@ async fn t4_each_status_renders_its_option() {
             assert!(at(">Original<") < at(">Expert<"));
             assert!(at(">Expert<") < at(">Today<"));
             assert!(at(">Today<") < at("Decision by scenario"));
-            assert!(at("Decision by scenario") < at("Open the Temporal board"));
-            assert!(at("Open the Temporal board") < at("Ask this evidence"));
+            assert!(
+                at("Decision by scenario") < at("Open the Temporal board and Expert discussion")
+            );
+            assert!(
+                !v.contains("Ask this evidence"),
+                "the disabled button is gone"
+            );
             assert!(v.contains(&format!(r#"href="/run/{}/temporal""#, "RUN-ID")));
-            let ask = &v[at("Ask this evidence") - 200..at("Ask this evidence")];
-            assert!(ask.contains("disabled"), "{ask}");
-            assert!(v.contains(">Later<"));
+            // The rule that hides the results card, the Introduction row and
+            // Progress while this view is open, also before hydration.
+            assert!(m.contains(".rx-expon .run-chrome .rk-card"));
+            assert!(m.contains(".rx-pre:has(.rx-expert:target:not(:empty)) .run-chrome .rk-card"));
             // Citations link to the study sheets on the page, and each
             // carries the mark of the handler that switches to the Answer
             // view before opening the sheet (the sheets sit in the answer,

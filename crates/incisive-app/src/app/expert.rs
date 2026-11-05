@@ -4,11 +4,13 @@
 //! - **Run page** ([`Expert`], [`option_bar`], [`expert_view`]): an "Answer
 //!   | Expert opinion" option under the title and badges when the run has a
 //!   temporal row, and the Expert Opinion view (opinion, why, the three-line
-//!   At a glance, the scenario cards, the board link and a disabled "Ask
-//!   this evidence"). The answer below is drawn exactly as before, outside
-//!   these pieces. `#expert` opens the view, also before hydration (CSS
-//!   `:target`); while the opinion is being written the page polls every
-//!   15 s for at most 10 minutes and flips to ready without a reload.
+//!   At a glance, the scenario cards and the board link). While the view is
+//!   open the results card, the Introduction row and Progress are hidden, so
+//!   the verdict sits under the pills. The answer below is drawn exactly as
+//!   before, outside these pieces. `#expert` opens the view, also before
+//!   hydration (CSS `:target`); while the opinion is being written the page
+//!   polls every 15 s for at most 10 minutes and flips to ready without a
+//!   reload.
 //! - **Board page** ([`TemporalPage`], `/run/:id/temporal`): the frozen
 //!   Temporal board, steps 1–7, with Rust-drawn SVG (timeline and linked
 //!   progression) and the stored checks folded at the bottom.
@@ -44,7 +46,7 @@ pub const EXPERT_STYLE: &str = r##"
   --rt-era1:#ece4cf; --rt-era2:#e2e9e0; --rt-era3:#dde6ef; }
 .rx-answer[hidden], .rx-expert[hidden] { display:none; }
 .rx-late { flex-basis:100%; font-size:.72rem; font-weight:500; color:var(--rt-warn); }
-.rx-expert { font-family:var(--iv-font); display:flex; flex-direction:column; gap:10px; max-width:760px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
+.rx-expert { font-family:var(--iv-font); display:flex; flex-direction:column; gap:10px; margin-top:6px; color:var(--iv-body); font-size:15px; line-height:1.5; overflow-wrap:anywhere; min-width:0; }
 .rx-op { background:var(--iv-tint); border-radius:16px; padding:12px 14px; display:flex; flex-direction:column; gap:6px; }
 .rx-who { font-size:.72rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--iv-accent); }
 .rx-verdict { margin:0; color:var(--iv-ink); font-weight:600; font-size:.98rem; line-height:1.45; }
@@ -59,15 +61,14 @@ pub const EXPERT_STYLE: &str = r##"
 .rx-scen > div { background:var(--iv-ground); border-radius:10px; padding:8px 10px; font-size:.86rem; display:flex; flex-direction:column; gap:2px; }
 .rx-scen .lab { font-size:.7rem; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--iv-muted); }
 .rx-scen .choice { color:var(--iv-ink); font-weight:700; }
-.rx-act { display:flex; flex-direction:column; gap:8px; margin-top:4px; max-width:560px; }
+.rx-act { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
 .rx .rx-btn { font:inherit; font-weight:700; font-size:.92rem; border-radius:14px; padding:10px 14px; min-height:46px; display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid var(--iv-accent); background:var(--iv-accent); color:#fff; text-align:left; text-decoration:none; }
-.rx .rx-btn.ghost { background:var(--iv-card); color:var(--iv-accent); }
-.rx .rx-btn[disabled] { cursor:default; opacity:1; }
-.rx-btn small { display:block; font-weight:500; font-size:.76rem; opacity:.85; }
-.rx-soon, .rt-soon { flex:none; font-size:.66rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; background:var(--iv-tint); color:var(--iv-accent); border-radius:999px; padding:2px 8px; }
 .rx-expert a.rx-cite, .rt a.rt-cite { color:var(--iv-accent); font-weight:600; }
 .rx-seg a:focus-visible, .rx-seg button:focus-visible, .rx-expert a:focus-visible, .rx-expert button:focus-visible, .rt a:focus-visible, .rt summary:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
+/* While the Expert opinion is open: the verdict sits right under the pills. */
+.rx-expon .run-chrome .rk-card, .rx-expon .run-chrome .in-fold, .rx-expon .run-chrome > details.run-fold { display:none; }
 /* Before hydration: #expert opens a ready view (CSS :target) and hides the answer. */
+.rx-pre:has(.rx-expert:target:not(:empty)) .run-chrome .rk-card, .rx-pre:has(.rx-expert:target:not(:empty)) .run-chrome .in-fold, .rx-pre:has(.rx-expert:target:not(:empty)) .run-chrome > details.run-fold { display:none; }
 .rx-pre .rx-expert:target:not(:empty)[hidden] { display:flex; }
 .rx-pre:has(.rx-expert:target:not(:empty)) .rx-answer { display:none; }
 .rx-pre:has(.rx-expert:target:not(:empty)) .rx-tab.on { background:none; color:var(--iv-muted); }
@@ -657,13 +658,9 @@ fn expert_body(x: Expert, o: &Opened, known: &BTreeSet<u16>) -> AnyView {
         {decisions}
         <div class="rx-act">
             <a class="rx-btn" href=format!("/run/{run_id}/temporal")>
-                <span>"Open the Temporal board"</span>
+                <span>"Open the Temporal board and Expert discussion"</span>
                 <span aria-hidden="true">"\u{2192}"</span>
             </a>
-            <button class="rx-btn ghost" type="button" disabled=true>
-                <span>"Ask this evidence" <small>"Reads only this answer and its expert opinion"</small></span>
-                <span class="rx-soon">"Later"</span>
-            </button>
         </div>
     }
     .into_any()
