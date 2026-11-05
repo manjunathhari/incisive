@@ -808,16 +808,6 @@ pub fn speaker_label(speaker: &str) -> String {
     }
 }
 
-/// The round's heading: "Round 2 · Competing explanations".
-pub fn round_heading(r: &Round) -> String {
-    let title = r.title.trim();
-    if title.is_empty() {
-        format!("Round {}", r.round)
-    } else {
-        format!("Round {} \u{b7} {title}", r.round)
-    }
-}
-
 /// The class of a scoreboard status chip: leading (accent), unresolved
 /// (warn), anything else grey.
 pub fn status_class(status: &str) -> &'static str {
@@ -829,6 +819,109 @@ pub fn status_class(status: &str) -> &'static str {
     } else {
         "rt-chip grey"
     }
+}
+
+// ---------- the round table's chat ----------
+
+/// The bold opening of a point: up to its first colon, when that is near the
+/// start and holds no sentence end or citation ("What held:").
+static LEAD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)^([^:.\[\]]{3,48}:)(\s.*)$").expect("lead pattern"));
+/// An explanation's code in the text: H1 … H9.
+static HYPOTHESIS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bH[1-9]\b").expect("hypothesis pattern"));
+
+/// A run of a chat message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSpan {
+    Text(String),
+    /// The bold opening.
+    Lead(String),
+    /// An explanation's code (H1), marked in the text.
+    Code(String),
+    Ref(u16),
+}
+
+/// "H2 blockers", "H1 receptor": the drug, not an explanation's code.
+fn is_drug_word(after: &str) -> bool {
+    let a = after.trim_start_matches([' ', '-']).to_ascii_lowercase();
+    ["block", "receptor", "antagonist", "antihistamine"]
+        .iter()
+        .any(|w| a.starts_with(w))
+}
+
+fn split_codes(text: &str, bold: bool, out: &mut Vec<ChatSpan>) {
+    let plain = |t: &str| {
+        if bold {
+            ChatSpan::Lead(t.to_string())
+        } else {
+            ChatSpan::Text(t.to_string())
+        }
+    };
+    let mut at = 0;
+    for m in HYPOTHESIS.find_iter(text) {
+        if is_drug_word(&text[m.end()..]) {
+            continue;
+        }
+        if m.start() > at {
+            out.push(plain(&text[at..m.start()]));
+        }
+        out.push(ChatSpan::Code(m.as_str().to_string()));
+        at = m.end();
+    }
+    if at < text.len() {
+        out.push(plain(&text[at..]));
+    }
+}
+
+/// A debate point cut into runs for its chat message: the bold opening, the
+/// explanation codes and the reference links. Every character is kept, in
+/// order, as [`cite_pieces`] keeps them.
+pub fn chat_spans(text: &str, known: &BTreeSet<u16>) -> Vec<ChatSpan> {
+    let mut out = Vec::new();
+    let rest = match LEAD.captures(text) {
+        Some(c) => {
+            split_codes(c.get(1).map_or("", |m| m.as_str()), true, &mut out);
+            c.get(2).map_or("", |m| m.as_str())
+        }
+        None => text,
+    };
+    for p in cite_pieces(rest, known) {
+        match p {
+            Piece::Text(t) => split_codes(&t, false, &mut out),
+            Piece::Ref(n) => out.push(ChatSpan::Ref(n)),
+        }
+    }
+    out
+}
+
+/// A point about the patient's question gets its own band in the chat.
+pub fn is_patient_point(text: &str) -> bool {
+    text.trim_start()
+        .get(..16)
+        .is_some_and(|s| s.eq_ignore_ascii_case("patient question"))
+}
+
+/// The tab's title for a round: its stored title.
+pub fn round_tab(r: &Round) -> (String, String) {
+    (format!("Round {}", r.round), r.title.trim().to_string())
+}
+
+// ---------- the era cards' "More" ----------
+
+/// A box this much longer than the usual length (px) is not worth cutting.
+pub const MORE_SLACK: i32 = 24;
+
+/// From the "What the era showed" boxes' full heights: the usual length (the
+/// middle one) and which boxes run past it and get "More".
+pub fn more_cut(heights: &[i32]) -> (i32, Vec<bool>) {
+    let mut sorted = heights.to_vec();
+    sorted.sort_unstable();
+    let usual = sorted.get(sorted.len() / 2).copied().unwrap_or(0);
+    (
+        usual,
+        heights.iter().map(|h| *h > usual + MORE_SLACK).collect(),
+    )
 }
 
 // ---------- SVG geometry ----------
@@ -1713,10 +1806,10 @@ mod tests {
         assert_eq!(status_class("weakened"), "rt-chip grey");
         let r = Round {
             round: 2,
-            title: "Tested".into(),
+            title: " Tested ".into(),
             ..Round::default()
         };
-        assert_eq!(round_heading(&r), "Round 2 \u{b7} Tested");
+        assert_eq!(round_tab(&r), ("Round 2".into(), "Tested".into()));
     }
 
     #[test]

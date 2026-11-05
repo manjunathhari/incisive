@@ -11,9 +11,11 @@
 //!   hydration (CSS `:target`); while the opinion is being written the page
 //!   polls every 15 s for at most 10 minutes and flips to ready without a
 //!   reload.
-//! - **Board page** ([`TemporalPage`], `/run/:id/temporal`): the frozen
-//!   Temporal board, steps 1–7, with Rust-drawn SVG (timeline and linked
-//!   progression) and the stored checks folded at the bottom.
+//! - **Board page** ([`TemporalPage`], `/run/:id/temporal`): the Temporal
+//!   board, steps 1–7, with Rust-drawn SVG (timeline and linked progression)
+//!   and the stored checks folded at the bottom. Step 2 runs the eras side by
+//!   side, with "More" on the long boxes; Step 4 is the round table, a tab
+//!   per round; Steps 5 and 6 and the next five years open on click.
 //!
 //! Everything is escaped text, links and SVG elements built from data; no
 //! `inner_html`. The styles ([`EXPERT_STYLE`]) ship inside these pieces
@@ -91,9 +93,20 @@ pub const EXPERT_STYLE: &str = r##"
 .rt-chip { font-size:.72rem; font-weight:600; padding:2px 8px; border-radius:999px; background:var(--iv-tint); color:var(--iv-accent); white-space:nowrap; }
 .rt-chip.warn { background:var(--rt-warn-soft); color:var(--rt-warn); }
 .rt-chip.grey { background:var(--iv-ground); color:var(--iv-muted); }
-.rt-eras { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr)); gap:12px; }
-.rt-era { border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; border:1px solid var(--iv-border); min-width:0; }
-.rt-era.e1 { background:var(--rt-era1); } .rt-era.e2 { background:var(--rt-era2); } .rt-era.e3 { background:var(--rt-era3); }
+.rt-eras { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(330px,1fr); grid-template-rows:repeat(4,auto); column-gap:12px; overflow-x:auto; position:relative; left:50%; width:calc(100vw - 32px); margin-left:calc(16px - 50vw); box-sizing:border-box; padding:0 8px 14px; }
+@supports not selector(::-webkit-scrollbar) {
+.rt-eras { scrollbar-width:auto; scrollbar-color:var(--iv-accent) var(--iv-border); }
+}
+.rt-eras::-webkit-scrollbar { height:12px; } .rt-eras::-webkit-scrollbar-track { background:var(--iv-border); border-radius:6px; } .rt-eras::-webkit-scrollbar-thumb { background:var(--iv-accent); border-radius:6px; }
+.rt-era { border-radius:12px; padding:14px; display:grid; grid-row:span 4; grid-template-rows:subgrid; row-gap:10px; align-content:start; border:1px solid var(--iv-border); min-width:0; background:var(--rt-era-bg,var(--iv-ground)); }
+.rt-era > h3 { grid-row:1; } .rt-era > .rt-go { grid-row:2; } .rt-era > .rt-shows { grid-row:3; } .rt-era > .rt-learned, .rt-era > .rt-empty { grid-row:4; }
+.rt-shows.capped { position:relative; overflow:hidden; padding-bottom:30px; }
+.rt-shows.can-more:not(.capped) { position:relative; padding-bottom:30px; }
+.rt-mfade { display:none; }
+.rt-shows.can-more .rt-mfade { display:flex; position:absolute; left:0; right:0; bottom:0; align-items:flex-end; }
+.rt-shows.capped .rt-mfade { height:64px; background:linear-gradient(to bottom,transparent,var(--rt-era-bg,var(--iv-ground)) 60%); }
+.rt-mfade button { border:0; background:none; padding:0; cursor:pointer; font:inherit; font-size:.84rem; font-weight:700; color:var(--iv-accent); min-height:24px; }
+.rt-era.e1 { --rt-era-bg:var(--rt-era1); } .rt-era.e2 { --rt-era-bg:var(--rt-era2); } .rt-era.e3 { --rt-era-bg:var(--rt-era3); }
 .rt-era h3 { display:flex; justify-content:space-between; gap:8px; align-items:baseline; flex-wrap:wrap; }
 .rt-lab { font-size:.7rem; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--iv-muted); }
 .rt-blk { display:flex; flex-direction:column; gap:4px; font-size:.9rem; }
@@ -106,13 +119,59 @@ pub const EXPERT_STYLE: &str = r##"
 .rt-legend span { display:inline-flex; align-items:center; gap:6px; }
 .rt-sw { width:16px; height:3px; display:inline-block; border-radius:2px; }
 .rt-sw.s0 { background:var(--rt-warn); } .rt-sw.s1 { background:var(--iv-accent); } .rt-sw.s2 { background:var(--rt-skp); }
-.rt-debate { gap:14px; }
-.rt-round { display:flex; flex-direction:column; gap:8px; }
-.rt-rh { font-size:.72rem; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--iv-muted); }
-.rt-msg { border-radius:12px; padding:12px 14px; max-width:min(100%,760px); display:flex; flex-direction:column; gap:6px; font-size:.92rem; border:1px solid var(--iv-border); align-self:flex-start; background:var(--iv-ground); }
-.rt-msg .who { font-size:.74rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--iv-muted); }
-.rt-msg.r { background:var(--rt-res-soft); } .rt-msg.r .who { color:var(--rt-res); }
-.rt-msg.s { background:var(--rt-skp-soft); align-self:flex-end; } .rt-msg.s .who { color:var(--rt-skp); }
+/* the round table */
+.rt-s4 { position:relative; }
+.rt-pic { position:absolute; left:calc(50% - min(100vw - 32px,1248px) / 2 + 8px); top:-6px; width:140px; height:95px; }
+.rt-pic svg { width:140px; height:95px; }
+.rt-fr { fill:var(--rt-res); transform-box:fill-box; transform-origin:center; animation:rtk-r 7s ease-in-out infinite; }
+.rt-fs { fill:var(--rt-skp); transform-box:fill-box; transform-origin:center; animation:rtk-s 7s ease-in-out infinite; }
+@keyframes rtk-r { 0%,12%,88%,100% { transform:scale(1.14); } 34%,66% { transform:scale(1); } }
+@keyframes rtk-s { 0%,16%,84%,100% { transform:scale(1); } 38%,62% { transform:scale(1.14); } }
+.rt-br { fill:none; stroke:var(--rt-res); stroke-width:4; } .rt-bs { fill:none; stroke:var(--rt-skp); stroke-width:4; }
+.rt-pg { fill:var(--iv-card); stroke:var(--iv-line); stroke-width:2; } .rt-pl { stroke:var(--iv-line); stroke-width:4; stroke-linecap:round; }
+.rt-lens { animation:rtk-l 7s ease-in-out infinite; }
+@keyframes rtk-l { 0%,12%,88%,100% { transform:translate(0,0); } 38%,62% { transform:translate(62px,14px); } }
+.rt-lg { fill:var(--iv-tint); fill-opacity:.6; stroke:var(--iv-accent); stroke-width:4; } .rt-lh { stroke:var(--iv-accent); stroke-width:6; stroke-linecap:round; }
+@media (prefers-reduced-motion:reduce) { .rt-fr, .rt-fs, .rt-lens { animation:none; } }
+.rt-tb { position:relative; left:50%; width:min(100vw - 32px,1248px); margin-left:calc(min(100vw - 32px,1248px) / -2); box-sizing:border-box; padding:0 8px; display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:20px; align-items:start; }
+.rt-tb-chat { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:18px; overflow:hidden; min-width:0; }
+.rt-seats { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding:12px 16px; font-size:.85rem; font-weight:600; border-bottom:1px solid var(--iv-border); }
+.rt-seats > span { display:inline-flex; gap:7px; align-items:center; }
+.rt-av { flex:none; width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; color:#fff; }
+.rt-av.r { background:var(--rt-res); } .rt-av.s { background:var(--rt-skp); } .rt-av.p { background:var(--iv-accent); }
+.rt-tabs { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); background:var(--iv-ground); }
+a.rt-tab { padding:10px 12px; display:flex; flex-direction:column; gap:3px; border-right:1px solid var(--iv-border); border-bottom:1px solid var(--iv-border); border-top:3px solid transparent; font-size:.74rem; line-height:1.3; min-width:0; color:var(--iv-ink); text-decoration:none; }
+a.rt-tab:last-child { border-right:0; }
+a.rt-tab.r { border-top-color:var(--rt-res); } a.rt-tab.s { border-top-color:var(--rt-skp); }
+a.rt-tab b { font-size:.72rem; letter-spacing:.05em; text-transform:uppercase; }
+a.rt-tab.r b { color:var(--rt-res); } a.rt-tab.s b { color:var(--rt-skp); }
+a.rt-tab.on.r { background:var(--rt-res); color:#fff; } a.rt-tab.on.s { background:var(--rt-skp); color:#fff; } a.rt-tab.on b { color:#fff; }
+.rt .rt-hint { max-width:none; padding:18px 16px; color:var(--iv-muted); font-size:.92rem; text-align:center; }
+.rt-tb-chat:not(.rt-hyd):has(.rt-round:target) .rt-hint { display:none; }
+.rt-round { display:none; flex-direction:column; gap:7px; padding:16px 16px 18px; }
+.rt-round.show, .rt-tb-chat:not(.rt-hyd) .rt-round:target { display:flex; }
+.rt-who { font-size:.74rem; font-weight:700; margin:2px 40px 0; }
+.rt-who.r { color:var(--rt-res); } .rt-who.s { color:var(--rt-skp); text-align:right; }
+.rt-m { display:flex; gap:8px; align-items:flex-end; max-width:84%; }
+.rt-m.s { align-self:flex-end; flex-direction:row-reverse; }
+.rt-m .rt-av { visibility:hidden; } .rt-m.last .rt-av { visibility:visible; }
+.rt-bub { padding:9px 13px; border-radius:16px; font-size:.92rem; line-height:1.45; min-width:0; }
+.rt-m.r .rt-bub { background:var(--rt-res-soft); border-bottom-left-radius:5px; } .rt-m.s .rt-bub { background:var(--rt-skp-soft); border-bottom-right-radius:5px; }
+.rt-h { font-size:.76rem; font-weight:700; padding:0 6px; border-radius:999px; background:var(--iv-card); border:1px solid var(--iv-line); line-height:1.45; }
+.rt-pat { align-self:center; width:88%; box-sizing:border-box; background:var(--iv-tint); border:1px solid var(--iv-line); border-radius:14px; padding:10px 14px; display:flex; gap:10px; margin:6px 0; font-size:.92rem; line-height:1.45; }
+.rt-side { position:sticky; top:12px; display:flex; flex-direction:column; gap:8px; min-width:0; }
+.rt-hy { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:12px; padding:9px 12px; display:flex; justify-content:space-between; gap:10px; align-items:flex-start; font-size:.84rem; font-weight:600; line-height:1.3; }
+.rt-note { font-size:.76rem; color:var(--iv-muted); }
+/* folded sections */
+details.rt-f { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:12px; min-width:0; }
+details.rt-f > summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:44px; padding:10px 16px; }
+details.rt-f > summary::-webkit-details-marker { display:none; }
+details.rt-f > summary .rt-step { flex-wrap:nowrap; min-width:0; }
+details.rt-f > summary .rt-step b { flex:none; white-space:nowrap; }
+details.rt-f > summary::after { content:'Show \25BE'; flex:none; font-size:.82rem; font-weight:600; color:var(--iv-accent); }
+details.rt-f[open] > summary::after { content:'Hide \25B4'; }
+.rt-f-b { padding:0 16px 14px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+.rt-f-b > .rt-panel { border:0; padding:0; background:none; }
 .rt table { border-collapse:collapse; width:100%; font-size:.86rem; background:transparent; }
 .rt th, .rt td { text-align:left; padding:8px; border-bottom:1px solid var(--iv-border); vertical-align:top; }
 .rt th { font-weight:600; color:var(--iv-muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; }
@@ -149,7 +208,21 @@ details.rt-checks[open] { display:flex; flex-direction:column; gap:12px; padding
 .rt-pt.assumed { stroke-dasharray:2 2; }
 .rt-split { fill:var(--rt-warn-soft); stroke:var(--rt-warn); stroke-width:1; }
 .rt-split-t { fill:var(--rt-warn); font-family:var(--iv-font); font-weight:700; }
-@media (max-width:640px) { .rt { gap:24px; } .rt h1 { font-size:1.3rem; } .rt-panel { padding:12px; } }
+@media (max-width:1180px) { .rt-pic { position:static; margin-bottom:-4px; } }
+@media (max-width:1000px) { .rt-tb { grid-template-columns:minmax(0,1fr); } .rt-side { position:static; } }
+@media (max-width:640px) { .rt { gap:24px; } .rt h1 { font-size:1.3rem; } .rt-panel { padding:12px; }
+  .rt-eras { grid-auto-columns:300px; }
+  .rt-tb { padding:0; left:auto; width:auto; margin-left:0; }
+  .rt-tabs { grid-auto-flow:row; }
+  a.rt-tab { flex-direction:row; gap:8px; border-right:0; border-top:0; border-left:3px solid transparent; padding:7px 10px; min-height:44px; align-items:center; box-sizing:border-box; }
+  a.rt-tab.r { border-left-color:var(--rt-res); } a.rt-tab.s { border-left-color:var(--rt-skp); }
+  a.rt-tab b { flex:none; }
+  .rt-round { padding:10px; } .rt-m { max-width:94%; } .rt-av { width:26px; height:26px; } .rt-who { margin:2px 34px 0; } .rt-pat { width:100%; }
+  .rt-f-b table { display:block; min-width:0 !important; } .rt-f-b thead { display:none; } .rt-f-b tbody, .rt-f-b tr, .rt-f-b td { display:block; width:auto; }
+  .rt-f-b tr { padding:10px 0; border-bottom:1px solid var(--iv-border); } .rt-f-b tr:last-child { border-bottom:0; }
+  .rt-f-b td { border:0; padding:3px 0; } .rt-f-b .rt-scroll { overflow-x:visible; }
+  .rt-f-b td[data-l]::before { content:attr(data-l); display:block; font-size:.7rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--iv-muted); margin-top:4px; }
+}
 "##;
 
 /// How a reference number in board text links.
@@ -737,6 +810,7 @@ pub(super) fn board_page(run_id: Uuid, v: &TemporalView) -> AnyView {
         return not_ready(status_message(s));
     };
     let known = xp::known_refs(&o.board, o.flags.as_ref());
+    let round_known = known.clone();
     let c = move |t: &str| cited(t, &known, Cite::RunPage(run_id));
     let topic = if o.board.topic.trim().is_empty() {
         v.topic
@@ -749,14 +823,14 @@ pub(super) fn board_page(run_id: Uuid, v: &TemporalView) -> AnyView {
         <div class="rt">
             <style>{EXPERT_STYLE}</style>
             <header>
-                <div class="rt-eyebrow">"Incisive \u{b7} temporal evidence board"</div>
+                <div class="rt-eyebrow">"Incisive \u{b7} temporal evidence board \u{b7} Expert Discussion"</div>
                 <h1>{topic}</h1>
                 <p class="rt-meta">{xp::source_line(&o.table)}</p>
             </header>
             {step1(&o.table)}
             {step2(&o.board, &o.table, &c)}
             {step3(&o.board, &o.table, &c)}
-            {step4(&o.board, &c)}
+            {step4(&o.board, &c, &round_known, run_id)}
             {step5(&o.board, &c)}
             {step6(&o.board, &o.table, &c)}
             {step7(&o.board, &o.table, &c)}
@@ -913,8 +987,88 @@ fn gantt_svg(g: &xp::Gantt) -> AnyView {
 
 // ---- step 2: the eras ----
 
+/// Cut the long "What the era showed" boxes to the usual length, leaving
+/// those in `open` whole (browser only; the server draws them whole, so the
+/// page reads in full before the browser takes over).
+fn cap_eras(open: &BTreeSet<usize>) {
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Ok(list) = doc.query_selector_all(".rt-era > .rt-shows") else {
+            return;
+        };
+        let boxes: Vec<web_sys::Element> = (0..list.length())
+            .filter_map(|i| list.item(i))
+            .filter_map(|n| n.dyn_into::<web_sys::Element>().ok())
+            .collect();
+        let heights: Vec<i32> = boxes
+            .iter()
+            .map(|b| {
+                let _ = b.class_list().remove_2("capped", "can-more");
+                let _ = b.set_attribute("style", "align-self:start");
+                let h = b.scroll_height();
+                let _ = b.remove_attribute("style");
+                h
+            })
+            .collect();
+        let (usual, long) = xp::more_cut(&heights);
+        for (i, b) in boxes.iter().enumerate() {
+            if !long[i] {
+                continue;
+            }
+            let _ = b.class_list().add_1("can-more");
+            if !open.contains(&i) {
+                let _ = b.class_list().add_1("capped");
+                let _ = b.set_attribute("style", &format!("height:{usual}px;max-height:{usual}px"));
+            }
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    let _ = open;
+}
+
 fn step2(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
     let n = t.eras.len();
+    let open: RwSignal<BTreeSet<usize>> = RwSignal::new(BTreeSet::new());
+    Effect::new(move |_| {
+        let o = open.get();
+        request_animation_frame(move || cap_eras(&o));
+    });
+    #[cfg(feature = "hydrate")]
+    {
+        let recap = move || {
+            if let Some(o) = open.try_get_untracked() {
+                cap_eras(&o);
+            }
+        };
+        let listener = window_event_listener(leptos::ev::resize, move |_| recap());
+        on_cleanup(move || listener.remove());
+        // Once the web font has loaded, the boxes' heights have changed.
+        set_timeout(recap, std::time::Duration::from_millis(800));
+    }
+    let more = move |i: usize| {
+        view! {
+            <div class="rt-mfade">
+                <button
+                    type="button"
+                    aria-expanded=move || open.with(|o| o.contains(&i)).to_string()
+                    on:click=move |_| {
+                        open.update(|o| {
+                            if !o.remove(&i) {
+                                o.insert(i);
+                            }
+                        })
+                    }
+                >
+                    {move || if open.with(|o| o.contains(&i)) { "Less \u{25B4}" } else { "More \u{25BE}" }}
+                </button>
+            </div>
+        }
+        .into_any()
+    };
     let mut cards: Vec<AnyView> = t
         .eras
         .iter()
@@ -946,7 +1100,7 @@ fn step2(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
             let blk = |lab: &'static str, text: Option<&String>| {
                 text.filter(|t| !t.trim().is_empty()).map(|t| {
                     view! {
-                        <div class="rt-blk">
+                        <div class="rt-blk rt-go">
                             <span class="rt-lab">{lab}</span>
                             <p>{c(t)}</p>
                         </div>
@@ -974,10 +1128,11 @@ fn step2(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
                 <article class=format!("rt-era e{}", xp::era_class(i, n))>
                     <h3>{e.label.clone()} " " <span class=chip_class>{xp::era_chip(i, e, n)}</span></h3>
                     {blk("Going in", note.map(|n| &n.going_in))}
-                    <div class="rt-blk">
+                    <div class="rt-blk rt-shows">
                         <span class="rt-lab">"What the era showed"</span>
                         {shown}
                         {note.filter(|n| !n.showed.trim().is_empty()).map(|n| view! { <p>{c(&n.showed)}</p> }.into_any())}
+                        {more(i)}
                     </div>
                     {after}
                     {missing}
@@ -987,13 +1142,13 @@ fn step2(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
         })
         .collect();
     // Notes for eras the table does not have: shown, flagged by the checks.
-    for o in b.orphan_era_notes(t) {
+    for (j, o) in b.orphan_era_notes(t).into_iter().enumerate() {
         cards.push(
             view! {
                 <article class="rt-era">
                     <h3>{o.era_id.clone()} " " <span class="rt-chip warn">"Not an era of the table"</span></h3>
-                    <div class="rt-blk"><span class="rt-lab">"Going in"</span><p>{c(&o.going_in)}</p></div>
-                    <div class="rt-blk"><span class="rt-lab">"What the era showed"</span><p>{c(&o.showed)}</p></div>
+                    <div class="rt-blk rt-go"><span class="rt-lab">"Going in"</span><p>{c(&o.going_in)}</p></div>
+                    <div class="rt-blk rt-shows"><span class="rt-lab">"What the era showed"</span><p>{c(&o.showed)}</p>{more(n + j)}</div>
                     <div class="rt-learned"><span class="rt-lab">"Knowledge after"</span><p>{c(&o.knowledge_after)}</p></div>
                 </article>
             }
@@ -1046,7 +1201,7 @@ fn step3(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
         (!b.linked_note.trim().is_empty()).then(|| view! { <p>{c(&b.linked_note)}</p> }.into_any());
     view! {
         <section>
-            {step_head(3, "Linked progression")}
+            {step_head(3, "How the outcomes moved together")}
             <div class="rt-panel">
                 {body}
                 {note}
@@ -1153,46 +1308,205 @@ fn panel_svg(pn: &xp::Panel) -> AnyView {
     .into_any()
 }
 
-// ---- step 4: the debate ----
+// ---- step 4: the round table ----
 
-fn step4(b: &Board, c: &dyn Fn(&str) -> AnyView) -> AnyView {
+/// A debate point's text as chat runs: bold opening, marked codes, links.
+fn chat_text(text: &str, known: &BTreeSet<u16>, run_id: Uuid) -> AnyView {
+    xp::chat_spans(text, known)
+        .into_iter()
+        .map(|s| match s {
+            xp::ChatSpan::Text(t) => t.into_any(),
+            xp::ChatSpan::Lead(t) => view! { <b>{t}</b> }.into_any(),
+            xp::ChatSpan::Code(t) => view! { <span class="rt-h">{t}</span> }.into_any(),
+            xp::ChatSpan::Ref(n) => view! {
+                <a class="rt-cite" href=format!("/runs/{run_id}#ref-{n}") rel="external">{n.to_string()}</a>
+            }
+            .into_any(),
+        })
+        .collect_view()
+        .into_any()
+}
+
+/// The moving picture beside the heading: the researcher and the skeptic
+/// either side of the papers, a magnifying glass going between them.
+fn round_table_picture() -> AnyView {
+    view! {
+        <div class="rt-pic">
+            <svg viewBox="0 0 280 190" role="img" aria-label="A researcher and a skeptic facing each other across a page, with a magnifying glass moving between them">
+                <circle class="rt-fr" cx="38" cy="54" r="25"></circle>
+                <path class="rt-br" d="M2 155 a36 48 0 0 1 72 0"></path>
+                <circle class="rt-fs" cx="242" cy="54" r="25"></circle>
+                <path class="rt-bs" d="M206 155 a36 48 0 0 1 72 0"></path>
+                <rect class="rt-pg" x="85" y="31" width="110" height="122" rx="8"></rect>
+                <line class="rt-pl" x1="100" y1="54" x2="180" y2="54"></line>
+                <line class="rt-pl" x1="100" y1="76" x2="166" y2="76"></line>
+                <line class="rt-pl" x1="100" y1="98" x2="180" y2="98"></line>
+                <line class="rt-pl" x1="100" y1="120" x2="148" y2="120"></line>
+                <g class="rt-lens">
+                    <circle class="rt-lg" cx="108" cy="72" r="23"></circle>
+                    <line class="rt-lh" x1="125" y1="89" x2="142" y2="106"></line>
+                </g>
+            </svg>
+        </div>
+    }
+    .into_any()
+}
+
+fn side_letter(speaker: &str) -> (&'static str, &'static str) {
+    match xp::side(speaker) {
+        xp::Side::Skeptic => ("s", "S"),
+        _ => ("r", "R"),
+    }
+}
+
+/// One round's chat (`round-{n}`; before hydration its tab's link opens it
+/// through CSS `:target`).
+fn round_chat(
+    i: usize,
+    r: &xp::Round,
+    known: &BTreeSet<u16>,
+    run_id: Uuid,
+    sel: RwSignal<Option<usize>>,
+) -> AnyView {
+    let (side, letter) = side_letter(&r.speaker);
+    let last = r.points.iter().rposition(|p| !xp::is_patient_point(p));
+    let who = view! { <div class=format!("rt-who {side}")>{xp::speaker_label(&r.speaker)}</div> };
+    let points = r
+        .points
+        .iter()
+        .enumerate()
+        .map(|(k, pt)| {
+            if xp::is_patient_point(pt) {
+                view! {
+                    <div class="rt-pat">
+                        <span class="rt-av p" aria-hidden="true">"P"</span>
+                        <div>{chat_text(pt, known, run_id)}</div>
+                    </div>
+                }
+                .into_any()
+            } else {
+                let class = if last == Some(k) {
+                    format!("rt-m {side} last")
+                } else {
+                    format!("rt-m {side}")
+                };
+                view! {
+                    <div class=class>
+                        <span class=format!("rt-av {side}") aria-hidden="true">{letter}</span>
+                        <div class="rt-bub">{chat_text(pt, known, run_id)}</div>
+                    </div>
+                }
+                .into_any()
+            }
+        })
+        .collect_view();
+    view! {
+        <div class="rt-round" id=format!("round-{}", i + 1) class:show=move || sel.get() == Some(i)>
+            {who}
+            {points}
+        </div>
+    }
+    .into_any()
+}
+
+fn step4(b: &Board, c: &dyn Fn(&str) -> AnyView, known: &BTreeSet<u16>, run_id: Uuid) -> AnyView {
+    let sel: RwSignal<Option<usize>> = RwSignal::new(None);
+    // Once the browser has taken over the tabs are the only thing opening a
+    // round; `:target` would otherwise stay on after the address's mark goes.
+    let hydrated = RwSignal::new(false);
+    let rounds_n = b.debate.len();
+    // A round opened by its link before the browser took over carries on
+    // through the tab, and the address's mark goes.
+    Effect::new(move |_| {
+        hydrated.set(true);
+        if let Some(n) = current_hash()
+            .strip_prefix("#round-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| (1..=rounds_n).contains(n))
+        {
+            sel.set(Some(n - 1));
+            replace_hash("");
+        }
+    });
+    let tabs = b
+        .debate
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let (side, _) = side_letter(&r.speaker);
+            let (name, title) = xp::round_tab(r);
+            view! {
+                <a
+                    class=format!("rt-tab {side}")
+                    class:on=move || sel.get() == Some(i)
+                    aria-expanded=move || (sel.get() == Some(i)).to_string()
+                    href=format!("#round-{}", i + 1)
+                    rel="external"
+                    on:click=move |ev: leptos::ev::MouseEvent| {
+                        ev.prevent_default();
+                        sel.update(|s| *s = if *s == Some(i) { None } else { Some(i) });
+                    }
+                >
+                    <b>{name}</b>
+                    <span>{title}</span>
+                </a>
+            }
+            .into_any()
+        })
+        .collect_view();
     let rounds = b
         .debate
         .iter()
-        .map(|r| {
-            let class = match xp::side(&r.speaker) {
-                xp::Side::Researcher => "rt-msg r",
-                xp::Side::Skeptic => "rt-msg s",
-                xp::Side::Other => "rt-msg",
-            };
-            let points = if r.points.len() == 1 {
-                view! { <p>{c(&r.points[0])}</p> }.into_any()
-            } else {
-                let items = r
-                    .points
-                    .iter()
-                    .map(|pt| view! { <li>{c(pt)}</li> }.into_any())
-                    .collect_view();
-                view! { <ul>{items}</ul> }.into_any()
-            };
+        .enumerate()
+        .map(|(i, r)| round_chat(i, r, known, run_id, sel))
+        .collect_view();
+    let ended = b
+        .scoreboard
+        .iter()
+        .map(|s| {
             view! {
-                <div class="rt-round">
-                    <div class="rt-rh">{xp::round_heading(r)}</div>
-                    <div class=class>
-                        <span class="who">{xp::speaker_label(&r.speaker)}</span>
-                        {points}
-                    </div>
+                <div class="rt-hy">
+                    <div><b>{s.code.clone()}</b> " " {c(&s.name)}</div>
+                    <span class=xp::status_class(&s.status)>{s.status.clone()}</span>
                 </div>
             }
             .into_any()
         })
         .collect_view();
     view! {
-        <section>
-            {step_head(4, "Latest-period researcher and skeptic")}
+        <section class="rt-s4">
+            {round_table_picture()}
+            {step_head(4, "The round table")}
             <p class="rt-meta">"The researcher names competing explanations before choosing one; the skeptic challenges the conclusion whichever way it leans."</p>
-            <div class="rt-panel rt-debate">{rounds}</div>
+            <div class="rt-tb">
+                <div class="rt-tb-chat" class:rt-hyd=move || hydrated.get()>
+                    <div class="rt-seats">
+                        <span><span class="rt-av r" aria-hidden="true">"R"</span>"Latest-period researcher"</span>
+                        <span><span class="rt-av s" aria-hidden="true">"S"</span>"Skeptic"</span>
+                        <span><span class="rt-av p" aria-hidden="true">"P"</span>"The patient\u{2019}s question"</span>
+                    </div>
+                    <div class="rt-tabs">{tabs}</div>
+                    <p class="rt-hint" hidden=move || sel.get().is_some()>"Press a round to read that part of the discussion."</p>
+                    {rounds}
+                </div>
+                <div class="rt-side">
+                    <h3>"Where each explanation ended"</h3>
+                    {ended}
+                    <p class="rt-note">"Full for and against: Step 5."</p>
+                </div>
+            </div>
         </section>
+    }
+    .into_any()
+}
+
+/// A folded section: `head` always shows, the body opens on click.
+fn fold(head: AnyView, body: AnyView) -> AnyView {
+    view! {
+        <details class="rt-f">
+            <summary>{head}</summary>
+            <div class="rt-f-b">{body}</div>
+        </details>
     }
     .into_any()
 }
@@ -1207,23 +1521,26 @@ fn step5(b: &Board, c: &dyn Fn(&str) -> AnyView) -> AnyView {
             view! {
                 <tr>
                     <td><b>{s.code.clone()}</b> " " {c(&s.name)}</td>
-                    <td>{c(&s.for_)}</td>
-                    <td>{c(&s.against)}</td>
-                    <td><span class=xp::status_class(&s.status)>{s.status.clone()}</span></td>
+                    <td data-l="For">{c(&s.for_)}</td>
+                    <td data-l="Against">{c(&s.against)}</td>
+                    <td data-l="Status"><span class=xp::status_class(&s.status)>{s.status.clone()}</span></td>
                 </tr>
             }
             .into_any()
         })
         .collect_view();
+    let body = view! {
+        <div class="rt-panel rt-scroll">
+            <table style="min-width:600px">
+                <thead><tr><th>"Explanation"</th><th>"For"</th><th>"Against"</th><th>"Status"</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+    }
+    .into_any();
     view! {
         <section>
-            {step_head(5, "Hypothesis scoreboard after the debate")}
-            <div class="rt-panel rt-scroll">
-                <table style="min-width:600px">
-                    <thead><tr><th>"Explanation"</th><th>"For"</th><th>"Against"</th><th>"Status"</th></tr></thead>
-                    <tbody>{rows}</tbody>
-                </table>
-            </div>
+            {fold(step_head(5, "Hypothesis scoreboard after the debate"), body)}
         </section>
     }
     .into_any()
@@ -1240,9 +1557,10 @@ fn step6(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
         .map(|r| r.cells.len())
         .max()
         .unwrap_or(0);
-    let heads = xp::ledger_headers(mode, &t.eras, ncols)
-        .into_iter()
-        .map(|h| view! { <th>{h}</th> }.into_any())
+    let labels = xp::ledger_headers(mode, &t.eras, ncols);
+    let heads = labels
+        .iter()
+        .map(|h| view! { <th>{h.clone()}</th> }.into_any())
         .collect_view();
     let rows = b
         .ledger
@@ -1252,22 +1570,26 @@ fn step6(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
             let cells = (0..ncols)
                 .map(|i| {
                     let t = r.cells.get(i).map(String::as_str).unwrap_or("");
-                    view! { <td>{c(t)}</td> }.into_any()
+                    let l = labels.get(i).cloned().unwrap_or_default();
+                    view! { <td data-l=l>{c(t)}</td> }.into_any()
                 })
                 .collect_view();
             view! { <tr><td>{c(&r.question)}</td>{cells}</tr> }.into_any()
         })
         .collect_view();
+    let body = view! {
+        <div class="rt-panel rt-scroll">
+            <table class="rt-ledger" style="min-width:640px">
+                <thead><tr><th>"Question"</th>{heads}</tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <p class="rt-meta">{xp::ledger_note(mode)}</p>
+        </div>
+    }
+    .into_any();
     view! {
         <section>
-            {step_head(6, "Temporal knowledge ledger")}
-            <div class="rt-panel rt-scroll">
-                <table class="rt-ledger" style="min-width:640px">
-                    <thead><tr><th>"Question"</th>{heads}</tr></thead>
-                    <tbody>{rows}</tbody>
-                </table>
-                <p class="rt-meta">{xp::ledger_note(mode)}</p>
-            </div>
+            {fold(step_head(6, "Temporal knowledge ledger"), body)}
         </section>
     }
     .into_any()
@@ -1297,7 +1619,15 @@ fn step7(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
     let triggers = b
         .triggers
         .iter()
-        .map(|tr| view! { <tr><td>{c(&tr.if_)}</td><td>{c(&tr.then)}</td></tr> }.into_any())
+        .map(|tr| {
+            view! {
+                <tr>
+                    <td>{c(&tr.if_)}</td>
+                    <td data-l="Then">{c(&tr.then)}</td>
+                </tr>
+            }
+            .into_any()
+        })
         .collect_view();
     let predictive =
         xp::predictive_line(t).map(|l| view! { <p class="rt-meta">{l}</p> }.into_any());
@@ -1306,6 +1636,16 @@ fn step7(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
         .iter()
         .map(|s| view! { <li>{c(s)}</li> }.into_any())
         .collect_view();
+    let next_five = view! {
+        <div class="rt-panel rt-scroll">
+            <table style="min-width:600px">
+                <thead><tr><th>"If the next independent study shows"</th><th>"Then"</th></tr></thead>
+                <tbody>{triggers}</tbody>
+            </table>
+            {predictive}
+        </div>
+    }
+    .into_any();
     view! {
         <section>
             {step_head(7, "Expert opinion")}
@@ -1319,14 +1659,10 @@ fn step7(b: &Board, t: &TemporalTable, c: &dyn Fn(&str) -> AnyView) -> AnyView {
             </div>
             <h3>"Expert decision: what should we conclude today?"</h3>
             <div class="rt-scen">{scen}</div>
-            <div class="rt-panel rt-scroll">
-                <h3>"What the next five years could show, and what it would change"</h3>
-                <table style="min-width:600px">
-                    <thead><tr><th>"If the next independent study shows"</th><th>"Then"</th></tr></thead>
-                    <tbody>{triggers}</tbody>
-                </table>
-                {predictive}
-            </div>
+            {fold(
+                view! { <h3>"What the next five years could show, and what it would change"</h3> }.into_any(),
+                next_five,
+            )}
             <div class="rt-panel">
                 <h3>"What would settle it"</h3>
                 <ul>{settle}</ul>

@@ -620,8 +620,8 @@ async fn t4_board_page_renders_all_seven_steps() {
         let steps = [
             "When the patients were treated",
             "What each era showed, and what it taught",
-            "Linked progression",
-            "Latest-period researcher and skeptic",
+            "How the outcomes moved together",
+            "The round table",
             "Hypothesis scoreboard after the debate",
             "Temporal knowledge ledger",
             "Expert opinion</h2>",
@@ -641,15 +641,26 @@ async fn t4_board_page_renders_all_seven_steps() {
             serde_json::from_value(table_of(name)).unwrap();
         let panels = incisive_app::expert_page::linked_panels(&t).len();
         assert!(panels >= 1, "{name}");
-        assert_eq!(m.matches("<svg viewBox=").count(), 1 + panels, "{name}");
+        // And the round table's picture.
+        assert_eq!(m.matches("<svg viewBox=").count(), 2 + panels, "{name}");
         assert!(m.contains("class=\"rt-bar"));
         assert!(m.contains("no difference</text>"));
         // Era cards: one per era of the table.
         assert_eq!(m.matches("<article class=\"rt-era").count(), t.eras.len());
-        // Debate: researcher left, skeptic right.
-        assert!(m.contains(r#"<div class="rt-msg r">"#));
-        assert!(m.contains(r#"<div class="rt-msg s">"#));
-        assert!(m.contains("Round 1 \u{b7} "));
+        // The heading, and Step 2's boxes ready for "More".
+        assert!(m.contains("temporal evidence board \u{b7} Expert Discussion"));
+        assert_eq!(m.matches("rt-blk rt-shows").count(), t.eras.len());
+        // The round table: a tab and a hidden chat per round, researcher
+        // left, skeptic right, and the hint until a round is pressed.
+        let rounds = m.matches(r##"href="#round-"##).count();
+        assert!((4..=5).contains(&rounds), "{name}: {rounds}");
+        assert_eq!(m.matches(r#"id="round-"#).count(), rounds, "{name}");
+        assert!(m.contains(r#"class="rt-m r"#), "{name}");
+        assert!(m.contains(r#"class="rt-m s"#), "{name}");
+        assert!(m.contains("Press a round to read that part of the discussion."));
+        assert!(m.contains("Where each explanation ended"));
+        // Steps 5 and 6 and the next five years start folded (no `open`).
+        assert_eq!(m.matches(r#"<details class="rt-f">"#).count(), 3, "{name}");
         // Checks folded (closed), listing the stored flags.
         let checks = &m[at("<details class=\"rt-checks\">")..];
         assert!(checks.contains("Flag, never delete"));
