@@ -29,6 +29,9 @@ pub(crate) fn is_retryable(err: &ClaudeError) -> bool {
             RETRYABLE_STATUSES.contains(status)
         }
         ClaudeError::Transport(e) => e.is_timeout() || e.is_connect(),
+        // Before the first event, as any failed attempt (the caller's deadline
+        // is final). Once events have started it is the caller's to decide.
+        ClaudeError::StreamInterrupted(b) => !b.started && b.kind != crate::BreakKind::Deadline,
     }
 }
 
@@ -38,7 +41,7 @@ pub(crate) fn status_of(err: &ClaudeError) -> Option<u16> {
         ClaudeError::Api { status, .. } | ClaudeError::Decode { status, .. } => Some(*status),
         ClaudeError::RateLimited { .. } => Some(429),
         ClaudeError::Overloaded => Some(529),
-        ClaudeError::Transport(_) => None,
+        ClaudeError::Transport(_) | ClaudeError::StreamInterrupted(_) => None,
     }
 }
 
