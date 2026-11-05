@@ -1365,7 +1365,7 @@ fn run_view(
     if let Some(chat) = chat {
         let c = chat::Chat::new(run_id, chat, asked, x);
         return view! {
-            <div class=x.wrapper_class() class:rx-chaton=move || c.open.get()>
+            <div class=x.wrapper_class() class:rx-expon=move || x.expert.get() class:rx-chaton=move || c.open.get()>
                 <style>{expert::EXPERT_STYLE}</style>
                 <style>{chat::CHAT_STYLE}</style>
                 <div class="run-chrome">
@@ -1390,7 +1390,7 @@ fn run_view(
     // The answer is drawn unchanged inside a wrapper the Expert opinion view
     // hides (outside `.ap-main`).
     view! {
-        <div class=x.wrapper_class()>
+        <div class=x.wrapper_class() class:rx-expon=move || x.expert.get()>
             <style>{expert::EXPERT_STYLE}</style>
             <div class="run-chrome">
                 <h1 class="run-question">{heading}</h1>
