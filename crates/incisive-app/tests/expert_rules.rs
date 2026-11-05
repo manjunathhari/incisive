@@ -594,3 +594,58 @@ fn long_words_wrap_in_the_view_and_the_board() {
         assert!(rule.contains("overflow-wrap:anywhere"), "{class}");
     }
 }
+
+/// The round table's chat runs keep every character, in order.
+#[test]
+fn chat_spans_keep_the_text() {
+    use incisive_app::expert_page::{ChatSpan, chat_spans, is_patient_point};
+    let known: std::collections::BTreeSet<u16> = [3, 4].into_iter().collect();
+    let text = "Against H1: SLS II was negative [3]; see H2 and [4, 9].";
+    let spans = chat_spans(text, &known);
+    let back: String = spans
+        .iter()
+        .map(|s| match s {
+            ChatSpan::Text(t) | ChatSpan::Lead(t) | ChatSpan::Code(t) => t.clone(),
+            ChatSpan::Ref(n) => n.to_string(),
+        })
+        .collect();
+    assert_eq!(back, text);
+    assert_eq!(spans[0], ChatSpan::Lead("Against ".into()));
+    assert_eq!(spans[1], ChatSpan::Code("H1".into()));
+    assert_eq!(spans[2], ChatSpan::Lead(":".into()));
+    assert!(spans.contains(&ChatSpan::Ref(3)) && spans.contains(&ChatSpan::Ref(4)));
+    assert!(
+        !spans.contains(&ChatSpan::Ref(9)),
+        "an unknown number stays text"
+    );
+    // A drug is not an explanation's code.
+    assert!(
+        !chat_spans("Add H2 blockers, and H1 was weak.", &known)
+            .iter()
+            .any(|s| *s == ChatSpan::Code("H2".into()))
+    );
+    // No bold when the colon is far off or follows a sentence end.
+    assert!(
+        !chat_spans("It held. Then: more.", &known)
+            .iter()
+            .any(|s| matches!(s, ChatSpan::Lead(_)))
+    );
+    assert!(is_patient_point(
+        "Patient question, skeptic side: what will…"
+    ));
+    assert!(!is_patient_point("The patient question"));
+    assert!(!is_patient_point("Short"));
+}
+
+/// "More" goes on the boxes past the usual (middle) length, with some slack.
+#[test]
+fn more_goes_on_the_long_boxes_only() {
+    use incisive_app::expert_page::more_cut;
+    let (usual, long) = more_cut(&[336, 314, 269, 291, 744]);
+    assert_eq!(usual, 314);
+    assert_eq!(long, [false, false, false, false, true]);
+    let (usual, long) = more_cut(&[381, 336, 291, 314, 851]);
+    assert_eq!(usual, 336);
+    assert_eq!(long, [true, false, false, false, true]);
+    assert_eq!(more_cut(&[]), (0, vec![]));
+}
