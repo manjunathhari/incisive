@@ -386,10 +386,7 @@ mod tests {
         let mut problems = Vec::new();
         strict_problems("picks", &v, &mut problems);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(
-            v["properties"]["organs"]["items"]["enum"][25],
-            "Whole body or other"
-        );
+        assert_eq!(v["properties"]["organs"]["items"]["enum"], json!(ORGANS));
         let mut bad = Vec::new();
         strict_problems(
             "bad",
@@ -397,6 +394,9 @@ mod tests {
             &mut bad,
         );
         assert!(!bad.is_empty(), "walker is not vacuous");
+        let mut empty = Vec::new();
+        strict_problems("e", &json!({"type": "string", "enum": []}), &mut empty);
+        assert!(empty.iter().any(|p| p.contains("enum")), "{empty:?}");
     }
 
     fn strict_problems(path: &str, v: &Value, out: &mut Vec<String>) {
@@ -420,6 +420,13 @@ mod tests {
             if !ALLOWED.contains(&k.as_str()) {
                 out.push(format!("{path}: unsupported keyword {k}"));
             }
+        }
+        if let Some(e) = o.get("enum")
+            && !e
+                .as_array()
+                .is_some_and(|a| !a.is_empty() && a.iter().all(Value::is_string))
+        {
+            out.push(format!("{path}: enum must be a non-empty array of strings"));
         }
         if o.get("type") == Some(&json!("object")) {
             if o.get("additionalProperties") != Some(&json!(false)) {
