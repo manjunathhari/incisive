@@ -234,7 +234,7 @@ jobs:
           esac
           gf="${GRAPH_FROM#"${GRAPH_FROM%%[![:space:]]*}"}"
           gf="${gf%"${gf##*[![:space:]]}"}"
-          if [ -n "$gf" ] && ! python3 -c 'import sys, datetime; datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d")' "$gf" 2>/dev/null; then
+          if [ -n "$gf" ] && ! { [[ "$gf" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && python3 -c 'import sys, datetime; datetime.date.fromisoformat(sys.argv[1])' "$gf" 2>/dev/null; }; then
             echo "::error::vars.GRAPH_FROM must be a date as YYYY-MM-DD (see infra/README.md, Knowledge graph)"; exit 1
           fi
           if [ "$gr" = "on" ] && [ -z "$gf" ]; then
@@ -245,6 +245,12 @@ jobs:
           sys.exit(0 if os.environ["INTRO_MODEL_CHECK"] in json.loads(os.environ["MODEL_PRICES"]) else 1)
           '; then
             echo "::error::vars.MODEL_PRICES has no price for INTRO_MODEL ${im:-claude-sonnet-5-5} (see infra/README.md section 14)"; exit 1
+          fi
+          if [ "$gr" = "on" ] && ! GRAPH_MODEL_CHECK="${gm:-claude-sonnet-5-5}" python3 -c '
+          import json, os, sys
+          sys.exit(0 if os.environ["GRAPH_MODEL_CHECK"] in json.loads(os.environ["MODEL_PRICES"]) else 1)
+          '; then
+            echo "::error::vars.MODEL_PRICES has no price for GRAPH_MODEL ${gm:-claude-sonnet-5-5} (see infra/README.md, Knowledge graph)"; exit 1
           fi
           # Optional switches: unset, true or false (a typo must not silently mean off).
           # Optional memory layer (infra/README.md, "Memory layer"): MEMORY unset

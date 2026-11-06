@@ -464,13 +464,26 @@ impl Config {
             }
             let from = match lookup("GRAPH_FROM") {
                 None => None,
-                Some(v) => Some(chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d").map_err(
-                    |_| ConfigError::Invalid {
-                        var: "GRAPH_FROM",
-                        reason: "expected a date as YYYY-MM-DD".to_string(),
-                    },
-                )?),
+                Some(v) => Some(
+                    Some(v.as_str())
+                        .filter(|v| {
+                            v.len() == 10
+                                && v.bytes().enumerate().all(|(i, b)| {
+                                    if i == 4 || i == 7 {
+                                        b == b'-'
+                                    } else {
+                                        b.is_ascii_digit()
+                                    }
+                                })
+                        })
+                        .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
+                        .ok_or_else(|| ConfigError::Invalid {
+                            var: "GRAPH_FROM",
+                            reason: "expected a date as YYYY-MM-DD".to_string(),
+                        })?,
+                ),
             };
+
             if on && from.is_none() {
                 return Err(ConfigError::Invalid {
                     var: "GRAPH_FROM",
@@ -1461,6 +1474,18 @@ mod tests {
             Config::from_lookup(lookup(&p))
         };
         assert!(!with(&[("GRAPH", "off")]).unwrap().graph.on);
+        // Same trimming as INTRO: blanks around the value are ignored, and a
+        // blank value is unset (off).
+        assert!(!with(&[("GRAPH", "")]).unwrap().graph.on);
+        assert!(!with(&[("GRAPH", "  \n")]).unwrap().graph.on);
+        assert!(!with(&[("GRAPH", " off ")]).unwrap().graph.on);
+        assert!(
+            with(&[("GRAPH", " on "), ("GRAPH_FROM", " 2026-11-01\n")])
+                .unwrap()
+                .graph
+                .on
+        );
+        assert!(with(&[("GRAPH", "on"), ("GRAPH_FROM", " ")]).is_err());
         let c = with(&[("GRAPH", "on"), ("GRAPH_FROM", "2026-11-01")]).unwrap();
         assert!(c.graph.on);
         assert_eq!(c.graph.from, chrono::NaiveDate::from_ymd_opt(2026, 11, 1));
@@ -1481,7 +1506,15 @@ mod tests {
                 ..
             }
         ));
-        for bad in ["yesterday", "2026-13-01", "01/11/2026"] {
+        for bad in [
+            "yesterday",
+            "2026-13-01",
+            "01/11/2026",
+            "2026-1-5",
+            "2026-11-1",
+            "+2026-11-01",
+            "2026-11-01x",
+        ] {
             assert!(
                 matches!(
                     with(&[("GRAPH_FROM", bad)]).unwrap_err(),
