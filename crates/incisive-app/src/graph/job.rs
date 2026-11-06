@@ -205,6 +205,43 @@ pub async fn enqueue_new(pool: &PgPool, from: NaiveDate) -> sqlx::Result<u64> {
     Ok(r.rows_affected())
 }
 
+/// The runs the backfill would call the model for, and no others: finished
+/// (done or partial), a version 3 answer with a written answer, and no job.
+/// `backfill_count` and `backfill_queue` both use it, so the figure the owner
+/// approves is the set that is queued.
+const BACKFILL_ELIGIBLE: &str = "FROM incisive.runs r \
+     JOIN incisive.run_answers a ON a.run_id = r.id \
+     WHERE r.status IN ('done','partial') \
+       AND a.answer_version = 3 \
+       AND jsonb_typeof(a.body -> 'answer') = 'object' \
+       AND NOT EXISTS (SELECT 1 FROM incisive.graph_jobs j WHERE j.run_id = r.id)";
+
+/// How many runs `backfill_queue` would queue now. Writes nothing.
+pub async fn backfill_count(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar(&format!("SELECT count(*) {BACKFILL_ELIGIBLE}"))
+        .fetch_one(pool)
+        .await
+}
+
+/// Queue the eligible runs (see `BACKFILL_ELIGIBLE`). Returns how many.
+pub async fn backfill_queue(pool: &PgPool) -> sqlx::Result<u64> {
+    let r = sqlx::query(&format!(
+        "INSERT INTO incisive.graph_jobs (run_id) SELECT r.id {BACKFILL_ELIGIBLE} \
+         ON CONFLICT DO NOTHING"
+    ))
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// The `--count` line: runs and an estimate in paise, nothing else.
+pub fn backfill_line(runs: i64, paise_each: i64) -> String {
+    format!(
+        "{runs} runs, about {} paise",
+        runs.saturating_mul(paise_each)
+    )
+}
+
 /// The next due job, if any.
 async fn next_due(pool: &PgPool) -> sqlx::Result<Option<Uuid>> {
     sqlx::query_scalar(

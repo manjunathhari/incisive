@@ -40,6 +40,13 @@ name = "memory_backfill"
 path = "src/bin/memory_backfill.rs"
 required-features = ["ssr"]
 
+# The graph backfill: `--count` the runs the graph job would call for (with a
+# cost estimate), `--queue` to queue them. Run by the owner with DATABASE_URL set.
+[[bin]]
+name = "graph_backfill"
+path = "src/bin/graph_backfill.rs"
+required-features = ["ssr"]
+
 [dependencies]
 secrecy = "0.10"
 leptos = { version = "0.8" }
