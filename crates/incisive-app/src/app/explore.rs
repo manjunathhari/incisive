@@ -221,6 +221,30 @@ pub async fn get_start(
     Ok(ExploreStart { all, map, frame })
 }
 
+/// The name of concept `concept_id` for "Ask about this", only when it is
+/// on the signed-in user's own map (reached through their run links, and
+/// through merges as the map does); otherwise `None`, as with `GRAPH` off,
+/// a signed-out caller aside (that one is refused). The name is never
+/// logged.
+#[server(prefix = "/api/fn", endpoint = "topic_label", input = Json)]
+pub async fn topic_label(concept_id: i64) -> Result<Option<String>, ServerFnError> {
+    use crate::identity::CurrentUser;
+    let (state, user) = super::signed_in().await?;
+    if !state.graph.settings.on {
+        return Ok(None);
+    }
+    let CurrentUser(user) = user.map_err(|r| {
+        super::set_status(r.status());
+        ServerFnError::new(r.message())
+    })?;
+    crate::graph::read::topic_label(&state.pool, user.id, concept_id)
+        .await
+        .map_err(|_| {
+            tracing::error!(user_id = user.id, "explore: topic read failed");
+            ServerFnError::new("Incisive couldn't load that topic. Please try again.")
+        })
+}
+
 // ---------- the page ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1455,6 +1479,7 @@ fn card_view(ui: Ui, c: Card, inline: bool) -> AnyView {
             {c.answer.map(|href| view! { <a class="kg-act" href=href>"Open the full answer"</a> })}
             {c.sheet.map(|href| view! { <a class="kg-act" href=href rel="external">"Open the study sheet"</a> })}
             {c.pubmed.map(|href| view! { <a class="kg-act alt" href=href rel="external">"Open the paper"</a> })}
+            {c.ask.map(|href| view! { <a class="kg-act alt" href=href>"Ask about this"</a> })}
         </div>
     }
     .into_any()

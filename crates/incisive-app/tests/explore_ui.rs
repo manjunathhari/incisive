@@ -846,3 +846,215 @@ async fn the_map_is_drawn_with_a_button_per_dot() {
     let (_, body) = call(router(st), "explore_list", "{}", Some(&other)).await;
     assert!(!body.contains(&question));
 }
+
+// ---------- Ask about this ----------
+
+const ASK_HOME: &str = "tests/fixtures/explore/ask_home_before.html";
+
+/// The id of the concept of `kind` that `mapped_run` made for `tag`.
+async fn concept_id(pool: &PgPool, kind: &str, label: &str) -> i64 {
+    sqlx::query_scalar("SELECT id FROM incisive.graph_concepts WHERE kind = $1 AND label = $2")
+        .bind(kind)
+        .bind(label)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// What the Ask page's question box holds as first drawn.
+fn question_box(html: &str) -> String {
+    let m = markup(html);
+    let a = m.find(r#"<textarea id="question""#).expect("textarea");
+    let open_end = a + m[a..].find('>').unwrap() + 1;
+    let close = open_end + m[open_end..].find("</textarea>").unwrap();
+    let tag = &m[a..open_end];
+    // The value is either the element's text or a `value` attribute.
+    format!("{tag}|{}", &m[open_end..close])
+}
+
+async fn spend_and_runs(pool: &PgPool, user: i64) -> (i64, i64) {
+    let runs = sqlx::query_scalar("SELECT count(*) FROM incisive.runs WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let spend = sqlx::query_scalar("SELECT count(*) FROM incisive.spend WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (runs, spend)
+}
+
+#[tokio::test]
+async fn the_explore_page_links_ask_about_this_by_id() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (uid, email) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    mapped_run(
+        &pool,
+        uid,
+        &t,
+        &[paper(&pmid(&t, 1), "A trial", 2024, "RCT")],
+    )
+    .await;
+    let disease = concept_id(&pool, "disease", &format!("Inguinal hernia {t}")).await;
+    let treatment = concept_id(&pool, "treatment", &format!("Robotic surgery {t}")).await;
+    let organ = concept_id(&pool, "organ", &format!("Abdominal wall {t}")).await;
+    let outcome = concept_id(&pool, "outcome", &format!("Recurrence {t}")).await;
+    let (s, body) = call(
+        router(state(pool.clone(), true)),
+        "explore_list",
+        "{}",
+        Some(&email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let m: MapData = serde_json::from_str(&body).unwrap();
+    let ask = |kind: DotKind, id: i64| {
+        let d = m.dots.iter().find(|d| d.kind == kind).unwrap();
+        assert_eq!(d.concept_id, Some(id));
+        ep::card_for(&m, &d.id).unwrap().ask
+    };
+    // By id only: no name in the link.
+    assert_eq!(
+        ask(DotKind::Disease, disease),
+        Some(format!("/?topic={disease}"))
+    );
+    assert_eq!(
+        ask(DotKind::Treatment, treatment),
+        Some(format!("/?topic={treatment}"))
+    );
+    assert_eq!(ask(DotKind::Organ, organ), None);
+    assert_eq!(ask(DotKind::Outcome, outcome), None);
+}
+
+#[tokio::test]
+async fn topic_label_gives_only_the_users_own_names() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (a, a_email) = new_user(&pool, "surgeon").await;
+    let (_, b_email) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    mapped_run(&pool, a, &t, &[]).await;
+    let disease = concept_id(&pool, "disease", &format!("Inguinal hernia {t}")).await;
+    let ask = |email: Option<&'static str>, id: String, on: bool| {
+        let pool = pool.clone();
+        let email = email.map(str::to_string);
+        async move {
+            call(
+                router(state(pool, on)),
+                "topic_label",
+                &format!(r#"{{"concept_id":{id}}}"#),
+                email.as_deref(),
+            )
+            .await
+        }
+    };
+    let _ = ask;
+    let own = call(
+        router(state(pool.clone(), true)),
+        "topic_label",
+        &format!(r#"{{"concept_id":{disease}}}"#),
+        Some(&a_email),
+    )
+    .await;
+    assert_eq!(own.0, StatusCode::OK, "{}", own.1);
+    assert_eq!(
+        serde_json::from_str::<Option<String>>(&own.1).unwrap(),
+        Some(format!("Inguinal hernia {t}"))
+    );
+    for (what, id, email, on) in [
+        ("another user's concept", disease, Some(&b_email), true),
+        ("an id that is nobody's", i64::MAX, Some(&a_email), true),
+        ("a negative id", -1, Some(&a_email), true),
+        ("GRAPH off", disease, Some(&a_email), false),
+    ] {
+        let (s, body) = call(
+            router(state(pool.clone(), on)),
+            "topic_label",
+            &format!(r#"{{"concept_id":{id}}}"#),
+            email.map(String::as_str),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{what}: {body}");
+        assert_eq!(body.trim(), "null", "{what} gave a name");
+    }
+    let (s, body) = call(
+        router(state(pool.clone(), true)),
+        "topic_label",
+        &format!(r#"{{"concept_id":{disease}}}"#),
+        None,
+    )
+    .await;
+    assert_ne!(s, StatusCode::OK, "signed out got {body}");
+    assert!(!body.contains(&t));
+}
+
+#[tokio::test]
+async fn the_ask_page_puts_no_name_in_its_html_and_starts_nothing() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (a, a_email) = new_user(&pool, "surgeon").await;
+    let (_, b_email) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    mapped_run(&pool, a, &t, &[]).await;
+    let disease = concept_id(&pool, "disease", &format!("Inguinal hernia {t}")).await;
+    let before = spend_and_runs(&pool, a).await;
+
+    // The box is filled in the browser (see the Ask page), so the first
+    // HTML carries no name for anyone, and the box is as it was.
+    let uri = format!("/?topic={disease}");
+    let (s, own) = get(router(state(pool.clone(), true)), &uri, Some(&a_email)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(own.contains(r#"<textarea id="question""#));
+    assert!(!own.contains(&t), "the name is in the first HTML");
+
+    let cases = [
+        ("another user", uri.clone(), b_email.clone(), true),
+        ("a bad id", "/?topic=abc".to_string(), a_email.clone(), true),
+        (
+            "an unknown id",
+            "/?topic=999999999999".to_string(),
+            a_email.clone(),
+            true,
+        ),
+        ("GRAPH off", uri.clone(), a_email.clone(), false),
+    ];
+    for (what, uri, email, on) in cases {
+        let (s, html) = get(router(state(pool.clone(), on)), &uri, Some(&email)).await;
+        assert_eq!(s, StatusCode::OK, "{what}");
+        assert!(!html.contains(&t), "{what}: the name leaked");
+        assert_eq!(
+            question_box(&html),
+            question_box(
+                &get(router(state(pool.clone(), on)), "/", Some(&email))
+                    .await
+                    .1
+            ),
+            "{what}: the box is not empty"
+        );
+    }
+    // Nothing was started: no run, no spend.
+    assert_eq!(spend_and_runs(&pool, a).await, before);
+}
+
+/// Ask with no `topic` is what it was before this task.
+#[tokio::test]
+async fn the_ask_page_without_a_topic_is_unchanged() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (_, email) = new_user(&pool, "surgeon").await;
+    let (s, html) = get(router(state(pool, true)), "/", Some(&email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let now = settled(&html);
+    let file = format!("{}/{ASK_HOME}", env!("CARGO_MANIFEST_DIR"));
+    if std::env::var("EXPLORE_ASK_CAPTURE").is_ok_and(|v| v == "1") {
+        std::fs::write(&file, &now).unwrap();
+        eprintln!("captured {file}");
+        return;
+    }
+    let before = std::fs::read_to_string(&file).unwrap();
+    assert!(now == before, "the Ask page changed with no topic");
+}

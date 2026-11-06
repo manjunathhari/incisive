@@ -298,6 +298,8 @@ pub struct Card {
     pub sheet: Option<String>,
     /// A paper on PubMed.
     pub pubmed: Option<String>,
+    /// "Ask about this": the Ask page with this concept's id (never its name).
+    pub ask: Option<String>,
 }
 
 /// The card before anything is picked.
@@ -337,6 +339,12 @@ pub fn indian_number(n: i64) -> String {
 
 fn run_href(id: uuid::Uuid) -> String {
     format!("/runs/{id}")
+}
+
+/// Where "Ask about this" goes: the Ask page with the concept's id. The id
+/// only, never the name (the Ask page looks the name up for its owner).
+fn ask_href(d: &Dot) -> Option<String> {
+    d.concept_id.map(|id| format!("/?topic={id}"))
 }
 
 /// The card for dot `id`; `None` when it is not on the map.
@@ -435,6 +443,7 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             } else {
                 "Looked at in one of your runs.".into()
             };
+            c.ask = ask_href(d);
         }
         DotKind::Disease | DotKind::Organ => {
             c.kicker = if d.kind == DotKind::Disease {
@@ -444,6 +453,9 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             }
             .into();
             c.body = linked(near.len());
+            if d.kind == DotKind::Disease {
+                c.ask = ask_href(d);
+            }
         }
     }
     Some(c)
@@ -990,6 +1002,26 @@ mod tests {
             bottom_line: None,
             certainty: None,
         }
+    }
+
+    #[test]
+    fn only_disease_and_treatment_cards_offer_ask_about_this() {
+        let mut m = MapData::default();
+        for (id, kind, cid) in [
+            ("d:7", DotKind::Disease, 7),
+            ("t:8", DotKind::Treatment, 8),
+            ("g:9", DotKind::Organ, 9),
+            ("o:4", DotKind::Outcome, 4),
+        ] {
+            let mut d = dot(id, kind, "Some name", "");
+            d.concept_id = Some(cid);
+            m.dots.push(d);
+        }
+        let ask = |id: &str| card_for(&m, id).unwrap().ask;
+        assert_eq!(ask("d:7").as_deref(), Some("/?topic=7"));
+        assert_eq!(ask("t:8").as_deref(), Some("/?topic=8"));
+        assert_eq!(ask("g:9"), None);
+        assert_eq!(ask("o:4"), None);
     }
 
     fn paper(pmid: &str, rank: &str, year: Option<i32>) -> Dot {

@@ -245,6 +245,33 @@ fn in_years(year: Option<i32>, f: &MapFilter) -> bool {
     year.is_some_and(|y| f.year_from.is_none_or(|lo| y >= lo) && f.year_to.is_none_or(|hi| y <= hi))
 }
 
+/// The name of concept `concept_id`, only when it is on `user_id`'s own map:
+/// some concept of theirs (`graph_run_concepts` for this user) is it, or
+/// merged into it, as the map's dots are. `None` for anyone else's concept
+/// and for an id that does not exist.
+pub async fn topic_label(
+    pool: &PgPool,
+    user_id: i64,
+    concept_id: i64,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE walk(start, id, merged_into, d) AS ( \
+           SELECT c.id, c.id, c.merged_into, 0 FROM incisive.graph_concepts c \
+            WHERE c.id IN (SELECT concept_id FROM incisive.graph_run_concepts WHERE user_id = $1) \
+           UNION ALL \
+           SELECT w.start, c.id, c.merged_into, w.d + 1 FROM walk w \
+             JOIN incisive.graph_concepts c ON c.id = w.merged_into WHERE w.d < $3), \
+         fin AS (SELECT DISTINCT ON (start) start, id FROM walk ORDER BY start, d DESC) \
+         SELECT c.label FROM incisive.graph_concepts c \
+          WHERE c.id = $2 AND c.id IN (SELECT id FROM fin)",
+    )
+    .bind(user_id)
+    .bind(concept_id)
+    .bind(MAX_CHAIN)
+    .fetch_optional(pool)
+    .await
+}
+
 /// One user's map under a filter. Dots come sorted by id with `x`/`y` at 0;
 /// the page places them with [`crate::graph_view::layout`]. Above
 /// [`MAX_DOTS`] the papers are left out unless the user chose what to hide.
