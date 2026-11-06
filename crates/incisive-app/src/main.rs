@@ -36,6 +36,11 @@ async fn retention_loop(pool: sqlx::PgPool) {
             Ok((qas, priors)) => tracing::info!(qas, priors, "chat retention pass"),
             Err(_) => tracing::error!("chat retention pass failed"),
         }
+        // Whatever GRAPH's value: names no run links to any more must go.
+        match incisive_app::graph::store::cleanup_unused(&pool).await {
+            Ok(removed) => tracing::info!(removed, "graph cleanup pass"),
+            Err(_) => tracing::error!("graph cleanup pass failed"),
+        }
     }
 }
 
@@ -171,9 +176,17 @@ async fn main() {
         temporal_client,
         stream: config.stream,
         intro,
+        // The graph: its own client too (one attempt, about 30 s), only when on.
         graph: incisive_app::graph::settings::GraphRuntime {
             settings: config.graph.clone(),
-            client: None,
+            client: config
+                .anthropic_api_key
+                .clone()
+                .filter(|_| config.graph.on)
+                .map(|key| {
+                    Arc::new(incisive_app::graph::job::client(key))
+                        as Arc<dyn incisive_app::agent::llm::LlmClient>
+                }),
         },
         memory: config.memory.clone(),
         chat: config.chat.clone(),
@@ -201,6 +214,10 @@ async fn main() {
             // The memory loop also waits for migrations: it reads the 0013 tables.
             if state.memory.on {
                 tokio::spawn(incisive_app::memory::job::memory_loop(state.clone()));
+            }
+            // The graph loop reads the 0017 tables; it only exists with GRAPH=on.
+            if state.graph.settings.on {
+                tokio::spawn(incisive_app::graph::job::graph_loop(state.clone()));
             }
             if state.chat.on {
                 tokio::spawn(incisive_app::chat::job::chat_loop(state));

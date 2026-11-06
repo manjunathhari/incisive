@@ -499,7 +499,12 @@ impl Config {
                     ),
                 });
             }
-            GraphSettings { on, model, from }
+            GraphSettings {
+                on,
+                model,
+                from,
+                ..GraphSettings::default()
+            }
         };
 
         let usd_inr = match (app_env, lookup("USD_INR")) {
