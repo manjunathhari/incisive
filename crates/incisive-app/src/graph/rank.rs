@@ -84,20 +84,25 @@ fn has_word_rct(t: &str) -> bool {
     words(t).any(|w| w == "rct" || w == "rcts")
 }
 
-/// A text that only talks about a study (protocol, commentary, review that is
-/// not systematic) or is not a human study (animal work).
-fn is_mention_only(t: &str) -> bool {
-    t.contains("narrative review")
-        || t.contains("scoping review")
-        || t.contains("in vitro")
+/// Not a human study of its own: a protocol, commentary, editorial, letter or
+/// animal work.
+fn is_excluded(t: &str) -> bool {
+    [
+        "study protocol",
+        "trial protocol",
+        "review protocol",
+        "protocol for",
+        "letter to the editor",
+        "comment on",
+        "in vitro",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
         || words(t).any(|w| {
             matches!(
                 w,
                 "editorial"
-                    | "letter"
                     | "commentary"
-                    | "comment"
-                    | "protocol"
                     | "porcine"
                     | "swine"
                     | "murine"
@@ -108,35 +113,72 @@ fn is_mention_only(t: &str) -> bool {
                     | "rodent"
                     | "canine"
                     | "animal"
+                    | "animals"
             )
         })
 }
 
-/// Any word that names a study design, so "guideline" is not the study type.
-fn names_a_design(t: &str) -> bool {
-    has_word_rct(t)
-        || [
-            "randomi",
-            "trial",
-            "cohort",
-            "retrospective",
-            "prospective",
-            "case series",
-            "case report",
-            "case-control",
-            "case control",
-            "meta-analysis",
-            "meta analysis",
-            "systematic review",
-            "observational",
-            "comparative",
-            "single-arm",
-            "single arm",
-            "claims",
-            "database",
-        ]
-        .iter()
-        .any(|w| t.contains(w))
+/// Byte offset of the first word that names a study design.
+fn first_design(t: &str) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut note = |i: usize| best = Some(best.map_or(i, |b| b.min(i)));
+    for w in [
+        "randomi",
+        "trial",
+        "cohort",
+        "retrospective",
+        "prospective",
+        "case series",
+        "case report",
+        "case-control",
+        "case control",
+        "meta-analysis",
+        "meta analysis",
+        "systematic review",
+        "observational",
+        "comparative",
+        "single-arm",
+        "single arm",
+        "claims",
+        "database",
+    ] {
+        if let Some(i) = t.find(w) {
+            note(i);
+        }
+    }
+    for (i, _) in t.match_indices("rct") {
+        let before = t[..i].chars().next_back();
+        let after = t[i + 3..].chars().next();
+        let after = if after == Some('s') {
+            t[i + 4..].chars().next()
+        } else {
+            after
+        };
+        if !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric) {
+            note(i);
+        }
+    }
+    best
+}
+
+/// "guideline" (not hyphenated, as in "guideline-directed") or "consensus
+/// statement" comes before any design word.
+fn is_guideline(t: &str) -> bool {
+    let mut at: Option<usize> = None;
+    for (i, _) in t.match_indices("guideline") {
+        if !t[i + 9..].starts_with('-') {
+            at = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = t.find("consensus statement") {
+        at = Some(at.map_or(i, |a| a.min(i)));
+    }
+    match (at, first_design(t)) {
+        (Some(g), Some(d)) => g < d,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 enum Class {
@@ -150,7 +192,7 @@ enum Class {
 fn classify(t: &str) -> Class {
     let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
     let hit = |rank, label| Class::Hit(ranked(rank, label));
-    if has(&["guideline", "consensus"]) && !names_a_design(t) {
+    if is_guideline(t) {
         return hit(Rank::Guideline, "Guideline");
     }
     if has(&[
@@ -161,6 +203,9 @@ fn classify(t: &str) -> Class {
         "decision-analytic",
     ]) {
         return hit(Rank::Model, "Model");
+    }
+    if is_excluded(t) {
+        return Class::MentionOnly;
     }
     let scoping_or_narrative = t.contains("narrative review") || t.contains("scoping review");
     if has(&["meta-analysis", "meta analysis"])
@@ -184,7 +229,7 @@ fn classify(t: &str) -> Class {
         ]);
         return Class::Hit(r);
     }
-    if is_mention_only(t) {
+    if scoping_or_narrative {
         return Class::MentionOnly;
     }
     let retro = |label| Class::Hit(ranked(Rank::Retrospective, label));
@@ -213,7 +258,19 @@ fn classify(t: &str) -> Class {
         if t.contains("retrospective") {
             return retro("Retrospective");
         }
-        if t.contains("trial") || has(&["single-arm", "single arm", "prospective"]) {
+        if has(&["case series", "case report"]) {
+            return hit(Rank::CaseSeries, "Case series");
+        }
+        if t.contains("trial")
+            || has(&[
+                "single-arm",
+                "single arm",
+                "prospective",
+                "quasi-randomi",
+                "quasi randomi",
+                "quasirandomi",
+            ])
+        {
             return hit(Rank::Prospective, "Prospective");
         }
         return retro("Retrospective or unstated");
@@ -432,6 +489,41 @@ mod tests {
             lab("Case-control study"),
             (Rank::Retrospective, "Retrospective or unstated")
         );
+    }
+
+    #[test]
+    fn guideline_first_wins_and_design_first_keeps_design() {
+        for d in [
+            "Clinical practice guideline based on a systematic review and meta-analysis",
+            "Guideline informed by RCTs",
+        ] {
+            assert_eq!(r(d), Rank::Guideline, "{d}");
+        }
+        assert_eq!(
+            r("Cohort study of guideline adherence"),
+            Rank::Retrospective
+        );
+        assert_eq!(r("RCT of guideline-directed medical therapy"), Rank::Rct);
+    }
+
+    #[test]
+    fn protocols_and_animal_meta_are_unclassified() {
+        for d in [
+            "Systematic review protocol",
+            "Meta-analysis in a murine model",
+        ] {
+            assert_eq!(r(d), Rank::Unclassified, "{d}");
+        }
+        assert_eq!(r("RCT of two surgical protocols"), Rank::Rct);
+        assert_eq!(r("Letter to the editor"), Rank::Unclassified);
+        assert_eq!(r("Comment on an RCT"), Rank::Unclassified);
+        assert_eq!(r("Narrative review of RCTs"), Rank::Unclassified);
+    }
+
+    #[test]
+    fn non_randomised_case_series_and_quasi_controlled() {
+        assert_eq!(r("Non-randomised case series"), Rank::CaseSeries);
+        assert_eq!(r("Quasi-randomised controlled study"), Rank::Prospective);
     }
 
     #[test]
