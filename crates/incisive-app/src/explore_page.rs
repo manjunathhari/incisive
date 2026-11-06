@@ -28,6 +28,8 @@ pub const NOT_ALL: &str =
 pub const LINE_MEANS: &str =
     "A line means \"looked at in this run\", not \"this treatment works\".";
 pub const SQUARES: &str = "Bigger, darker squares are higher-ranked papers.";
+/// Under a map with no room for any paper.
+pub const PAPERS_HIDDEN: &str = "Papers are hidden on this map; see them in List";
 pub const FIND_LABEL: &str = "Find on your map";
 pub const FIND_HINT: &str = "e.g. hernia, bile duct, POEM";
 
@@ -453,7 +455,10 @@ pub fn cap_for_map(data: &mut MapData, max: usize) {
     let room = max - others.len();
     papers.sort_by(paper_order);
     papers.truncate(room);
-    if had_papers {
+    if had_papers && papers.is_empty() {
+        // No room left for any paper.
+        data.papers_hidden_by_size = true;
+    } else if had_papers {
         data.top_papers = Some(u32::try_from(papers.len()).unwrap_or(u32::MAX));
     }
     others.extend(papers);
@@ -470,6 +475,15 @@ pub fn top_papers_line(n: u32) -> String {
         "Showing the top 1 paper".to_string()
     } else {
         format!("Showing the top {n} papers")
+    }
+}
+
+/// The line under a map that was cut to size, if it was.
+pub fn map_note(data: &MapData) -> Option<String> {
+    if data.papers_hidden_by_size {
+        Some(PAPERS_HIDDEN.to_string())
+    } else {
+        data.top_papers.map(top_papers_line)
     }
 }
 
@@ -661,6 +675,26 @@ mod tests {
     }
 
     #[test]
+    fn no_room_for_papers_hides_them_rather_than_showing_the_top_zero() {
+        let mut m = sample();
+        for i in 0..10 {
+            m.dots
+                .push(dot(&format!("t:9{i}"), DotKind::Treatment, "T", ""));
+        }
+        // 15 dots that are not papers, a cap of 12.
+        cap_for_map(&mut m, 12);
+        assert_eq!(m.dots.len(), 12);
+        assert!(m.dots.iter().all(|d| d.kind != DotKind::Paper));
+        assert_eq!(m.top_papers, None);
+        assert!(m.papers_hidden_by_size);
+        assert_eq!(
+            map_note(&m).as_deref(),
+            Some("Papers are hidden on this map; see them in List")
+        );
+        assert_eq!(map_note(&sample()), None);
+    }
+
+    #[test]
     fn numbers_use_indian_grouping() {
         assert_eq!(indian_number(7), "7");
         assert_eq!(indian_number(999), "999");
@@ -723,6 +757,7 @@ mod tests {
                 .all(|l| present.contains(l.a.as_str()) && present.contains(l.b.as_str()))
         );
         assert_eq!(top_papers_line(395), "Showing the top 395 papers");
+        assert_eq!(map_note(&m).as_deref(), Some("Showing the top 395 papers"));
         // A small map is left alone.
         let mut small = sample();
         cap_for_map(&mut small, 400);

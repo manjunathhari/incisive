@@ -198,6 +198,8 @@ struct Ui {
     query: RwSignal<String>,
     sel: RwSignal<Option<String>>,
     open: RwSignal<BTreeSet<String>>,
+    /// The page runs in the browser (hydrated): the switch works.
+    ready: RwSignal<bool>,
 }
 
 #[component]
@@ -209,35 +211,48 @@ pub fn ExplorePage() -> impl IntoView {
     {
         o.set_status(axum::http::StatusCode::NOT_FOUND);
     }
+    // Drawn on the server as the List, which works with no script; the
+    // switch shows, and Map (the default) or the remembered choice is
+    // taken, once the page runs in the browser.
     let ui = Ui {
-        view: RwSignal::new(View::Map),
+        view: RwSignal::new(View::List),
         organ: RwSignal::new(None),
         query: RwSignal::new(String::new()),
         sel: RwSignal::new(None),
         open: RwSignal::new(BTreeSet::new()),
+        ready: RwSignal::new(false),
     };
-    // The remembered choice, once the page runs in the browser.
     Effect::new(move |_| {
-        if let Some(v) = load_view() {
-            ui.view.set(v);
-        }
+        ui.view.set(load_view().unwrap_or(View::Map));
+        ui.ready.set(true);
     });
     let all = Resource::new(|| (), |_| get_list(MapFilter::default()));
+    let page = move |inner: AnyView| {
+        view! {
+            <style>{EXPLORE_STYLE}</style>
+            <div class="iv-wrap kg" data-view=move || ui.view.get().as_str()>
+                <h1 class="iv-sr">{ep::TITLE}</h1>
+                {inner}
+            </div>
+        }
+        .into_any()
+    };
     view! {
-        <style>{EXPLORE_STYLE}</style>
-        <div class="iv-wrap kg" data-view=move || ui.view.get().as_str()>
-            <h1 class="iv-sr">{ep::TITLE}</h1>
-            <Suspense fallback=|| view! { <p class="iv-status">"Loading your map\u{2026}"</p> }>
-                {move || {
-                    all.get()
-                        .map(|r| match r {
-                            Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
-                            Ok(d) if d.runs == 0 => view! { <p class="iv-empty">{ep::EMPTY}</p> }.into_any(),
-                            Ok(d) => explore_body(ui, d).into_any(),
-                        })
-                }}
-            </Suspense>
-        </div>
+        <Suspense fallback=|| ()>
+            {move || {
+                all.get()
+                    .map(|r| match r {
+                        // With `GRAPH` off: the app's usual not-found, nothing
+                        // of this page.
+                        Err(e) if error_text(&e) == ep::NOT_FOUND => {
+                            view! { <p>{ep::NOT_FOUND}</p> }.into_any()
+                        }
+                        Err(e) => page(view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()),
+                        Ok(d) if d.runs == 0 => page(view! { <p class="iv-empty">{ep::EMPTY}</p> }.into_any()),
+                        Ok(d) => page(explore_body(ui, d).into_any()),
+                    })
+            }}
+        </Suspense>
     }
 }
 
@@ -303,7 +318,7 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
         }
     };
     view! {
-        <div role="group" aria-label="View" class="kg-switch">
+        <div role="group" aria-label="View" class="kg-switch" hidden=move || !ui.ready.get()>
             <button type="button" aria-pressed=move || (ui.view.get() == View::Map).to_string() on:click=move |_| set_view(View::Map)>
                 "Map"
             </button>
@@ -338,7 +353,7 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
                             map.get()
                                 .map(|r| match r {
                                     Ok(m) => {
-                                        let top = m.top_papers.map(ep::top_papers_line);
+                                        let top = ep::map_note(&m);
                                         view! {
                                             <p class="kg-foot">
                                                 <span>{ep::count_line(&m)}</span>

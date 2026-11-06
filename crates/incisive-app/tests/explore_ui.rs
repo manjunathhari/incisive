@@ -226,6 +226,43 @@ fn markup(html: &str) -> String {
     m
 }
 
+/// The page outside its scripts with streamed chunks put back in their
+/// slots, nonces and today's date blanked.
+fn settled(html: &str) -> String {
+    let date = incisive_app::library::header_date(incisive_app::library::now_utc());
+    let nonce = regex::Regex::new(r#"(crossorigin|nonce)="[^"]*""#).unwrap();
+    let mut m = nonce
+        .replace_all(&markup(html), "$1=\"NONCE\"")
+        .replace(&date, "HEADER-DATE");
+    let tpl = regex::Regex::new(r#"<template id="(\d+)-f">"#).unwrap();
+    while let Some(c) = tpl.captures(&m) {
+        let n = c[1].to_string();
+        let at = c.get(0).unwrap();
+        let close = at.end() + m[at.end()..].find("</template>").expect("template end");
+        let content = m[at.end()..close].to_string();
+        m.replace_range(at.start()..close + "</template>".len(), "");
+        let (o, cl) = (format!("<!--s-{n}-o-->"), format!("<!--s-{n}-c-->"));
+        let (Some(a), Some(b)) = (m.find(&o), m.find(&cl)) else {
+            panic!("no slot for template {n}");
+        };
+        m.replace_range(a..b + cl.len(), &content);
+    }
+    regex::Regex::new(r"<!--s-\d+-[oc]-->")
+        .unwrap()
+        .replace_all(&m, "")
+        .into_owned()
+}
+
+/// The `<header>` of a page.
+fn header_of(html: &str) -> String {
+    let m = settled(html);
+    let a = m.find(r#"<header class="iv-head">"#).expect("header");
+    let b = a + m[a..].find("</header>").expect("header end") + "</header>".len();
+    m[a..b].to_string()
+}
+
+const OWNER_HEADER: &str = "tests/fixtures/explore/owner_header_before.json";
+
 /// Text as the page writes it (quotes may be escaped in text).
 fn unescaped(html: &str) -> String {
     html.replace("&quot;", "\"").replace("&#34;", "\"")
@@ -259,8 +296,19 @@ async fn with_graph_off_there_is_no_explore_link_and_no_page() {
 
     let (s, page) = get(router(st.clone()), "/explore", Some(&email)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    assert!(page.contains("Page not found"));
+    let m = markup(&page);
+    assert!(m.contains("<p>Page not found. Go back to the question box.</p>"));
     assert!(!page.contains(&format!("Inguinal hernia {t}")));
+    // Nothing of the Explore page: no styles, no heading, no error box.
+    for absent in [
+        ".kg-switch",
+        "<h1",
+        "iv-wrap kg",
+        "role=\"alert\"",
+        "Loading",
+    ] {
+        assert!(!m.contains(absent), "{absent} with GRAPH=off");
+    }
 
     for f in ["explore_list", "explore_map"] {
         let (s, body) = call(router(st.clone()), f, "{}", Some(&email)).await;
@@ -395,6 +443,21 @@ async fn the_list_groups_folds_and_escapes() {
     assert!(html.contains(r#"aria-label="Organ""#));
     assert!(html.contains(r#"aria-label="View""#));
     assert!(html.contains("Find on your map"));
+    // Before the page hydrates (or with no script) the List shows, and the
+    // Map's place and the switch, which need the script, do not.
+    let tag_with = |needle: &str| -> String {
+        let at = html.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        let start = html[..at].rfind('<').unwrap();
+        let end = at + html[at..].find('>').unwrap();
+        html[start..=end].to_string()
+    };
+    assert!(
+        !tag_with(r#"class="kg-list""#).contains("hidden"),
+        "the List is hidden"
+    );
+    assert!(tag_with(r#"id="kg-map""#).contains(" hidden"));
+    assert!(tag_with(r#"class="kg-switch""#).contains(" hidden"));
+    assert!(html.contains(r#"data-view="list""#));
 
     // The fixed words, exactly.
     assert!(text.contains(NOT_ALL));
@@ -484,4 +547,124 @@ async fn a_big_map_lays_out_the_top_papers() {
     let (_, html) = get(router(st), "/explore", Some(&email)).await;
     assert!(html.contains("Showing the top 395 papers"));
     assert!(html.contains("Papers, ranked \u{b7} 420"));
+}
+
+/// With `GRAPH=off` the owner's header (Activity in the nav) is byte for
+/// byte as before Explore. With `EXPLORE_NAV_CAPTURE=1` it is written to
+/// [`OWNER_HEADER`] instead (done with `ivory.rs` and `ask.rs` from
+/// f152318, the commit before Explore).
+#[tokio::test]
+async fn the_owners_header_is_unchanged_with_graph_off() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (_, email) = new_user(&pool, "owner").await;
+    let st = state(pool, false);
+    let mut now = serde_json::Map::new();
+    for path in ["/", "/history", "/activity"] {
+        let (s, html) = get(router(st.clone()), path, Some(&email)).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        now.insert(
+            path.to_string(),
+            serde_json::Value::String(header_of(&html)),
+        );
+    }
+    let file = format!("{}/{OWNER_HEADER}", env!("CARGO_MANIFEST_DIR"));
+    if std::env::var("EXPLORE_NAV_CAPTURE").is_ok_and(|v| v == "1") {
+        std::fs::create_dir_all(std::path::Path::new(&file).parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_string_pretty(&now).unwrap()).unwrap();
+        eprintln!("captured {file}");
+        return;
+    }
+    let before: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    for (path, h) in &now {
+        assert_eq!(&before[path], h, "{path}: the owner's header changed");
+        assert!(!h.as_str().unwrap().contains("/explore"));
+        assert!(h.as_str().unwrap().contains(r#"href="/activity""#));
+    }
+}
+
+/// B never reaches A's map: not with A's organ id, and not A's reference
+/// numbers for a paper both of them have.
+#[tokio::test]
+async fn another_users_organ_and_sheets_stay_theirs() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (a, email_a) = new_user(&pool, "surgeon").await;
+    let (b, email_b) = new_user(&pool, "surgeon").await;
+    let (ta, tb) = (tag(), tag());
+    let shared = pmid(&ta, 1);
+    let only_a = pmid(&ta, 2);
+    let run_a = mapped_run(
+        &pool,
+        a,
+        &ta,
+        &[
+            paper(&shared, "Shared trial", 2024, "RCT"),
+            paper(&only_a, "A's trial", 2023, "RCT"),
+        ],
+    )
+    .await;
+    let run_b = mapped_run(
+        &pool,
+        b,
+        &tb,
+        &[paper(&shared, "Shared trial", 2024, "RCT")],
+    )
+    .await;
+    let answer =
+        |n: u16, p: &str| serde_json::json!({"version": 3, "references": [{"n": n, "pmid": p}]});
+    for (run, body) in [(run_a, answer(7, &shared)), (run_b, answer(2, &shared))] {
+        sqlx::query(
+            "INSERT INTO incisive.run_answers (run_id, body, answer_version) VALUES ($1, $2, 3)",
+        )
+        .bind(run)
+        .bind(body)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let st = state(pool.clone(), true);
+    let (_, body) = call(router(st.clone()), "explore_list", "{}", Some(&email_a)).await;
+    let mine: MapData = serde_json::from_str(&body).unwrap();
+    let organ_a = mine
+        .dots
+        .iter()
+        .find(|d| d.kind == DotKind::Organ)
+        .and_then(|d| d.concept_id)
+        .unwrap();
+    let shared_a = mine
+        .dots
+        .iter()
+        .find(|d| d.id == format!("p:{shared}"))
+        .unwrap();
+    assert_eq!(shared_a.sheet.map(|s| (s.run, s.n)), Some((run_a, 7)));
+
+    // B with A's organ: nothing.
+    let filter = format!(
+        r#"{{"filter": {{"organ": {organ_a}, "year_from": null, "year_to": null, "certainty": null, "hidden": []}}}}"#
+    );
+    for f in ["explore_list", "explore_map"] {
+        let (s, body) = call(router(st.clone()), f, &filter, Some(&email_b)).await;
+        assert_eq!(s, StatusCode::OK, "{f}: {body}");
+        let m: MapData = serde_json::from_str(&body).unwrap();
+        assert!(m.dots.is_empty(), "{f}: {:?}", m.dots);
+        assert_eq!(m.runs, 0, "{f}");
+        assert!(
+            !body.contains(&ta) && !body.contains(&run_a.to_string()),
+            "{f}"
+        );
+    }
+    // B's own map: the shared paper opens B's sheet, never A's.
+    let (_, body) = call(router(st.clone()), "explore_list", "{}", Some(&email_b)).await;
+    let theirs: MapData = serde_json::from_str(&body).unwrap();
+    assert!(!body.contains(&run_a.to_string()) && !body.contains(&only_a));
+    let shared_b = theirs
+        .dots
+        .iter()
+        .find(|d| d.id == format!("p:{shared}"))
+        .unwrap();
+    assert_eq!(shared_b.sheet.map(|s| (s.run, s.n)), Some((run_b, 2)));
+    let (_, html) = get(router(st), "/explore", Some(&email_b)).await;
+    assert!(!html.contains(&run_a.to_string()) && !html.contains(&ta));
 }
