@@ -59,6 +59,26 @@ async fn begin() -> Option<(tokio::sync::MutexGuard<'static, ()>, PgPool)> {
     .execute(&pool)
     .await
     .unwrap();
+    // Prep copies cached abstracts of the fixtures' references into passages.
+    // `paper_cache` is shared and not truncated: another test binary may have
+    // left a row (chat_prep's holds "zebra" and "recurrence"), so clear them.
+    let pmids: Vec<String> = [HERNIA.body, ACHALASIA.body]
+        .iter()
+        .flat_map(|b| {
+            let v: Value = serde_json::from_str(b).unwrap();
+            v["references"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r["pmid"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    sqlx::query("DELETE FROM incisive.paper_cache WHERE pmid = ANY($1)")
+        .bind(&pmids)
+        .execute(&pool)
+        .await
+        .unwrap();
     Some((guard, pool))
 }
 
