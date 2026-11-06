@@ -130,13 +130,13 @@ pub fn norm_label(s: &str) -> String {
 }
 
 /// A name fit to store: not blank, at most 80 characters, no patient
-/// identifier. Returns it trimmed.
+/// identifier. Returns it with white space (newlines included) collapsed.
 fn clean_name(s: &str) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty() || t.chars().count() > MAX_NAME || !deid::scan(t).is_empty() {
+    let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() || t.chars().count() > MAX_NAME || !deid::scan(&t).is_empty() {
         return None;
     }
-    Some(t.to_string())
+    Some(t)
 }
 
 /// Keep up to `cap` clean, distinct names; count every one left out.
@@ -189,7 +189,10 @@ pub fn check(raw: RawPicks, a: &AnswerV3) -> Picks {
         let name = clean_name(&o.name);
         match (row, name) {
             (Some(row), Some(name))
-                if outcomes.len() < MAX_OUTCOMES && !outcomes.iter().any(|p| p.row == row) =>
+                if outcomes.len() < MAX_OUTCOMES
+                    && !outcomes
+                        .iter()
+                        .any(|p| p.row == row || norm_label(&p.name) == norm_label(&name)) =>
             {
                 outcomes.push(PickedOutcome {
                     row,
@@ -379,7 +382,98 @@ mod tests {
             v["properties"]["outcomes"]["items"]["additionalProperties"],
             false
         );
-        let _ = crate::agent::llm::OutputSchema::new(v);
+        // `OutputSchema::new` does not validate, so walk the schema here.
+        let mut problems = Vec::new();
+        strict_problems("picks", &v, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            v["properties"]["organs"]["items"]["enum"][25],
+            "Whole body or other"
+        );
+        let mut bad = Vec::new();
+        strict_problems(
+            "bad",
+            &json!({"type": "object", "properties": {"a": {"type": "string", "maxLength": 3}}, "required": ["a"]}),
+            &mut bad,
+        );
+        assert!(!bad.is_empty(), "walker is not vacuous");
+    }
+
+    fn strict_problems(path: &str, v: &Value, out: &mut Vec<String>) {
+        const ALLOWED: &[&str] = &[
+            "type",
+            "properties",
+            "items",
+            "required",
+            "enum",
+            "const",
+            "anyOf",
+            "description",
+            "additionalProperties",
+            "minItems",
+        ];
+        let Some(o) = v.as_object() else {
+            out.push(format!("{path}: not a schema object"));
+            return;
+        };
+        for k in o.keys() {
+            if !ALLOWED.contains(&k.as_str()) {
+                out.push(format!("{path}: unsupported keyword {k}"));
+            }
+        }
+        if o.get("type") == Some(&json!("object")) {
+            if o.get("additionalProperties") != Some(&json!(false)) {
+                out.push(format!("{path}: additionalProperties must be false"));
+            }
+            let props = o.get("properties").and_then(|p| p.as_object());
+            let req = o.get("required").and_then(|r| r.as_array());
+            match (req, props) {
+                (Some(req), Some(props)) => {
+                    for r in req {
+                        if !r.as_str().is_some_and(|r| props.contains_key(r)) {
+                            out.push(format!("{path}: required {r} not in properties"));
+                        }
+                    }
+                    if props.len() != req.len() {
+                        out.push(format!("{path}: every property must be required"));
+                    }
+                    for (k, p) in props {
+                        strict_problems(&format!("{path}.{k}"), p, out);
+                    }
+                }
+                _ => out.push(format!("{path}: object needs properties and required")),
+            }
+        }
+        if let Some(items) = o.get("items") {
+            strict_problems(&format!("{path}[]"), items, out);
+        }
+    }
+
+    #[test]
+    fn repeated_outcome_name_keeps_first_row() {
+        let p = check(
+            raw(&[(1, "Pain"), (2, "  pain "), (3, "Recurrence")]),
+            &hernia(),
+        );
+        assert_eq!(p.outcomes.len(), 2);
+        assert_eq!(p.outcomes[0].row, 1);
+        assert_eq!(p.outcomes[1].name, "Recurrence");
+        assert_eq!(p.dropped, 1);
+    }
+
+    #[test]
+    fn names_have_inner_white_space_collapsed() {
+        let r = RawPicks {
+            diseases: s(&["Inguinal\n  hernia\t repair "]),
+            outcomes: vec![RawOutcome {
+                row: 1,
+                name: "Chronic\npain".into(),
+            }],
+            ..Default::default()
+        };
+        let p = check(r, &hernia());
+        assert_eq!(p.diseases, s(&["Inguinal hernia repair"]));
+        assert_eq!(p.outcomes[0].name, "Chronic pain");
     }
 
     #[test]
