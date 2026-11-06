@@ -562,8 +562,17 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
     Effect::new(move |_| {
         let key = (filter_of(ui), mu.frame.get(), mu.retry.get());
         let same = |k: &MapKey| k.0 == key.0 && k.1 == key.1;
-        if shown.with_value(same) || asking.with_value(|a| a.as_ref().is_some_and(|a| *a == key)) {
-            return;
+        let in_flight = asking.with_value(|a| a.as_ref().map(|a| *a == key));
+        match ep::map_fetch(shown.with_value(same), in_flight) {
+            ep::MapFetch::Nothing => return,
+            // Back to the map on screen while another loads: forget that
+            // one, so its reply is not drawn under this filter.
+            ep::MapFetch::Drop => {
+                asking.set_value(None);
+                mu.busy.set(false);
+                return;
+            }
+            ep::MapFetch::Ask => {}
         }
         asking.set_value(Some(key.clone()));
         mu.busy.set(true);

@@ -750,6 +750,28 @@ pub fn visible_labels(
     out
 }
 
+/// What to do when the map's filter or frame changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapFetch {
+    /// The wanted map is on screen, or already being fetched.
+    Nothing,
+    /// The wanted map is on screen but another is being fetched: forget
+    /// that fetch (its reply is dropped) and stop showing "Loading".
+    Drop,
+    /// Fetch the wanted map.
+    Ask,
+}
+
+/// `on_screen`: the wanted map is the one drawn. `in_flight`: `None` when
+/// nothing is being fetched, else whether the fetch is for the wanted map.
+pub fn map_fetch(on_screen: bool, in_flight: Option<bool>) -> MapFetch {
+    match (on_screen, in_flight) {
+        (true, Some(_)) => MapFetch::Drop,
+        (true, None) | (false, Some(true)) => MapFetch::Nothing,
+        (false, _) => MapFetch::Ask,
+    }
+}
+
 /// Whether a click on a dot picks it: a keyboard or screen-reader press
 /// (`detail` 0) always does; a pointer click does unless the map was just
 /// dragged.
@@ -1444,6 +1466,70 @@ mod tests {
         // Zoom and pan place a spot.
         let s = Spot::of(&dots[0], 2.0, -50.0, 10.0);
         assert_eq!((s.x, s.y), (150.0, 210.0));
+    }
+
+    /// The page's fetch bookkeeping, as `explore.rs` keeps it.
+    struct Fetches {
+        shown: char,
+        asking: Option<char>,
+        busy: bool,
+    }
+
+    impl Fetches {
+        fn want(&mut self, k: char) {
+            let in_flight = self.asking.map(|a| a == k);
+            match map_fetch(self.shown == k, in_flight) {
+                MapFetch::Nothing => {}
+                MapFetch::Drop => {
+                    self.asking = None;
+                    self.busy = false;
+                }
+                MapFetch::Ask => {
+                    self.asking = Some(k);
+                    self.busy = true;
+                }
+            }
+        }
+
+        /// A reply for `k` arrives: drawn only if it is still the one asked.
+        fn reply(&mut self, k: char) -> bool {
+            if self.asking != Some(k) {
+                return false;
+            }
+            self.asking = None;
+            self.busy = false;
+            self.shown = k;
+            true
+        }
+    }
+
+    #[test]
+    fn a_filter_changed_and_changed_back_keeps_its_map() {
+        let mut f = Fetches {
+            shown: 'A',
+            asking: None,
+            busy: false,
+        };
+        f.want('A');
+        assert_eq!((f.asking, f.busy), (None, false), "already on screen");
+        f.want('B');
+        assert_eq!((f.asking, f.busy), (Some('B'), true));
+        f.want('B');
+        assert_eq!(f.asking, Some('B'), "not asked twice");
+        // Back to A while B loads: B is forgotten.
+        f.want('A');
+        assert_eq!((f.asking, f.busy), (None, false));
+        assert!(!f.reply('B'), "B's late reply is not drawn under A");
+        assert_eq!(f.shown, 'A');
+        // A then C: C is drawn.
+        f.want('C');
+        assert!(f.reply('C'));
+        assert_eq!((f.shown, f.busy), ('C', false));
+        // A newer request replaces an older one.
+        f.want('D');
+        f.want('E');
+        assert!(!f.reply('D'));
+        assert!(f.reply('E'));
     }
 
     #[test]
