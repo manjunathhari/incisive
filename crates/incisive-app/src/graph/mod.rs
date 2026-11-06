@@ -5,3 +5,4 @@ pub mod extract;
 pub mod organs;
 pub mod rank;
 pub mod settings;
+pub mod store;
