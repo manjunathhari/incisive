@@ -34,6 +34,10 @@ fn dot(id: &str, kind: DotKind, r: f32) -> Dot {
         concept_id: None,
         pmid: None,
         retracted: false,
+        design: String::new(),
+        n: None,
+        includes_non_rct: false,
+        sheet: None,
     }
 }
 

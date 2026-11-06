@@ -38,6 +38,8 @@ mod draft;
 mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
 mod expert;
+// The knowledge graph's Explore page (GRAPH=on).
+mod explore;
 mod intro;
 mod ivory;
 mod library_page;
@@ -796,6 +798,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("runs/:id") view=RunPage />
                     <Route path=path!("run/:id/temporal") view=expert::TemporalPage />
                     <Route path=path!("history") view=library_page::LibraryPage />
+                    <Route path=path!("explore") view=explore::ExplorePage />
                     <Route path=path!("activity") view=ActivityPage />
                 </Routes>
             </ivory::PageMain>

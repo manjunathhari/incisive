@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::layout::{concept_radius, paper_radius};
 use super::store::MAX_CHAIN;
-use crate::graph_view::{Dot, DotKind, Line, MapData, MapFilter};
+use crate::graph_view::{Dot, DotKind, Line, MapData, MapFilter, SheetRef};
 
 /// Above this many dots, papers are left out unless the user chose what to
 /// hide.
@@ -57,6 +57,9 @@ struct PaperLink {
     retracted: bool,
     rank: String,
     rank_label: String,
+    includes_non_rct: bool,
+    design: String,
+    n: Option<i64>,
 }
 
 fn concept_kind(kind: &str) -> Option<DotKind> {
@@ -147,7 +150,8 @@ async fn concept_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<ConceptL
 
 async fn paper_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<PaperLink>> {
     sqlx::query_as(
-        "SELECT rp.run_id AS run, p.pmid, p.title, p.year, p.retracted, rp.rank, rp.rank_label \
+        "SELECT rp.run_id AS run, p.pmid, p.title, p.year, p.retracted, rp.rank, rp.rank_label, \
+                rp.includes_non_rct, rp.design, rp.n \
            FROM incisive.graph_run_papers rp \
            JOIN incisive.runs r ON r.id = rp.run_id AND r.user_id = $1 \
            JOIN incisive.graph_papers p ON p.pmid = rp.pmid \
@@ -156,6 +160,30 @@ async fn paper_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<PaperLink>
     .bind(user_id)
     .fetch_all(pool)
     .await
+}
+
+/// Each linked paper's reference number in its run's stored answer, by run
+/// and PMID (the user's own runs only).
+async fn sheet_refs(pool: &PgPool, user_id: i64) -> sqlx::Result<HashMap<(Uuid, String), u16>> {
+    let rows: Vec<(Uuid, String, i32)> = sqlx::query_as(
+        "SELECT rp.run_id, rp.pmid, (ref->>'n')::int \
+           FROM incisive.graph_run_papers rp \
+           JOIN incisive.runs r ON r.id = rp.run_id AND r.user_id = $1 \
+           JOIN incisive.run_answers a ON a.run_id = rp.run_id \
+           CROSS JOIN LATERAL jsonb_array_elements( \
+                CASE WHEN jsonb_typeof(a.body->'references') = 'array' \
+                     THEN a.body->'references' ELSE '[]'::jsonb END) ref \
+          WHERE rp.user_id = $1 AND ref->>'pmid' = rp.pmid \
+            AND jsonb_typeof(ref->'n') = 'number' \
+            AND (ref->>'n') ~ '^[0-9]{1,5}$'",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(run, pmid, n)| Some(((run, pmid), u16::try_from(n).ok()?)))
+        .collect())
 }
 
 fn blank_dot(id: String, kind: DotKind) -> Dot {
@@ -173,6 +201,10 @@ fn blank_dot(id: String, kind: DotKind) -> Dot {
         concept_id: None,
         pmid: None,
         retracted: false,
+        design: String::new(),
+        n: None,
+        includes_non_rct: false,
+        sheet: None,
     }
 }
 
@@ -184,11 +216,27 @@ fn in_years(year: Option<i32>, f: &MapFilter) -> bool {
 }
 
 /// One user's map under a filter. Dots come sorted by id with `x`/`y` at 0;
-/// the page places them with [`crate::graph_view::layout`].
+/// the page places them with [`crate::graph_view::layout`]. Above
+/// [`MAX_DOTS`] the papers are left out unless the user chose what to hide.
 pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Result<MapData> {
+    let mut m = load_map_all(pool, user_id, f).await?;
+    if f.hidden.is_empty() && m.dots.len() > MAX_DOTS {
+        m.dots.retain(|d| d.kind != DotKind::Paper);
+        let present: HashSet<&str> = m.dots.iter().map(|d| d.id.as_str()).collect();
+        m.lines
+            .retain(|l| present.contains(l.a.as_str()) && present.contains(l.b.as_str()));
+        m.papers_hidden_by_size = true;
+    }
+    Ok(m)
+}
+
+/// [`load_map`] with every dot the filter keeps, however many (the Explore
+/// list, and the map before it is cut to size).
+pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Result<MapData> {
     let runs = user_runs(pool, user_id).await?;
     let concepts = concept_links(pool, user_id).await?;
     let papers = paper_links(pool, user_id).await?;
+    let sheets = sheet_refs(pool, user_id).await?;
 
     // Runs the organ and certainty filters keep.
     let keep: HashSet<Uuid> = runs
@@ -350,6 +398,22 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
         d.rank = Some(best.rank.clone());
         d.pmid = Some(pmid.to_string());
         d.retracted = best.retracted;
+        d.design = best.design.clone();
+        d.n = best.n;
+        d.includes_non_rct = best.includes_non_rct;
+        // The newest run that cites it.
+        d.sheet = links
+            .iter()
+            .filter_map(|p| {
+                let n = sheets.get(&(p.run, p.pmid.clone()))?;
+                Some((
+                    newness.get(&p.run).copied().unwrap_or(usize::MAX),
+                    p.run,
+                    *n,
+                ))
+            })
+            .min()
+            .map(|(_, run, n)| SheetRef { run, n });
         dots.push(d);
         for p in links {
             lines.insert(line(&run_dot_id(p.run), &paper_dot_id(pmid), true));
@@ -361,12 +425,6 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
     dots.retain(|d| {
         !hidden.contains(d.kind.as_str()) && d.rank.as_deref().is_none_or(|r| !hidden.contains(r))
     });
-    let mut papers_hidden_by_size = false;
-    if f.hidden.is_empty() && dots.len() > MAX_DOTS {
-        dots.retain(|d| d.kind != DotKind::Paper);
-        papers_hidden_by_size = true;
-    }
-
     dots.sort_by(|a, b| a.id.cmp(&b.id));
     let present: HashSet<&str> = dots.iter().map(|d| d.id.as_str()).collect();
     let lines: Vec<Line> = lines
@@ -376,7 +434,8 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
     Ok(MapData {
         dots,
         lines,
-        papers_hidden_by_size,
+        papers_hidden_by_size: false,
         runs: u32::try_from(runs.len()).unwrap_or(u32::MAX),
+        top_papers: None,
     })
 }
