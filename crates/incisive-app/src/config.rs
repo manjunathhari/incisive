@@ -55,6 +55,9 @@ pub struct Config {
     /// (`TEMPORAL`: `off`, the default, or `on`; `TEMPORAL_MAX_TOKENS`
     /// optional, 2,000–32,000, default 20,000).
     pub temporal: crate::agent::temporal_writer::TemporalSettings,
+    /// Stage S1: the two Opus writers stream their replies (`STREAM`: `on`, the
+    /// default, or `off`, which restores today's calls exactly).
+    pub stream: bool,
     /// The introduction agent (`INTRO`: `off`, the default, or `on`;
     /// `INTRO_MODEL`, default `claude-sonnet-5-5`, priced when `INTRO=on`).
     pub intro: crate::runs::intro::IntroSettings,
@@ -388,6 +391,17 @@ impl Config {
             }
         };
 
+        let stream = match lookup("STREAM").as_deref().map(str::trim) {
+            None | Some("") | Some("on") => true,
+            Some("off") => false,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "STREAM",
+                    reason: "expected on or off".into(),
+                });
+            }
+        };
+
         let intro = {
             use crate::runs::intro::IntroSettings;
             let on = match lookup("INTRO").as_deref() {
@@ -502,6 +516,7 @@ impl Config {
             full_engine,
             completeness,
             temporal,
+            stream,
             intro,
             memory,
             chat,
@@ -1271,6 +1286,36 @@ mod tests {
         p.push(("GEMMA_AUTH", "s3cr3t-gemma-token"));
         let c = Config::from_lookup(lookup(&p)).unwrap();
         assert!(!format!("{:?}", c.memory).contains("s3cr3t-gemma-token"));
+    }
+
+    /// `STREAM` is `on` (default) or `off`, trimmed; anything else refuses at
+    /// startup.
+    #[test]
+    fn stream_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(c.stream, "on by default");
+        for (v, want) in [
+            ("on", true),
+            ("off", false),
+            (" off ", false),
+            (" on", true),
+        ] {
+            let mut pairs = full();
+            pairs.push(("STREAM", v));
+            assert_eq!(
+                Config::from_lookup(lookup(&pairs)).unwrap().stream,
+                want,
+                "{v}"
+            );
+        }
+        for bad in ["true", "OFF", "1"] {
+            let mut pairs = full();
+            pairs.push(("STREAM", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&pairs)),
+                Err(ConfigError::Invalid { var: "STREAM", .. })
+            ));
+        }
     }
 
     /// `INTRO` is `off` (default) or `on`, trimmed; anything else refuses at

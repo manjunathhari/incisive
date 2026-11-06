@@ -33,6 +33,7 @@ use crate::ask::{ActivityView, AskOutcome, MeView};
 // The ivory redesign: header and tokens, the Ask page and the Library.
 mod ask_page;
 mod details;
+mod draft;
 // The evidence chat's option and window.
 mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
@@ -993,6 +994,7 @@ fn RunPage() -> impl IntoView {
     let timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage> =
         StoredValue::new_local(None);
     let last_good: RwSignal<Option<RunPageData>> = RwSignal::new(None);
+    let live_draft: RwSignal<Option<String>> = RwSignal::new(None);
     let row_wait: StoredValue<RowWait, LocalStorage> = StoredValue::new_local(RowWait::default());
     let intro_wait: StoredValue<RowWait, LocalStorage> = StoredValue::new_local(RowWait::default());
     on_cleanup(move || {
@@ -1007,12 +1009,48 @@ fn RunPage() -> impl IntoView {
             h.clear();
         }
     };
+    // Stage S1: while a draft shows, a poll asks without touching the resource,
+    // so the page is drawn again only if something besides the draft changed.
+    let draft_poll = StoredValue::new(false);
+    let poll = move || {
+        let drawn = last_good.with_untracked(|l| l.as_ref().map(|d| d.run.summary.id));
+        let Some((id, shown)) = drawn.zip(live_draft.get_untracked()) else {
+            tick.update(|t| *t += 1);
+            return;
+        };
+        if draft_poll.get_value() {
+            return;
+        }
+        draft_poll.set_value(true);
+        leptos::task::spawn_local(async move {
+            let now = get_my_run(id).await;
+            let _ = draft_poll.try_update_value(|b| *b = false);
+            let step = now.ok().and_then(|now| {
+                last_good.try_with_untracked(|l| {
+                    l.as_ref()
+                        .map(|d| crate::draft_page::poll_step(&d.run, &shown, &now))
+                })?
+            });
+            match step {
+                Some(crate::draft_page::PollStep::Same) => {}
+                Some(crate::draft_page::PollStep::Draft(text)) => {
+                    // Kept for the error view, which draws the last good page.
+                    let _ = last_good.try_update_untracked(|l| {
+                        if let Some(d) = l {
+                            d.run.draft = Some(text.clone());
+                        }
+                    });
+                    let _ = live_draft.try_set(Some(text));
+                }
+                _ => {
+                    let _ = tick.try_update(|t| *t += 1);
+                }
+            }
+        });
+    };
     let start = move || {
         if timer.with_value(|t| t.is_none()) {
-            let h = leptos::leptos_dom::helpers::set_interval_with_handle(
-                move || tick.update(|t| *t += 1),
-                POLL_EVERY,
-            );
+            let h = leptos::leptos_dom::helpers::set_interval_with_handle(poll, POLL_EVERY);
             timer.set_value(h.ok());
         }
     };
@@ -1054,7 +1092,7 @@ fn RunPage() -> impl IntoView {
                 data.get()
                     .map(|r| match r {
                         Ok(RunPageData { run, temporal, chat }) => {
-                            run_view(run, temporal, chat, query, ui, intro_ui).into_any()
+                            run_view(run, temporal, chat, query, ui, intro_ui, live_draft).into_any()
                         }
                         Err(e) if is_not_found(&e) => {
                             view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()
@@ -1064,7 +1102,7 @@ fn RunPage() -> impl IntoView {
                                 <p class="hint" role="status">
                                     "Connection problem \u{2014} retrying. " {error_text(&e)}
                                 </p>
-                                {run_view(run, temporal, chat, query, ui, intro_ui)}
+                                {run_view(run, temporal, chat, query, ui, intro_ui, live_draft)}
                             }
                                 .into_any(),
                             None => view! {
@@ -1182,10 +1220,16 @@ fn run_view(
     query: Memo<leptos_router::params::ParamsMap>,
     ui: tracker::TrackerUi,
     intro_ui: intro::IntroUi,
+    live_draft: RwSignal<Option<String>>,
 ) -> AnyView {
     let status = v.summary.status;
     let run_id = v.summary.id;
     let intro_row = v.intro;
+    // Stage S1: the answer as far as it is written (the API sends it only
+    // while the run is running with no answer).
+    let draft_text = v.draft.filter(|t| {
+        status.is_active() && crate::draft_page::has_content(&crate::draft_page::read_answer(t))
+    });
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw: Phase 3
     // answers (version 3) with their own view, everything else as Phase 2.
@@ -1274,7 +1318,11 @@ fn run_view(
     // The clock starts at the first step, as `elapsed_s` nearly does, so a
     // queue wait cannot make it step back at the end.
     let clock_from = v.steps.first().map_or(created_at, |s| s.at);
-    let last_step_at = v.steps.last().map_or(created_at, |s| s.at);
+    let last_step_at = v
+        .steps
+        .iter()
+        .rfind(|s| !crate::run_tracker::is_expert_first_words(&s.line))
+        .map_or(created_at, |s| s.at);
     let total_secs = elapsed_s.map_or((last_step_at - clock_from).num_seconds(), |s| s as i64);
     let mut read = {
         let lines: Vec<crate::run_tracker::Step<'_>> = v
@@ -1326,8 +1374,20 @@ fn run_view(
             total_secs,
         )
     });
+    // Stage S1: once the first words are there, the card and the introduction
+    // fold into rows, so the answer sits near the top.
+    let drafting = draft_text.is_some();
+    let card = if drafting {
+        card.map(|c| draft::fold_results(ui, clock_from, c))
+    } else {
+        card
+    };
     // In front of the card, in every layout below; nothing without a text.
-    let card = intro::with_results(intro_ui, working, intro_row, card);
+    let card = intro::with_results(intro_ui, working && !drafting, intro_row, card);
+    if live_draft.get_untracked() != draft_text {
+        live_draft.set(draft_text);
+    }
+    let answer_block = answer_block.or_else(|| drafting.then(|| draft::answer_view(live_draft)));
     let Some(t) = temporal else {
         return view! {
             // Page chrome (ivory redesign): Figtree; the answer below is untouched.

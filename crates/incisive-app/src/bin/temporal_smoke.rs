@@ -146,6 +146,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                     claude_client::ClaudeError::Overloaded => "overloaded".into(),
                     claude_client::ClaudeError::Transport(_) => "transport".into(),
                     claude_client::ClaudeError::Decode { status, .. } => format!("decode {status}"),
+                    claude_client::ClaudeError::StreamInterrupted(_) => "stream interrupted".into(),
                 };
                 println!("status: failed ({kind})");
                 continue;

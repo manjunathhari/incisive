@@ -62,6 +62,7 @@ fn state(pool: PgPool, on: bool) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: incisive_app::runs::intro::IntroRuntime {
             settings: IntroSettings {
                 on,

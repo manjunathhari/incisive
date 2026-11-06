@@ -196,6 +196,7 @@ fn state(pool: PgPool, llm: Arc<ScriptedLlm>, server: &MockServer) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),

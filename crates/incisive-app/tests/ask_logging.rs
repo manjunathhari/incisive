@@ -103,6 +103,7 @@ fn state(pool: PgPool, gate: Arc<dyn Classifier>, gate_model: &str) -> AppState 
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),

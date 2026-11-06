@@ -13,6 +13,8 @@ pub mod api;
 #[cfg(feature = "ssr")]
 pub mod budget;
 #[cfg(feature = "ssr")]
+pub mod drafts;
+#[cfg(feature = "ssr")]
 pub mod intro;
 #[cfg(feature = "ssr")]
 pub mod store;
@@ -499,6 +501,11 @@ pub struct RunView {
     /// wire when there is nothing to show, so a page without one is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<IntroView>,
+    /// The answer as far as the writer has got, only while it is being written
+    /// (`STREAM=on`). Absent from the wire otherwise, so other pages are
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
 }
 
 /// What the run page may know of a run's introduction. A failed, skipped or
@@ -528,4 +535,12 @@ pub struct TemporalView {
     pub board: Option<serde_json::Value>,
     pub table: Option<serde_json::Value>,
     pub flags: Option<serde_json::Value>,
+    /// The opinion as far as its writer has got, only while it is being
+    /// written. Absent from the wire otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
+    /// Being written with `STREAM=on`: the page asks again every 2 s, as a
+    /// draft can arrive at any moment. Absent from the wire otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub streaming: bool,
 }

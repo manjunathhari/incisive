@@ -30,6 +30,8 @@
 //! Privacy: nothing here logs the question, abstracts or the answer; only
 //! the run id and counts.
 
+use std::time::Instant;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -43,14 +45,16 @@ use super::extractor::{
     has_own_sign, quote_values, written_numbers, written_traced,
 };
 use super::llm::{
-    Effort, OutputSchema, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
+    Effort, LlmCall, OutputSchema, Reply, SCHEMA_NUDGE, StepError, hold_estimate, log_unreadable,
     neutralise_source_tags, read_structured, wrap_source,
 };
 use super::researcher::{Contradiction, MAX_CONTRADICTIONS, MAX_SELECTED, MAX_SELECTED_FULL};
 use super::skeptic::SkepticReview;
+use super::team::writer_min_time;
 use super::{AgentLlm, RunContext};
 use crate::gate::neutralise_close_tag;
 use crate::runs::budget::RunBudget;
+use crate::runs::drafts::{self, Part};
 
 /// Byte caps of each field the writer is shown (after neutralising).
 #[derive(Debug, Clone, Copy)]
@@ -1613,11 +1617,19 @@ pub async fn write_counted(
     system: &str,
     user: &str,
 ) -> Result<(WrittenAnswer, u32), WriteFailure> {
-    let call = llm.call(ctx, &llm.models.writer, "write");
+    let mut call = llm.call(ctx, &llm.models.writer, "write");
+    if ctx.state.stream {
+        let left = ctx.budget.until_hard_stop(Instant::now());
+        call = call.streaming(drafts::streaming(
+            ctx.state.pool.clone(),
+            ctx.run_id,
+            Part::Answer,
+            Instant::now() + left,
+        ));
+    }
     let schema = OutputSchema::new(writer_schema());
     let max = ctx.settings.writer_max_tokens;
-    let first = call
-        .reply(system, user, Some(&schema), max)
+    let first = first_reply(ctx, &call, system, user, &schema, max)
         .await
         .map_err(WriteFailure::Step)?;
     let fault = match read_structured::<WireAnswer>(&first) {
@@ -1654,6 +1666,37 @@ pub async fn write_counted(
             tracing::info!(run_id = %ctx.run_id, error_kind = e.kind(), "writer retry not made or failed");
             Err(fail)
         }
+    }
+}
+
+/// The writer's first call. A broken stream (`STREAM=on`) gets one retry from
+/// the start with the same request, as a new logical call with its own hold,
+/// if time and money allow; otherwise, or if that breaks too, the call failed,
+/// as any failed call does today ([`StepError::Llm`]).
+async fn first_reply(
+    ctx: &RunContext,
+    call: &LlmCall,
+    system: &str,
+    user: &str,
+    schema: &OutputSchema,
+    max: u32,
+) -> Result<Reply, StepError> {
+    match call.reply(system, user, Some(schema), max).await {
+        Err(StepError::StreamBroken) => {}
+        other => return other,
+    }
+    if ctx.budget.until_hard_stop(Instant::now()) < writer_min_time(ctx.mode) {
+        tracing::warn!(run_id = %ctx.run_id, "writer stream broke; no time for a retry");
+        return Err(StepError::Llm);
+    }
+    tracing::warn!(run_id = %ctx.run_id, "writer stream broke; one retry");
+    match call.reply(system, user, Some(schema), max).await {
+        Err(e @ (StepError::Cancelled | StepError::Unrecorded | StepError::HardStop)) => Err(e),
+        Err(e) => {
+            tracing::warn!(run_id = %ctx.run_id, error_kind = e.kind(), "writer stream retry not made or failed");
+            Err(StepError::Llm)
+        }
+        ok => ok,
     }
 }
 

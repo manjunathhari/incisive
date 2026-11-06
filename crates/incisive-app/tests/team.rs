@@ -148,6 +148,7 @@ fn app_state(pool: PgPool, lit: Arc<Literature>) -> AppState {
         completeness: false,
         temporal: Default::default(),
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
@@ -1696,4 +1697,225 @@ async fn dropping_the_run_mid_writer_still_books_the_writer() {
         .await
         .unwrap();
     assert_eq!(cost, charges(&pool, uid).await.iter().sum::<i64>());
+}
+
+// ---------- Stage S1: the writer streamed ----------
+
+#[path = "support/stream_llm.rs"]
+mod stream_llm;
+use stream_llm::{StreamLlm, broken};
+
+/// What must not depend on how the reply travelled.
+fn comparable_body(mut body: Value) -> Value {
+    for f in ["elapsed_s", "created_at"] {
+        body.as_object_mut().unwrap().remove(f);
+    }
+    body
+}
+
+/// A Quick run through the worker with `llm` and `stream`; the status, the
+/// comparable body, every charge and every step line.
+async fn quick_run_with(
+    pool: &PgPool,
+    server: &MockServer,
+    llm: Arc<dyn LlmClient>,
+    stream: bool,
+) -> (RunStatus, Option<Value>, Vec<i64>, Vec<String>, i64, Uuid) {
+    let mut st = team_state(pool, literature(server), agent_llm(llm, MODEL));
+    st.stream = stream;
+    let (uid, user) = new_user(pool).await;
+    let out = start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Quick, None)
+        .await
+        .unwrap();
+    let AskOutcome::RunStarted { run_id, .. } = out else {
+        panic!("{out:?}")
+    };
+    let v = wait_done(pool, uid, run_id).await;
+    wait_idle(&st, run_id).await;
+    (
+        v.summary.status,
+        v.answer.map(comparable_body),
+        charges(pool, uid).await,
+        lines(&v.steps),
+        v.summary.cost_paise,
+        run_id,
+    )
+}
+
+async fn draft_rows(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM incisive.run_drafts WHERE run_id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn only_first_words(l: &[String]) -> Vec<&String> {
+    l.iter().filter(|x| x.contains("first words")).collect()
+}
+
+/// The hard rule: streamed or not, the same stored answer, charges, status and
+/// request; the steps differ only by the new line.
+#[tokio::test]
+async fn a_streamed_quick_run_stores_exactly_what_a_plain_one_does() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let plain = quick_run_with(&pool, &server, Arc::new(team_script()), false).await;
+    assert_eq!(plain.0, RunStatus::Done);
+
+    let inner = Arc::new(team_script());
+    let llm = Arc::new(StreamLlm::new(inner.clone()));
+    let streamed = quick_run_with(&pool, &server, llm.clone(), true).await;
+    assert_eq!(streamed.0, plain.0);
+    assert_eq!(streamed.1, plain.1, "the stored answer");
+    assert_eq!(streamed.2, plain.2, "the charges");
+    assert_eq!(streamed.4, plain.4, "the cost");
+    // Only the writer's call streamed, and its request is the plain one.
+    let s = llm.streamed.lock().unwrap().clone();
+    assert_eq!(s.len(), 1);
+    assert!(request_user_text(&s[0]).contains(STUDIES_HEADING));
+    assert_eq!(s[0].max_tokens, DepthSettings::QUICK.writer_max_tokens);
+    // The overall limit is the run's hard stop.
+    let deadline = llm.deadlines.lock().unwrap()[0].unwrap();
+    assert!(deadline > Instant::now());
+    // Steps: the same, plus one first-words line right after the writer's.
+    let mut l = streamed.3.clone();
+    let first = only_first_words(&l);
+    assert_eq!(first.len(), 1, "{l:?}");
+    assert!(first[0].starts_with("Writer: first words after "));
+    l.retain(|x| !x.contains("first words"));
+    assert_eq!(l, plain.3);
+    // The draft is gone with the run.
+    assert_eq!(draft_rows(&pool, streamed.5).await, 0);
+}
+
+/// With `STREAM=off` the streamed path is never taken.
+#[tokio::test]
+async fn stream_off_never_takes_the_streamed_path() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(StreamLlm::new(Arc::new(team_script())));
+    let r = quick_run_with(&pool, &server, llm.clone(), false).await;
+    assert_eq!(r.0, RunStatus::Done);
+    assert!(llm.streamed.lock().unwrap().is_empty());
+    assert_eq!(only_first_words(&r.3).len(), 0);
+}
+
+#[tokio::test]
+async fn a_broken_stream_is_retried_once_and_the_answer_is_the_same() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let plain = quick_run_with(&pool, &server, Arc::new(team_script()), false).await;
+
+    let llm = Arc::new(
+        StreamLlm::new(Arc::new(team_script())).breaking(vec![broken("{\"bottom_line\":", 3000)]),
+    );
+    let r = quick_run_with(&pool, &server, llm.clone(), true).await;
+    assert_eq!(r.0, RunStatus::Done, "{:?}", r.3);
+    assert_eq!(llm.streamed.lock().unwrap().len(), 2, "one retry");
+    let s = llm.streamed.lock().unwrap().clone();
+    assert_eq!(
+        serde_json::to_string(&s[0].body()).unwrap(),
+        serde_json::to_string(&s[1].body()).unwrap(),
+        "the same request, from the start"
+    );
+    // One charge more than a plain run, for what the broken stream received.
+    assert_eq!(r.2.len(), plain.2.len() + 1);
+    assert_eq!(&r.2[r.2.len() - 1], &plain.2[plain.2.len() - 1]);
+    let mut got = r.1.unwrap();
+    let mut want = plain.1.unwrap();
+    for b in [&mut got, &mut want] {
+        b.as_object_mut().unwrap().remove("cost_paise");
+    }
+    assert_eq!(got, want, "the same stored answer, cost apart");
+    assert_eq!(only_first_words(&r.3).len(), 1, "one line, not one per try");
+    assert_eq!(draft_rows(&pool, r.5).await, 0);
+}
+
+/// Two breaks: the call failed, as any failed call does today.
+#[tokio::test]
+async fn a_stream_that_breaks_twice_fails_the_run_as_a_failed_call_does() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(StreamLlm::new(Arc::new(team_script())).breaking(vec![
+        broken("{\"bottom_line\":", 3000),
+        broken("{\"bottom_line\":", 3000),
+    ]));
+    let r = quick_run_with(&pool, &server, llm.clone(), true).await;
+    assert_eq!(r.0, RunStatus::Failed, "{:?}", r.3);
+    assert_eq!(llm.streamed.lock().unwrap().len(), 2, "never a third");
+    let kind: Option<String> =
+        sqlx::query_scalar("SELECT error_kind FROM incisive.runs WHERE id = $1")
+            .bind(r.5)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kind.as_deref(), Some("llm"));
+    assert_eq!(draft_rows(&pool, r.5).await, 0);
+}
+
+/// `max_tokens` takes the existing path: one low-effort retry, itself streamed.
+#[tokio::test]
+async fn a_truncated_streamed_reply_takes_the_low_effort_retry() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let inner = research_script(ScriptedLlm::new())
+        .when(FINAL_KEY)
+        .reply_json(
+            study_list(&[(SEEN_A, "RCT"), (UNSEEN, "RCT"), (SEEN_B, "SR_MA")]),
+            u(),
+        )
+        .when(STUDIES_HEADING)
+        .reply_stop(
+            "{\"bottom_line\":",
+            StopReason::MaxTokens,
+            usage(3000, 2500),
+        )
+        .when(STUDIES_HEADING)
+        .reply_json(writer_json(), usage(3000, 2500));
+    let llm = Arc::new(StreamLlm::new(Arc::new(inner)));
+    let r = quick_run_with(&pool, &server, llm.clone(), true).await;
+    assert_eq!(r.0, RunStatus::Done, "{:?}", r.3);
+    let s = llm.streamed.lock().unwrap().clone();
+    assert_eq!(s.len(), 2);
+    assert_eq!(s[0].output_config.as_ref().unwrap().effort, None);
+    assert_eq!(
+        s[1].output_config.as_ref().unwrap().effort,
+        Some(Effort::Low)
+    );
+}
+
+/// A run ending `partial` takes its draft with it too.
+#[tokio::test]
+async fn a_partial_run_leaves_no_draft() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let cut = || -> (&str, StopReason, Usage) {
+        (
+            "{\"bottom_line\":",
+            StopReason::MaxTokens,
+            usage(3000, 2500),
+        )
+    };
+    let (a, b, c) = cut();
+    let (d, e, f) = cut();
+    let inner = research_script(ScriptedLlm::new())
+        .when(FINAL_KEY)
+        .reply_json(
+            study_list(&[(SEEN_A, "RCT"), (UNSEEN, "RCT"), (SEEN_B, "SR_MA")]),
+            u(),
+        )
+        .when(STUDIES_HEADING)
+        .reply_stop(a, b, c)
+        .when(STUDIES_HEADING)
+        .reply_stop(d, e, f);
+    let r = quick_run_with(
+        &pool,
+        &server,
+        Arc::new(StreamLlm::new(Arc::new(inner))),
+        true,
+    )
+    .await;
+    assert_eq!(r.0, RunStatus::Partial, "{:?}", r.3);
+    assert_eq!(draft_rows(&pool, r.5).await, 0);
 }

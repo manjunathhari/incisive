@@ -233,6 +233,7 @@ pub async fn get_run_for_user(
         answer: answer.map(|(b, _)| b),
         answer_version,
         intro: None,
+        draft: None,
     }))
 }
 

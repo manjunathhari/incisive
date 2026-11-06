@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::stream::StreamBreak;
+
 #[derive(Debug, Error)]
 pub enum ClaudeError {
     /// The API rejected the request with a structured error body.
@@ -21,4 +23,7 @@ pub enum ClaudeError {
     /// the response only, never from request data.
     #[error("could not decode response (status {status}): {body_snippet}")]
     Decode { status: u16, body_snippet: String },
+    /// A streamed reply broke off. Counts only, never reply text.
+    #[error("stream interrupted ({0})")]
+    StreamInterrupted(StreamBreak),
 }

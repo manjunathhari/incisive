@@ -18,6 +18,8 @@ pub mod config;
 #[cfg(feature = "ssr")]
 pub mod db;
 pub mod deid;
+/// Stage S1: reading a half-written reply (no Leptos).
+pub mod draft_page;
 /// Temporal T4: the Expert Opinion screens' rules (no Leptos).
 pub mod expert_page;
 #[cfg(feature = "ssr")]

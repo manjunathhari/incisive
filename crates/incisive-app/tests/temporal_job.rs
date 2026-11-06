@@ -69,6 +69,7 @@ fn state(pool: PgPool, llm: Arc<AgentLlm>, temporal: TemporalSettings, global: i
         completeness: false,
         temporal,
         temporal_client: None,
+        stream: false,
         intro: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
@@ -1017,4 +1018,152 @@ async fn failed_opinion_never_queues_memory() {
     .await;
     assert_ne!(status, JobStatus::Done);
     assert_eq!(memory_jobs_for(&pool, run).await, 0);
+}
+
+// ---------- Stage S1: the writer streamed ----------
+
+#[path = "support/stream_llm.rs"]
+mod stream_llm;
+use stream_llm::{StreamLlm, broken};
+
+async fn streamed_job(
+    pool: &PgPool,
+    uid: i64,
+    llm: StreamLlm,
+) -> (
+    Uuid,
+    JobStatus,
+    incisive_app::runs::TemporalView,
+    Arc<StreamLlm>,
+) {
+    let run = finished_run(pool, uid).await;
+    let llm = Arc::new(llm);
+    let mut st = state(
+        pool.clone(),
+        agent_llm(llm.clone(), MODEL),
+        TemporalSettings::on(),
+        BIG,
+    );
+    st.stream = true;
+    let req = Uuid::new_v4();
+    assert!(insert_pending(pool, run, req).await.unwrap());
+    let status = run_job(&st, st.llm.as_ref().unwrap(), run, uid, req, &hernia_body()).await;
+    let view = get_for_user(pool, uid, run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    (run, status, view, llm)
+}
+
+async fn opinion_draft_rows(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM incisive.run_drafts WHERE run_id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Streamed or not: the same board, table, flags and charge.
+#[tokio::test]
+async fn a_streamed_opinion_stores_exactly_what_a_plain_one_does() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let plain = ScriptedLlm::new().reply_json(board_json(), usage());
+    let (_, status, want, _) = job_with(&pool, uid, plain, TemporalSettings::on(), BIG).await;
+    assert_eq!(status, JobStatus::Done);
+    let plain_charges = charges(&pool, uid).await;
+
+    let uid2 = new_user(&pool, 100_000).await;
+    let inner = ScriptedLlm::new().reply_json(board_json(), usage());
+    let (run, status, got, llm) = streamed_job(&pool, uid2, StreamLlm::new(Arc::new(inner))).await;
+    assert_eq!(status, JobStatus::Done);
+    assert_eq!(got, want);
+    assert_eq!(
+        charges(&pool, uid2)
+            .await
+            .iter()
+            .map(|c| c.0)
+            .collect::<Vec<_>>(),
+        plain_charges.iter().map(|c| c.0).collect::<Vec<_>>()
+    );
+    let req = llm.streamed.lock().unwrap()[0].clone();
+    assert_eq!(req.max_tokens, writer::DEFAULT_MAX_TOKENS);
+    assert_eq!(
+        req.output_config.as_ref().unwrap().effort,
+        Some(writer::EFFORT)
+    );
+    assert!(llm.plain.lock().unwrap().is_empty());
+    assert_eq!(opinion_draft_rows(&pool, run).await, 0, "gone with the row");
+    assert_eq!(reservations(&pool, uid2).await, 0);
+}
+
+/// Owner decision D4: a broken stream fails the job as today. One call, never
+/// a second; charged what was received; the reservation released.
+#[tokio::test]
+async fn a_broken_stream_fails_the_opinion_with_one_call_and_the_charge_booked() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let inner = ScriptedLlm::new().reply_json(board_json(), usage());
+    let text = "{\"at_a_glance\":{\"expert\":\"Selective use";
+    let llm = StreamLlm::new(Arc::new(inner)).breaking(vec![broken(text, 30_000)]);
+    let (run, status, v, llm) = streamed_job(&pool, uid, llm).await;
+    assert_eq!(
+        (status, v.reason.as_deref()),
+        (JobStatus::Failed, Some("api error"))
+    );
+    assert_eq!(llm.streamed.lock().unwrap().len(), 1, "no retry");
+    assert!(v.board.is_none());
+    assert_eq!(v.draft, None);
+    // 30k in at $1/M plus what was received, at two bytes a token at $5/M.
+    let ch = charges(&pool, uid).await;
+    assert_eq!(ch.len(), 1);
+    let output = text.len().div_ceil(2) as f64;
+    let want = ((30_000.0 + output * 5.0) / 1e6 * 88.0 * 100.0_f64).ceil() as i64;
+    assert_eq!(ch[0].0, want);
+    assert_eq!(reservations(&pool, uid).await, 0);
+    assert_eq!(opinion_draft_rows(&pool, run).await, 0);
+    assert_eq!(last_event(&pool, run).await.0, "temporal_failed");
+}
+
+/// The late first-words line never moves the run's own fields.
+#[tokio::test]
+async fn the_first_words_line_leaves_the_run_row_alone() {
+    let Some(pool) = connect().await else { return };
+    let uid = new_user(&pool, 100_000).await;
+    let run = finished_run(&pool, uid).await;
+    let before = run_snapshot(&pool, run).await;
+    let inner = ScriptedLlm::new().reply_json(board_json(), usage());
+    let llm = Arc::new(StreamLlm::new(Arc::new(inner)));
+    let mut st = state(
+        pool.clone(),
+        agent_llm(llm.clone(), MODEL),
+        TemporalSettings::on(),
+        BIG,
+    );
+    st.stream = true;
+    let req = Uuid::new_v4();
+    assert!(insert_pending(&pool, run, req).await.unwrap());
+    let status = run_job(&st, st.llm.as_ref().unwrap(), run, uid, req, &hernia_body()).await;
+    assert_eq!(status, JobStatus::Done);
+    let mut line = None;
+    for _ in 0..200 {
+        line = sqlx::query_scalar::<_, String>(
+            "SELECT line FROM incisive.run_steps WHERE run_id = $1 AND line LIKE 'Expert Opinion:%'",
+        )
+        .bind(run)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        if line.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        line.unwrap()
+            .starts_with("Expert Opinion: first words after "),
+    );
+    let after = run_snapshot(&pool, run).await;
+    assert_eq!(after.0, before.0, "the run's row");
 }

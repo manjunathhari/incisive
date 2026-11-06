@@ -7,12 +7,14 @@
 //! `incisive.run_temporal` and spawns [`run_job`] in its own task. The
 //! run's row, status, timing, cost and reservation are never touched: the
 //! job books its money under its **own** request id (`run_temporal.
-//! request_id`), not the run's, and writes only its own row.
+//! request_id`), not the run's, and writes only its own row, its draft and,
+//! with `STREAM=on`, one first-words line among the run's steps.
 //!
 //! **The job** ([`run_job`]): build the T1 table; skip with "not enough
 //! primary studies" under two independent primary studies; reserve the
 //! writer's worst-case hold against the **user's** caps (owner D3;
-//! `spend::reserve`, purpose `temporal`); make one structured call through
+//! `spend::reserve`, purpose `temporal`); make one structured call (streamed
+//! with `STREAM=on`, its draft kept in `runs::drafts`) through
 //! the agent's budgeted path (`LlmCall`: hold, call, charge the real cost,
 //! release the rest); run the code checks; store the board, the table and
 //! the flags. Every failure ends the row `failed`, `skipped` or
@@ -43,6 +45,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::budget::RunBudget;
+use super::drafts::{self, Part};
 use super::worker::CancelFlag;
 use super::{RunMode, RunStatus, TemporalView, store};
 use crate::agent::AgentLlm;
@@ -56,6 +59,8 @@ use crate::server::AppState;
 use crate::spend::{self, CapCheck};
 use crate::temporal::{StudyKind, TemporalInput, TemporalTable, build};
 
+/// The row's status while the opinion is being written.
+pub const PENDING: &str = "pending";
 /// The spend purpose of the job's reservation.
 pub const PURPOSE: &str = "temporal";
 /// A pending row older than this is failed by recovery (the job takes at
@@ -165,6 +170,7 @@ pub async fn finish(
     .bind(f.cost_paise.max(0))
     .execute(pool)
     .await?;
+    drafts::clear(pool, run_id, Part::Opinion).await;
     Ok(r.rows_affected() > 0)
 }
 
@@ -191,9 +197,11 @@ pub async fn get_for_user(
 ) -> sqlx::Result<Option<Option<TemporalView>>> {
     let row = sqlx::query(
         "SELECT t.run_id AS t_run, t.status, t.reason, t.topic, t.evidence_year, \
-                t.table_json, t.board_json, t.flags \
+                t.table_json, t.board_json, t.flags, d.text AS draft \
          FROM incisive.runs r \
          LEFT JOIN incisive.run_temporal t ON t.run_id = r.id \
+         LEFT JOIN incisive.run_drafts d ON d.run_id = t.run_id AND d.part = 'opinion' \
+           AND t.status = 'pending' \
          WHERE r.id = $1 AND r.user_id = $2",
     )
     .bind(run_id)
@@ -213,6 +221,8 @@ pub async fn get_for_user(
         board: row.try_get("board_json")?,
         table: row.try_get("table_json")?,
         flags: row.try_get("flags")?,
+        draft: row.try_get("draft")?,
+        streaming: false,
     })))
 }
 
@@ -233,6 +243,7 @@ pub async fn recover_stale(pool: &PgPool) -> sqlx::Result<usize> {
     .fetch_all(pool)
     .await?;
     for &(run_id, user_id, request_id, cost) in &stale {
+        drafts::clear(pool, run_id, Part::Opinion).await;
         if let Some(req) = request_id
             && spend::release(pool, user_id, req).await.is_err()
         {
@@ -494,7 +505,7 @@ async fn job_inner(
         .temporal_client
         .clone()
         .unwrap_or_else(|| llm.client.clone());
-    let call = LlmCall::new(
+    let mut call = LlmCall::new(
         client,
         budget.clone(),
         state.pool.clone(),
@@ -502,6 +513,16 @@ async fn job_inner(
         model,
         writer::STEP,
     );
+    if state.stream {
+        // Its strict one-call rule stands: a broken stream fails the job (the
+        // client's one attempt; no retry here). `time_limit` ends the stream.
+        call = call.streaming(drafts::streaming(
+            state.pool.clone(),
+            run_id,
+            Part::Opinion,
+            Instant::now() + settings.time_limit,
+        ));
+    }
     let schema = writer::output_schema();
     let started = Instant::now();
     // The call and its charge run in their own task (booked whatever happens

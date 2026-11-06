@@ -169,6 +169,7 @@ async fn main() {
         completeness: config.completeness,
         temporal: config.temporal,
         temporal_client,
+        stream: config.stream,
         intro,
         memory: config.memory.clone(),
         chat: config.chat.clone(),

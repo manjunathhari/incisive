@@ -312,9 +312,38 @@ pub const POLL_EVERY_SECS: u64 = 15;
 /// At most this many polls (10 minutes, the job's stale limit).
 pub const POLL_MAX: u32 = 40;
 
+/// With `STREAM=on`: how often it asks while the opinion is being written.
+pub const STREAM_POLL_EVERY_SECS: u64 = 2;
+
+/// How often the page asks while the opinion is being written, and at most how
+/// many times: either way for 10 minutes, the job's stale limit.
+pub fn poll_plan(streaming: bool) -> (u64, u32) {
+    if streaming {
+        let secs = POLL_EVERY_SECS * u64::from(POLL_MAX);
+        (
+            STREAM_POLL_EVERY_SECS,
+            u32::try_from(secs / STREAM_POLL_EVERY_SECS).unwrap_or(POLL_MAX),
+        )
+    } else {
+        (POLL_EVERY_SECS, POLL_MAX)
+    }
+}
+
 /// The note on the option once the page has stopped asking (the opinion is
 /// still being written after [`POLL_MAX`] polls).
 pub const POLL_GAVE_UP_NOTE: &str = "Taking longer than usual \u{2014} reload later";
+
+/// The opinion's pill while its draft can be opened: its state and its words
+/// for screen readers. Once the page has stopped asking, the fill stops and it
+/// says so.
+pub fn draft_pill(label: &str, gave_up: bool) -> (crate::run_tracker::PillState, String) {
+    use crate::run_tracker::PillState;
+    if gave_up {
+        (PillState::Stopped, format!("{label}. {POLL_GAVE_UP_NOTE}"))
+    } else {
+        (PillState::Filling, PillState::Filling.aria(label))
+    }
+}
 
 /// What the run page does at a poll tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,9 +361,14 @@ pub enum Poll {
 /// again only while the opinion is being written and fewer than
 /// [`POLL_MAX`] polls (every [`POLL_EVERY_SECS`] s) have been made.
 pub fn next_poll(ticks: u32, state: OptionState) -> Poll {
+    next_poll_within(ticks, state, POLL_MAX)
+}
+
+/// [`next_poll`] with at most `max` polls ([`poll_plan`]).
+pub fn next_poll_within(ticks: u32, state: OptionState, max: u32) -> Poll {
     if !state.polls() {
         Poll::Stop
-    } else if ticks >= POLL_MAX {
+    } else if ticks >= max {
         Poll::GiveUp
     } else {
         Poll::Continue
@@ -1559,7 +1593,20 @@ mod tests {
             board: None,
             table: None,
             flags: None,
+            draft: None,
+            streaming: false,
         }
+    }
+
+    #[test]
+    fn the_draft_pill_says_when_the_page_has_stopped_asking() {
+        use crate::run_tracker::PillState;
+        let (state, aria) = draft_pill("Expert opinion", false);
+        assert_eq!(state, PillState::Filling);
+        assert_eq!(aria, PillState::Filling.aria("Expert opinion"));
+        let (state, aria) = draft_pill("Expert opinion", true);
+        assert_eq!(state, PillState::Stopped);
+        assert!(aria.contains(POLL_GAVE_UP_NOTE));
     }
 
     #[test]
@@ -1609,6 +1656,9 @@ mod tests {
         assert_eq!(OptionState::of(&tv("done")), Failed);
         assert_eq!(OptionState::of(&tv("pending")), Pending);
         assert_eq!(POLL_EVERY_SECS * u64::from(POLL_MAX), 600);
+        // Stage S1: with `STREAM=on`, every 2 s for just as long.
+        assert_eq!(poll_plan(false), (POLL_EVERY_SECS, POLL_MAX));
+        assert_eq!(poll_plan(true), (2, 300));
     }
 
     #[test]
@@ -1819,6 +1869,9 @@ mod tests {
         assert_eq!(next_poll(POLL_MAX - 1, Pending), Poll::Continue);
         assert_eq!(next_poll(POLL_MAX, Pending), Poll::GiveUp);
         assert_eq!(next_poll(POLL_MAX + 5, Pending), Poll::GiveUp);
+        assert_eq!(next_poll_within(299, Pending, 300), Poll::Continue);
+        assert_eq!(next_poll_within(300, Pending, 300), Poll::GiveUp);
+        assert_eq!(next_poll_within(0, Failed, 300), Poll::Stop);
         for s in [Ready, Skipped, Failed, CapBlocked] {
             assert_eq!(next_poll(0, s), Poll::Stop, "{s:?}");
             assert_eq!(next_poll(POLL_MAX, s), Poll::Stop, "{s:?}");

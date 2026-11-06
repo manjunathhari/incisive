@@ -43,6 +43,7 @@ jobs:
           COMPLETENESS: ${{ vars.COMPLETENESS }}
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
+          STREAM: ${{ vars.STREAM }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
@@ -189,6 +190,14 @@ jobs:
           if [ -n "$tm" ] && ! { [[ "$tm" =~ ^[0-9]+$ ]] && [ "$tm" -ge 2000 ] && [ "$tm" -le 32000 ]; }; then
             echo "::error::vars.TEMPORAL_MAX_TOKENS must be a whole number from 2000 to 32000 (see infra/README.md section 13)"; exit 1
           fi
+          # Optional writer streaming (infra/README.md section 15): unset (on), on or
+          # off. The same trim.
+          st="${STREAM#"${STREAM%%[![:space:]]*}"}"
+          st="${st%"${st##*[![:space:]]}"}"
+          case "$st" in
+            ""|on|off) ;;
+            *) echo "::error::vars.STREAM must be on or off (see infra/README.md section 15)"; exit 1 ;;
+          esac
           # Optional introduction agent (infra/README.md section 14): unset (off), off
           # or on. The same trim. When on, INTRO_MODEL (default claude-sonnet-5-5,
           # mirrors runs::intro::DEFAULT_MODEL) must be priced, as the app refuses
@@ -300,6 +309,7 @@ jobs:
           COMPLETENESS: ${{ vars.COMPLETENESS }}
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
+          STREAM: ${{ vars.STREAM }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
@@ -332,6 +342,8 @@ jobs:
           optional = ["AGENT_MODELS", "RUN_LIMITS", "QUICK_ENGINE", "FULL_ENGINE", "COMPLETENESS"]
           # Temporal T2/T3 (infra/README.md section 13): optional too.
           optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
+          # Writer streaming (infra/README.md section 15): optional too.
+          optional += ["STREAM"]
           # The introduction agent (infra/README.md section 14): optional too.
           optional += ["INTRO", "INTRO_MODEL"]
           # Memory layer: optional too (GEMMA_AUTH is a secret, below).

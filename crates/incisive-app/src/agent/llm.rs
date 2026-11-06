@@ -20,6 +20,12 @@
 //! * The call id is made once per logical call and reused when the charge is
 //!   re-sent. Claude is never called again because a charge was not recorded.
 //!
+//! * Streamed calls (Stage S1, [`LlmCall::streaming`]; the answer writer and
+//!   the Expert Opinion writer only): the same request, cap and hold; the reply
+//!   arrives in pieces and is rebuilt into the same response, which then takes
+//!   the same path. A stream that breaks off is charged what was received
+//!   ([`Attempt::broken_usage`]) and is [`StepError::StreamBroken`].
+//!
 //! Privacy: nothing here logs prompts, responses or question text; only the
 //! run id, step, model, token counts and error kind. A reply that cannot be
 //! read is logged by [`log_unreadable`]: stop reason, its size and the serde
@@ -33,13 +39,14 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 #[cfg(any(test, feature = "test-util"))]
 use std::sync::Mutex;
+use std::time::Instant;
 
 use async_trait::async_trait;
 /// `output_config.effort`, per step (Ruling R-FA2).
 pub use claude_client::Effort;
 use claude_client::{
-    ClaudeError, Client, ContentBlock, Message, MessagesRequest, MessagesResponse, OutputConfig,
-    OutputFormat, Role, StopReason, ToolDef, Usage,
+    BreakKind, ClaudeError, Client, ContentBlock, Message, MessagesRequest, MessagesResponse,
+    OutputConfig, OutputFormat, Role, StopReason, StreamBreak, ToolDef, Usage,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -213,6 +220,10 @@ pub enum StepError {
     /// `failed` with `hard_stop`, as its own gate does. Not fatal in the
     /// money sense: every call made was charged.
     HardStop,
+    /// A streamed reply broke off (charged what was received). Only returned
+    /// by a call made with [`LlmCall::streaming`]; each writer decides what
+    /// follows, and no other step ever sees it.
+    StreamBroken,
 }
 
 impl StepError {
@@ -227,6 +238,7 @@ impl StepError {
             StepError::RateLimited(_) => "rate_limited",
             StepError::Lit => "lit",
             StepError::HardStop => "hard_stop",
+            StepError::StreamBroken => "stream_broken",
         }
     }
 
@@ -251,6 +263,20 @@ impl std::error::Error for StepError {}
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn call(&self, req: &MessagesRequest) -> Result<MessagesResponse, ClaudeError>;
+
+    /// The same call with its reply streamed: `on_text` gets the reply's text
+    /// so far, and `deadline`, if any, ends it. By default the plain call, with
+    /// its whole text at the end.
+    async fn stream(
+        &self,
+        req: &MessagesRequest,
+        on_text: &(dyn for<'t> Fn(&'t str) + Send + Sync),
+        _deadline: Option<Instant>,
+    ) -> Result<MessagesResponse, ClaudeError> {
+        let resp = self.call(req).await?;
+        on_text(&response_text(&resp));
+        Ok(resp)
+    }
 }
 
 #[async_trait]
@@ -258,6 +284,27 @@ impl LlmClient for Client {
     async fn call(&self, req: &MessagesRequest) -> Result<MessagesResponse, ClaudeError> {
         self.create_message(req).await
     }
+
+    async fn stream(
+        &self,
+        req: &MessagesRequest,
+        on_text: &(dyn for<'t> Fn(&'t str) + Send + Sync),
+        deadline: Option<Instant>,
+    ) -> Result<MessagesResponse, ClaudeError> {
+        self.stream_message(req, on_text, deadline).await
+    }
+}
+
+/// What a streamed call does with its reply as it arrives.
+#[derive(Clone)]
+pub struct Streaming {
+    /// Before each attempt of the call: the text starts again.
+    pub on_attempt: Arc<dyn Fn() + Send + Sync>,
+    /// The reply's text so far. Must not block: the reply waits for it.
+    pub on_text: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The overall limit of each call; a reply still arriving then is broken
+    /// off and charged what was received.
+    pub deadline: Option<Instant>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -663,6 +710,11 @@ pub fn request_prompt_bytes(req: &MessagesRequest) -> usize {
     system + text + tools + choice + output + marks
 }
 
+/// Bytes of output counted as one token when a broken stream is charged. Low
+/// on purpose (the hold's estimate of input uses three): a reply of PMIDs and
+/// punctuation has few bytes to a token, and the charge is never to fall short.
+const BYTES_PER_OUTPUT_TOKEN: usize = 2;
+
 /// Bytes one `cache_control` mark adds to a block (rounded up).
 const CACHE_MARK_BYTES: usize = 40;
 
@@ -965,6 +1017,8 @@ pub struct LlmCall {
     step: &'static str,
     /// Report 429 / 529 as [`StepError::RateLimited`] instead of `Llm`.
     rate_limits: bool,
+    /// Stream the reply (the two writers, `STREAM=on`).
+    streaming: Option<Streaming>,
 }
 
 impl LlmCall {
@@ -984,7 +1038,15 @@ impl LlmCall {
             model: model.into(),
             step,
             rate_limits: false,
+            streaming: None,
         }
+    }
+
+    /// This handle's calls stream their replies (see [`Streaming`]). The
+    /// request, hold and charge rules are otherwise the same.
+    pub fn streaming(mut self, streaming: Streaming) -> LlmCall {
+        self.streaming = Some(streaming);
+        self
     }
 
     /// This handle's calls report a rate limit or overload that outlasted the
@@ -1327,7 +1389,14 @@ impl Attempt {
     async fn call_and_settle(self, hold: Hold) -> Result<Reply, StepError> {
         let c = &self.call;
         let run_id = c.budget.run_id();
-        match c.llm.call(&self.req).await {
+        let replied = match &c.streaming {
+            Some(s) => {
+                (s.on_attempt)();
+                c.llm.stream(&self.req, &*s.on_text, s.deadline).await
+            }
+            None => c.llm.call(&self.req).await,
+        };
+        match replied {
             Ok(resp) => {
                 tracing::info!(
                     %run_id, step = c.step, model = %c.model,
@@ -1343,6 +1412,16 @@ impl Attempt {
                     return Err(StepError::Llm);
                 }
                 Ok(Reply::of(&resp))
+            }
+            Err(ClaudeError::StreamInterrupted(b)) => {
+                tracing::warn!(%run_id, step = c.step, model = %c.model, error_kind = "stream_interrupted", break_kind = b.kind.as_str(), output_bytes = b.output_bytes, "claude stream broke off");
+                if b.kind == BreakKind::NotSent {
+                    drop(hold);
+                } else {
+                    let usage = self.broken_usage(&b);
+                    self.settle(hold, &usage).await?;
+                }
+                Err(StepError::StreamBroken)
             }
             Err(e) => {
                 tracing::warn!(%run_id, step = c.step, model = %c.model, error_kind = error_kind(&e), "claude call failed");
@@ -1361,6 +1440,45 @@ impl Attempt {
                 }
             }
         }
+    }
+
+    /// What a broken stream is charged. Before `message_start` nothing is
+    /// known and the request may have been processed: the estimate, as for a
+    /// timeout today. After it: the real input, and as output the most of what
+    /// the API last reported and what the bytes received come to, rounded up
+    /// ([`BYTES_PER_OUTPUT_TOKEN`]), at most `max_tokens`.
+    ///
+    /// Never above the hold: the estimated output is lowered until the charge
+    /// fits it. Never below what was received: the real input and the output
+    /// the API reported always stand, so if those alone pass the hold (input is
+    /// only estimated in the hold) they are booked in full, as on every call.
+    /// Thinking the API does not send is not seen here, so it is not counted.
+    fn broken_usage(&self, b: &StreamBreak) -> Usage {
+        let Some(known) = b.usage else {
+            return self.estimate_usage;
+        };
+        let received = u32::try_from(b.output_bytes.div_ceil(BYTES_PER_OUTPUT_TOKEN))
+            .unwrap_or(u32::MAX)
+            .min(self.req.max_tokens);
+        let with = |output_tokens| Usage {
+            output_tokens,
+            ..known
+        };
+        let cost = |u: &Usage| self.call.budget.cost_of(&self.call.model, u);
+        let (mut low, mut high) = (known.output_tokens, known.output_tokens.max(received));
+        if cost(&with(high)).is_ok_and(|c| c <= self.estimate) {
+            return with(high);
+        }
+        // The largest estimate that fits the hold (cost grows with output).
+        while low + 1 < high {
+            let mid = low + (high - low) / 2;
+            if cost(&with(mid)).is_ok_and(|c| c <= self.estimate) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        with(low)
     }
 
     /// Charge `usage` under this call's id. A failed charge is re-sent once
