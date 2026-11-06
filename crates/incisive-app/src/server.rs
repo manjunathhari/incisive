@@ -58,6 +58,8 @@ pub struct AppState {
     pub stream: bool,
     /// The introduction agent (`INTRO`, default off; `INTRO_MODEL`).
     pub intro: crate::runs::intro::IntroRuntime,
+    /// The knowledge graph (`GRAPH`, default off; `GRAPH_MODEL`, `GRAPH_FROM`).
+    pub graph: crate::graph::settings::GraphRuntime,
     /// The memory layer's settings (`MEMORY`, default off).
     pub memory: crate::memory::settings::MemorySettings,
     /// Gemma embeddings client; `None` when `GEMMA_URL`/`GEMMA_AUTH` are unset.

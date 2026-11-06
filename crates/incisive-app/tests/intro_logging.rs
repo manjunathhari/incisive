@@ -66,6 +66,7 @@ fn state(pool: PgPool, llm: Arc<dyn LlmClient>) -> AppState {
             },
             client: Some(llm),
         },
+        graph: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,

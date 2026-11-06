@@ -61,6 +61,9 @@ pub struct Config {
     /// The introduction agent (`INTRO`: `off`, the default, or `on`;
     /// `INTRO_MODEL`, default `claude-sonnet-5-5`, priced when `INTRO=on`).
     pub intro: crate::runs::intro::IntroSettings,
+    /// The knowledge graph (`GRAPH`: `off`, the default, or `on`; `GRAPH_MODEL`,
+    /// priced when on in prod; `GRAPH_FROM`, a `YYYY-MM-DD` date, required when on).
+    pub graph: crate::graph::settings::GraphSettings,
     /// The memory layer (`MEMORY`, default off; `GEMMA_URL`, `GEMMA_AUTH`,
     /// `EMBED_MODEL`, `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH`).
     pub memory: crate::memory::settings::MemorySettings,
@@ -439,6 +442,66 @@ impl Config {
             }
         };
 
+        let graph = {
+            use crate::graph::settings::GraphSettings;
+            let on = match lookup("GRAPH").as_deref() {
+                None | Some("off") => false,
+                Some("on") => true,
+                Some(_) => {
+                    return Err(ConfigError::Invalid {
+                        var: "GRAPH",
+                        reason: "expected `on` or `off`".to_string(),
+                    });
+                }
+            };
+            let defaults = GraphSettings::default();
+            let model = lookup("GRAPH_MODEL").unwrap_or(defaults.model);
+            if model.chars().any(char::is_whitespace) {
+                return Err(ConfigError::Invalid {
+                    var: "GRAPH_MODEL",
+                    reason: "expected a model id without spaces".to_string(),
+                });
+            }
+            let from = match lookup("GRAPH_FROM") {
+                None => None,
+                Some(v) => Some(
+                    Some(v.as_str())
+                        .filter(|v| {
+                            v.len() == 10
+                                && v.bytes().enumerate().all(|(i, b)| {
+                                    if i == 4 || i == 7 {
+                                        b == b'-'
+                                    } else {
+                                        b.is_ascii_digit()
+                                    }
+                                })
+                        })
+                        .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
+                        .ok_or_else(|| ConfigError::Invalid {
+                            var: "GRAPH_FROM",
+                            reason: "expected a date as YYYY-MM-DD".to_string(),
+                        })?,
+                ),
+            };
+
+            if on && from.is_none() {
+                return Err(ConfigError::Invalid {
+                    var: "GRAPH_FROM",
+                    reason: "required when GRAPH=on (a date as YYYY-MM-DD)".to_string(),
+                });
+            }
+            // Only when on, as for INTRO_MODEL.
+            if on && app_env == AppEnv::Prod && model_prices.get(&model).is_none() {
+                return Err(ConfigError::Invalid {
+                    var: "MODEL_PRICES",
+                    reason: format!(
+                        "no entry for GRAPH_MODEL `{model}`; add it to MODEL_PRICES or change GRAPH_MODEL"
+                    ),
+                });
+            }
+            GraphSettings { on, model, from }
+        };
+
         let usd_inr = match (app_env, lookup("USD_INR")) {
             (_, Some(v)) => {
                 let rate = v.parse::<f64>().map_err(|e| ConfigError::Invalid {
@@ -518,6 +581,7 @@ impl Config {
             temporal,
             stream,
             intro,
+            graph,
             memory,
             chat,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
@@ -1391,6 +1455,107 @@ mod tests {
             ConfigError::Invalid { var, reason } => {
                 assert_eq!(var, "MODEL_PRICES");
                 assert!(reason.contains("INTRO_MODEL"));
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// `GRAPH` is `off` (default) or `on`; on needs `GRAPH_FROM` (a date);
+    /// `GRAPH_MODEL` has no spaces and is priced in prod when on.
+    #[test]
+    fn graph_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.graph.on, "off by default");
+        assert_eq!(c.graph.model, "claude-sonnet-5-5");
+        assert_eq!(c.graph.from, None);
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut p = full();
+            p.extend_from_slice(extra);
+            Config::from_lookup(lookup(&p))
+        };
+        assert!(!with(&[("GRAPH", "off")]).unwrap().graph.on);
+        // Same trimming as INTRO: blanks around the value are ignored, and a
+        // blank value is unset (off).
+        assert!(!with(&[("GRAPH", "")]).unwrap().graph.on);
+        assert!(!with(&[("GRAPH", "  \n")]).unwrap().graph.on);
+        assert!(!with(&[("GRAPH", " off ")]).unwrap().graph.on);
+        assert!(
+            with(&[("GRAPH", " on "), ("GRAPH_FROM", " 2026-11-01\n")])
+                .unwrap()
+                .graph
+                .on
+        );
+        assert!(with(&[("GRAPH", "on"), ("GRAPH_FROM", " ")]).is_err());
+        let c = with(&[("GRAPH", "on"), ("GRAPH_FROM", "2026-11-01")]).unwrap();
+        assert!(c.graph.on);
+        assert_eq!(c.graph.from, chrono::NaiveDate::from_ymd_opt(2026, 11, 1));
+        for bad in ["ON", "maybe", "true", "o n"] {
+            assert_eq!(
+                with(&[("GRAPH", bad)]).unwrap_err(),
+                ConfigError::Invalid {
+                    var: "GRAPH",
+                    reason: "expected `on` or `off`".to_string(),
+                },
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            with(&[("GRAPH", "on")]).unwrap_err(),
+            ConfigError::Invalid {
+                var: "GRAPH_FROM",
+                ..
+            }
+        ));
+        for bad in [
+            "yesterday",
+            "2026-13-01",
+            "01/11/2026",
+            "2026-1-5",
+            "2026-11-1",
+            "+2026-11-01",
+            "2026-11-01x",
+        ] {
+            assert!(
+                matches!(
+                    with(&[("GRAPH_FROM", bad)]).unwrap_err(),
+                    ConfigError::Invalid {
+                        var: "GRAPH_FROM",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            with(&[("GRAPH_MODEL", "two words")]).unwrap_err(),
+            ConfigError::Invalid {
+                var: "GRAPH_MODEL",
+                ..
+            }
+        ));
+        let prod = |model: &'static str| {
+            let mut v: Vec<_> = full()
+                .into_iter()
+                .filter(|(k, _)| *k != "APP_ENV")
+                .collect();
+            v.extend([
+                ("APP_ENV", "prod"),
+                ("IAP_AUDIENCE", "/projects/1/apps/2"),
+                ("MODEL_PRICES", PROD_PRICES),
+                ("USD_INR", "88"),
+                ("GLOBAL_MONTHLY_CAP_INR", "10000"),
+                ("UNPAYWALL_EMAIL", "a@example.com"),
+                ("GRAPH", "on"),
+                ("GRAPH_FROM", "2026-11-01"),
+                ("GRAPH_MODEL", model),
+            ]);
+            Config::from_lookup(lookup(&v))
+        };
+        assert!(prod("claude-sonnet-5-5").unwrap().graph.on);
+        match prod("unpriced").unwrap_err() {
+            ConfigError::Invalid { var, reason } => {
+                assert_eq!(var, "MODEL_PRICES");
+                assert!(reason.contains("GRAPH_MODEL"));
             }
             e => panic!("{e:?}"),
         }

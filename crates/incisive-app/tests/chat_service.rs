@@ -85,6 +85,7 @@ fn base_state(pool: PgPool, memory: MemorySettings, chat: ChatSettings) -> AppSt
         temporal_client: None,
         stream: false,
         intro: Default::default(),
+        graph: Default::default(),
         chat,
         memory,
         embedder: None,

@@ -70,6 +70,7 @@ fn state(pool: PgPool, on: bool) -> AppState {
             },
             client: None,
         },
+        graph: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,

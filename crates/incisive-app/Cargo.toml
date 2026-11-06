@@ -26,6 +26,13 @@ name = "temporal_smoke"
 path = "src/bin/temporal_smoke.rs"
 required-features = ["ssr"]
 
+# The graph smoke (Task 4): the concept-picking call on real runs, offline.
+# Writes request bodies for curl and reads the replies back; no network, no key.
+[[bin]]
+name = "graph_smoke"
+path = "src/bin/graph_smoke.rs"
+required-features = ["ssr"]
+
 # The memory backfill: queues the memory job for every existing Full run
 # with a finished Expert Opinion. Run by the owner with DATABASE_URL set.
 [[bin]]

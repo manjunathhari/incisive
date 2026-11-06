@@ -728,3 +728,53 @@ UPDATE incisive.evidence_records SET embed_attempts = 0 WHERE embedding IS NULL 
 UPDATE incisive.chat_passages SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
 UPDATE incisive.topic_qas SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
 ```
+
+## Knowledge graph
+
+Tables for a graph of concepts (disease, treatment, organ, outcome) and papers, linked to runs. The
+feature is dark: with `GRAPH=off` (the default) nothing reads or writes these tables. Migration
+`0017_graph.sql` is additive (five new tables, row-level security on, no policies). A run's delete
+removes its links and job row; concepts and papers are shared and stay.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `GRAPH` | no | `off` or `on`. | `off` |
+| `GRAPH_MODEL` | no | The model of the graph's calls. Must be priced in `MODEL_PRICES` when `GRAPH=on` (prod). | `claude-sonnet-5-5` |
+| `GRAPH_FROM` | when `GRAPH=on` | The first day the graph applies from, `YYYY-MM-DD`. | none |
+
+All three are checked before the build (only the ends trimmed), and the app refuses any other value
+at startup (`GRAPH=on` without `GRAPH_FROM`, a bad date, a model with a space, or an unpriced model in
+prod). Rolling back: set `GRAPH=off`; stored rows stay.
+
+**Merging two concepts** (same kind; keep `:keep`, fold in `:drop`). Run in the Supabase SQL editor,
+after replacing `:drop` and `:keep` with the real concept ids (plain numbers; the editor does not bind them).
+It does nothing at all (no error, nothing changed) unless both ids exist, differ, are of the same
+kind, and `:keep` is not itself merged into another concept; check that the first line reports
+`merged = 1`. A link that the kept concept already has on the same run is dropped, not doubled.
+
+```sql
+WITH ok AS (
+  SELECT d.id AS drop_id, k.id AS keep_id
+  FROM incisive.graph_concepts d, incisive.graph_concepts k
+  WHERE d.id = :drop AND k.id = :keep AND d.id <> k.id
+    AND d.kind = k.kind AND k.merged_into IS NULL AND d.merged_into IS NULL
+), mark AS (
+  UPDATE incisive.graph_concepts c SET merged_into = ok.keep_id
+  FROM ok WHERE c.id = ok.drop_id RETURNING c.id
+), dedupe AS (
+  DELETE FROM incisive.graph_run_concepts d USING incisive.graph_run_concepts k, ok
+  WHERE d.concept_id = ok.drop_id AND k.concept_id = ok.keep_id AND k.run_id = d.run_id
+  RETURNING d.run_id
+), move AS (
+  UPDATE incisive.graph_run_concepts l SET concept_id = ok.keep_id
+  FROM ok WHERE l.concept_id = ok.drop_id
+    AND NOT EXISTS (SELECT 1 FROM incisive.graph_run_concepts k
+                    WHERE k.concept_id = ok.keep_id AND k.run_id = l.run_id)
+  RETURNING l.run_id
+)
+SELECT (SELECT count(*) FROM mark) AS merged, (SELECT count(*) FROM dedupe) AS deduped,
+       (SELECT count(*) FROM move) AS moved;
+```
+
+It is one statement, so it is atomic. (A concept already merged elsewhere is refused on either side:
+merge into its final target instead.)
