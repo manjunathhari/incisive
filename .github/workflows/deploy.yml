@@ -46,6 +46,9 @@ jobs:
           STREAM: ${{ vars.STREAM }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
+          GRAPH: ${{ vars.GRAPH }}
+          GRAPH_MODEL: ${{ vars.GRAPH_MODEL }}
+          GRAPH_FROM: ${{ vars.GRAPH_FROM }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
           MEMORY: ${{ vars.MEMORY }}
@@ -213,6 +216,30 @@ jobs:
           case "$im" in
             *[[:space:]]*) echo "::error::vars.INTRO_MODEL must be a model name without spaces (see infra/README.md section 14)"; exit 1 ;;
           esac
+          # Optional knowledge graph (infra/README.md, "Knowledge graph"): GRAPH unset
+          # (off), off or on; the same trim. When on, GRAPH_FROM must be a real date
+          # (YYYY-MM-DD) and GRAPH_MODEL (default claude-sonnet-5-5, mirrors
+          # graph::settings::DEFAULT_MODEL) must be priced, as the app refuses to
+          # start otherwise. With it off nothing is called.
+          gr="${GRAPH#"${GRAPH%%[![:space:]]*}"}"
+          gr="${gr%"${gr##*[![:space:]]}"}"
+          case "$gr" in
+            ""|on|off) ;;
+            *) echo "::error::vars.GRAPH must be on or off (see infra/README.md, Knowledge graph)"; exit 1 ;;
+          esac
+          gm="${GRAPH_MODEL#"${GRAPH_MODEL%%[![:space:]]*}"}"
+          gm="${gm%"${gm##*[![:space:]]}"}"
+          case "$gm" in
+            *[[:space:]]*) echo "::error::vars.GRAPH_MODEL must be a model name without spaces (see infra/README.md, Knowledge graph)"; exit 1 ;;
+          esac
+          gf="${GRAPH_FROM#"${GRAPH_FROM%%[![:space:]]*}"}"
+          gf="${gf%"${gf##*[![:space:]]}"}"
+          if [ -n "$gf" ] && ! python3 -c 'import sys, datetime; datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d")' "$gf" 2>/dev/null; then
+            echo "::error::vars.GRAPH_FROM must be a date as YYYY-MM-DD (see infra/README.md, Knowledge graph)"; exit 1
+          fi
+          if [ "$gr" = "on" ] && [ -z "$gf" ]; then
+            echo "::error::vars.GRAPH=on needs vars.GRAPH_FROM, a date as YYYY-MM-DD (see infra/README.md, Knowledge graph)"; exit 1
+          fi
           if [ "$ia" = "on" ] && ! INTRO_MODEL_CHECK="${im:-claude-sonnet-5-5}" python3 -c '
           import json, os, sys
           sys.exit(0 if os.environ["INTRO_MODEL_CHECK"] in json.loads(os.environ["MODEL_PRICES"]) else 1)
@@ -312,6 +339,9 @@ jobs:
           STREAM: ${{ vars.STREAM }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
+          GRAPH: ${{ vars.GRAPH }}
+          GRAPH_MODEL: ${{ vars.GRAPH_MODEL }}
+          GRAPH_FROM: ${{ vars.GRAPH_FROM }}
           HAS_NCBI_KEY: ${{ vars.HAS_NCBI_KEY }}
           CPU_ALWAYS: ${{ vars.CPU_ALWAYS }}
           MEMORY: ${{ vars.MEMORY }}
@@ -346,6 +376,8 @@ jobs:
           optional += ["STREAM"]
           # The introduction agent (infra/README.md section 14): optional too.
           optional += ["INTRO", "INTRO_MODEL"]
+          # The knowledge graph (infra/README.md, "Knowledge graph"): optional too.
+          optional += ["GRAPH", "GRAPH_MODEL", "GRAPH_FROM"]
           # Memory layer: optional too (GEMMA_AUTH is a secret, below).
           optional += ["MEMORY", "GEMMA_URL", "EMBED_MODEL", "MEMORY_TOPIC_MATCH", "MEMORY_GATE_MATCH"]
           # Evidence chat: optional too; it reuses GEMMA_URL and GEMMA_AUTH.

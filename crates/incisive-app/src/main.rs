@@ -171,6 +171,10 @@ async fn main() {
         temporal_client,
         stream: config.stream,
         intro,
+        graph: incisive_app::graph::settings::GraphRuntime {
+            settings: config.graph.clone(),
+            client: None,
+        },
         memory: config.memory.clone(),
         chat: config.chat.clone(),
         embedder: incisive_app::memory::embed::Embedder::from_settings(&config.memory)

@@ -196,6 +196,7 @@ fn state_with(env: AppEnv, pool: sqlx::PgPool, verifier: IapVerifier) -> AppStat
         temporal_client: None,
         stream: false,
         intro: Default::default(),
+        graph: Default::default(),
         memory: incisive_app::memory::settings::MemorySettings::default(),
         chat: incisive_app::chat::settings::ChatSettings::default(),
         embedder: None,

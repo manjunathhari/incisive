@@ -68,6 +68,7 @@ fn state(pool: PgPool) -> AppState {
             on: true,
             ..Default::default()
         },
+        graph: Default::default(),
         memory: MemorySettings {
             on: true,
             ..MemorySettings::default()

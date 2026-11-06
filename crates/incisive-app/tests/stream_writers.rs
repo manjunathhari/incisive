@@ -69,6 +69,7 @@ fn state(pool: PgPool, stream: bool) -> AppState {
         temporal_client: None,
         stream,
         intro: Default::default(),
+        graph: Default::default(),
         memory: Default::default(),
         chat: Default::default(),
         embedder: None,

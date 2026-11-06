@@ -728,3 +728,33 @@ UPDATE incisive.evidence_records SET embed_attempts = 0 WHERE embedding IS NULL 
 UPDATE incisive.chat_passages SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
 UPDATE incisive.topic_qas SET embed_attempts = 0 WHERE embedding IS NULL AND embed_attempts > 0;
 ```
+
+## Knowledge graph
+
+Tables for a graph of concepts (disease, treatment, organ, outcome) and papers, linked to runs. The
+feature is dark: with `GRAPH=off` (the default) nothing reads or writes these tables. Migration
+`0017_graph.sql` is additive (five new tables, row-level security on, no policies). A run's delete
+removes its links and job row; concepts and papers are shared and stay.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+| `GRAPH` | no | `off` or `on`. | `off` |
+| `GRAPH_MODEL` | no | The model of the graph's calls. Must be priced in `MODEL_PRICES` when `GRAPH=on` (prod). | `claude-sonnet-5-5` |
+| `GRAPH_FROM` | when `GRAPH=on` | The first day the graph applies from, `YYYY-MM-DD`. | none |
+
+All three are checked before the build (only the ends trimmed), and the app refuses any other value
+at startup (`GRAPH=on` without `GRAPH_FROM`, a bad date, a model with a space, or an unpriced model in
+prod). Rolling back: set `GRAPH=off`; stored rows stay.
+
+**Merging two concepts** (same kind; keep `:keep`, fold in `:drop`). Run in the Supabase SQL editor,
+in one transaction: mark the pointer, then repoint the links. A link that the kept concept already
+has on the same run is dropped rather than doubled.
+
+```sql
+BEGIN;
+UPDATE incisive.graph_concepts SET merged_into = :keep WHERE id = :drop AND kind = (SELECT kind FROM incisive.graph_concepts WHERE id = :keep);
+DELETE FROM incisive.graph_run_concepts d USING incisive.graph_run_concepts k
+  WHERE d.concept_id = :drop AND k.concept_id = :keep AND k.run_id = d.run_id;
+UPDATE incisive.graph_run_concepts SET concept_id = :keep WHERE concept_id = :drop;
+COMMIT;
+```

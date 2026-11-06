@@ -24,6 +24,9 @@ pub mod draft_page;
 pub mod expert_page;
 #[cfg(feature = "ssr")]
 pub mod gate;
+/// The knowledge graph (off by default).
+#[cfg(feature = "ssr")]
+pub mod graph;
 #[cfg(feature = "ssr")]
 pub mod health;
 #[cfg(feature = "ssr")]
