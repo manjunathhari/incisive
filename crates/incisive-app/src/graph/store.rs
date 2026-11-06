@@ -131,10 +131,57 @@ async fn link_concept(
     Ok(())
 }
 
+/// One concept link [`write_run`] writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConceptLink<'a> {
+    pub kind: &'static str,
+    pub label: &'a str,
+    pub certainty: Option<&'a str>,
+    pub source_row: Option<i32>,
+}
+
+/// The order [`write_run`] writes in: concepts by (kind, normalised label),
+/// papers by PMID, whatever order they were picked in, so two runs written
+/// at once take the shared rows' locks in the same order and cannot
+/// deadlock.
+pub fn write_order<'a>(
+    picks: &'a Picks,
+    papers: &'a [PaperRow],
+) -> (Vec<ConceptLink<'a>>, Vec<&'a PaperRow>) {
+    let mut concepts = Vec::new();
+    for (kind, names) in [
+        ("disease", &picks.diseases),
+        ("treatment", &picks.treatments),
+        ("organ", &picks.organs),
+    ] {
+        for name in names {
+            concepts.push(ConceptLink {
+                kind,
+                label: name,
+                certainty: None,
+                source_row: None,
+            });
+        }
+    }
+    for o in &picks.outcomes {
+        concepts.push(ConceptLink {
+            kind: "outcome",
+            label: &o.name,
+            certainty: Some(&o.certainty),
+            source_row: i32::try_from(o.row).ok(),
+        });
+    }
+    concepts.sort_by_cached_key(|c| (c.kind, norm_label(c.label), c.label, c.source_row));
+    let mut papers: Vec<&PaperRow> = papers.iter().collect();
+    papers.sort_by(|a, b| a.pmid.cmp(&b.pmid));
+    (concepts, papers)
+}
+
 /// Store a run's picks and papers in one transaction, replacing any links an
-/// earlier attempt wrote. The user comes from the run, never from the caller.
-/// A run that is gone is `Err(RowNotFound)` and nothing is written; the run's
-/// row is key-share locked until commit, so it cannot be deleted mid-write.
+/// earlier attempt wrote, in [`write_order`]. The user comes from the run,
+/// never from the caller. A run that is gone is `Err(RowNotFound)` and
+/// nothing is written; the run's row is key-share locked until commit, so it
+/// cannot be deleted mid-write.
 pub async fn write_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -159,18 +206,9 @@ pub async fn write_run(
         .execute(&mut *tx)
         .await?;
 
-    for (kind, names) in [
-        ("disease", &picks.diseases),
-        ("treatment", &picks.treatments),
-        ("organ", &picks.organs),
-    ] {
-        for name in names {
-            link_concept(&mut tx, run_id, kind, name, None, None).await?;
-        }
-    }
-    for o in &picks.outcomes {
-        let row = i32::try_from(o.row).ok();
-        link_concept(&mut tx, run_id, "outcome", &o.name, Some(&o.certainty), row).await?;
+    let (concepts, papers) = write_order(picks, papers);
+    for c in &concepts {
+        link_concept(&mut tx, run_id, c.kind, c.label, c.certainty, c.source_row).await?;
     }
 
     for p in papers {

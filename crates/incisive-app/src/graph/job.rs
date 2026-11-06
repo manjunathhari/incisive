@@ -11,9 +11,12 @@
 //! **The call.** One structured call per attempt (`LlmCall::start` with the
 //! picks schema), [`MAX_TOKENS`] of output at [`EFFORT`] (low: thinking
 //! counts toward `max_tokens`), through the graph's own client (one attempt,
-//! [`TIME_LIMIT`]; see [`client`]). The code checks (`extract::check`) clean
-//! the reply; a reply with no organ, or with no outcome while the answer has
-//! outcome rows, is `empty_picks` and writes nothing.
+//! [`TIME_LIMIT`]; see [`client`]), never the agent's: with no graph client a
+//! job is `failed` with `no_client` before anything is reserved. The job
+//! waits `GraphSettings::time_limit` ([`TIME_LIMIT`]) for it. The code
+//! checks (`extract::check`) clean the reply; a reply with no organ, or with
+//! no outcome while the answer has outcome rows, is `empty_picks` and writes
+//! nothing.
 //!
 //! **Money.** Each attempt reserves the call's hold against the **user's**
 //! caps under its own request id (`graph_jobs.request_id`, purpose
@@ -24,11 +27,15 @@
 //! attempt is not counted.
 //!
 //! **Retries.** An API error, a timeout, a cut-off or unreadable reply,
-//! `empty_picks` or a store error puts the job back to `pending` (after
+//! `empty_picks` or a store error (a foreign-key failure while the run still
+//! exists included) puts the job back to `pending` (after
 //! [`RETRY_AFTER_MIN`] minutes) until [`MAX_ATTEMPTS`]; then it is `failed`.
-//! An unpriced model, a cost refusal, an unrecorded charge or a panic fails
-//! it at once. A run deleted at any point leaves no rows: its job row goes
-//! with it, and `store::write_run` refuses a run that is gone.
+//! An unpriced model, no client, a cost refusal, an unrecorded charge or a
+//! panic ([`fail_panicked`], which releases the reservation) fails it at
+//! once. A timed-out call keeps only what it still holds reserved; its late
+//! charge releases the rest and is added to the job's cost. A run deleted
+//! at any point leaves no rows: its job row goes with it, and
+//! `store::write_run` refuses a run that is gone.
 //!
 //! **Recovery** ([`recover_stale`], every tick): a claimed job holds a lease
 //! of [`STALE_AFTER_MIN`] minutes (`next_try_at`); a `running` job past it is
@@ -223,15 +230,51 @@ pub async fn backfill_count(pool: &PgPool) -> sqlx::Result<i64> {
         .await
 }
 
-/// Queue the eligible runs (see `BACKFILL_ELIGIBLE`). Returns how many.
-pub async fn backfill_queue(pool: &PgPool) -> sqlx::Result<u64> {
+/// How [`backfill_queue`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillQueued {
+    /// This many runs queued (the count expected).
+    Queued(u64),
+    /// The eligible runs were not the count expected: nothing queued.
+    Changed { found: i64 },
+}
+
+/// The refusal line when the eligible runs no longer match `--expect`.
+pub fn changed_line(expected: i64, found: i64) -> String {
+    format!("eligible runs changed: expected {expected}, found {found}")
+}
+
+/// Queue the eligible runs (see `BACKFILL_ELIGIBLE`), only if there are
+/// exactly `expect` of them: the count and the queue run in one repeatable
+/// read transaction, so both see the same runs. Any other count queues
+/// nothing and returns [`BackfillQueued::Changed`].
+pub async fn backfill_queue(pool: &PgPool, expect: i64) -> sqlx::Result<BackfillQueued> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let found: i64 = sqlx::query_scalar(&format!("SELECT count(*) {BACKFILL_ELIGIBLE}"))
+        .fetch_one(&mut *tx)
+        .await?;
+    if found != expect {
+        tx.rollback().await?;
+        return Ok(BackfillQueued::Changed { found });
+    }
     let r = sqlx::query(&format!(
         "INSERT INTO incisive.graph_jobs (run_id) SELECT r.id {BACKFILL_ELIGIBLE} \
          ON CONFLICT DO NOTHING"
     ))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(r.rows_affected())
+    let queued = r.rows_affected();
+    if i64::try_from(queued).ok() != Some(expect) {
+        tx.rollback().await?;
+        return Ok(BackfillQueued::Changed {
+            found: i64::try_from(queued).unwrap_or(i64::MAX),
+        });
+    }
+    tx.commit().await?;
+    Ok(BackfillQueued::Queued(queued))
 }
 
 /// The `--count` line: runs and an estimate in paise, nothing else.
@@ -337,8 +380,8 @@ async fn add_cost(pool: &PgPool, run_id: Uuid, paise: i64) -> sqlx::Result<()> {
 }
 
 /// A job whose task panicked: `failed` with `panic`, its reservation
-/// released.
-async fn fail_panicked(pool: &PgPool, run_id: Uuid) {
+/// released. Only a job still `running` is changed. Public for tests.
+pub async fn fail_panicked(pool: &PgPool, run_id: Uuid) {
     let row: sqlx::Result<Option<(i64, Option<Uuid>)>> = sqlx::query_as(
         "UPDATE incisive.graph_jobs j SET status = 'failed', last_error_kind = $2, \
                 finished_at = now() \
@@ -527,13 +570,9 @@ async fn load(
 async fn attempt(state: &AppState, run_id: Uuid, user_id: i64, request_id: Uuid) -> (Outcome, i64) {
     let pool = &state.pool;
     let settings = &state.graph.settings;
-    // Its own client (one attempt, no retry), else the agent's.
-    let Some(client) = state
-        .graph
-        .client
-        .clone()
-        .or_else(|| state.llm.as_ref().map(|l| l.client.clone()))
-    else {
+    // Its own client only (one attempt, no retry); never the agent's. Without
+    // one the job fails before anything is reserved, so no hold is left.
+    let Some(client) = state.graph.client.clone() else {
         return (Outcome::Fail(reason::NO_CLIENT), 0);
     };
 
@@ -640,7 +679,7 @@ async fn attempt(state: &AppState, run_id: Uuid, user_id: i64, request_id: Uuid)
             return (o, 0);
         }
     };
-    let reply = match tokio::time::timeout(TIME_LIMIT, &mut handle).await {
+    let reply = match tokio::time::timeout(settings.time_limit, &mut handle).await {
         Ok(Ok(r)) => Ok(r),
         Ok(Err(_)) => Ok(Err(StepError::Unrecorded)),
         Err(_) => Err(()),
@@ -704,8 +743,13 @@ async fn attempt(state: &AppState, run_id: Uuid, user_id: i64, request_id: Uuid)
             cost,
         ),
         Err(sqlx::Error::RowNotFound) => (Outcome::Skip(reason::GONE), cost),
+        // A foreign-key failure means the run is gone only if it really is;
+        // while it exists (a concept removed mid-write, say) it is retried.
         Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("23503") => {
-            (Outcome::Skip(reason::GONE), cost)
+            match crate::runs::store::run_exists(pool, run_id).await {
+                Ok(false) => (Outcome::Skip(reason::GONE), cost),
+                Ok(true) | Err(_) => (Outcome::Retry(reason::STORE), cost),
+            }
         }
         Err(_) => (Outcome::Retry(reason::STORE), cost),
     }

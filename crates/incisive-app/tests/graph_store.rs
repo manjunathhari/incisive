@@ -8,7 +8,7 @@ use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::graph::extract::{PickedOutcome, Picks};
 use incisive_app::graph::rank::Rank;
 use incisive_app::graph::store::{
-    PaperRow, cleanup_unused, known_names, papers_from, pub_types_for, write_run,
+    PaperRow, cleanup_unused, known_names, papers_from, pub_types_for, write_order, write_run,
 };
 use secrecy::SecretString;
 use sqlx::PgPool;
@@ -72,6 +72,66 @@ fn study_row_gives_design_and_n_and_missing_row_ranks_from_types() {
     assert_eq!(from_types.rank.rank, Rank::Rct);
     let none = rows.iter().find(|r| r.pmid == "99999992").unwrap();
     assert_eq!(none.rank.rank, Rank::Unclassified);
+}
+
+/// Concepts lock in (kind, normalised label) order and papers in PMID
+/// order, whatever order the picks and references came in.
+#[test]
+fn write_order_is_the_same_for_any_input_order() {
+    let outcome = |row, name: &str| PickedOutcome {
+        row,
+        name: name.into(),
+        certainty: "low".into(),
+    };
+    let a = Picks {
+        diseases: vec!["Zenker diverticulum".into(), "achalasia".into()],
+        treatments: vec!["POEM".into(), "Heller  myotomy".into(), "botox".into()],
+        organs: vec!["Oesophagus".into()],
+        outcomes: vec![outcome(2, "Reflux"), outcome(1, "dysphagia")],
+        dropped: 0,
+    };
+    let mut b = a.clone();
+    b.diseases.reverse();
+    b.treatments.rotate_left(1);
+    b.outcomes.reverse();
+    let pa = vec![
+        paper("300", "c", false),
+        paper("1000", "a", false),
+        paper("200", "b", false),
+    ];
+    let mut pb = pa.clone();
+    pb.reverse();
+
+    let (ca, papers_a) = write_order(&a, &pa);
+    let (cb, papers_b) = write_order(&b, &pb);
+    assert_eq!(ca, cb);
+    let keys: Vec<(&str, String)> = ca
+        .iter()
+        .map(|c| {
+            (
+                c.kind,
+                c.label
+                    .to_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        })
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "by (kind, norm_label)");
+    assert_eq!(keys.len(), 8);
+    assert_eq!(keys[0], ("disease", "achalasia".to_string()));
+    assert_eq!(keys[7], ("treatment", "poem".to_string()));
+    let outcome_link = ca.iter().find(|c| c.label == "dysphagia").unwrap();
+    assert_eq!(
+        (outcome_link.certainty, outcome_link.source_row),
+        (Some("low"), Some(1))
+    );
+    let pmids = |p: &[&PaperRow]| p.iter().map(|p| p.pmid.clone()).collect::<Vec<_>>();
+    assert_eq!(pmids(&papers_a), pmids(&papers_b));
+    assert_eq!(pmids(&papers_a), ["1000", "200", "300"]);
 }
 
 async fn connect() -> Option<PgPool> {

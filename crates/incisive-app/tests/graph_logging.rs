@@ -65,6 +65,7 @@ fn state(pool: PgPool, llm: Arc<dyn LlmClient>) -> AppState {
                 on: true,
                 model: "m-test".into(),
                 from: Some(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+                ..GraphSettings::default()
             },
             client: Some(llm),
         },

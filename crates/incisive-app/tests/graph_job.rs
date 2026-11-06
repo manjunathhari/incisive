@@ -16,8 +16,8 @@ use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::OfflineClassifier;
 use incisive_app::graph::extract::{self, KnownNames};
 use incisive_app::graph::job::{
-    JobStatus, MAX_ATTEMPTS, MAX_TOKENS, PURPOSE, enqueue_new, graph_loop, process, reason,
-    recover_stale,
+    JobStatus, MAX_ATTEMPTS, MAX_TOKENS, PURPOSE, TIME_LIMIT, enqueue_new, fail_panicked,
+    graph_loop, process, reason, recover_stale,
 };
 use incisive_app::graph::settings::{GraphRuntime, GraphSettings};
 use incisive_app::identity::{IapVerifier, JwkSource};
@@ -83,6 +83,7 @@ fn state(pool: PgPool, llm: Arc<dyn LlmClient>, on: bool) -> AppState {
                 on,
                 model: MODEL.into(),
                 from: on.then(today_ist),
+                ..GraphSettings::default()
             },
             client: Some(llm),
         },
@@ -927,4 +928,209 @@ async fn graph_off_starts_no_loop_and_makes_no_call() {
         "off: no job runs"
     );
     assert!(llm.requests().is_empty());
+}
+
+// ---------- no client, store faults, panics, time ----------
+
+#[tokio::test]
+async fn without_its_own_client_the_job_fails_and_never_uses_the_agents() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let uid = new_user(&pool, 100_000).await;
+    let run = new_run(&pool, uid, "focused", "done", Some(hernia())).await;
+    queue(&pool, run).await;
+    let agents = Arc::new(ScriptedLlm::new().reply_json(good(&tag()), usage()));
+    let mut st = state(pool.clone(), Arc::new(ScriptedLlm::new()), true);
+    st.graph.client = None;
+    st.llm = Some(agent_llm(agents.clone(), MODEL));
+    assert_eq!(process(&st, run).await, JobStatus::Failed);
+    let j = job_row(&pool, run).await.unwrap();
+    assert_eq!(
+        (j.status.as_str(), j.kind.as_deref()),
+        ("failed", Some(reason::NO_CLIENT))
+    );
+    assert!(j.finished);
+    assert_eq!(j.cost, 0);
+    assert!(
+        agents.requests().is_empty(),
+        "the agent's client is not used"
+    );
+    assert!(reservations(&pool, uid).await.is_empty());
+    assert!(charges(&pool, uid).await.is_empty());
+    assert_eq!(links(&pool, run).await, (0, 0));
+}
+
+/// Make every paper link insert for `run` fail with a foreign-key violation
+/// (23503) while the run itself stays. Returns the trigger's name.
+async fn fk_fault(pool: &PgPool, run: Uuid) -> String {
+    let name = format!("graph_fk_fault_{}", run.simple());
+    sqlx::query(&format!(
+        "CREATE FUNCTION incisive.{name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.run_id = '{run}'::uuid THEN \
+           RAISE EXCEPTION 'fault' USING ERRCODE = '23503'; END IF; RETURN NEW; END $$"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {name} BEFORE INSERT ON incisive.graph_run_papers \
+         FOR EACH ROW EXECUTE FUNCTION incisive.{name}()"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    name
+}
+
+async fn drop_fk_fault(pool: &PgPool, name: &str) {
+    sqlx::query(&format!("DROP TRIGGER {name} ON incisive.graph_run_papers"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP FUNCTION incisive.{name}()"))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_foreign_key_fault_while_the_run_exists_is_retried_not_skipped() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let uid = new_user(&pool, 100_000).await;
+    let run = new_run(&pool, uid, "focused", "done", Some(hernia())).await;
+    queue(&pool, run).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .reply_json(good(&tag()), usage())
+            .reply_json(good(&tag()), usage()),
+    );
+    let st = state(pool.clone(), llm.clone(), true);
+    let fault = fk_fault(&pool, run).await;
+    let s = process(&st, run).await;
+    drop_fk_fault(&pool, &fault).await;
+    assert_eq!(s, JobStatus::Pending);
+    let j = job_row(&pool, run).await.unwrap();
+    assert_eq!(
+        (j.status.as_str(), j.attempts, j.kind.as_deref()),
+        ("pending", 1, Some(reason::STORE))
+    );
+    assert!(!j.finished);
+    assert!(j.cost > 0, "the call was charged");
+    assert_eq!(links(&pool, run).await, (0, 0), "the write rolled back");
+    assert!(reservations(&pool, uid).await.is_empty());
+
+    // The next attempt writes the run.
+    due(&pool, run).await;
+    assert_eq!(process(&st, run).await, JobStatus::Done);
+    assert!(links(&pool, run).await.1 > 0);
+}
+
+#[tokio::test]
+async fn a_panicked_job_is_failed_and_its_reservation_released() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let uid = new_user(&pool, 100_000).await;
+    let run = new_run(&pool, uid, "focused", "done", Some(hernia())).await;
+    let other = new_run(&pool, uid, "focused", "done", Some(hernia())).await;
+    let (req, other_req) = (Uuid::new_v4(), Uuid::new_v4());
+    for (r, q) in [(run, req), (other, other_req)] {
+        sqlx::query(
+            "INSERT INTO incisive.graph_jobs (run_id, status, attempts, request_id, next_try_at) \
+             VALUES ($1, 'running', 1, $2, now() + interval '5 minutes')",
+        )
+        .bind(r)
+        .bind(q)
+        .execute(&pool)
+        .await
+        .unwrap();
+        hold(&pool, uid, q, "0 minutes").await;
+    }
+
+    fail_panicked(&pool, run).await;
+    let j = job_row(&pool, run).await.unwrap();
+    assert_eq!(
+        (j.status.as_str(), j.kind.as_deref()),
+        ("failed", Some(reason::PANIC))
+    );
+    assert!(j.finished);
+    let left: Vec<Uuid> = reservations(&pool, uid)
+        .await
+        .into_iter()
+        .map(|r| r.2)
+        .collect();
+    assert_eq!(
+        left,
+        vec![other_req],
+        "only the panicked job's hold released"
+    );
+    assert_eq!(job_row(&pool, other).await.unwrap().status, "running");
+
+    // A job that is no longer running is left alone.
+    fail_panicked(&pool, run).await;
+    assert_eq!(
+        job_row(&pool, run).await.unwrap().kind.as_deref(),
+        Some(reason::PANIC)
+    );
+    assert!(store::delete_run(&pool, uid, other).await.unwrap());
+    sqlx::query("DELETE FROM incisive.spend WHERE request_id = $1")
+        .bind(other_req)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn the_time_limit_defaults_to_thirty_seconds() {
+    assert_eq!(TIME_LIMIT, Duration::from_secs(30));
+    assert_eq!(GraphSettings::default().time_limit, TIME_LIMIT);
+}
+
+#[tokio::test]
+async fn a_timed_out_call_is_retried_and_its_late_charge_is_booked() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let uid = new_user(&pool, 100_000).await;
+    let run = new_run(&pool, uid, "focused", "done", Some(hernia())).await;
+    queue(&pool, run).await;
+    let llm = Arc::new(
+        ScriptedLlm::new()
+            .delay(Duration::from_millis(400))
+            .reply_json(good(&tag()), usage()),
+    );
+    let mut st = state(pool.clone(), llm, true);
+    st.graph.settings.time_limit = Duration::from_millis(30);
+    let started = std::time::Instant::now();
+    assert_eq!(process(&st, run).await, JobStatus::Pending);
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "did not wait"
+    );
+    let j = job_row(&pool, run).await.unwrap();
+    assert_eq!(
+        (j.status.as_str(), j.attempts, j.kind.as_deref()),
+        ("pending", 1, Some(reason::TIME))
+    );
+    assert_eq!(
+        links(&pool, run).await,
+        (0, 0),
+        "a late reply is not written"
+    );
+    // The call still books its charge, frees what the job kept for it, and
+    // the job's cost is brought up to date.
+    for _ in 0..200 {
+        let cost = job_row(&pool, run).await.unwrap().cost;
+        if cost > 0 && reservations(&pool, uid).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(reservations(&pool, uid).await.is_empty());
+    let c = charges(&pool, uid).await;
+    assert_eq!(c.len(), 1);
+    assert_eq!(
+        job_row(&pool, run).await.unwrap().cost,
+        c[0].1,
+        "late cost on the job"
+    );
 }

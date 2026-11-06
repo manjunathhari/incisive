@@ -1,9 +1,13 @@
 //! The graph backfill with the database (`TEST_DATABASE_URL`): `--count`
-//! counts exactly the runs `--queue` would queue, changes nothing, and
-//! `--queue` is repeatable.
+//! counts exactly the runs `--queue` would queue, changes nothing, `--queue`
+//! queues only when `--expect` still matches, and is repeatable.
+
+use std::process::Command;
 
 use incisive_app::db::{lazy_pool, migrate};
-use incisive_app::graph::job::{backfill_count, backfill_line, backfill_queue};
+use incisive_app::graph::job::{
+    BackfillQueued, backfill_count, backfill_line, backfill_queue, changed_line,
+};
 use incisive_app::runs::store;
 use secrecy::SecretString;
 use serde_json::Value;
@@ -81,6 +85,26 @@ async fn all_jobs(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
+/// Queue whatever other tests left eligible, so counts start at zero.
+async fn clear_leftovers(pool: &PgPool) {
+    let n = backfill_count(pool).await.unwrap();
+    assert_eq!(
+        backfill_queue(pool, n).await.unwrap(),
+        BackfillQueued::Queued(n as u64)
+    );
+}
+
+async fn forget_user_jobs(pool: &PgPool, uid: i64) {
+    sqlx::query(
+        "DELETE FROM incisive.graph_jobs j USING incisive.runs r \
+         WHERE r.id = j.run_id AND r.user_id = $1",
+    )
+    .bind(uid)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[test]
 fn the_count_line_is_runs_and_paise_only() {
     assert_eq!(backfill_line(12, 40), "12 runs, about 480 paise");
@@ -93,7 +117,7 @@ async fn count_changes_nothing_and_queue_adds_only_eligible_runs_once() {
     let _g = SERIAL.lock().await;
     let uid = new_user(&pool).await;
     // Take the other tests' leftovers out of the way first.
-    backfill_queue(&pool).await.unwrap();
+    clear_leftovers(&pool).await;
     assert_eq!(backfill_count(&pool).await.unwrap(), 0);
 
     let mut v2 = hernia();
@@ -125,19 +149,124 @@ async fn count_changes_nothing_and_queue_adds_only_eligible_runs_once() {
     assert_eq!(all_jobs(&pool).await, jobs_before, "count writes nothing");
 
     // --queue: those two, not the skipped ones, not the already queued one.
-    assert_eq!(backfill_queue(&pool).await.unwrap(), 2);
+    assert_eq!(
+        backfill_queue(&pool, 2).await.unwrap(),
+        BackfillQueued::Queued(2)
+    );
     assert_eq!(jobs_among(&pool, &[done, partial, already]).await, 3);
     assert_eq!(jobs_among(&pool, &skipped).await, 0);
 
     // A second --queue adds nothing, and nothing is left to count.
-    assert_eq!(backfill_queue(&pool).await.unwrap(), 0);
+    assert_eq!(
+        backfill_queue(&pool, 0).await.unwrap(),
+        BackfillQueued::Queued(0)
+    );
     assert_eq!(backfill_count(&pool).await.unwrap(), 0);
     assert_eq!(all_jobs(&pool).await, jobs_before + 2);
 
     // Leave the shared database as found for the other tests.
-    sqlx::query("DELETE FROM incisive.graph_jobs j USING incisive.runs r WHERE r.id = j.run_id AND r.user_id = $1")
-        .bind(uid)
-        .execute(&pool)
-        .await
+    forget_user_jobs(&pool, uid).await;
+}
+
+#[test]
+fn the_changed_line_names_both_figures() {
+    assert_eq!(
+        changed_line(3, 5),
+        "eligible runs changed: expected 3, found 5"
+    );
+}
+
+#[tokio::test]
+async fn queue_with_an_out_of_date_expect_queues_nothing() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let uid = new_user(&pool).await;
+    clear_leftovers(&pool).await;
+    let runs = [
+        new_run(&pool, uid, "done", Some(hernia())).await,
+        new_run(&pool, uid, "partial", Some(hernia())).await,
+    ];
+    let jobs_before = all_jobs(&pool).await;
+    for wrong in [0, 1, 3] {
+        assert_eq!(
+            backfill_queue(&pool, wrong).await.unwrap(),
+            BackfillQueued::Changed { found: 2 },
+            "expect {wrong}"
+        );
+        assert_eq!(all_jobs(&pool).await, jobs_before, "nothing queued");
+    }
+    assert_eq!(
+        backfill_queue(&pool, 2).await.unwrap(),
+        BackfillQueued::Queued(2)
+    );
+    assert_eq!(jobs_among(&pool, &runs).await, 2);
+    forget_user_jobs(&pool, uid).await;
+}
+
+fn backfill_bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_graph_backfill"))
+}
+
+#[test]
+fn the_binary_refuses_queue_without_expect() {
+    let out = backfill_bin()
+        .arg("--queue")
+        .env_remove("DATABASE_URL")
+        .output()
         .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--expect"), "{err}");
+    assert!(out.stdout.is_empty());
+    for bad in [
+        &["--queue", "--expect"][..],
+        &["--queue", "--expect", "-1"],
+        &["--queue", "--expect", "two"],
+    ] {
+        let out = backfill_bin()
+            .args(bad)
+            .env_remove("DATABASE_URL")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{bad:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_binary_with_a_changed_count_exits_non_zero_and_queues_nothing() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let uid = new_user(&pool).await;
+    clear_leftovers(&pool).await;
+    let run = new_run(&pool, uid, "done", Some(hernia())).await;
+    let jobs_before = all_jobs(&pool).await;
+
+    let out = backfill_bin()
+        .args(["--queue", "--expect", "4"])
+        .env("DATABASE_URL", &url)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("eligible runs changed: expected 4, found 1"),
+        "{err}"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(all_jobs(&pool).await, jobs_before, "nothing queued");
+
+    let out = backfill_bin()
+        .args(["--queue", "--expect", "1"])
+        .env("DATABASE_URL", &url)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "queued 1 runs\n");
+    assert_eq!(jobs_among(&pool, &[run]).await, 1);
+    forget_user_jobs(&pool, uid).await;
 }
