@@ -13,7 +13,7 @@ use crate::agent::answer_v3::AnswerV3;
 /// Most names offered back to the model, per kind.
 const KNOWN_CAP: i64 = 100;
 /// Guard against a `merged_into` cycle.
-const MAX_CHAIN: i32 = 20;
+pub(super) const MAX_CHAIN: i32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaperRow {

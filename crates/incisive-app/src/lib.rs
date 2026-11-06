@@ -27,6 +27,8 @@ pub mod gate;
 /// The knowledge graph (off by default).
 #[cfg(feature = "ssr")]
 pub mod graph;
+/// The knowledge-graph map's shared types and layout (no Leptos).
+pub mod graph_view;
 #[cfg(feature = "ssr")]
 pub mod health;
 #[cfg(feature = "ssr")]
