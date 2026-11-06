@@ -445,8 +445,12 @@ async fn the_list_groups_folds_and_escapes() {
     // Five papers, then the fold.
     assert!(html.contains("Show all 6"));
     assert!(html.contains("Paper five"));
+    // (The map has a button for every paper; the List folds.)
+    let m = markup(&html);
+    let list = &m[m.find(r#"class="kg-list""#).unwrap()..m.find(r#"class="kg-side""#).unwrap()];
+    assert!(list.contains("Paper five"));
     assert!(
-        !markup(&html).contains("Paper six"),
+        !list.contains("Paper six"),
         "the sixth paper is folded away"
     );
     assert!(html.contains(&format!("Inguinal hernia {t} question")));
@@ -693,4 +697,138 @@ async fn another_users_organ_and_sheets_stay_theirs() {
     assert_eq!(shared_b.sheet.map(|s| (s.run, s.n)), Some((run_b, 2)));
     let (_, html) = get(router(st), "/explore", Some(&email_b)).await;
     assert!(!html.contains(&run_a.to_string()) && !html.contains(&ta));
+}
+
+/// A page with a browser's User-Agent.
+async fn get_as(app: Router, path: &str, email: &str, ua: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("x-dev-user-email", email)
+        .header("user-agent", ua)
+        .body(Body::empty())
+        .unwrap();
+    body_of(app.oneshot(req).await.unwrap()).await
+}
+
+/// The map's dot buttons in a page.
+fn dot_buttons(markup: &str) -> usize {
+    regex::Regex::new(r#"<button type="button"[^>]*class="kg-dot( on)?""#)
+        .unwrap()
+        .find_iter(markup)
+        .count()
+}
+
+const IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+
+/// The server draws the map: one real button per dot, named by kind and
+/// label, laid out for a desktop frame or, for a phone, a phone frame. A
+/// question's card has the question, its bottom line and its certainty, and
+/// only its owner ever sees them.
+#[tokio::test]
+async fn the_map_is_drawn_with_a_button_per_dot() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (uid, email) = new_user(&pool, "surgeon").await;
+    let (_, other) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    let question = format!("Is robotic hernia repair better {t}?");
+    let run = mapped_run(
+        &pool,
+        uid,
+        &t,
+        &[
+            paper(&pmid(&t, 1), "A trial", 2024, "RCT"),
+            paper(&pmid(&t, 2), "A cohort", 2019, "Retrospective cohort"),
+        ],
+    )
+    .await;
+    sqlx::query("UPDATE incisive.runs SET question = $1 WHERE id = $2")
+        .bind(&question)
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO incisive.run_answers (run_id, body, answer_version) VALUES ($1, $2, 3)",
+    )
+    .bind(run)
+    .bind(serde_json::json!({"version": 3,
+        "answer": {"bottom_line": {"text": "No consistent benefit [1].", "certainty": "Moderate"}},
+        "references": [{"n": 1, "pmid": pmid(&t, 1)}]}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let st = state(pool.clone(), true);
+
+    let (s, html) = get(router(st.clone()), "/explore", Some(&email)).await;
+    assert_eq!(s, StatusCode::OK);
+    let m = markup(&html);
+    let (_, body) = call(
+        router(st.clone()),
+        "explore_map",
+        r#"{"w": 860, "h": 720}"#,
+        Some(&email),
+    )
+    .await;
+    let map: MapData = serde_json::from_str(&body).unwrap();
+    assert_eq!(map.dots.len(), 7);
+    assert_eq!(dot_buttons(&m), map.dots.len(), "one button per dot");
+    for name in [
+        format!("Disease: Inguinal hernia {t}"),
+        format!("Organ: Abdominal wall {t}"),
+        format!("Treatment: Robotic surgery {t}"),
+        format!("Outcome: Recurrence {t}"),
+        format!("Your question: Inguinal hernia {t} question"),
+        "RCT paper: A trial".to_string(),
+        "Retrospective paper: A cohort".to_string(),
+    ] {
+        assert!(
+            m.contains(&format!(r#"aria-label="{name}""#)),
+            "no dot named {name}"
+        );
+    }
+    // Lines are drawn, paper lines dashed; the frame is the desktop's.
+    assert!(m.contains(r#"viewBox="0 0 860 720""#));
+    assert_eq!(m.matches("<line ").count(), map.lines.len());
+    assert!(m.contains(r#"stroke-dasharray="4 3""#));
+    assert!(m.contains("Time-lapse by paper year"));
+    assert!(m.contains("Show on the map"));
+    // The disease row names the run's certainty.
+    assert!(m.contains(&format!("Abdominal wall {t} \u{b7} Certainty: Moderate")));
+
+    // A phone gets the phone frame.
+    let (_, phone) = get_as(router(st.clone()), "/explore", &email, IPHONE).await;
+    let pm = markup(&phone);
+    assert!(pm.contains(r#"viewBox="0 0 358 480""#));
+    assert_eq!(dot_buttons(&pm), 7);
+
+    // The question's card, from the user's own runs.
+    let (_, body) = call(router(st.clone()), "explore_list", "{}", Some(&email)).await;
+    let all: MapData = serde_json::from_str(&body).unwrap();
+    let c = ep::card_for(&all, &format!("r:{run}")).unwrap();
+    assert_eq!(c.title, question);
+    assert_eq!(c.body, "No consistent benefit.");
+    assert_eq!(
+        c.kicker,
+        "Full run \u{b7} 31 Oct 2026 \u{b7} Certainty: Moderate"
+    );
+    assert_eq!(c.answer, Some(format!("/runs/{run}")));
+    // "Run certainty" goes by the run's own certainty (its outcome is Low).
+    for (want, runs) in [("Moderate", 1), ("Low", 0)] {
+        let f = format!(
+            r#"{{"filter": {{"organ": null, "year_from": null, "year_to": null, "certainty": "{want}", "hidden": []}}, "w": 358, "h": 480}}"#
+        );
+        let (s, body) = call(router(st.clone()), "explore_map", &f, Some(&email)).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        let m: MapData = serde_json::from_str(&body).unwrap();
+        assert_eq!(m.runs, runs, "{want}");
+        assert!(m.dots.iter().all(|d| d.x <= 358.0 && d.y <= 480.0));
+    }
+
+    // Nobody else sees it.
+    let (_, theirs) = get(router(st.clone()), "/explore", Some(&other)).await;
+    assert!(!theirs.contains(&question) && !theirs.contains(&t));
+    let (_, body) = call(router(st), "explore_list", "{}", Some(&other)).await;
+    assert!(!body.contains(&question));
 }

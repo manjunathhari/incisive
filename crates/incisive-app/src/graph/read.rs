@@ -27,6 +27,9 @@ const RANK_ORDER: [&str; 8] = [
     "unclassified",
 ];
 
+/// The bottom-line certainties an answer can state.
+const CERTAINTIES: [&str; 4] = ["High", "Moderate", "Low", "Very low"];
+
 fn rank_order(code: &str) -> usize {
     RANK_ORDER
         .iter()
@@ -38,6 +41,10 @@ struct RunRow {
     id: Uuid,
     mode: String,
     day: String,
+    /// The user's own question; never logged.
+    question: String,
+    bottom_line: Option<String>,
+    certainty: Option<String>,
 }
 
 struct ConceptLink {
@@ -90,12 +97,22 @@ fn paper_dot_id(pmid: &str) -> String {
     format!("p:{pmid}")
 }
 
-/// The user's runs that have any link, newest first.
+/// The user's runs that have any link, newest first, each with its
+/// question, and its stored bottom line and certainty when it has an
+/// answer (version 3; version 2 has no certainty).
 async fn user_runs(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<RunRow>> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+    type Row = (Uuid, String, String, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT r.id, r.mode, \
-                to_char(r.created_at AT TIME ZONE 'Asia/Kolkata', 'FMDD Mon YYYY') \
+                to_char(r.created_at AT TIME ZONE 'Asia/Kolkata', 'FMDD Mon YYYY'), \
+                r.question, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,text}' \
+                     ELSE a.body #>> '{bottom_line,0,text}' END, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,certainty}' END \
            FROM incisive.runs r \
+           LEFT JOIN incisive.run_answers a ON a.run_id = r.id \
           WHERE r.user_id = $1 \
             AND (EXISTS (SELECT 1 FROM incisive.graph_run_concepts rc \
                           WHERE rc.run_id = r.id AND rc.user_id = $1) \
@@ -108,7 +125,17 @@ async fn user_runs(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<RunRow>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, mode, day)| RunRow { id, mode, day })
+        .map(|(id, mode, day, question, bottom_line, certainty)| RunRow {
+            id,
+            mode,
+            day,
+            question,
+            // As stored, citations and all; the page strips them.
+            bottom_line: bottom_line.filter(|b| !b.trim().is_empty()),
+            certainty: certainty
+                .map(|c| c.trim().to_string())
+                .filter(|c| CERTAINTIES.contains(&c.as_str())),
+        })
         .collect())
 }
 
@@ -205,6 +232,9 @@ fn blank_dot(id: String, kind: DotKind) -> Dot {
         n: None,
         includes_non_rct: false,
         sheet: None,
+        question: None,
+        bottom_line: None,
+        certainty: None,
     }
 }
 
@@ -248,14 +278,21 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
                     .iter()
                     .any(|c| c.run == run && c.kind == DotKind::Organ && c.id == organ)
             });
-            let certainty_ok = f.certainty.as_deref().is_none_or(|want| {
-                concepts.iter().any(|c| {
+            // The run's own (bottom-line) certainty; a run with no stored
+            // certainty goes by its outcomes' certainty.
+            let own = runs
+                .iter()
+                .find(|r| r.id == run)
+                .and_then(|r| r.certainty.as_deref());
+            let certainty_ok = f.certainty.as_deref().is_none_or(|want| match own {
+                Some(got) => got.eq_ignore_ascii_case(want),
+                None => concepts.iter().any(|c| {
                     c.run == run
                         && c.kind == DotKind::Outcome
                         && c.certainty
                             .as_deref()
                             .is_some_and(|got| got.eq_ignore_ascii_case(want))
-                })
+                }),
             });
             organ_ok && certainty_ok
         })
@@ -295,6 +332,9 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
         d.first_year = run_year.get(&r.id).copied();
         d.r = concept_radius(DotKind::Run, 1);
         d.run_id = Some(r.id);
+        d.question = Some(r.question.clone());
+        d.bottom_line = r.bottom_line.clone();
+        d.certainty = r.certainty.clone();
         dots.push(d);
     }
 
@@ -372,6 +412,13 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
             _ => String::new(),
         };
         d.first_year = earliest(&s.runs);
+        if s.kind == DotKind::Disease {
+            // The newest of its runs that has a certainty.
+            d.certainty = runs
+                .iter()
+                .filter(|r| s.runs.contains(&r.id))
+                .find_map(|r| r.certainty.clone());
+        }
         d.r = concept_radius(s.kind, s.runs.len());
         d.concept_id = Some(id);
         dots.push(d);

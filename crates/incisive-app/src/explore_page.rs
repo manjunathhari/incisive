@@ -135,6 +135,16 @@ fn run_sub(run: &Dot) -> String {
     }
 }
 
+/// "text · Certainty: X" (just "Certainty: X" with no text); the text as
+/// it is with no certainty.
+fn with_certainty(text: String, certainty: Option<&str>) -> String {
+    match certainty.map(str::trim).filter(|c| !c.is_empty()) {
+        None => text,
+        Some(c) if text.is_empty() => format!("Certainty: {c}"),
+        Some(c) => format!("{text} \u{b7} Certainty: {c}"),
+    }
+}
+
 fn runs_of(data: &MapData, id: &str) -> usize {
     neighbours(data, id)
         .into_iter()
@@ -168,6 +178,10 @@ fn row_of(data: &MapData, d: &Dot) -> Row {
             )
         }
         DotKind::Outcome if !d.sub.is_empty() => (d.label.clone(), format!("Certainty: {}", d.sub)),
+        DotKind::Disease => (
+            d.label.clone(),
+            with_certainty(d.sub.clone(), d.certainty.as_deref()),
+        ),
         DotKind::Paper => (d.label.clone(), paper_sub(d)),
         _ => (d.label.clone(), d.sub.clone()),
     };
@@ -385,9 +399,21 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
                 .map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
         DotKind::Run => {
-            c.kicker = run_sub(d);
-            c.title = run_title(data, d);
-            c.body = linked(near.len());
+            // As on the board: the question as asked and its bottom line
+            // (the user's own run; the map is never anyone else's).
+            c.kicker = with_certainty(run_sub(d), d.certainty.as_deref());
+            c.title = d
+                .question
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+                .map_or_else(|| run_title(data, d), str::to_string);
+            c.body = d
+                .bottom_line
+                .as_deref()
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .map_or_else(|| linked(near.len()), str::to_string);
             c.answer = d.run_id.map(run_href);
         }
         DotKind::Outcome => {
@@ -497,6 +523,362 @@ pub fn count_line(data: &MapData) -> String {
     )
 }
 
+// ---------- the map ----------
+
+/// Below this window width the map uses [`PHONE_FRAME`].
+pub const PHONE_BELOW: f64 = 700.0;
+
+/// The frame for a browser window this wide.
+pub fn frame_for(width: f64) -> (f32, f32) {
+    if width < PHONE_BELOW {
+        PHONE_FRAME
+    } else {
+        DESKTOP_FRAME
+    }
+}
+
+/// The frame the server draws first, from the browser's User-Agent (a
+/// phone says "Mobi"); the page checks its real width once it runs.
+pub fn frame_for_agent(user_agent: Option<&str>) -> (f32, f32) {
+    if user_agent.is_some_and(|ua| ua.contains("Mobi")) {
+        PHONE_FRAME
+    } else {
+        DESKTOP_FRAME
+    }
+}
+
+/// The zoom range and one step of + / −.
+pub const ZOOM_MIN: f32 = 0.6;
+pub const ZOOM_MAX: f32 = 5.0;
+pub const ZOOM_STEP: f32 = 1.4;
+
+/// A dot's radius at a zoom: dots grow a little when zoomed in, to 1.35x.
+pub fn zoom_radius(r: f32, zoom: f32) -> f32 {
+    if zoom > 1.0 {
+        r * (1.0 + (zoom - 1.0) * 0.15).min(1.35)
+    } else {
+        r
+    }
+}
+
+/// A dot's tap target: at least 30 units across.
+pub fn hit_size(r: f32) -> f32 {
+    (r * 2.0 + 8.0).max(30.0)
+}
+
+/// A label drawn on the map: its top-left corner and width in frame units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelBox {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub text: String,
+    pub bold: bool,
+}
+
+/// A label's height in frame units.
+pub const LABEL_H: f32 = 14.0;
+/// The width one character of a label takes (12px Figtree).
+const CHAR_W: f32 = 6.3;
+/// A label longer than this is cut.
+pub const LABEL_MAX: usize = 30;
+/// A frame at least this wide labels every outcome.
+const WIDE_FROM: f32 = 700.0;
+
+/// A label's text: names over [`LABEL_MAX`] characters keep the first 28,
+/// then "…" (the board's cut).
+pub fn label_text(label: &str) -> String {
+    if label.chars().count() > LABEL_MAX {
+        let head: String = label.chars().take(LABEL_MAX - 2).collect();
+        format!("{}\u{2026}", head.trim_end())
+    } else {
+        label.to_string()
+    }
+}
+
+/// A kind's place in the label order, after the picked dot and the find
+/// box's matches: disease, organ, treatment, outcome, question, paper.
+pub fn label_rank(kind: DotKind) -> u8 {
+    match kind {
+        DotKind::Disease => 3,
+        DotKind::Organ => 4,
+        DotKind::Treatment => 5,
+        DotKind::Outcome => 6,
+        DotKind::Run => 8,
+        DotKind::Paper => 9,
+    }
+}
+
+/// Whether two boxes (x, y, w, h) overlap.
+fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1
+}
+
+/// The labels the map shows, for dots already placed in the frame (zoom
+/// and pan applied). The picked dot first, then the find box's matches,
+/// then by [`label_rank`]: a label that would cover a dot or an earlier
+/// label is left out, except the picked dot's, which always shows. Diseases,
+/// organs and treatments are labelled; outcomes on a wide frame or from
+/// 1.3x; papers from 2.5x; questions only when picked or found. Labels sit
+/// under their dot and stay inside the frame.
+pub fn visible_labels(
+    dots: &[Dot],
+    zoom: f32,
+    sel: Option<&str>,
+    found: &HashSet<String>,
+    frame: (f32, f32),
+) -> Vec<LabelBox> {
+    let (w_frame, h_frame) = frame;
+    let prio = |d: &Dot| {
+        if Some(d.id.as_str()) == sel {
+            0
+        } else if found.contains(&d.id) {
+            1
+        } else {
+            label_rank(d.kind)
+        }
+    };
+    let mut order: Vec<&Dot> = dots.iter().collect();
+    order.sort_by(|a, b| prio(a).cmp(&prio(b)).then_with(|| a.id.cmp(&b.id)));
+    // Every dot is in the way of the labels but its own.
+    let mut boxes: Vec<(String, (f32, f32, f32, f32))> = dots
+        .iter()
+        .map(|d| {
+            let r = zoom_radius(d.r, zoom);
+            (d.id.clone(), (d.x - r, d.y - r, r * 2.0, r * 2.0))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for d in order {
+        let picked = Some(d.id.as_str()) == sel;
+        let wanted = picked
+            || found.contains(&d.id)
+            || match d.kind {
+                DotKind::Disease | DotKind::Organ | DotKind::Treatment => true,
+                DotKind::Outcome => zoom >= 1.3 || w_frame >= WIDE_FROM,
+                DotKind::Paper => zoom >= 2.5,
+                DotKind::Run => false,
+            };
+        if !wanted {
+            continue;
+        }
+        let r = zoom_radius(d.r, zoom);
+        let text = label_text(&d.label);
+        let w = (text.chars().count() as f32 * CHAR_W + 6.0)
+            .min(w_frame - 4.0)
+            .max(0.0);
+        let x = (d.x - w / 2.0).min(w_frame - w - 2.0).max(2.0);
+        let mut y = d.y + r + 2.0;
+        let outside = y < 0.0 || y > h_frame - LABEL_H || d.x < 0.0 || d.x > w_frame;
+        if outside {
+            if !picked {
+                continue;
+            }
+            y = y.min(h_frame - LABEL_H).max(0.0);
+        }
+        let mine = (x, y, w, LABEL_H);
+        let covers = boxes
+            .iter()
+            .any(|(id, b)| *id != d.id && overlaps(mine, *b));
+        if covers && !picked {
+            continue;
+        }
+        boxes.push((format!("label:{}", d.id), mine));
+        out.push(LabelBox {
+            id: d.id.clone(),
+            x,
+            y,
+            w,
+            text,
+            bold: picked || d.kind == DotKind::Disease,
+        });
+    }
+    out
+}
+
+/// The tapped dot and the dots a line joins it to; empty when it is not
+/// on the map.
+pub fn near(data: &MapData, id: &str) -> HashSet<String> {
+    if dot(data, id).is_none() {
+        return HashSet::new();
+    }
+    let mut out: HashSet<String> = neighbours(data, id)
+        .into_iter()
+        .map(|d| d.id.clone())
+        .collect();
+    out.insert(id.to_string());
+    out
+}
+
+/// The dots the time-lapse shows by the end of `year`: a paper from its
+/// year, any other dot from its first paper's year (a dot with no paper
+/// year waits for the end). `None`: every dot.
+pub fn visible_until(data: &MapData, year: Option<i32>) -> HashSet<String> {
+    data.dots
+        .iter()
+        .filter(|d| year.is_none_or(|y| d.first_year.is_some_and(|f| f <= y)))
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+/// The first and last paper years on the map (the time-lapse's range).
+pub fn year_span(data: &MapData) -> Option<(i32, i32)> {
+    let years = data
+        .dots
+        .iter()
+        .filter(|d| d.kind == DotKind::Paper)
+        .filter_map(|d| d.first_year);
+    years.fold(None, |acc, y| match acc {
+        None => Some((y, y)),
+        Some((lo, hi)) => Some((lo.min(y), hi.max(y))),
+    })
+}
+
+/// The dots the find box matches: every word in the label, a paper's
+/// design, or a question's name and text.
+pub fn found_on_map(data: &MapData, query: &str) -> HashSet<String> {
+    let words: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if words.is_empty() {
+        return HashSet::new();
+    }
+    data.dots
+        .iter()
+        .filter(|d| {
+            let mut hay = format!("{} {}", d.label, d.design);
+            if d.kind == DotKind::Run {
+                hay.push(' ');
+                hay.push_str(&run_title(data, d));
+                if let Some(q) = &d.question {
+                    hay.push(' ');
+                    hay.push_str(q);
+                }
+            }
+            let hay = hay.to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|d| d.id.clone())
+        .collect()
+}
+
+/// A kind's name on the map and in the legend.
+pub fn kind_name(kind: DotKind) -> &'static str {
+    match kind {
+        DotKind::Organ => "Organ",
+        DotKind::Disease => "Disease",
+        DotKind::Run => "Your question",
+        DotKind::Treatment => "Treatment",
+        DotKind::Outcome => "Outcome",
+        DotKind::Paper => "Paper",
+    }
+}
+
+/// A dot's accessible name: its kind (a paper's rank) and its label.
+pub fn dot_aria(data: &MapData, d: &Dot) -> String {
+    match d.kind {
+        DotKind::Paper => format!("{} paper: {}", rank_info(d.rank.as_deref()).2, d.label),
+        DotKind::Run => format!("{}: {}", kind_name(d.kind), run_title(data, d)),
+        k => format!("{}: {}", kind_name(k), d.label),
+    }
+}
+
+/// The class naming a paper's rank colour (`other` when not ranked).
+pub fn rank_class(code: Option<&str>) -> &'static str {
+    match code {
+        Some("rct") => "rct",
+        Some("meta") => "meta",
+        Some("prospective") => "prospective",
+        Some("retrospective") => "retrospective",
+        Some("case_series") => "case_series",
+        _ => "other",
+    }
+}
+
+/// The papers of a picked question, or of a disease's questions, ranked
+/// (the side column's "Papers, ranked"); none for any other dot.
+pub fn papers_for(data: &MapData, id: &str) -> Vec<Row> {
+    let Some(d) = dot(data, id) else {
+        return Vec::new();
+    };
+    let runs: Vec<&str> = match d.kind {
+        DotKind::Run => vec![d.id.as_str()],
+        DotKind::Disease => neighbours(data, id)
+            .into_iter()
+            .filter(|n| n.kind == DotKind::Run)
+            .map(|n| n.id.as_str())
+            .collect(),
+        _ => return Vec::new(),
+    };
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut papers: Vec<&Dot> = runs
+        .iter()
+        .flat_map(|r| neighbours(data, r))
+        .filter(|n| n.kind == DotKind::Paper && seen.insert(n.id.as_str()))
+        .collect();
+    papers.sort_by(|a, b| paper_order(a, b));
+    papers.into_iter().map(|p| row_of(data, p)).collect()
+}
+
+/// The legend's entries ("Show on the map"): the key it toggles in
+/// `MapFilter::hidden`, its name, its swatch class, and whether it is a
+/// paper rank (a square). "Not ranked" hides every unranked code.
+pub const LEGEND: [(&str, &str, &str, bool); 11] = [
+    ("organ", "Organ", "organ", false),
+    ("disease", "Disease", "disease", false),
+    ("run", "Your question", "run", false),
+    ("treatment", "Treatment", "treatment", false),
+    ("outcome", "Outcome", "outcome", false),
+    ("rct", "1 RCT", "rct", true),
+    ("meta", "2 Meta-analysis", "meta", true),
+    ("prospective", "3 Prospective", "prospective", true),
+    ("retrospective", "4 Retrospective", "retrospective", true),
+    ("case_series", "5 Case series", "case_series", true),
+    ("other", "Not ranked", "other", true),
+];
+
+/// The rank codes "Not ranked" stands for.
+pub const UNRANKED: [&str; 3] = ["guideline", "model", "unclassified"];
+
+/// The `hidden` codes a legend key stands for.
+pub fn hidden_codes(key: &str) -> Vec<String> {
+    if key == "other" {
+        UNRANKED.iter().map(|s| s.to_string()).collect()
+    } else {
+        vec![key.to_string()]
+    }
+}
+
+/// The paper year choices: (value, label, from, to).
+pub const YEARS: [(&str, &str, Option<i32>, Option<i32>); 4] = [
+    ("all", "Any year", None, None),
+    ("new", "2024\u{2013}2026", Some(2024), None),
+    ("mid", "2019\u{2013}2023", Some(2019), Some(2023)),
+    ("old", "Before 2019", None, Some(2018)),
+];
+
+/// The run certainty choices: (value, label).
+pub const CERTAINTIES: [(&str, &str); 4] = [
+    ("all", "Any"),
+    ("Moderate", "Moderate"),
+    ("Low", "Low"),
+    ("Very low", "Very low"),
+];
+
+/// The time-lapse button's words.
+pub fn play_label(playing: bool, until: Option<i32>, last: Option<i32>) -> &'static str {
+    if playing {
+        "Pause"
+    } else if until.is_some() && until >= last {
+        "Play again"
+    } else {
+        "Time-lapse by paper year"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +904,9 @@ mod tests {
             n: None,
             includes_non_rct: false,
             sheet: None,
+            question: None,
+            bottom_line: None,
+            certainty: None,
         }
     }
 
@@ -762,5 +1147,288 @@ mod tests {
         let mut small = sample();
         cap_for_map(&mut small, 400);
         assert_eq!(small, sample());
+    }
+
+    // ---------- the map ----------
+
+    const WIDE: (f32, f32) = (860.0, 720.0);
+    const PHONE: (f32, f32) = (358.0, 480.0);
+
+    fn at(mut d: Dot, x: f32, y: f32) -> Dot {
+        d.x = x;
+        d.y = y;
+        d
+    }
+
+    fn ids(labels: &[LabelBox]) -> Vec<&str> {
+        let mut v: Vec<&str> = labels.iter().map(|l| l.id.as_str()).collect();
+        v.sort_unstable();
+        v
+    }
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    /// Two dots side by side: their labels overlap, but neither label
+    /// touches the other dot.
+    fn pair(a: Dot, b: Dot) -> Vec<Dot> {
+        vec![at(a, 100.0, 100.0), at(b, 112.0, 100.0)]
+    }
+
+    #[test]
+    fn colliding_labels_keep_the_higher_priority() {
+        let disease = dot("d:1", DotKind::Disease, "Inguinal hernia", "");
+        let organ = dot("g:1", DotKind::Organ, "Abdominal wall", "");
+        let treatment = dot("t:1", DotKind::Treatment, "Robotic surgery", "");
+        let outcome = dot("o:1", DotKind::Outcome, "Recurrence", "");
+        let mut p = paper("1", "rct", Some(2020));
+        p.label = "A paper".into();
+        // Every pair in the priority order: the first keeps its label.
+        let order = [disease, organ, treatment, outcome, p];
+        for i in 0..order.len() {
+            for j in (i + 1)..order.len() {
+                let dots = pair(order[j].clone(), order[i].clone());
+                let got = visible_labels(&dots, 3.0, None, &none(), WIDE);
+                assert_eq!(
+                    ids(&got),
+                    [order[i].id.as_str()],
+                    "{} over {}",
+                    order[i].id,
+                    order[j].id
+                );
+            }
+        }
+        // Found beats a disease; selected beats found.
+        let dots = pair(
+            dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
+            dot("t:1", DotKind::Treatment, "Robotic surgery", ""),
+        );
+        let found: HashSet<String> = ["t:1".to_string()].into();
+        assert_eq!(
+            ids(&visible_labels(&dots, 1.0, None, &found, WIDE)),
+            ["t:1"]
+        );
+        let found: HashSet<String> = ["d:1".to_string()].into();
+        assert_eq!(
+            ids(&visible_labels(&dots, 1.0, Some("t:1"), &found, WIDE)),
+            ["t:1"]
+        );
+        // The whole order, questions and papers last.
+        let kinds = [
+            DotKind::Disease,
+            DotKind::Organ,
+            DotKind::Treatment,
+            DotKind::Outcome,
+            DotKind::Run,
+            DotKind::Paper,
+        ];
+        for w in kinds.windows(2) {
+            assert!(label_rank(w[0]) < label_rank(w[1]), "{:?}", w);
+        }
+        // A disease label is bold.
+        let one = [at(
+            dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
+            100.0,
+            100.0,
+        )];
+        assert!(visible_labels(&one, 1.0, None, &none(), WIDE)[0].bold);
+    }
+
+    #[test]
+    fn a_selected_dots_label_always_shows() {
+        // Squeezed between two diseases, a question has no label unless it
+        // is picked, and then it shows over theirs.
+        let dots = vec![
+            at(dot("d:1", DotKind::Disease, "Achalasia", ""), 100.0, 100.0),
+            at(dot(RUN, DotKind::Run, "Your question", ""), 106.0, 100.0),
+            at(dot("d:2", DotKind::Disease, "Hernia", ""), 112.0, 116.0),
+        ];
+        let got = visible_labels(&dots, 1.0, None, &none(), WIDE);
+        assert!(!ids(&got).contains(&RUN));
+        let got = visible_labels(&dots, 1.0, Some(RUN), &none(), WIDE);
+        let l = got.iter().find(|l| l.id == RUN).expect("the picked label");
+        assert!(l.bold);
+        // At the bottom edge, where a label would leave the frame.
+        let low = [at(dot("t:1", DotKind::Treatment, "POEM", ""), 50.0, 478.0)];
+        assert!(visible_labels(&low, 1.0, None, &none(), PHONE).is_empty());
+        let got = visible_labels(&low, 1.0, Some("t:1"), &none(), PHONE);
+        assert_eq!(ids(&got), ["t:1"]);
+        assert!(got[0].y + LABEL_H <= PHONE.1);
+    }
+
+    #[test]
+    fn labels_stay_in_the_frame() {
+        let long = "Laparoscopic Heller myotomy with Dor fundoplication";
+        let dots = vec![
+            at(dot("d:1", DotKind::Disease, long, ""), 1.0, 40.0),
+            at(dot("d:2", DotKind::Disease, long, ""), 357.0, 120.0),
+            at(dot("d:3", DotKind::Disease, long, ""), 180.0, 300.0),
+            at(dot("t:1", DotKind::Treatment, "POEM", ""), 2.0, 470.0),
+        ];
+        for sel in [None, Some("t:1")] {
+            let got = visible_labels(&dots, 1.0, sel, &none(), PHONE);
+            assert!(got.len() >= 3, "{got:?}");
+            for l in &got {
+                assert!(l.x >= 0.0 && l.x + l.w <= PHONE.0, "{l:?}");
+                assert!(l.y >= 0.0 && l.y + LABEL_H <= PHONE.1, "{l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn long_names_are_cut_at_thirty_characters() {
+        let long = "Laparoscopic Heller myotomy with Dor fundoplication";
+        let thirty = "Robotic transabdominal repair!";
+        assert_eq!(thirty.chars().count(), 30);
+        let dots = vec![
+            at(dot("d:1", DotKind::Disease, long, ""), 200.0, 100.0),
+            at(dot("d:2", DotKind::Disease, thirty, ""), 200.0, 300.0),
+        ];
+        let got = visible_labels(&dots, 1.0, None, &none(), WIDE);
+        let text = |id: &str| got.iter().find(|l| l.id == id).unwrap().text.clone();
+        // The board's cut: 28 characters, then "…" (a trailing space dropped).
+        assert_eq!(text("d:1"), "Laparoscopic Heller myotomy\u{2026}");
+        assert!(text("d:1").chars().count() <= 30);
+        assert_eq!(text("d:2"), thirty);
+    }
+
+    #[test]
+    fn small_kinds_are_labelled_when_there_is_room() {
+        let dots = vec![
+            at(dot("o:1", DotKind::Outcome, "Recurrence", ""), 100.0, 100.0),
+            at(paper("1", "rct", Some(2020)), 200.0, 200.0),
+            at(dot(RUN, DotKind::Run, "Your question", ""), 300.0, 300.0),
+        ];
+        let at_zoom = |k: f32, frame| ids(&visible_labels(&dots, k, None, &none(), frame)).len();
+        // A phone at 1x: no outcome, paper or question labels.
+        assert_eq!(at_zoom(1.0, PHONE), 0);
+        // Outcomes from 1.3x on a phone, always on a wide map.
+        assert_eq!(
+            ids(&visible_labels(&dots, 1.3, None, &none(), PHONE)),
+            ["o:1"]
+        );
+        assert_eq!(
+            ids(&visible_labels(&dots, 1.0, None, &none(), WIDE)),
+            ["o:1"]
+        );
+        // Papers from 2.5x; questions only when found or picked.
+        assert_eq!(
+            ids(&visible_labels(&dots, 2.5, None, &none(), PHONE)),
+            ["o:1", "p:1"]
+        );
+        let found: HashSet<String> = [RUN.to_string()].into();
+        assert!(ids(&visible_labels(&dots, 1.0, None, &found, PHONE)).contains(&RUN));
+    }
+
+    #[test]
+    fn near_is_the_tapped_dot_and_its_neighbours() {
+        let m = sample();
+        let got = near(&m, RUN);
+        let want: HashSet<String> = [RUN, "d:2", "t:3", "o:4", "p:101", "p:200"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got, want);
+        let got = near(&m, "g:1");
+        assert_eq!(got, ["g:1", "d:2"].iter().map(|s| s.to_string()).collect());
+        assert!(near(&m, "x:9").is_empty());
+    }
+
+    #[test]
+    fn the_time_lapse_hides_later_papers_and_concepts() {
+        let mut m = sample();
+        for d in &mut m.dots {
+            match d.id.as_str() {
+                "d:2" | "g:1" => d.first_year = Some(2019),
+                "t:3" => d.first_year = Some(2023),
+                _ => {}
+            }
+        }
+        let all: HashSet<String> = m.dots.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(visible_until(&m, None), all);
+        let shown = visible_until(&m, Some(2020));
+        for id in ["d:2", "g:1", "p:101"] {
+            assert!(shown.contains(id), "{id} by 2020");
+        }
+        // A paper after the year, a concept whose first paper is later, and
+        // one with no paper year.
+        for id in ["p:102", "p:200", "t:3", "o:4", "p:104"] {
+            assert!(!shown.contains(id), "{id} by 2020");
+        }
+        assert!(visible_until(&m, Some(2026)).contains("p:100"));
+    }
+
+    #[test]
+    fn the_frame_follows_the_window_width() {
+        assert_eq!(frame_for(390.0), PHONE_FRAME);
+        assert_eq!(frame_for(699.0), PHONE_FRAME);
+        assert_eq!(frame_for(700.0), DESKTOP_FRAME);
+        assert_eq!(frame_for(1280.0), DESKTOP_FRAME);
+        assert_eq!(
+            frame_for_agent(Some("Mozilla/5.0 (iPhone) Mobile/15E148")),
+            PHONE_FRAME
+        );
+        assert_eq!(
+            frame_for_agent(Some("Mozilla/5.0 (X11; Linux x86_64)")),
+            DESKTOP_FRAME
+        );
+        assert_eq!(frame_for_agent(None), DESKTOP_FRAME);
+    }
+
+    #[test]
+    fn a_dot_is_named_by_its_kind_and_label() {
+        let m = sample();
+        let name = |id: &str| dot_aria(&m, m.dots.iter().find(|d| d.id == id).unwrap());
+        assert_eq!(name("d:2"), "Disease: Inguinal hernia");
+        assert_eq!(name("g:1"), "Organ: Abdominal wall");
+        assert_eq!(name("p:101"), "RCT paper: Paper 101");
+        assert_eq!(name("p:100"), "Not ranked paper: Paper 100");
+        assert_eq!(name(RUN), "Your question: Inguinal hernia question");
+    }
+
+    #[test]
+    fn a_question_card_shows_the_question_and_its_bottom_line() {
+        let mut m = sample();
+        for d in &mut m.dots {
+            if d.id == RUN {
+                d.question = Some("Is robotic repair better?".into());
+                d.bottom_line = Some("No consistent benefit.".into());
+                d.certainty = Some("Low".into());
+            }
+            if d.id == "d:2" {
+                d.certainty = Some("Low".into());
+            }
+        }
+        let c = card_for(&m, RUN).unwrap();
+        assert_eq!(
+            c.kicker,
+            "Full run \u{b7} 31 Oct 2026 \u{b7} Certainty: Low"
+        );
+        assert_eq!(c.title, "Is robotic repair better?");
+        assert_eq!(c.body, "No consistent benefit.");
+        assert!(c.answer.is_some());
+        let g = groups(&m);
+        assert_eq!(g[0].rows[0].sub, "Abdominal wall \u{b7} Certainty: Low");
+        // Without a stored answer the card still names the question.
+        let c = card_for(&sample(), RUN).unwrap();
+        assert_eq!(c.title, "Inguinal hernia question");
+        assert_eq!(c.kicker, "Full run \u{b7} 31 Oct 2026");
+    }
+
+    #[test]
+    fn a_question_or_disease_lists_its_papers_by_rank() {
+        let m = sample();
+        let rows = papers_for(&m, RUN);
+        let got: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(got, ["p:101", "p:200"]);
+        assert_eq!(
+            papers_for(&m, "d:2")
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["p:101", "p:200"]
+        );
+        assert!(papers_for(&m, "t:3").is_empty());
     }
 }

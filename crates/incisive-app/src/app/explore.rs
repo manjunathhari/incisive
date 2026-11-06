@@ -1,8 +1,10 @@
 //! The Explore page (`/explore`, `GRAPH=on`): the user's own map as a list
 //! of diseases, treatments, outcomes, questions and ranked papers, each
 //! group folded at five rows, with a card for the picked row (in place on a
-//! phone, at the side on a wide screen). The map itself is drawn in a later
-//! step; its place holds the counts.
+//! phone, at the side on a wide screen), and the map: the dots the server
+//! laid out once, drawn as real buttons over SVG lines, with tap to light up
+//! a dot's neighbours, zoom, drag, find, the "Show on the map" filters and a
+//! time-lapse by paper year (in the browser, with no new layout).
 //!
 //! Everything is drawn on the server first, so the list works before the
 //! page hydrates. Every fetch goes through the server functions here, which
@@ -13,6 +15,7 @@ use std::collections::BTreeSet;
 
 use leptos::prelude::*;
 use leptos::server_fn::codec::Json;
+use serde::{Deserialize, Serialize};
 
 use super::error_text;
 use crate::explore_page::{self as ep, Card, Group, Row};
@@ -37,8 +40,42 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-chips { display:flex; gap:6px; overflow-x:auto; padding-bottom:2px; }
 .iv-wrap .kg-chips button { flex:none; min-height:44px; padding:0 14px; border-radius:999px; border:1px solid var(--iv-border); background:var(--iv-card); color:var(--iv-ink); font-family:inherit; font-size:14px; cursor:pointer; }
 .iv-wrap .kg-chips button[aria-pressed="true"] { border:2px solid var(--iv-ink); padding:0 13px; }
-.kg-map-frame { position:relative; box-sizing:border-box; width:100%; aspect-ratio:860 / 720; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:18px; display:flex; align-items:center; justify-content:center; padding:16px; }
-.kg-map-frame p { margin:0; font-size:14px; color:var(--iv-muted); text-align:center; }
+.kg-map { display:flex; flex-direction:column; gap:10px; }
+.kg-map-frame { position:relative; box-sizing:border-box; width:100%; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:18px; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; }
+.iv-wrap button.kg-bg { position:absolute; left:0; top:0; width:100%; height:100%; padding:0; border:0; background:transparent; cursor:grab; }
+.kg-svg { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
+.kg-ln { stroke:var(--kg-other); } .kg-ln.on { stroke:var(--iv-body); }
+.iv-wrap button.kg-dot { position:absolute; transform:translate(-50%,-50%); padding:0; border:0; background:transparent; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; }
+.kg-mk { display:block; box-sizing:border-box; border-radius:50%; }
+.kg-mk.sq { border-radius:2px; }
+.iv-wrap button.kg-dot.on .kg-mk { border:2px solid var(--iv-ink); }
+.kg-mk.organ { background:var(--kg-organ); } .kg-mk.disease { background:var(--kg-disease); } .kg-mk.run { background:var(--kg-run); }
+.kg-mk.treatment { background:var(--kg-treatment); } .kg-mk.outcome { background:var(--kg-outcome); }
+.kg-mk.rct, .kg-num.rct { background:var(--kg-rct); } .kg-mk.meta, .kg-num.meta { background:var(--kg-meta); } .kg-mk.prospective, .kg-num.prospective { background:var(--kg-pro); }
+.kg-mk.retrospective, .kg-num.retrospective { background:var(--kg-retro); } .kg-mk.case_series, .kg-num.case_series { background:var(--kg-series); } .kg-mk.other, .kg-num.other { background:var(--kg-other); }
+.kg-lab { position:absolute; pointer-events:none; font-size:12px; line-height:14px; white-space:nowrap; overflow:hidden; background:rgba(255,255,255,0.86); border-radius:4px; padding:0 3px; color:var(--iv-ink); }
+.kg-lab.b { font-weight:600; }
+.kg-zoom { position:absolute; right:10px; top:10px; display:flex; flex-direction:column; gap:8px; }
+.iv-wrap .kg-zoom button { width:44px; height:44px; padding:0; border-radius:12px; border:1px solid var(--iv-border); background:var(--iv-card); font-family:inherit; font-size:20px; color:var(--iv-ink); cursor:pointer; }
+.iv-wrap .kg-zoom button.fit { font-size:13px; }
+.kg-year { position:absolute; left:12px; top:10px; font-size:28px; font-weight:700; color:var(--iv-accent); pointer-events:none; }
+.iv-wrap button.kg-play { min-height:44px; padding:0 16px; border-radius:999px; border:1px solid var(--iv-accent); background:var(--iv-card); color:var(--iv-accent); font-family:inherit; font-size:14px; font-weight:600; cursor:pointer; }
+.kg-papers { display:flex; flex-direction:column; gap:6px; }
+.kg-papers h3 { margin:0; font-size:13px; font-weight:600; color:var(--iv-ink); }
+.iv-wrap button.kg-paper { display:flex; gap:10px; width:100%; text-align:left; padding:10px 12px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:14px; font-family:inherit; color:var(--iv-ink); cursor:pointer; }
+.kg-num { flex:none; width:24px; height:24px; border-radius:4px; color:var(--iv-ink); font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
+.kg-num.rct, .kg-num.meta { color:#fff; }
+.kg-legend { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:16px; }
+.iv-wrap button.kg-legend-btn { display:flex; justify-content:space-between; align-items:center; width:100%; min-height:48px; padding:0 14px; background:transparent; border:0; border-radius:16px; font-family:inherit; font-size:13px; font-weight:600; color:var(--iv-body); cursor:pointer; }
+.kg-legend-body { padding:0 14px 14px; display:flex; flex-direction:column; gap:10px; }
+.kg-keys { display:flex; flex-wrap:wrap; gap:6px; }
+.iv-wrap .kg-keys button { display:inline-flex; align-items:center; gap:6px; min-height:44px; padding:0 10px; border-radius:999px; border:1px solid var(--iv-border); background:var(--iv-card); font-family:inherit; font-size:12px; color:var(--iv-ink); cursor:pointer; }
+.iv-wrap .kg-keys button[aria-pressed="false"] { color:var(--iv-muted); }
+.iv-wrap .kg-keys button[aria-pressed="false"] .kg-mk { background:#E8E4DC; }
+.kg-selects { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; }
+.kg-selects div { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.kg-selects label { margin:0; font-size:12px; font-weight:600; color:var(--iv-body); }
+.kg-selects select { width:100%; min-height:44px; border:1px solid var(--iv-line); border-radius:12px; background:var(--iv-card); font-family:inherit; font-size:13px; color:var(--iv-ink); }
 .kg-foot { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; color:var(--iv-muted); }
 .kg-groups { display:flex; flex-direction:column; gap:14px; }
 .kg-group { display:flex; flex-direction:column; gap:6px; }
@@ -73,7 +110,6 @@ pub const EXPLORE_STYLE: &str = r#"
 @media (min-width:641px) { .kg-card.kg-inline { display:none; } }
 @media (max-width:640px) {
   .kg-main, .kg-side { flex-basis:100%; }
-  .kg-map-frame { aspect-ratio:358 / 480; }
   .kg[data-view="list"] .kg-side-card { display:none; }
 }
 "#;
@@ -100,13 +136,45 @@ async fn explore_user() -> Result<(crate::server::AppState, crate::identity::Use
 #[cfg(feature = "ssr")]
 async fn load(filter: &MapFilter) -> Result<MapData, ServerFnError> {
     let (state, user) = explore_user().await?;
-    crate::graph::read::load_map_all(&state.pool, user.id, filter)
+    let mut data = crate::graph::read::load_map_all(&state.pool, user.id, filter)
         .await
         .map_err(|_| {
             tracing::error!(user_id = user.id, "explore: map read failed");
             super::set_status(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
             ServerFnError::new("Incisive couldn't load your map. Please try again.")
-        })
+        })?;
+    // A question card shows the bottom line as text: no citation marks.
+    for d in &mut data.dots {
+        d.bottom_line = d
+            .bottom_line
+            .take()
+            .map(|b| crate::answer_page::strip_citations(&b))
+            .filter(|b| !b.is_empty());
+    }
+    Ok(data)
+}
+
+/// A frame size the page sent, kept sane (non-finite or not positive: the
+/// desktop frame; at most 4000).
+#[cfg(feature = "ssr")]
+fn frame_size(w: f32, h: f32) -> (f32, f32) {
+    let size = |v: f32, fallback: f32| {
+        if v.is_finite() && v > 0.0 {
+            v.min(4000.0)
+        } else {
+            fallback
+        }
+    };
+    (size(w, ep::DESKTOP_FRAME.0), size(h, ep::DESKTOP_FRAME.1))
+}
+
+/// Cut the map to [`crate::graph::read::MAX_DOTS`] and lay it out, once,
+/// for the frame.
+#[cfg(feature = "ssr")]
+fn for_frame(mut data: MapData, (w, h): (f32, f32)) -> MapData {
+    ep::cap_for_map(&mut data, crate::graph::read::MAX_DOTS);
+    crate::graph_view::layout(&mut data.dots, &data.lines, w, h);
+    data
 }
 
 /// The signed-in user's map for a `w` by `h` frame: at most
@@ -118,18 +186,8 @@ pub async fn get_map(
     #[server(default)] w: f32,
     #[server(default)] h: f32,
 ) -> Result<MapData, ServerFnError> {
-    let mut data = load(&filter).await?;
-    ep::cap_for_map(&mut data, crate::graph::read::MAX_DOTS);
-    let size = |v: f32, fallback: f32| {
-        if v.is_finite() && v > 0.0 {
-            v.min(4000.0)
-        } else {
-            fallback
-        }
-    };
-    let (w, h) = (size(w, ep::DESKTOP_FRAME.0), size(h, ep::DESKTOP_FRAME.1));
-    crate::graph_view::layout(&mut data.dots, &data.lines, w, h);
-    Ok(data)
+    let data = load(&filter).await?;
+    Ok(for_frame(data, frame_size(w, h)))
 }
 
 /// The signed-in user's whole map under the filter, not laid out (the List
@@ -137,6 +195,28 @@ pub async fn get_map(
 #[server(prefix = "/api/fn", endpoint = "explore_list", input = Json)]
 pub async fn get_list(#[server(default)] filter: MapFilter) -> Result<MapData, ServerFnError> {
     load(&filter).await
+}
+
+/// What the page opens with: the whole map (the List) and the same dots
+/// cut and laid out for the frame, from one read.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExploreStart {
+    pub all: MapData,
+    pub map: MapData,
+    pub frame: (f32, f32),
+}
+
+/// The page's first data: one read of the signed-in user's map, for the
+/// List and for a `w` by `h` map. Not found with `GRAPH` off.
+#[server(prefix = "/api/fn", endpoint = "explore_start", input = Json)]
+pub async fn get_start(
+    #[server(default)] w: f32,
+    #[server(default)] h: f32,
+) -> Result<ExploreStart, ServerFnError> {
+    let all = load(&MapFilter::default()).await?;
+    let frame = frame_size(w, h);
+    let map = for_frame(all.clone(), frame);
+    Ok(ExploreStart { all, map, frame })
 }
 
 // ---------- the page ----------
@@ -200,6 +280,122 @@ struct Ui {
     open: RwSignal<BTreeSet<String>>,
     /// The page runs in the browser (hydrated): the switch works.
     ready: RwSignal<bool>,
+    /// "Show on the map": the legend keys switched off, the paper years and
+    /// the run certainty.
+    hidden: RwSignal<BTreeSet<&'static str>>,
+    years: RwSignal<&'static str>,
+    certainty: RwSignal<&'static str>,
+    legend_open: RwSignal<bool>,
+}
+
+/// The filter the chips and "Show on the map" make.
+fn filter_of(ui: Ui) -> MapFilter {
+    let years = ui.years.get();
+    let (_, _, year_from, year_to) = ep::YEARS
+        .iter()
+        .copied()
+        .find(|y| y.0 == years)
+        .unwrap_or(ep::YEARS[0]);
+    let certainty = ui.certainty.get();
+    MapFilter {
+        organ: ui.organ.get(),
+        year_from,
+        year_to,
+        certainty: (certainty != "all").then(|| certainty.to_string()),
+        hidden: ui
+            .hidden
+            .get()
+            .iter()
+            .flat_map(|k| ep::hidden_codes(k))
+            .collect(),
+    }
+}
+
+/// A pinch's start: the fingers' distance and middle, and k, tx, ty.
+type Pinch = (f32, (f32, f32), f32, f32, f32);
+
+/// A drag or a pinch on the map, in frame units.
+#[derive(Debug, Clone, Default)]
+struct Drag {
+    /// The pointers down: id and where.
+    pts: Vec<(i32, f32, f32)>,
+    /// One pointer: where it went down and the pan then.
+    start: Option<(f32, f32, f32, f32)>,
+    /// Two pointers: their distance and middle, and the zoom and pan then.
+    pinch: Option<Pinch>,
+    /// The map moved since the pointer went down, so it was not a tap.
+    moved: bool,
+}
+
+/// The map's state.
+#[derive(Clone, Copy)]
+struct MapUi {
+    /// The laid-out map and the frame it was laid out for.
+    data: RwSignal<(MapData, (f32, f32))>,
+    /// The frame this browser wants (its width decides).
+    frame: RwSignal<(f32, f32)>,
+    /// Zoom and pan: k, tx, ty.
+    view: RwSignal<(f32, f32, f32)>,
+    /// The time-lapse's year (`None`: every dot) and whether it plays.
+    until: RwSignal<Option<i32>>,
+    playing: RwSignal<bool>,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    drag: StoredValue<Drag>,
+    timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage>,
+    node: NodeRef<leptos::html::Div>,
+}
+
+impl MapUi {
+    fn frame_now(self) -> (f32, f32) {
+        self.data.with_untracked(|(_, f)| *f)
+    }
+
+    /// Zoom by `f` about a point of the frame.
+    fn zoom_at(self, f: f32, (cx, cy): (f32, f32)) {
+        let (k, tx, ty) = self.view.get_untracked();
+        let nk = (k * f).clamp(ep::ZOOM_MIN, ep::ZOOM_MAX);
+        let m = nk / k;
+        self.view.set((nk, cx - (cx - tx) * m, cy - (cy - ty) * m));
+    }
+
+    fn zoom(self, f: f32) {
+        let (w, h) = self.frame_now();
+        self.zoom_at(f, (w / 2.0, h / 2.0));
+    }
+
+    fn stop(self) {
+        if let Some(h) = self.timer.try_update_value(Option::take).flatten() {
+            h.clear();
+        }
+        self.playing.set(false);
+    }
+}
+
+/// The frame the server draws first: from the browser's User-Agent.
+fn first_frame() -> (f32, f32) {
+    #[cfg(feature = "ssr")]
+    {
+        let ua = use_context::<axum::http::request::Parts>().and_then(|p| {
+            p.headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        });
+        ep::frame_for_agent(ua.as_deref())
+    }
+    #[cfg(not(feature = "ssr"))]
+    ep::DESKTOP_FRAME
+}
+
+/// This browser window's width (browser only).
+fn window_width() -> Option<f64> {
+    #[cfg(feature = "hydrate")]
+    {
+        web_sys::window()?.inner_width().ok()?.as_f64()
+    }
+    #[cfg(not(feature = "hydrate"))]
+    None
 }
 
 #[component]
@@ -221,13 +417,19 @@ pub fn ExplorePage() -> impl IntoView {
         sel: RwSignal::new(None),
         open: RwSignal::new(BTreeSet::new()),
         ready: RwSignal::new(false),
+        hidden: RwSignal::new(BTreeSet::new()),
+        years: RwSignal::new("all"),
+        certainty: RwSignal::new("all"),
+        legend_open: RwSignal::new(false),
     };
     Effect::new(move |_| {
         ui.view.set(load_view().unwrap_or(View::Map));
         ui.ready.set(true);
     });
-    // Blocking: the list is in the first HTML, not streamed in by script.
-    let all = Resource::new_blocking(|| (), |_| get_list(MapFilter::default()));
+    // Blocking: the list and the map are in the first HTML, not streamed
+    // in by script. One read serves both.
+    let frame = first_frame();
+    let start = Resource::new_blocking(|| (), move |_| get_start(frame.0, frame.1));
     let page = move |inner: AnyView| {
         view! {
             <style>{EXPLORE_STYLE}</style>
@@ -241,7 +443,8 @@ pub fn ExplorePage() -> impl IntoView {
     view! {
         <Suspense fallback=|| ()>
             {move || {
-                all.get()
+                start
+                    .get()
                     .map(|r| match r {
                         // With `GRAPH` off: the app's usual not-found, nothing
                         // of this page.
@@ -249,7 +452,7 @@ pub fn ExplorePage() -> impl IntoView {
                             view! { <p>{ep::NOT_FOUND}</p> }.into_any()
                         }
                         Err(e) => page(view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any()),
-                        Ok(d) if d.runs == 0 => page(view! { <p class="iv-empty">{ep::EMPTY}</p> }.into_any()),
+                        Ok(d) if d.all.runs == 0 => page(view! { <p class="iv-empty">{ep::EMPTY}</p> }.into_any()),
                         Ok(d) => page(explore_body(ui, d).into_any()),
                     })
             }}
@@ -257,46 +460,80 @@ pub fn ExplorePage() -> impl IntoView {
     }
 }
 
-/// The switch, the find box, the organ chips, the map's place, the list and
-/// the side column, for a user with runs on the map (`all`: unfiltered).
-fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
-    let chips = ep::organs(&all);
-    let all = StoredValue::new(all);
-    // An organ's own list; the whole map needs no second fetch.
+/// The switch, the find box, the organ chips, the map, the list and the
+/// side column, for a user with runs on the map.
+fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
+    let chips = ep::organs(&start.all);
+    let all = StoredValue::new(start.all);
+    let mu = MapUi {
+        data: RwSignal::new((start.map, start.frame)),
+        frame: RwSignal::new(start.frame),
+        view: RwSignal::new((1.0, 0.0, 0.0)),
+        until: RwSignal::new(None),
+        playing: RwSignal::new(false),
+        busy: RwSignal::new(false),
+        error: RwSignal::new(None),
+        drag: StoredValue::new(Drag::default()),
+        timer: StoredValue::new_local(None),
+        node: NodeRef::new(),
+    };
+    // The list under a filter; the whole map needs no second fetch.
     let picked = Resource::new(
-        move || ui.organ.get(),
-        |organ| async move {
-            match organ {
-                None => Ok(None),
-                Some(o) => get_list(MapFilter {
-                    organ: Some(o),
-                    ..MapFilter::default()
-                })
-                .await
-                .map(Some),
+        move || filter_of(ui),
+        |f| async move {
+            if f == MapFilter::default() {
+                Ok(None)
+            } else {
+                get_list(f).await.map(Some)
             }
         },
     );
-    let map = Resource::new(
-        move || ui.organ.get(),
-        |organ| {
-            get_map(
-                MapFilter {
-                    organ,
-                    ..MapFilter::default()
-                },
-                ep::DESKTOP_FRAME.0,
-                ep::DESKTOP_FRAME.1,
-            )
-        },
-    );
+    // In the browser: the frame this window wants, then a new map whenever
+    // the filter or the frame changes (laid out by the server, never here).
+    Effect::new(move |_| {
+        if let Some(w) = window_width() {
+            mu.frame.set(ep::frame_for(w));
+        }
+    });
+    let shown = StoredValue::new((MapFilter::default(), start.frame));
+    let asked = StoredValue::new(0u32);
+    Effect::new(move |_| {
+        let key = (filter_of(ui), mu.frame.get());
+        if shown.with_value(|s| *s == key) {
+            return;
+        }
+        shown.set_value(key.clone());
+        let n = asked.with_value(|a| a + 1);
+        asked.set_value(n);
+        mu.busy.set(true);
+        leptos::task::spawn_local(async move {
+            let (f, (w, h)) = key;
+            let r = get_map(f, w, h).await;
+            if asked.try_get_value() != Some(n) {
+                return;
+            }
+            let _ = mu.busy.try_set(false);
+            match r {
+                Ok(m) => {
+                    let _ = mu.data.try_set((m, (w, h)));
+                    let _ = mu.error.try_set(None);
+                }
+                Err(e) => {
+                    let _ = mu.error.try_set(Some(error_text(&e)));
+                }
+            }
+        });
+    });
     let set_view = move |v: View| {
+        mu.stop();
+        mu.until.set(None);
         ui.view.set(v);
         save_view(v);
     };
     let pick_organ = move |o: Option<i64>| {
         ui.organ.set(o);
         ui.sel.set(None);
+        mu.view.set((1.0, 0.0, 0.0));
     };
     let chip_views = chips
         .into_iter()
@@ -313,9 +550,14 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
         })
         .collect_view();
     let data = move || -> Option<Result<MapData, ServerFnError>> {
-        match ui.organ.get() {
-            None => Some(Ok(all.get_value())),
-            Some(_) => picked.get().map(|r| r.map(Option::unwrap_or_default)),
+        if filter_of(ui) == MapFilter::default() {
+            return Some(Ok(all.get_value()));
+        }
+        match picked.get()? {
+            Ok(Some(d)) => Some(Ok(d)),
+            // Still the whole map's answer: the filtered list is on its way.
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
         }
     };
     view! {
@@ -346,31 +588,11 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
                     {chip_views}
                 </div>
                 <div id="kg-map" class="kg-map" hidden=move || ui.view.get() != View::Map>
-                    <div class="kg-map-frame">
-                        <p>"The map is drawn here in the next update. List shows every dot now."</p>
-                    </div>
-                    <Suspense fallback=|| view! { <p class="iv-status kg-foot">"Loading your map\u{2026}"</p> }>
-                        {move || {
-                            map.get()
-                                .map(|r| match r {
-                                    Ok(m) => {
-                                        let top = ep::map_note(&m);
-                                        view! {
-                                            <p class="kg-foot">
-                                                <span>{ep::count_line(&m)}</span>
-                                                {top.map(|t| view! { <span>{t}</span> })}
-                                            </p>
-                                        }
-                                            .into_any()
-                                    }
-                                    Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
-                                })
-                        }}
-                    </Suspense>
+                    {map_view(ui, mu)}
                 </div>
                 <div class="kg-list" hidden=move || ui.view.get() != View::List>
                     // No Suspense: the whole map is already here, so the list
-                    // is in the first HTML; an organ's list loads in the
+                    // is in the first HTML; a filtered list loads in the
                     // browser.
                     {move || match data() {
                         Some(Ok(d)) => list_view(ui, d).into_any(),
@@ -383,18 +605,586 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
                 <div class="kg-side-card">
                     {move || {
                         let d = data().and_then(Result::ok).unwrap_or_default();
-                        let card = ui
-                            .sel
-                            .get()
-                            .and_then(|id| ep::card_for(&d, &id))
+                        let sel = ui.sel.get();
+                        let card = sel
+                            .as_deref()
+                            .and_then(|id| ep::card_for(&d, id))
                             .unwrap_or_else(ep::default_card);
-                        card_view(ui, card, false)
+                        let papers = sel
+                            .as_deref()
+                            .map(|id| side_papers(ui, &d, id, mu.until.get()));
+                        view! { {card_view(ui, card, false)} {papers} }
                     }}
                 </div>
+                {legend_view(ui)}
                 <p class="kg-note">{ep::NOT_ALL} " " {ep::LINE_MEANS} " " {ep::SQUARES}</p>
             </section>
         </div>
     }
+}
+
+/// A coordinate as a share of the frame, for CSS.
+fn pct(v: f32, of: f32) -> String {
+    format!("{:.3}%", if of > 0.0 { v / of * 100.0 } else { 0.0 })
+}
+
+/// The map: lines, dots and labels in the frame, the zoom buttons, the
+/// time-lapse and the counts.
+fn map_view(ui: Ui, mu: MapUi) -> AnyView {
+    use std::collections::{HashMap, HashSet};
+    // What shows and what is lit.
+    let live = Memo::new(move |_| mu.data.with(|(m, _)| ep::visible_until(m, mu.until.get())));
+    let sel = Memo::new(move |_| ui.sel.get().filter(|s| live.with(|l| l.contains(s))));
+    let near = Memo::new(move |_| {
+        sel.get()
+            .map(|s| mu.data.with(|(m, _)| ep::near(m, &s)))
+            .unwrap_or_default()
+    });
+    let searching = Memo::new(move |_| !ui.query.with(|q| q.trim().is_empty()));
+    let found = Memo::new(move |_| {
+        let q = ui.query.get();
+        let l = live.get();
+        mu.data.with(|(m, _)| {
+            ep::found_on_map(m, &q)
+                .into_iter()
+                .filter(|id| l.contains(id))
+                .collect::<HashSet<String>>()
+        })
+    });
+    let lit = move |id: &str| {
+        if sel.with(Option::is_some) {
+            near.with(|n| n.contains(id))
+        } else if searching.get() {
+            found.with(|f| f.contains(id))
+        } else {
+            true
+        }
+    };
+    // The shown dots in frame units, zoom and pan applied.
+    let placed = Memo::new(move |_| {
+        let (k, tx, ty) = mu.view.get();
+        let l = live.get();
+        mu.data.with(|(m, _)| {
+            m.dots
+                .iter()
+                .filter(|d| l.contains(&d.id))
+                .map(|d| {
+                    let mut d = d.clone();
+                    d.x = tx + d.x * k;
+                    d.y = ty + d.y * k;
+                    d
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    let at = Memo::new(move |_| {
+        placed.with(|p| {
+            p.iter()
+                .map(|d| (d.id.clone(), (d.x, d.y, d.r)))
+                .collect::<HashMap<String, (f32, f32, f32)>>()
+        })
+    });
+    let frame = move || mu.data.with(|(_, f)| *f);
+
+    let lines = move || {
+        let (w, h) = frame();
+        let s = sel.get();
+        let focusing = s.is_some() || searching.get();
+        let at = at.get();
+        let lines = mu.data.with(|(m, _)| m.lines.clone());
+        let views = lines
+            .into_iter()
+            .filter_map(|l| {
+                let (a, b) = (at.get(&l.a)?, at.get(&l.b)?);
+                let on = match s.as_deref() {
+                    Some(s) => l.a == s || l.b == s,
+                    None => !focusing,
+                };
+                let class = if on && s.is_some() {
+                    "kg-ln on"
+                } else {
+                    "kg-ln"
+                };
+                Some(view! {
+                    <line
+                        class=class
+                        x1=format!("{:.1}", a.0)
+                        y1=format!("{:.1}", a.1)
+                        x2=format!("{:.1}", b.0)
+                        y2=format!("{:.1}", b.1)
+                        stroke-width=if l.paper { "1" } else { "1.6" }
+                        stroke-dasharray=l.paper.then_some("4 3")
+                        opacity=if on { "1" } else { "0.18" }
+                    ></line>
+                })
+            })
+            .collect_view();
+        view! {
+            <svg class="kg-svg" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" aria-hidden="true">
+                {views}
+            </svg>
+        }
+    };
+
+    // One real button per dot, kept across redraws (keyboard focus stays):
+    // what a dot is is fixed, where it sits and how lit it is follow the map.
+    let dot_button = move |id: String| {
+        let Some((aria, mark)) = mu.data.with_untracked(|(m, _)| {
+            let d = m.dots.iter().find(|d| d.id == id)?;
+            let mark = if d.kind == DotKind::Paper {
+                format!("kg-mk sq {}", ep::rank_class(d.rank.as_deref()))
+            } else {
+                format!("kg-mk {}", d.kind.as_str())
+            };
+            Some((ep::dot_aria(m, d), mark))
+        }) else {
+            return ().into_any();
+        };
+        let on = {
+            let id = id.clone();
+            Memo::new(move |_| sel.with(|s| s.as_deref() == Some(id.as_str())))
+        };
+        let size = {
+            let id = id.clone();
+            move || {
+                let k = mu.view.with(|v| v.0);
+                let (w, h) = frame();
+                at.with(|a| a.get(&id).copied()).map(|(x, y, r)| {
+                    let r = ep::zoom_radius(r, k);
+                    (pct(x, w), pct(y, h), ep::hit_size(r), r * 2.0)
+                })
+            }
+        };
+        let style = {
+            let size = size.clone();
+            move || {
+                size().map_or_else(String::new, |(x, y, hit, _)| {
+                    format!("left:{x};top:{y};width:{hit:.1}px;height:{hit:.1}px")
+                })
+            }
+        };
+        let mark_style = {
+            let id = id.clone();
+            move || {
+                let s = size().map_or(0.0, |v| v.3);
+                let o = if lit(&id) { "1" } else { "0.16" };
+                format!("width:{s:.1}px;height:{s:.1}px;opacity:{o}")
+            }
+        };
+        let pick = id.clone();
+        view! {
+            <button
+                type="button"
+                class=move || if on.get() { "kg-dot on" } else { "kg-dot" }
+                aria-label=aria
+                aria-pressed=move || on.get().to_string()
+                style=style
+                on:click=move |_| {
+                    if !mu.drag.with_value(|g| g.moved) {
+                        ui.sel.update(|s| {
+                            *s = (s.as_deref() != Some(pick.as_str())).then(|| pick.clone());
+                        });
+                    }
+                }
+            >
+                <span class=mark style=mark_style></span>
+            </button>
+        }
+        .into_any()
+    };
+    let dot_views = view! {
+        <For
+            each=move || placed.with(|p| p.iter().map(|d| d.id.clone()).collect::<Vec<_>>())
+            key=|id| id.clone()
+            children=dot_button
+        />
+    };
+
+    let labels = move || {
+        let (k, _, _) = mu.view.get();
+        let fr = frame();
+        let s = sel.get();
+        let f = found.get();
+        let boxes = placed.with(|p| ep::visible_labels(p, k, s.as_deref(), &f, fr));
+        boxes
+            .into_iter()
+            .map(|l| {
+                let style = format!(
+                    "left:{};top:{};max-width:{:.0}px;opacity:{}",
+                    pct(l.x, fr.0),
+                    pct(l.y, fr.1),
+                    l.w + 10.0,
+                    if lit(&l.id) { "1" } else { "0.3" }
+                );
+                view! {
+                    <div class=if l.bold { "kg-lab b" } else { "kg-lab" } style=style aria-hidden="true">
+                        {l.text}
+                    </div>
+                }
+            })
+            .collect_view()
+    };
+
+    // Pointers: drag to move, pinch to zoom, on the frame only.
+    // A pointer's place in frame units (the frame may be drawn smaller or
+    // bigger than its units); browser only.
+    let to_frame = move |x: i32, y: i32| -> Option<(f32, f32)> {
+        #[cfg(feature = "hydrate")]
+        {
+            let el = mu.node.get_untracked()?;
+            let rect = el.get_bounding_client_rect();
+            let (w, h) = mu.frame_now();
+            if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                return None;
+            }
+            Some((
+                ((f64::from(x) - rect.left()) * f64::from(w) / rect.width()) as f32,
+                ((f64::from(y) - rect.top()) * f64::from(h) / rect.height()) as f32,
+            ))
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = (x, y);
+            None
+        }
+    };
+    let two = |p: &[(i32, f32, f32)]| {
+        let (a, b) = (p[0], p[1]);
+        let d = ((a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt().max(1.0);
+        (d, ((a.1 + b.1) / 2.0, (a.2 + b.2) / 2.0))
+    };
+    let down = move |ev: leptos::ev::PointerEvent| {
+        let Some((x, y)) = to_frame(ev.client_x(), ev.client_y()) else {
+            return;
+        };
+        let id = ev.pointer_id();
+        let (k, tx, ty) = mu.view.get_untracked();
+        mu.drag.update_value(|g| {
+            g.pts.retain(|p| p.0 != id);
+            g.pts.push((id, x, y));
+            match g.pts.len() {
+                1 => {
+                    g.moved = false;
+                    g.start = Some((x, y, tx, ty));
+                    g.pinch = None;
+                }
+                2 => {
+                    let (d, mid) = two(&g.pts);
+                    g.pinch = Some((d, mid, k, tx, ty));
+                    g.start = None;
+                }
+                _ => {}
+            }
+        });
+    };
+    let moving = move |ev: leptos::ev::PointerEvent| {
+        let id = ev.pointer_id();
+        if !mu.drag.with_value(|g| g.pts.iter().any(|p| p.0 == id)) {
+            return;
+        }
+        let Some((x, y)) = to_frame(ev.client_x(), ev.client_y()) else {
+            return;
+        };
+        let next = mu.drag.try_update_value(|g| {
+            for p in &mut g.pts {
+                if p.0 == id {
+                    p.1 = x;
+                    p.2 = y;
+                }
+            }
+            if let Some((d0, mid0, k0, tx0, ty0)) = g.pinch
+                && g.pts.len() >= 2
+            {
+                let (d, mid) = two(&g.pts);
+                let k = (k0 * d / d0).clamp(ep::ZOOM_MIN, ep::ZOOM_MAX);
+                // The point under the fingers stays under them.
+                let (wx, wy) = ((mid0.0 - tx0) / k0, (mid0.1 - ty0) / k0);
+                g.moved = true;
+                return Some((k, mid.0 - wx * k, mid.1 - wy * k));
+            }
+            let (sx, sy, tx0, ty0) = g.start?;
+            let (dx, dy) = (x - sx, y - sy);
+            if dx.abs() + dy.abs() > 4.0 {
+                g.moved = true;
+            }
+            g.moved
+                .then(|| (mu.view.get_untracked().0, tx0 + dx, ty0 + dy))
+        });
+        if let Some(Some(v)) = next {
+            mu.view.set(v);
+        }
+    };
+    let up = move |ev: leptos::ev::PointerEvent| {
+        let id = ev.pointer_id();
+        let (_, tx, ty) = mu.view.get_untracked();
+        mu.drag.update_value(|g| {
+            g.pts.retain(|p| p.0 != id);
+            g.pinch = None;
+            // A finger left after a pinch carries on as a drag.
+            g.start = g.pts.first().map(|p| (p.1, p.2, tx, ty));
+        });
+    };
+
+    // The time-lapse: a year a step, by paper year, in the browser.
+    let span = move || mu.data.with(|(m, _)| ep::year_span(m));
+    let play = move |_| {
+        if mu.playing.get_untracked() {
+            mu.stop();
+            return;
+        }
+        let Some((first, last)) = span() else {
+            return;
+        };
+        let from = match mu.until.get_untracked() {
+            Some(y) if y < last => y,
+            _ => first,
+        };
+        mu.until.set(Some(from));
+        mu.playing.set(true);
+        ui.sel.set(None);
+        let tick = move || {
+            let next = mu.until.get_untracked().map_or(first, |y| y + 1);
+            if next > last {
+                mu.stop();
+                let _ = mu.until.try_set(Some(last));
+            } else {
+                let _ = mu.until.try_set(Some(next));
+            }
+        };
+        let h = leptos::leptos_dom::helpers::set_interval_with_handle(
+            tick,
+            std::time::Duration::from_millis(800),
+        );
+        mu.timer.set_value(h.ok());
+    };
+    on_cleanup(move || mu.stop());
+
+    view! {
+        <div
+            class="kg-map-frame"
+            node_ref=mu.node
+            style=move || {
+                let (w, h) = frame();
+                format!("aspect-ratio:{w} / {h}")
+            }
+            on:pointerdown=down
+            on:pointermove=moving
+            on:pointerup=up
+            on:pointercancel=up
+            on:pointerleave=up
+        >
+            <button
+                type="button"
+                class="kg-bg"
+                aria-label="Clear selection and drag to move the map"
+                on:click=move |_| {
+                    if !mu.drag.with_value(|g| g.moved) {
+                        ui.sel.set(None);
+                    }
+                    mu.drag.update_value(|g| g.moved = false);
+                }
+            ></button>
+            {lines}
+            {dot_views}
+            {labels}
+            <div class="kg-zoom">
+                <button type="button" aria-label="Zoom in" on:click=move |_| mu.zoom(ep::ZOOM_STEP)>"+"</button>
+                <button type="button" aria-label="Zoom out" on:click=move |_| mu.zoom(1.0 / ep::ZOOM_STEP)>"\u{2212}"</button>
+                <button type="button" class="fit" aria-label="Whole map" on:click=move |_| mu.view.set((1.0, 0.0, 0.0))>"Fit"</button>
+            </div>
+            {move || mu.until.get().map(|y| view! { <div class="kg-year" aria-hidden="true">{y}</div> })}
+        </div>
+        <div class="kg-foot">
+            <button type="button" class="kg-play" on:click=play>
+                {move || ep::play_label(mu.playing.get(), mu.until.get(), span().map(|s| s.1))}
+            </button>
+            <span>
+                {move || {
+                    let l = live.get();
+                    mu.data.with(|(m, _)| {
+                        let shown = MapData {
+                            dots: m.dots.iter().filter(|d| l.contains(&d.id)).cloned().collect(),
+                            lines: m
+                                .lines
+                                .iter()
+                                .filter(|x| l.contains(&x.a) && l.contains(&x.b))
+                                .cloned()
+                                .collect(),
+                            ..MapData::default()
+                        };
+                        ep::count_line(&shown)
+                    })
+                }}
+            </span>
+            {move || mu.data.with(|(m, _)| ep::map_note(m)).map(|t| view! { <span>{t}</span> })}
+            {move || mu.busy.get().then(|| view! { <span class="iv-status">"Loading your map\u{2026}"</span> })}
+        </div>
+        {move || mu.error.get().map(|e| view! { <p class="box amber" role="alert">{e}</p> })}
+    }
+    .into_any()
+}
+
+/// The picked question's or disease's papers, ranked, folded at five.
+fn side_papers(ui: Ui, d: &MapData, id: &str, until: Option<i32>) -> Option<AnyView> {
+    let live = ep::visible_until(d, until);
+    let rows: Vec<Row> = ep::papers_for(d, id)
+        .into_iter()
+        .filter(|r| live.contains(&r.id))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    const KEY: &str = "side papers";
+    let open = ui.open.with(|o| o.contains(KEY));
+    let total = rows.len();
+    let (rows, button) = ep::fold(&rows, open);
+    let items = rows
+        .into_iter()
+        .map(|r| {
+            let dot = d.dots.iter().find(|x| x.id == r.id);
+            let (_, num, _) = ep::rank_info(r.rank.as_deref());
+            let class = format!("kg-num {}", ep::rank_class(r.rank.as_deref()));
+            let sub = dot
+                .map(|x| {
+                    let mut parts: Vec<String> = Vec::new();
+                    if !x.design.trim().is_empty() {
+                        parts.push(x.design.trim().to_string());
+                    }
+                    if let Some(y) = x.first_year {
+                        parts.push(y.to_string());
+                    }
+                    if x.retracted {
+                        parts.push("Retracted".into());
+                    }
+                    parts.join(" \u{b7} ")
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| r.sub.clone());
+            let id = r.id.clone();
+            view! {
+                <button type="button" class="kg-paper" on:click=move |_| ui.sel.set(Some(id.clone()))>
+                    <span class=class aria-hidden="true">{num}</span>
+                    <span class="kg-row-text">
+                        <span class="kg-row-title">{r.title}</span>
+                        <span class="kg-row-sub">{sub}</span>
+                    </span>
+                </button>
+            }
+        })
+        .collect_view();
+    let toggle = move |_| {
+        ui.open.update(|o| {
+            if !o.remove(KEY) {
+                o.insert(KEY.to_string());
+            }
+        })
+    };
+    Some(
+        view! {
+            <div class="kg-papers">
+                <h3>{format!("Papers, ranked \u{b7} {total}")}</h3>
+                {items}
+                {button.map(|label| view! {
+                    <button type="button" class="kg-more" aria-expanded=open.to_string() on:click=toggle>
+                        {label}
+                    </button>
+                })}
+            </div>
+        }
+        .into_any(),
+    )
+}
+
+/// "Show on the map": the kinds and ranks to show, the paper years and the
+/// run certainty (each refetches the map, laid out by the server).
+fn legend_view(ui: Ui) -> AnyView {
+    let keys = ep::LEGEND
+        .iter()
+        .map(|&(key, name, class, square)| {
+            let mark = if square {
+                format!("kg-mk sq {class}")
+            } else {
+                format!("kg-mk {class}")
+            };
+            view! {
+                <button
+                    type="button"
+                    aria-pressed=move || (!ui.hidden.with(|h| h.contains(key))).to_string()
+                    on:click=move |_| {
+                        ui.hidden.update(|h| {
+                            if !h.remove(key) {
+                                h.insert(key);
+                            }
+                        })
+                    }
+                >
+                    <span class=mark style="width:11px;height:11px" aria-hidden="true"></span>
+                    {name}
+                </button>
+            }
+        })
+        .collect_view();
+    let year_options = ep::YEARS
+        .iter()
+        .map(|&(v, label, _, _)| view! { <option value=v selected=move || ui.years.get() == v>{label}</option> })
+        .collect_view();
+    let cert_options = ep::CERTAINTIES
+        .iter()
+        .map(|&(v, label)| view! { <option value=v selected=move || ui.certainty.get() == v>{label}</option> })
+        .collect_view();
+    view! {
+        <div class="kg-legend">
+            <button
+                type="button"
+                class="kg-legend-btn"
+                aria-expanded=move || ui.legend_open.get().to_string()
+                on:click=move |_| ui.legend_open.update(|o| *o = !*o)
+            >
+                <span>
+                    "Show on the map"
+                    {move || {
+                        let n = ui.hidden.with(BTreeSet::len);
+                        (n > 0).then(|| format!(" \u{b7} {n} hidden"))
+                    }}
+                </span>
+                <span aria-hidden="true">{move || if ui.legend_open.get() { "\u{25be}" } else { "\u{25b8}" }}</span>
+            </button>
+            <div class="kg-legend-body" hidden=move || !ui.legend_open.get()>
+                <div class="kg-keys">{keys}</div>
+                <div class="kg-selects">
+                    <div>
+                        <label for="kg-year">"Paper year"</label>
+                        <select
+                            id="kg-year"
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev);
+                                if let Some(y) = ep::YEARS.iter().find(|y| y.0 == v) {
+                                    ui.years.set(y.0);
+                                }
+                            }
+                        >
+                            {year_options}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="kg-cert">"Run certainty"</label>
+                        <select
+                            id="kg-cert"
+                            on:change=move |ev| {
+                                let v = event_target_value(&ev);
+                                if let Some(c) = ep::CERTAINTIES.iter().find(|c| c.0 == v) {
+                                    ui.certainty.set(c.0);
+                                }
+                            }
+                        >
+                            {cert_options}
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+    .into_any()
 }
 
 /// The groups that match the find box, each folded at five rows.

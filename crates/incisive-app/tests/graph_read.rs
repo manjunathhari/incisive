@@ -38,6 +38,9 @@ fn dot(id: &str, kind: DotKind, r: f32) -> Dot {
         n: None,
         includes_non_rct: false,
         sheet: None,
+        question: None,
+        bottom_line: None,
+        certainty: None,
     }
 }
 

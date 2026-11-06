@@ -61,6 +61,17 @@ pub struct Dot {
     /// and its reference number in that run's answer.
     #[serde(default)]
     pub sheet: Option<SheetRef>,
+    /// A run dot's question as the user asked it. Only ever loaded for the
+    /// signed-in user's own runs, and never logged.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// A run dot's bottom line (citations stripped).
+    #[serde(default)]
+    pub bottom_line: Option<String>,
+    /// A run's bottom-line certainty ("High" ... "Very low"); a disease's
+    /// is its newest run's.
+    #[serde(default)]
+    pub certainty: Option<String>,
 }
 
 /// A study sheet on a run page (`/runs/<run>#ref-<n>`).
