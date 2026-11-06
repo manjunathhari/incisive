@@ -263,6 +263,21 @@ fn header_of(html: &str) -> String {
 
 const OWNER_HEADER: &str = "tests/fixtures/explore/owner_header_before.json";
 
+/// The first HTML a browser draws with no script: outside scripts and
+/// outside any streamed `<template>`.
+fn first_html(html: &str) -> String {
+    let mut m = String::new();
+    let mut rest = markup(html);
+    while let Some(i) = rest.find("<template") {
+        m.push_str(&rest[..i]);
+        rest = rest[i..].find("</template>").map_or(String::new(), |j| {
+            rest[i + j + "</template>".len()..].to_string()
+        });
+    }
+    m.push_str(&rest);
+    m
+}
+
 /// Text as the page writes it (quotes may be escaped in text).
 fn unescaped(html: &str) -> String {
     html.replace("&quot;", "\"").replace("&#34;", "\"")
@@ -445,6 +460,17 @@ async fn the_list_groups_folds_and_escapes() {
     assert!(html.contains("Find on your map"));
     // Before the page hydrates (or with no script) the List shows, and the
     // Map's place and the switch, which need the script, do not.
+    let first = first_html(&html);
+    for want in [
+        r#"class="kg-list""#,
+        "Papers, ranked \u{b7} 6",
+        "Paper five",
+        "Show all 6",
+        NOT_ALL,
+        "Tap a dot",
+    ] {
+        assert!(first.contains(want), "{want} is not in the first HTML");
+    }
     let tag_with = |needle: &str| -> String {
         let at = html.find(needle).unwrap_or_else(|| panic!("no {needle}"));
         let start = html[..at].rfind('<').unwrap();

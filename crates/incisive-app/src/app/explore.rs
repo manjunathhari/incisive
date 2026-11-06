@@ -226,7 +226,8 @@ pub fn ExplorePage() -> impl IntoView {
         ui.view.set(load_view().unwrap_or(View::Map));
         ui.ready.set(true);
     });
-    let all = Resource::new(|| (), |_| get_list(MapFilter::default()));
+    // Blocking: the list is in the first HTML, not streamed in by script.
+    let all = Resource::new_blocking(|| (), |_| get_list(MapFilter::default()));
     let page = move |inner: AnyView| {
         view! {
             <style>{EXPLORE_STYLE}</style>
@@ -348,7 +349,7 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
                     <div class="kg-map-frame">
                         <p>"The map is drawn here in the next update. List shows every dot now."</p>
                     </div>
-                    <Suspense fallback=|| ()>
+                    <Suspense fallback=|| view! { <p class="iv-status kg-foot">"Loading your map\u{2026}"</p> }>
                         {move || {
                             map.get()
                                 .map(|r| match r {
@@ -368,33 +369,27 @@ fn explore_body(ui: Ui, all: MapData) -> impl IntoView {
                     </Suspense>
                 </div>
                 <div class="kg-list" hidden=move || ui.view.get() != View::List>
-                    <Suspense fallback=|| view! { <p class="iv-status">"Loading\u{2026}"</p> }>
-                        {move || {
-                            data()
-                                .map(|r| match r {
-                                    Ok(d) => list_view(ui, d).into_any(),
-                                    Err(e) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
-                                })
-                        }}
-                    </Suspense>
+                    // No Suspense: the whole map is already here, so the list
+                    // is in the first HTML; an organ's list loads in the
+                    // browser.
+                    {move || match data() {
+                        Some(Ok(d)) => list_view(ui, d).into_any(),
+                        Some(Err(e)) => view! { <p class="box amber" role="alert">{error_text(&e)}</p> }.into_any(),
+                        None => view! { <p class="iv-status">"Loading\u{2026}"</p> }.into_any(),
+                    }}
                 </div>
             </section>
             <section class="kg-side" aria-label="Details and filters">
                 <div class="kg-side-card">
-                    <Suspense fallback=|| ()>
-                        {move || {
-                            data()
-                                .map(|r| {
-                                    let d = r.unwrap_or_default();
-                                    let card = ui
-                                        .sel
-                                        .get()
-                                        .and_then(|id| ep::card_for(&d, &id))
-                                        .unwrap_or_else(ep::default_card);
-                                    card_view(ui, card, false)
-                                })
-                        }}
-                    </Suspense>
+                    {move || {
+                        let d = data().and_then(Result::ok).unwrap_or_default();
+                        let card = ui
+                            .sel
+                            .get()
+                            .and_then(|id| ep::card_for(&d, &id))
+                            .unwrap_or_else(ep::default_card);
+                        card_view(ui, card, false)
+                    }}
                 </div>
                 <p class="kg-note">{ep::NOT_ALL} " " {ep::LINE_MEANS} " " {ep::SQUARES}</p>
             </section>
