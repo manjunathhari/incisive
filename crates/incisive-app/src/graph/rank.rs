@@ -59,6 +59,12 @@ fn ranked(rank: Rank, label: &'static str) -> Ranked {
     }
 }
 
+/// "rct" / "rcts" as a whole word (not inside e.g. "arctic").
+fn has_word_rct(t: &str) -> bool {
+    t.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == "rct" || w == "rcts")
+}
+
 /// Classify one lower-cased text; `None` when nothing matches.
 fn classify(t: &str) -> Option<Ranked> {
     let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
@@ -93,10 +99,16 @@ fn classify(t: &str) -> Option<Ranked> {
         "non randomi",
         "single-arm",
         "single arm",
+        "quasi-randomi",
+        "quasi randomi",
+        "quasirandomi",
     ]) {
+        if t.contains("retrospective") {
+            return Some(ranked(Rank::Retrospective, "Retrospective"));
+        }
         return Some(ranked(Rank::Prospective, "Prospective"));
     }
-    if has(&["rct", "randomised", "randomized"]) {
+    if has_word_rct(t) || has(&["randomised", "randomized"]) {
         return Some(ranked(Rank::Rct, "RCT"));
     }
     if has(&["case series", "case report"]) {
@@ -168,6 +180,32 @@ mod tests {
             (c.rank, c.label),
             (Rank::Retrospective, "Retrospective or unstated")
         );
+    }
+
+    #[test]
+    fn retrospective_and_quasi_do_not_overstate() {
+        assert_eq!(
+            rank_paper("Retrospective non-randomised comparative study", &[]).label,
+            "Retrospective"
+        );
+        assert_eq!(
+            r("Retrospective non-randomised comparative study"),
+            Rank::Retrospective
+        );
+        assert_eq!(r("Retrospective single-arm series"), Rank::Retrospective);
+        assert_eq!(r("Quasi-randomised trial"), Rank::Prospective);
+        assert_eq!(r("Quasi-randomized trial"), Rank::Prospective);
+        assert_eq!(
+            r("Retrospective quasi-randomised study"),
+            Rank::Retrospective
+        );
+        let c = rank_paper("Arctic cohort", &[]);
+        assert_eq!(
+            (c.rank, c.label),
+            (Rank::Retrospective, "Retrospective or unstated")
+        );
+        assert_eq!(r("Pooled RCTs"), Rank::Rct);
+        assert_eq!(r("Open-label (RCT)"), Rank::Rct);
     }
 
     #[test]
