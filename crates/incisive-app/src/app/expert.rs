@@ -394,10 +394,7 @@ impl Expert {
             x.hydrated.set(true);
             x.follow_hash();
             #[cfg(feature = "hydrate")]
-            if let Some(n) = current_hash()
-                .strip_prefix("#ref-")
-                .and_then(|n| n.parse::<u16>().ok())
-            {
+            if let Some(n) = super::page::sheet_in_hash(&current_hash()) {
                 super::page::open_sheet(n);
             }
         });

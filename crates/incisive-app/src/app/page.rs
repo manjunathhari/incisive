@@ -56,6 +56,11 @@ pub(super) fn sheet_id(n: u16) -> String {
     format!("sheet-{n}")
 }
 
+/// The study sheet an address's hash names: `#ref-<n>` gives `n`.
+pub(super) fn sheet_in_hash(hash: &str) -> Option<u16> {
+    hash.strip_prefix("#ref-")?.parse().ok()
+}
+
 /// Open study sheet `n` (browser only): `showModal`, or the `open`
 /// attribute where that is missing. `false` when there is no sheet (the
 /// link then goes to the reference, as before hydration).
@@ -1368,4 +1373,27 @@ fn compare_view(c: &Ctx) -> AnyView {
         </section>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ref_hash_names_its_study_sheet() {
+        assert_eq!(sheet_in_hash("#ref-3"), Some(3));
+        assert_eq!(sheet_in_hash("#ref-12"), Some(12));
+        for h in [
+            "",
+            "#",
+            "#expert",
+            "#ref-",
+            "#ref-x",
+            "#ref-3x",
+            "ref-3",
+            "#ref-70000",
+        ] {
+            assert_eq!(sheet_in_hash(h), None, "{h}");
+        }
+    }
 }

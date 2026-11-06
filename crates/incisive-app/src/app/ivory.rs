@@ -455,11 +455,25 @@ pub fn SiteHeader() -> impl IntoView {
     }
 }
 
-/// `<main>`, wide on Ask and the Library.
+/// Set while the page on screen does not exist (Explore with `GRAPH`
+/// off): `<main>` then has the width of any unknown path.
+#[derive(Clone, Copy)]
+pub(super) struct PageMissing(pub RwSignal<bool>);
+
+/// `<main>`, wide on Ask, the Library and Explore. The server knows
+/// whether Explore exists as it draws; in the browser the page says so
+/// ([`PageMissing`]) once its first read answers.
 #[component]
 pub fn PageMain(children: Children) -> impl IntoView {
     let path = use_location().pathname;
-    let class = move || is_wide(&path.get()).then_some("wide");
+    #[cfg(feature = "ssr")]
+    let missing_now =
+        nav_page(&path.get_untracked()) == NavPage::Explore && super::explore::graph_off();
+    #[cfg(not(feature = "ssr"))]
+    let missing_now = false;
+    let missing = RwSignal::new(missing_now);
+    provide_context(PageMissing(missing));
+    let class = move || (is_wide(&path.get()) && !missing.get()).then_some("wide");
     view! { <main class=class>{children()}</main> }
 }
 

@@ -417,25 +417,35 @@ impl MapUi {
     }
 
     /// How big the frame is drawn: frame units per pixel (browser only).
+    /// A hidden frame (width 0) is skipped. Safe once the page is gone
+    /// (it may run on a later frame).
     fn measure(self) {
         #[cfg(feature = "hydrate")]
-        if let Some(el) = self.node.get_untracked() {
+        if let Some(el) = self.node.try_get_untracked().flatten() {
             let w = el.get_bounding_client_rect().width();
-            let (fw, _) = self.frame_now();
+            let Some(fw) = self.data.try_with_untracked(|(_, f)| f.0) else {
+                return;
+            };
             if w > 0.0 {
                 let u = fw / w as f32;
-                if (self.unit.get_untracked() - u).abs() > 1e-3 {
+                if self
+                    .unit
+                    .try_get_untracked()
+                    .is_some_and(|old| (old - u).abs() > 1e-3)
+                {
                     let _ = self.unit.try_set(u);
                 }
             }
         }
     }
 
+    /// Ends the time-lapse; also called from `on_cleanup`, when the
+    /// signals may already be gone.
     fn stop(self) {
         if let Some(h) = self.timer.try_update_value(Option::take).flatten() {
             h.clear();
         }
-        self.playing.set(false);
+        let _ = self.playing.try_set(false);
     }
 }
 
@@ -465,11 +475,18 @@ fn window_width() -> Option<f64> {
     None
 }
 
+/// With `GRAPH` off (or no app state) this page does not exist (server
+/// only).
+#[cfg(feature = "ssr")]
+pub(super) fn graph_off() -> bool {
+    !use_context::<crate::server::AppState>().is_some_and(|s| s.graph.settings.on)
+}
+
 #[component]
 pub fn ExplorePage() -> impl IntoView {
     // With `GRAPH` off this page does not exist.
     #[cfg(feature = "ssr")]
-    if !use_context::<crate::server::AppState>().is_some_and(|s| s.graph.settings.on)
+    if graph_off()
         && let Some(o) = use_context::<leptos_axum::ResponseOptions>()
     {
         o.set_status(axum::http::StatusCode::NOT_FOUND);
@@ -497,6 +514,19 @@ pub fn ExplorePage() -> impl IntoView {
     // in by script. One read serves both.
     let frame = first_frame();
     let start = Resource::new_blocking(|| (), move |_| get_start(frame.0, frame.1));
+    // In the browser: a page that does not exist is drawn at the width of
+    // any unknown path (the server has already drawn it so).
+    if let Some(super::ivory::PageMissing(missing)) = use_context() {
+        Effect::new(move |_| {
+            let off = start.with(|r| matches!(r, Some(Err(e)) if error_text(e) == ep::NOT_FOUND));
+            if missing.get_untracked() != off {
+                missing.set(off);
+            }
+        });
+        on_cleanup(move || {
+            let _ = missing.try_set(false);
+        });
+    }
     let page = move |inner: AnyView| {
         view! {
             <style>{EXPLORE_STYLE}</style>
@@ -831,20 +861,30 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     };
 
     // One real button per dot, kept across redraws (keyboard focus stays):
-    // what a dot is is fixed; where it sits follows the map, and its size
-    // follows the zoom through the layer's CSS variables.
+    // its name and mark follow the map (a refetch can change a paper's
+    // rank), as does where it sits; its size follows the zoom through the
+    // layer's CSS variables.
     let dot_button = move |id: String| {
-        let Some((aria, mark)) = mu.data.with_untracked(|(m, _)| {
-            let d = m.dots.iter().find(|d| d.id == id)?;
-            let mark = if d.kind == DotKind::Paper {
-                format!("kg-mk sq {}", ep::rank_class(d.rank.as_deref()))
-            } else {
-                format!("kg-mk {}", d.kind.as_str())
-            };
-            Some((ep::dot_aria(m, d), mark))
-        }) else {
-            return ().into_any();
+        let info = {
+            let id = id.clone();
+            Memo::new(move |_| {
+                mu.data.with(|(m, _)| {
+                    let d = m.dots.iter().find(|d| d.id == id)?;
+                    let mark = if d.kind == DotKind::Paper {
+                        format!("kg-mk sq {}", ep::rank_class(d.rank.as_deref()))
+                    } else {
+                        format!("kg-mk {}", d.kind.as_str())
+                    };
+                    Some((ep::dot_aria(m, d), mark))
+                })
+            })
         };
+        if info.with_untracked(Option::is_none) {
+            return ().into_any();
+        }
+        // A dot that leaves the map is removed by the list.
+        let aria = move || info.with(|i| i.as_ref().map(|i| i.0.clone()));
+        let mark = move || info.with(|i| i.as_ref().map(|i| i.1.clone()));
         let on = {
             let id = id.clone();
             Memo::new(move |_| sel.with(|s| s.as_deref() == Some(id.as_str())))
@@ -970,6 +1010,11 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             return;
         };
         let id = ev.pointer_id();
+        // A primary pointer starts a new gesture: any pointer still listed
+        // was lost (its up never came) and must not turn this into a pinch.
+        if ev.is_primary() {
+            mu.drag.update_value(|g| g.pts.clear());
+        }
         #[cfg(feature = "hydrate")]
         {
             use wasm_bindgen::JsCast;
@@ -1089,11 +1134,18 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     };
     on_cleanup(move || mu.stop());
     // How big the frame is drawn, once it shows and whenever the map or the
-    // view changes.
+    // view changes. On a switch to Map the frame may still be hidden (width
+    // 0, skipped) when this runs: measured again on the next frame.
     Effect::new(move |_| {
         mu.data.track();
-        ui.view.track();
+        let v = ui.view.get();
         mu.measure();
+        #[cfg(feature = "hydrate")]
+        if v == View::Map {
+            request_animation_frame(move || mu.measure());
+        }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = v;
     });
 
     view! {
@@ -1108,6 +1160,7 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             on:pointermove=moving
             on:pointerup=up
             on:pointercancel=up
+            on:lostpointercapture=up
             on:keydown=move |ev: leptos::ev::KeyboardEvent| {
                 if ev.key() == "Escape" {
                     ui.sel.set(None);

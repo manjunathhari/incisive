@@ -324,6 +324,15 @@ async fn with_graph_off_there_is_no_explore_link_and_no_page() {
     ] {
         assert!(!m.contains(absent), "{absent} with GRAPH=off");
     }
+    // The width of any unknown path, not Explore's wide layout.
+    let (s, unknown) = get(router(st.clone()), "/nowhere", Some(&email)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let main_tag = |html: &str| {
+        let at = html.find("<main").expect("a <main>");
+        html[at..at + html[at..].find('>').expect("its end") + 1].to_string()
+    };
+    assert_eq!(main_tag(&page), main_tag(&unknown));
+    assert!(!main_tag(&page).contains("wide"));
 
     for f in ["explore_list", "explore_map"] {
         let (s, body) = call(router(st.clone()), f, "{}", Some(&email)).await;
@@ -349,6 +358,7 @@ async fn with_graph_on_the_nav_has_explore() {
             !html.contains(r#"href="/activity""#),
             "{path}: not the owner"
         );
+        assert!(html.contains(r#"<main class="wide">"#), "{path}: wide");
     }
     let (_, html) = get(router(st.clone()), "/explore", Some(&email)).await;
     assert!(
