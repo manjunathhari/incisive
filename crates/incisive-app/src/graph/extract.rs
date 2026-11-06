@@ -1,5 +1,5 @@
 //! The concept picks: the request for one Claude call that names a run's
-//! disease, treatments, organs and up to three outcomes, and the code checks
+//! disease, treatments, organs and up to four outcomes, and the code checks
 //! that clean its reply. No call is made here.
 
 use serde::Deserialize;
@@ -14,13 +14,14 @@ use crate::deid;
 const MAX_NAME: usize = 80;
 const MAX_DISEASES: usize = 2;
 const MAX_TREATMENTS: usize = 4;
-const MAX_OUTCOMES: usize = 3;
+/// Most outcomes kept per run (the smoke tool checks with the same cap).
+pub const MAX_OUTCOMES: usize = 4;
 const MAX_ORGANS: usize = 2;
 
 pub const SYSTEM: &str = "You file one answered clinical question in a knowledge graph. \
 Name what the question is about, for any medical specialty. Reply with: the disease or condition \
 (at most two), the treatments or interventions compared (at most four), the organs involved (at most two), and \
-up to three outcomes.\n\
+up to four outcomes.\n\
 - Expand abbreviations only when you are sure of them; otherwise keep the words as written.\n\
 - Use a broad treatment name, for example \"Robotic surgery\", not a device or technique detail.\n\
 - For drugs, name the drug or class actually compared, for example \"SGLT2 inhibitors\", and keep \
@@ -218,6 +219,15 @@ pub fn check(raw: RawPicks, a: &AnswerV3) -> Picks {
     }
 }
 
+/// Whether checked picks are worth storing: at least one organ, and at least
+/// one outcome when the answer has outcome rows. No treatments is fine
+/// (prognosis questions may have none). An unusable reply is a failed
+/// attempt (`empty_picks`).
+pub fn is_usable(picks: &Picks, a: &AnswerV3) -> bool {
+    let has_rows = a.answer.as_ref().is_some_and(|w| !w.outcomes.is_empty());
+    !picks.organs.is_empty() && (!has_rows || !picks.outcomes.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,12 +278,61 @@ mod tests {
     }
 
     #[test]
-    fn fourth_outcome_is_dropped() {
+    fn fifth_outcome_is_dropped() {
         let a = hernia();
-        assert!(a.answer.as_ref().unwrap().outcomes.len() >= 4);
-        let p = check(raw(&[(1, "A"), (2, "B"), (3, "C"), (4, "D")]), &a);
-        assert_eq!(p.outcomes.len(), 3);
+        assert!(a.answer.as_ref().unwrap().outcomes.len() >= 5);
+        let p = check(raw(&[(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")]), &a);
+        assert_eq!(MAX_OUTCOMES, 4);
+        assert_eq!(p.outcomes.len(), 4);
+        assert_eq!(p.outcomes[3].row, 4);
         assert_eq!(p.dropped, 1);
+    }
+
+    #[test]
+    fn system_states_the_outcome_limit() {
+        assert!(SYSTEM.contains("up to four outcomes"));
+        assert!(!SYSTEM.contains("three"));
+    }
+
+    fn usable_picks(organs: &[&str], rows: &[usize]) -> Picks {
+        Picks {
+            organs: s(organs),
+            outcomes: rows
+                .iter()
+                .map(|r| PickedOutcome {
+                    row: *r,
+                    name: format!("O{r}"),
+                    certainty: "low".into(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn usable_needs_an_organ_and_an_outcome_when_rows_exist() {
+        let a = hernia();
+        assert!(is_usable(&usable_picks(&["Abdominal wall"], &[1]), &a));
+        assert!(!is_usable(&usable_picks(&[], &[1]), &a), "no organ");
+        assert!(
+            !is_usable(&usable_picks(&["Abdominal wall"], &[]), &a),
+            "no outcome while rows exist"
+        );
+        // No treatments is fine (prognosis questions).
+        let mut p = usable_picks(&["Abdominal wall"], &[1]);
+        p.treatments.clear();
+        p.diseases = s(&["Inguinal hernia"]);
+        assert!(is_usable(&p, &a));
+    }
+
+    #[test]
+    fn usable_without_outcome_rows_needs_only_an_organ() {
+        let mut a = hernia();
+        a.answer.as_mut().unwrap().outcomes.clear();
+        assert!(is_usable(&usable_picks(&["Abdominal wall"], &[]), &a));
+        assert!(!is_usable(&usable_picks(&[], &[]), &a));
+        a.answer = None;
+        assert!(is_usable(&usable_picks(&["Abdominal wall"], &[]), &a));
     }
 
     #[test]

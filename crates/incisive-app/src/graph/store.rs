@@ -133,6 +133,8 @@ async fn link_concept(
 
 /// Store a run's picks and papers in one transaction, replacing any links an
 /// earlier attempt wrote. The user comes from the run, never from the caller.
+/// A run that is gone is `Err(RowNotFound)` and nothing is written; the run's
+/// row is key-share locked until commit, so it cannot be deleted mid-write.
 pub async fn write_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -140,6 +142,14 @@ pub async fn write_run(
     papers: &[PaperRow],
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
+    let exists: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM incisive.runs WHERE id = $1 FOR KEY SHARE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if exists.is_none() {
+        return Err(sqlx::Error::RowNotFound);
+    }
     sqlx::query("DELETE FROM incisive.graph_run_concepts WHERE run_id = $1")
         .bind(run_id)
         .execute(&mut *tx)

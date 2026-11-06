@@ -442,3 +442,22 @@ async fn pub_types_come_from_the_paper_cache() {
     );
     assert!(pub_types_for(&pool, &[]).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn write_run_for_a_missing_run_errors_and_writes_nothing() {
+    let Some(pool) = connect().await else { return };
+    let _g = SERIAL.lock().await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let a = hernia();
+    let papers = papers_from(&a, &HashMap::new());
+    let missing = Uuid::new_v4();
+    let r = write_run(&pool, missing, &picks(&tag), &papers).await;
+    assert!(r.is_err(), "a run that is gone is an error, never Ok");
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM incisive.graph_concepts WHERE label LIKE $1")
+            .bind(format!("% {tag}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0, "no concept written");
+}
