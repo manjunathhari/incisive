@@ -515,7 +515,11 @@ pub fn map_note(data: &MapData) -> Option<String> {
 
 /// "12 dots · 14 lines" under the map.
 pub fn count_line(data: &MapData) -> String {
-    let (d, l) = (data.dots.len(), data.lines.len());
+    count_words(data.dots.len(), data.lines.len())
+}
+
+/// "12 dots · 14 lines".
+pub fn count_words(d: usize, l: usize) -> String {
     format!(
         "{d} {} \u{b7} {l} {}",
         if d == 1 { "dot" } else { "dots" },
@@ -615,69 +619,118 @@ fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
     a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1
 }
 
-/// The labels the map shows, for dots already placed in the frame (zoom
-/// and pan applied). The picked dot first, then the find box's matches,
-/// then by [`label_rank`]: a label that would cover a dot or an earlier
-/// label is left out, except the picked dot's, which always shows. Diseases,
-/// organs and treatments are labelled; outcomes on a wide frame or from
-/// 1.3x; papers from 2.5x; questions only when picked or found. Labels sit
-/// under their dot and stay inside the frame.
+/// What the label rules need of a dot: no more than this is copied when
+/// the map moves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spot {
+    pub id: String,
+    pub kind: DotKind,
+    pub label: String,
+    /// Where it sits in the frame, zoom and pan applied (frame units).
+    pub x: f32,
+    pub y: f32,
+    /// Its radius at 1x, in screen pixels.
+    pub r: f32,
+}
+
+impl Spot {
+    /// A dot placed by zoom `k` and pan (`tx`, `ty`).
+    pub fn of(d: &Dot, k: f32, tx: f32, ty: f32) -> Spot {
+        Spot {
+            id: d.id.clone(),
+            kind: d.kind,
+            label: d.label.clone(),
+            x: tx + d.x * k,
+            y: ty + d.y * k,
+            r: d.r,
+        }
+    }
+}
+
+/// The labels the map shows, for spots placed in the frame. `unit` is how
+/// many frame units one screen pixel is (the frame may be drawn smaller or
+/// bigger than its units): dots and label text are sized in pixels, so the
+/// collision maths turns them into frame units first.
+///
+/// Order: the picked dot, the find box's matches, the picked dot's
+/// neighbours (not papers), then by [`label_rank`]. A label that would
+/// cover a dot or an earlier label is left out, except the picked dot's,
+/// which always shows. With a dot picked, only it, the matches and its
+/// neighbours (not papers) are labelled, as on the board. Otherwise
+/// diseases, organs and treatments are; outcomes on a wide frame or from
+/// 1.3x; papers from 2.5x; questions only when found. Labels sit under
+/// their dot and stay inside the frame.
 pub fn visible_labels(
-    dots: &[Dot],
+    spots: &[Spot],
     zoom: f32,
     sel: Option<&str>,
+    near: &HashSet<String>,
     found: &HashSet<String>,
     frame: (f32, f32),
+    unit: f32,
 ) -> Vec<LabelBox> {
     let (w_frame, h_frame) = frame;
-    let prio = |d: &Dot| {
+    let unit = if unit.is_finite() && unit > 0.0 {
+        unit
+    } else {
+        1.0
+    };
+    let neighbour = |d: &Spot| near.contains(&d.id) && d.kind != DotKind::Paper;
+    let prio = |d: &Spot| {
         if Some(d.id.as_str()) == sel {
             0
         } else if found.contains(&d.id) {
             1
+        } else if sel.is_some() && neighbour(d) {
+            2
         } else {
             label_rank(d.kind)
         }
     };
-    let mut order: Vec<&Dot> = dots.iter().collect();
+    let mut order: Vec<&Spot> = spots.iter().collect();
     order.sort_by(|a, b| prio(a).cmp(&prio(b)).then_with(|| a.id.cmp(&b.id)));
     // Every dot is in the way of the labels but its own.
-    let mut boxes: Vec<(String, (f32, f32, f32, f32))> = dots
+    let radius = |d: &Spot| zoom_radius(d.r, zoom) * unit;
+    let mut boxes: Vec<(String, (f32, f32, f32, f32))> = spots
         .iter()
         .map(|d| {
-            let r = zoom_radius(d.r, zoom);
+            let r = radius(d);
             (d.id.clone(), (d.x - r, d.y - r, r * 2.0, r * 2.0))
         })
         .collect();
+    let (gap, h) = (2.0 * unit, LABEL_H * unit);
     let mut out = Vec::new();
     for d in order {
         let picked = Some(d.id.as_str()) == sel;
         let wanted = picked
             || found.contains(&d.id)
-            || match d.kind {
-                DotKind::Disease | DotKind::Organ | DotKind::Treatment => true,
-                DotKind::Outcome => zoom >= 1.3 || w_frame >= WIDE_FROM,
-                DotKind::Paper => zoom >= 2.5,
-                DotKind::Run => false,
+            || if sel.is_some() {
+                neighbour(d)
+            } else {
+                match d.kind {
+                    DotKind::Disease | DotKind::Organ | DotKind::Treatment => true,
+                    DotKind::Outcome => zoom >= 1.3 || w_frame >= WIDE_FROM,
+                    DotKind::Paper => zoom >= 2.5,
+                    DotKind::Run => false,
+                }
             };
         if !wanted {
             continue;
         }
-        let r = zoom_radius(d.r, zoom);
         let text = label_text(&d.label);
-        let w = (text.chars().count() as f32 * CHAR_W + 6.0)
-            .min(w_frame - 4.0)
+        let w = ((text.chars().count() as f32 * CHAR_W + 6.0) * unit)
+            .min(w_frame - 2.0 * gap)
             .max(0.0);
-        let x = (d.x - w / 2.0).min(w_frame - w - 2.0).max(2.0);
-        let mut y = d.y + r + 2.0;
-        let outside = y < 0.0 || y > h_frame - LABEL_H || d.x < 0.0 || d.x > w_frame;
+        let x = (d.x - w / 2.0).min(w_frame - w - gap).max(gap);
+        let mut y = d.y + radius(d) + gap;
+        let outside = y < 0.0 || y > h_frame - h || d.x < 0.0 || d.x > w_frame;
         if outside {
             if !picked {
                 continue;
             }
-            y = y.min(h_frame - LABEL_H).max(0.0);
+            y = y.min(h_frame - h).max(0.0);
         }
-        let mine = (x, y, w, LABEL_H);
+        let mine = (x, y, w, h);
         let covers = boxes
             .iter()
             .any(|(id, b)| *id != d.id && overlaps(mine, *b));
@@ -695,6 +748,13 @@ pub fn visible_labels(
         });
     }
     out
+}
+
+/// Whether a click on a dot picks it: a keyboard or screen-reader press
+/// (`detail` 0) always does; a pointer click does unless the map was just
+/// dragged.
+pub fn is_tap(moved: bool, detail: i32) -> bool {
+    detail == 0 || !moved
 }
 
 /// The tapped dot and the dots a line joins it to; empty when it is not
@@ -1170,6 +1230,18 @@ mod tests {
         HashSet::new()
     }
 
+    /// The labels at a 1:1 frame, nothing picked's neighbours given.
+    fn labels(
+        dots: &[Dot],
+        k: f32,
+        sel: Option<&str>,
+        found: &HashSet<String>,
+        frame: (f32, f32),
+    ) -> Vec<LabelBox> {
+        let spots: Vec<Spot> = dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect();
+        visible_labels(&spots, k, sel, &none(), found, frame, 1.0)
+    }
+
     /// Two dots side by side: their labels overlap, but neither label
     /// touches the other dot.
     fn pair(a: Dot, b: Dot) -> Vec<Dot> {
@@ -1189,7 +1261,7 @@ mod tests {
         for i in 0..order.len() {
             for j in (i + 1)..order.len() {
                 let dots = pair(order[j].clone(), order[i].clone());
-                let got = visible_labels(&dots, 3.0, None, &none(), WIDE);
+                let got = labels(&dots, 3.0, None, &none(), WIDE);
                 assert_eq!(
                     ids(&got),
                     [order[i].id.as_str()],
@@ -1205,15 +1277,9 @@ mod tests {
             dot("t:1", DotKind::Treatment, "Robotic surgery", ""),
         );
         let found: HashSet<String> = ["t:1".to_string()].into();
-        assert_eq!(
-            ids(&visible_labels(&dots, 1.0, None, &found, WIDE)),
-            ["t:1"]
-        );
+        assert_eq!(ids(&labels(&dots, 1.0, None, &found, WIDE)), ["t:1"]);
         let found: HashSet<String> = ["d:1".to_string()].into();
-        assert_eq!(
-            ids(&visible_labels(&dots, 1.0, Some("t:1"), &found, WIDE)),
-            ["t:1"]
-        );
+        assert_eq!(ids(&labels(&dots, 1.0, Some("t:1"), &found, WIDE)), ["t:1"]);
         // The whole order, questions and papers last.
         let kinds = [
             DotKind::Disease,
@@ -1232,7 +1298,7 @@ mod tests {
             100.0,
             100.0,
         )];
-        assert!(visible_labels(&one, 1.0, None, &none(), WIDE)[0].bold);
+        assert!(labels(&one, 1.0, None, &none(), WIDE)[0].bold);
     }
 
     #[test]
@@ -1244,15 +1310,15 @@ mod tests {
             at(dot(RUN, DotKind::Run, "Your question", ""), 106.0, 100.0),
             at(dot("d:2", DotKind::Disease, "Hernia", ""), 112.0, 116.0),
         ];
-        let got = visible_labels(&dots, 1.0, None, &none(), WIDE);
+        let got = labels(&dots, 1.0, None, &none(), WIDE);
         assert!(!ids(&got).contains(&RUN));
-        let got = visible_labels(&dots, 1.0, Some(RUN), &none(), WIDE);
+        let got = labels(&dots, 1.0, Some(RUN), &none(), WIDE);
         let l = got.iter().find(|l| l.id == RUN).expect("the picked label");
         assert!(l.bold);
         // At the bottom edge, where a label would leave the frame.
         let low = [at(dot("t:1", DotKind::Treatment, "POEM", ""), 50.0, 478.0)];
-        assert!(visible_labels(&low, 1.0, None, &none(), PHONE).is_empty());
-        let got = visible_labels(&low, 1.0, Some("t:1"), &none(), PHONE);
+        assert!(labels(&low, 1.0, None, &none(), PHONE).is_empty());
+        let got = labels(&low, 1.0, Some("t:1"), &none(), PHONE);
         assert_eq!(ids(&got), ["t:1"]);
         assert!(got[0].y + LABEL_H <= PHONE.1);
     }
@@ -1267,8 +1333,9 @@ mod tests {
             at(dot("t:1", DotKind::Treatment, "POEM", ""), 2.0, 470.0),
         ];
         for sel in [None, Some("t:1")] {
-            let got = visible_labels(&dots, 1.0, sel, &none(), PHONE);
-            assert!(got.len() >= 3, "{got:?}");
+            let got = labels(&dots, 1.0, sel, &none(), PHONE);
+            // With a dot picked only it (and its neighbours) are labelled.
+            assert!(got.len() >= if sel.is_some() { 1 } else { 3 }, "{got:?}");
             for l in &got {
                 assert!(l.x >= 0.0 && l.x + l.w <= PHONE.0, "{l:?}");
                 assert!(l.y >= 0.0 && l.y + LABEL_H <= PHONE.1, "{l:?}");
@@ -1285,7 +1352,7 @@ mod tests {
             at(dot("d:1", DotKind::Disease, long, ""), 200.0, 100.0),
             at(dot("d:2", DotKind::Disease, thirty, ""), 200.0, 300.0),
         ];
-        let got = visible_labels(&dots, 1.0, None, &none(), WIDE);
+        let got = labels(&dots, 1.0, None, &none(), WIDE);
         let text = |id: &str| got.iter().find(|l| l.id == id).unwrap().text.clone();
         // The board's cut: 28 characters, then "…" (a trailing space dropped).
         assert_eq!(text("d:1"), "Laparoscopic Heller myotomy\u{2026}");
@@ -1300,25 +1367,91 @@ mod tests {
             at(paper("1", "rct", Some(2020)), 200.0, 200.0),
             at(dot(RUN, DotKind::Run, "Your question", ""), 300.0, 300.0),
         ];
-        let at_zoom = |k: f32, frame| ids(&visible_labels(&dots, k, None, &none(), frame)).len();
+        let at_zoom = |k: f32, frame| ids(&labels(&dots, k, None, &none(), frame)).len();
         // A phone at 1x: no outcome, paper or question labels.
         assert_eq!(at_zoom(1.0, PHONE), 0);
         // Outcomes from 1.3x on a phone, always on a wide map.
-        assert_eq!(
-            ids(&visible_labels(&dots, 1.3, None, &none(), PHONE)),
-            ["o:1"]
-        );
-        assert_eq!(
-            ids(&visible_labels(&dots, 1.0, None, &none(), WIDE)),
-            ["o:1"]
-        );
+        assert_eq!(ids(&labels(&dots, 1.3, None, &none(), PHONE)), ["o:1"]);
+        assert_eq!(ids(&labels(&dots, 1.0, None, &none(), WIDE)), ["o:1"]);
         // Papers from 2.5x; questions only when found or picked.
         assert_eq!(
-            ids(&visible_labels(&dots, 2.5, None, &none(), PHONE)),
+            ids(&labels(&dots, 2.5, None, &none(), PHONE)),
             ["o:1", "p:1"]
         );
         let found: HashSet<String> = [RUN.to_string()].into();
-        assert!(ids(&visible_labels(&dots, 1.0, None, &found, PHONE)).contains(&RUN));
+        assert!(ids(&labels(&dots, 1.0, None, &found, PHONE)).contains(&RUN));
+    }
+
+    #[test]
+    fn a_picked_dots_neighbours_are_labelled_next() {
+        let spots = |dots: &[Dot]| -> Vec<Spot> {
+            dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect()
+        };
+        let mut p = paper("1", "rct", Some(2020));
+        p.label = "A paper".into();
+        let dots = vec![
+            at(dot(RUN, DotKind::Run, "Your question", ""), 300.0, 300.0),
+            at(dot("o:1", DotKind::Outcome, "Recurrence", ""), 100.0, 100.0),
+            at(dot("d:1", DotKind::Disease, "Hernia", ""), 600.0, 600.0),
+            at(p, 200.0, 200.0),
+        ];
+        let near: HashSet<String> = [RUN, "o:1", "p:1"].iter().map(|s| s.to_string()).collect();
+        // Picked: it and its neighbours, not papers, not the far disease
+        // (even at a zoom that labels papers).
+        let got = visible_labels(&spots(&dots), 3.0, Some(RUN), &near, &none(), PHONE, 1.0);
+        assert_eq!(ids(&got), ["o:1", RUN]);
+        // A neighbour beats a disease whose label it would cover.
+        let dots = pair(
+            dot("d:9", DotKind::Disease, "Inguinal hernia", ""),
+            dot("o:1", DotKind::Outcome, "Recurrence", ""),
+        );
+        let mut all = dots.clone();
+        all.push(at(
+            dot(RUN, DotKind::Run, "Your question", ""),
+            300.0,
+            300.0,
+        ));
+        let near: HashSet<String> = [RUN, "o:1", "d:9"].iter().map(|s| s.to_string()).collect();
+        let got = visible_labels(&spots(&all), 1.0, Some(RUN), &near, &none(), WIDE, 1.0);
+        assert_eq!(ids(&got), ["d:9", RUN]);
+        let near: HashSet<String> = [RUN, "o:1"].iter().map(|s| s.to_string()).collect();
+        let got = visible_labels(&spots(&all), 1.0, Some(RUN), &near, &none(), WIDE, 1.0);
+        assert_eq!(ids(&got), ["o:1", RUN]);
+    }
+
+    #[test]
+    fn collisions_are_counted_in_frame_units() {
+        // Clear at 1:1, but on a frame drawn at half size (2 units a
+        // pixel) the two labels meet.
+        let dots = [
+            at(
+                dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
+                100.0,
+                100.0,
+            ),
+            at(
+                dot("d:2", DotKind::Disease, "Achalasia repair", ""),
+                260.0,
+                100.0,
+            ),
+        ];
+        let spots: Vec<Spot> = dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect();
+        let one = visible_labels(&spots, 1.0, None, &none(), &none(), WIDE, 1.0);
+        assert_eq!(one.len(), 2);
+        let half = visible_labels(&spots, 1.0, None, &none(), &none(), WIDE, 2.0);
+        assert_eq!(ids(&half), ["d:1"]);
+        assert!((half[0].w - one[0].w * 2.0).abs() < 0.01);
+        // Zoom and pan place a spot.
+        let s = Spot::of(&dots[0], 2.0, -50.0, 10.0);
+        assert_eq!((s.x, s.y), (150.0, 210.0));
+    }
+
+    #[test]
+    fn a_keyboard_press_always_picks_a_dot() {
+        assert!(is_tap(false, 1));
+        assert!(!is_tap(true, 1), "the end of a drag is not a tap");
+        assert!(is_tap(true, 0), "Enter or Space after a drag still picks");
+        assert!(is_tap(false, 0));
     }
 
     #[test]

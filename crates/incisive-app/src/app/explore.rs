@@ -43,17 +43,19 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-map { display:flex; flex-direction:column; gap:10px; }
 .kg-map-frame { position:relative; box-sizing:border-box; width:100%; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:18px; overflow:hidden; touch-action:none; user-select:none; -webkit-user-select:none; }
 .iv-wrap button.kg-bg { position:absolute; left:0; top:0; width:100%; height:100%; padding:0; border:0; background:transparent; cursor:grab; }
+.kg-layer { position:absolute; left:0; top:0; width:100%; height:100%; transform-origin:0 0; will-change:transform; pointer-events:none; }
 .kg-svg { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
 .kg-ln { stroke:var(--kg-other); } .kg-ln.on { stroke:var(--iv-body); }
-.iv-wrap button.kg-dot { position:absolute; transform:translate(-50%,-50%); padding:0; border:0; background:transparent; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; }
+.iv-wrap button.kg-dot { position:absolute; transform:translate(-50%,-50%); width:calc(max(30px, var(--d) * var(--g, 1) + 8px) * var(--ik, 1)); height:calc(max(30px, var(--d) * var(--g, 1) + 8px) * var(--ik, 1)); padding:0; border:0; background:transparent; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; pointer-events:auto; }
 .kg-mk { display:block; box-sizing:border-box; border-radius:50%; }
+.kg-dot .kg-mk { width:calc(var(--d) * var(--g, 1) * var(--ik, 1)); height:calc(var(--d) * var(--g, 1) * var(--ik, 1)); }
 .kg-mk.sq { border-radius:2px; }
-.iv-wrap button.kg-dot.on .kg-mk { border:2px solid var(--iv-ink); }
+.iv-wrap button.kg-dot.on .kg-mk { border:calc(2px * var(--ik, 1)) solid var(--iv-ink); }
 .kg-mk.organ { background:var(--kg-organ); } .kg-mk.disease { background:var(--kg-disease); } .kg-mk.run { background:var(--kg-run); }
 .kg-mk.treatment { background:var(--kg-treatment); } .kg-mk.outcome { background:var(--kg-outcome); }
 .kg-mk.rct, .kg-num.rct { background:var(--kg-rct); } .kg-mk.meta, .kg-num.meta { background:var(--kg-meta); } .kg-mk.prospective, .kg-num.prospective { background:var(--kg-pro); }
 .kg-mk.retrospective, .kg-num.retrospective { background:var(--kg-retro); } .kg-mk.case_series, .kg-num.case_series { background:var(--kg-series); } .kg-mk.other, .kg-num.other { background:var(--kg-other); }
-.kg-lab { position:absolute; pointer-events:none; font-size:12px; line-height:14px; white-space:nowrap; overflow:hidden; background:rgba(255,255,255,0.86); border-radius:4px; padding:0 3px; color:var(--iv-ink); }
+.kg-lab { position:absolute; transform:scale(var(--ik, 1)); transform-origin:0 0; pointer-events:none; font-size:12px; line-height:14px; white-space:nowrap; overflow:hidden; background:rgba(255,255,255,0.86); border-radius:4px; padding:0 3px; color:var(--iv-ink); }
 .kg-lab.b { font-weight:600; }
 .kg-zoom { position:absolute; right:10px; top:10px; display:flex; flex-direction:column; gap:8px; }
 .iv-wrap .kg-zoom button { width:44px; height:44px; padding:0; border-radius:12px; border:1px solid var(--iv-border); background:var(--iv-card); font-family:inherit; font-size:20px; color:var(--iv-ink); cursor:pointer; }
@@ -107,8 +109,8 @@ pub const EXPLORE_STYLE: &str = r#"
 .iv-wrap a.kg-act:hover { color:#fff; background:#223a6a; }
 .iv-wrap a.kg-act.alt { background:var(--iv-card); color:var(--iv-accent); border:1px solid var(--iv-accent); }
 .kg-note { margin:0; font-size:12px; line-height:1.5; color:var(--iv-muted); }
-@media (min-width:641px) { .kg-card.kg-inline { display:none; } }
-@media (max-width:640px) {
+@media (min-width:700px) { .kg-card.kg-inline { display:none; } }
+@media (max-width:699.98px) {
   .kg-main, .kg-side { flex-basis:100%; }
   .kg[data-view="list"] .kg-side-card { display:none; }
 }
@@ -311,6 +313,10 @@ fn filter_of(ui: Ui) -> MapFilter {
     }
 }
 
+/// What a map fetch is for: the filter, the frame and the "Try again"
+/// count.
+type MapKey = (MapFilter, (f32, f32), u32);
+
 /// A pinch's start: the fingers' distance and middle, and k, tx, ty.
 type Pinch = (f32, (f32, f32), f32, f32, f32);
 
@@ -334,13 +340,21 @@ struct MapUi {
     data: RwSignal<(MapData, (f32, f32))>,
     /// The frame this browser wants (its width decides).
     frame: RwSignal<(f32, f32)>,
-    /// Zoom and pan: k, tx, ty.
+    /// Zoom and pan as drawn, live while a finger moves: k, tx, ty. Only the
+    /// map layer's transform follows it.
     view: RwSignal<(f32, f32, f32)>,
+    /// Zoom and pan at rest (after a zoom or at the end of a drag): the
+    /// labels are worked out for this.
+    settled: RwSignal<(f32, f32, f32)>,
+    /// Frame units per screen pixel (the frame is drawn at its box's size).
+    unit: RwSignal<f32>,
     /// The time-lapse's year (`None`: every dot) and whether it plays.
     until: RwSignal<Option<i32>>,
     playing: RwSignal<bool>,
     busy: RwSignal<bool>,
     error: RwSignal<Option<String>>,
+    /// Bumped by "Try again" after a failed fetch.
+    retry: RwSignal<u32>,
     drag: StoredValue<Drag>,
     timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage>,
     node: NodeRef<leptos::html::Div>,
@@ -351,17 +365,46 @@ impl MapUi {
         self.data.with_untracked(|(_, f)| *f)
     }
 
+    /// Zoom and pan, drawn and at rest.
+    fn place(self, v: (f32, f32, f32)) {
+        self.view.set(v);
+        self.settled.set(v);
+    }
+
+    /// The labels catch up with a drag or a pinch.
+    fn settle(self) {
+        let v = self.view.get_untracked();
+        if self.settled.get_untracked() != v {
+            self.settled.set(v);
+        }
+    }
+
     /// Zoom by `f` about a point of the frame.
     fn zoom_at(self, f: f32, (cx, cy): (f32, f32)) {
         let (k, tx, ty) = self.view.get_untracked();
         let nk = (k * f).clamp(ep::ZOOM_MIN, ep::ZOOM_MAX);
         let m = nk / k;
-        self.view.set((nk, cx - (cx - tx) * m, cy - (cy - ty) * m));
+        self.place((nk, cx - (cx - tx) * m, cy - (cy - ty) * m));
     }
 
     fn zoom(self, f: f32) {
         let (w, h) = self.frame_now();
         self.zoom_at(f, (w / 2.0, h / 2.0));
+    }
+
+    /// How big the frame is drawn: frame units per pixel (browser only).
+    fn measure(self) {
+        #[cfg(feature = "hydrate")]
+        if let Some(el) = self.node.get_untracked() {
+            let w = el.get_bounding_client_rect().width();
+            let (fw, _) = self.frame_now();
+            if w > 0.0 {
+                let u = fw / w as f32;
+                if (self.unit.get_untracked() - u).abs() > 1e-3 {
+                    let _ = self.unit.try_set(u);
+                }
+            }
+        }
     }
 
     fn stop(self) {
@@ -469,10 +512,13 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
         data: RwSignal::new((start.map, start.frame)),
         frame: RwSignal::new(start.frame),
         view: RwSignal::new((1.0, 0.0, 0.0)),
+        settled: RwSignal::new((1.0, 0.0, 0.0)),
+        unit: RwSignal::new(1.0),
         until: RwSignal::new(None),
         playing: RwSignal::new(false),
         busy: RwSignal::new(false),
         error: RwSignal::new(None),
+        retry: RwSignal::new(0),
         drag: StoredValue::new(Drag::default()),
         timer: StoredValue::new_local(None),
         node: NodeRef::new(),
@@ -490,31 +536,52 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
     );
     // In the browser: the frame this window wants, then a new map whenever
     // the filter or the frame changes (laid out by the server, never here).
+    // The frame follows the window across the breakpoint (the CSS's too).
     Effect::new(move |_| {
-        if let Some(w) = window_width() {
-            mu.frame.set(ep::frame_for(w));
+        let fit = move || {
+            if let Some(w) = window_width() {
+                let f = ep::frame_for(w);
+                if mu.frame.try_get_untracked() != Some(f) {
+                    let _ = mu.frame.try_set(f);
+                }
+            }
+            mu.measure();
+        };
+        fit();
+        #[cfg(feature = "hydrate")]
+        {
+            let h = window_event_listener(leptos::ev::resize, move |_| fit());
+            on_cleanup(move || h.remove());
         }
     });
-    let shown = StoredValue::new((MapFilter::default(), start.frame));
-    let asked = StoredValue::new(0u32);
+    // The map on screen, and the one being fetched: `shown` moves only
+    // when a fetch succeeds, so a failed one can be asked again ("Try
+    // again" bumps `retry`).
+    let shown = StoredValue::new((MapFilter::default(), start.frame, 0u32));
+    let asking: StoredValue<Option<MapKey>> = StoredValue::new(None);
     Effect::new(move |_| {
-        let key = (filter_of(ui), mu.frame.get());
-        if shown.with_value(|s| *s == key) {
+        let key = (filter_of(ui), mu.frame.get(), mu.retry.get());
+        let same = |k: &MapKey| k.0 == key.0 && k.1 == key.1;
+        if shown.with_value(same) || asking.with_value(|a| a.as_ref().is_some_and(|a| *a == key)) {
             return;
         }
-        shown.set_value(key.clone());
-        let n = asked.with_value(|a| a + 1);
-        asked.set_value(n);
+        asking.set_value(Some(key.clone()));
         mu.busy.set(true);
         leptos::task::spawn_local(async move {
-            let (f, (w, h)) = key;
+            let (f, (w, h), _) = key.clone();
             let r = get_map(f, w, h).await;
-            if asked.try_get_value() != Some(n) {
+            // A newer request has taken over.
+            if asking
+                .try_with_value(|a| a.as_ref() != Some(&key))
+                .unwrap_or(true)
+            {
                 return;
             }
+            asking.set_value(None);
             let _ = mu.busy.try_set(false);
             match r {
                 Ok(m) => {
+                    shown.set_value(key);
                     let _ = mu.data.try_set((m, (w, h)));
                     let _ = mu.error.try_set(None);
                 }
@@ -533,7 +600,7 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
     let pick_organ = move |o: Option<i64>| {
         ui.organ.set(o);
         ui.sel.set(None);
-        mu.view.set((1.0, 0.0, 0.0));
+        mu.place((1.0, 0.0, 0.0));
     };
     let chip_views = chips
         .into_iter()
@@ -628,8 +695,10 @@ fn pct(v: f32, of: f32) -> String {
     format!("{:.3}%", if of > 0.0 { v / of * 100.0 } else { 0.0 })
 }
 
-/// The map: lines, dots and labels in the frame, the zoom buttons, the
-/// time-lapse and the counts.
+/// The map: lines, dots and labels on one layer that zoom and pan move
+/// with a CSS transform (a move changes one style), the zoom buttons, the
+/// time-lapse and the counts. Labels are worked out again only when the
+/// map comes to rest.
 fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     use std::collections::{HashMap, HashSet};
     // What shows and what is lit.
@@ -660,65 +729,67 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             true
         }
     };
-    // The shown dots in frame units, zoom and pan applied.
-    let placed = Memo::new(move |_| {
-        let (k, tx, ty) = mu.view.get();
-        let l = live.get();
+    let frame = move || mu.data.with(|(_, f)| *f);
+    // Where each dot sits at 1x (frame units) and its radius in pixels.
+    let base = Memo::new(move |_| {
         mu.data.with(|(m, _)| {
             m.dots
                 .iter()
-                .filter(|d| l.contains(&d.id))
-                .map(|d| {
-                    let mut d = d.clone();
-                    d.x = tx + d.x * k;
-                    d.y = ty + d.y * k;
-                    d
-                })
-                .collect::<Vec<_>>()
-        })
-    });
-    let at = Memo::new(move |_| {
-        placed.with(|p| {
-            p.iter()
                 .map(|d| (d.id.clone(), (d.x, d.y, d.r)))
                 .collect::<HashMap<String, (f32, f32, f32)>>()
         })
     });
-    let frame = move || mu.data.with(|(_, f)| *f);
+    // The layer: the one style a drag or a pinch changes.
+    let layer_style = move || {
+        let (k, tx, ty) = mu.view.get();
+        let (w, h) = frame();
+        format!(
+            "transform:translate({},{}) scale({k});--k:{k};--ik:{};--g:{}",
+            pct(tx, w),
+            pct(ty, h),
+            1.0 / k,
+            ep::zoom_radius(1.0, k)
+        )
+    };
 
     let lines = move || {
         let (w, h) = frame();
         let s = sel.get();
         let focusing = s.is_some() || searching.get();
-        let at = at.get();
-        let lines = mu.data.with(|(m, _)| m.lines.clone());
-        let views = lines
-            .into_iter()
-            .filter_map(|l| {
-                let (a, b) = (at.get(&l.a)?, at.get(&l.b)?);
-                let on = match s.as_deref() {
-                    Some(s) => l.a == s || l.b == s,
-                    None => !focusing,
-                };
-                let class = if on && s.is_some() {
-                    "kg-ln on"
-                } else {
-                    "kg-ln"
-                };
-                Some(view! {
-                    <line
-                        class=class
-                        x1=format!("{:.1}", a.0)
-                        y1=format!("{:.1}", a.1)
-                        x2=format!("{:.1}", b.0)
-                        y2=format!("{:.1}", b.1)
-                        stroke-width=if l.paper { "1" } else { "1.6" }
-                        stroke-dasharray=l.paper.then_some("4 3")
-                        opacity=if on { "1" } else { "0.18" }
-                    ></line>
+        let l = live.get();
+        let views = mu.data.with(|(m, _)| {
+            let at: HashMap<&str, (f32, f32)> =
+                m.dots.iter().map(|d| (d.id.as_str(), (d.x, d.y))).collect();
+            m.lines
+                .iter()
+                .filter(|x| l.contains(&x.a) && l.contains(&x.b))
+                .filter_map(|x| {
+                    let (a, b) = (at.get(x.a.as_str())?, at.get(x.b.as_str())?);
+                    let on = match s.as_deref() {
+                        Some(s) => x.a == s || x.b == s,
+                        None => !focusing,
+                    };
+                    let class = if on && s.is_some() {
+                        "kg-ln on"
+                    } else {
+                        "kg-ln"
+                    };
+                    Some(view! {
+                        <line
+                            class=class
+                            x1=format!("{:.1}", a.0)
+                            y1=format!("{:.1}", a.1)
+                            x2=format!("{:.1}", b.0)
+                            y2=format!("{:.1}", b.1)
+                            stroke-width=if x.paper { "1" } else { "1.6" }
+                            stroke-dasharray=x.paper.then_some("4 3")
+                            vector-effect="non-scaling-stroke"
+                            opacity=if on { "1" } else { "0.18" }
+                        ></line>
+                    })
                 })
-            })
-            .collect_view();
+                .collect::<Vec<_>>()
+        });
         view! {
             <svg class="kg-svg" viewBox=format!("0 0 {w} {h}") preserveAspectRatio="none" aria-hidden="true">
                 {views}
@@ -727,7 +798,8 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     };
 
     // One real button per dot, kept across redraws (keyboard focus stays):
-    // what a dot is is fixed, where it sits and how lit it is follow the map.
+    // what a dot is is fixed; where it sits follows the map, and its size
+    // follows the zoom through the layer's CSS variables.
     let dot_button = move |id: String| {
         let Some((aria, mark)) = mu.data.with_untracked(|(m, _)| {
             let d = m.dots.iter().find(|d| d.id == id)?;
@@ -744,32 +816,19 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             let id = id.clone();
             Memo::new(move |_| sel.with(|s| s.as_deref() == Some(id.as_str())))
         };
-        let size = {
+        let style = {
             let id = id.clone();
             move || {
-                let k = mu.view.with(|v| v.0);
                 let (w, h) = frame();
-                at.with(|a| a.get(&id).copied()).map(|(x, y, r)| {
-                    let r = ep::zoom_radius(r, k);
-                    (pct(x, w), pct(y, h), ep::hit_size(r), r * 2.0)
-                })
-            }
-        };
-        let style = {
-            let size = size.clone();
-            move || {
-                size().map_or_else(String::new, |(x, y, hit, _)| {
-                    format!("left:{x};top:{y};width:{hit:.1}px;height:{hit:.1}px")
-                })
+                base.with(|b| b.get(&id).copied())
+                    .map_or_else(String::new, |(x, y, r)| {
+                        format!("left:{};top:{};--d:{:.1}px", pct(x, w), pct(y, h), r * 2.0)
+                    })
             }
         };
         let mark_style = {
             let id = id.clone();
-            move || {
-                let s = size().map_or(0.0, |v| v.3);
-                let o = if lit(&id) { "1" } else { "0.16" };
-                format!("width:{s:.1}px;height:{s:.1}px;opacity:{o}")
-            }
+            move || format!("opacity:{}", if lit(&id) { "1" } else { "0.16" })
         };
         let pick = id.clone();
         view! {
@@ -779,8 +838,9 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
                 aria-label=aria
                 aria-pressed=move || on.get().to_string()
                 style=style
-                on:click=move |_| {
-                    if !mu.drag.with_value(|g| g.moved) {
+                on:click=move |ev: leptos::ev::MouseEvent| {
+                    let moved = mu.drag.try_update_value(|g| std::mem::take(&mut g.moved)).unwrap_or(false);
+                    if ep::is_tap(moved, ev.detail()) {
                         ui.sel.update(|s| {
                             *s = (s.as_deref() != Some(pick.as_str())).then(|| pick.clone());
                         });
@@ -794,40 +854,59 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     };
     let dot_views = view! {
         <For
-            each=move || placed.with(|p| p.iter().map(|d| d.id.clone()).collect::<Vec<_>>())
+            each=move || {
+                let l = live.get();
+                mu.data.with(|(m, _)| {
+                    m.dots
+                        .iter()
+                        .filter(|d| l.contains(&d.id))
+                        .map(|d| d.id.clone())
+                        .collect::<Vec<_>>()
+                })
+            }
             key=|id| id.clone()
             children=dot_button
         />
     };
 
+    // Labels for the map at rest, drawn on the layer at their dot's 1x
+    // place and kept at 12px whatever the zoom.
     let labels = move || {
-        let (k, _, _) = mu.view.get();
+        let (k, tx, ty) = mu.settled.get();
         let fr = frame();
+        let unit = mu.unit.get();
         let s = sel.get();
-        let f = found.get();
-        let boxes = placed.with(|p| ep::visible_labels(p, k, s.as_deref(), &f, fr));
+        let l = live.get();
+        let spots: Vec<ep::Spot> = mu.data.with(|(m, _)| {
+            m.dots
+                .iter()
+                .filter(|d| l.contains(&d.id))
+                .map(|d| ep::Spot::of(d, k, tx, ty))
+                .collect()
+        });
+        let boxes = near
+            .with(|n| found.with(|f| ep::visible_labels(&spots, k, s.as_deref(), n, f, fr, unit)));
         boxes
             .into_iter()
-            .map(|l| {
+            .map(|b| {
                 let style = format!(
                     "left:{};top:{};max-width:{:.0}px;opacity:{}",
-                    pct(l.x, fr.0),
-                    pct(l.y, fr.1),
-                    l.w + 10.0,
-                    if lit(&l.id) { "1" } else { "0.3" }
+                    pct((b.x - tx) / k, fr.0),
+                    pct((b.y - ty) / k, fr.1),
+                    b.w / unit + 10.0,
+                    if lit(&b.id) { "1" } else { "0.3" }
                 );
                 view! {
-                    <div class=if l.bold { "kg-lab b" } else { "kg-lab" } style=style aria-hidden="true">
-                        {l.text}
+                    <div class=if b.bold { "kg-lab b" } else { "kg-lab" } style=style aria-hidden="true">
+                        {b.text}
                     </div>
                 }
             })
             .collect_view()
     };
 
-    // Pointers: drag to move, pinch to zoom, on the frame only.
-    // A pointer's place in frame units (the frame may be drawn smaller or
-    // bigger than its units); browser only.
+    // Pointers: drag to move, pinch to zoom, on the frame only. A pointer
+    // is captured by what it went down on, as on the board.
     let to_frame = move |x: i32, y: i32| -> Option<(f32, f32)> {
         #[cfg(feature = "hydrate")]
         {
@@ -858,6 +937,16 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             return;
         };
         let id = ev.pointer_id();
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            if let Some(t) = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            {
+                let _ = t.set_pointer_capture(id);
+            }
+        }
         let (k, tx, ty) = mu.view.get_untracked();
         mu.drag.update_value(|g| {
             g.pts.retain(|p| p.0 != id);
@@ -917,12 +1006,20 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
     let up = move |ev: leptos::ev::PointerEvent| {
         let id = ev.pointer_id();
         let (_, tx, ty) = mu.view.get_untracked();
-        mu.drag.update_value(|g| {
-            g.pts.retain(|p| p.0 != id);
-            g.pinch = None;
-            // A finger left after a pinch carries on as a drag.
-            g.start = g.pts.first().map(|p| (p.1, p.2, tx, ty));
-        });
+        let rest = mu
+            .drag
+            .try_update_value(|g| {
+                g.pts.retain(|p| p.0 != id);
+                g.pinch = None;
+                // A finger left after a pinch carries on as a drag.
+                g.start = g.pts.first().map(|p| (p.1, p.2, tx, ty));
+                g.pts.is_empty()
+            })
+            .unwrap_or(true);
+        // The labels catch up once the map stops (and after a pinch).
+        if rest || mu.drag.with_value(|g| g.pts.len() == 1) {
+            mu.settle();
+        }
     };
 
     // The time-lapse: a year a step, by paper year, in the browser.
@@ -958,6 +1055,13 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
         mu.timer.set_value(h.ok());
     };
     on_cleanup(move || mu.stop());
+    // How big the frame is drawn, once it shows and whenever the map or the
+    // view changes.
+    Effect::new(move |_| {
+        mu.data.track();
+        ui.view.track();
+        mu.measure();
+    });
 
     view! {
         <div
@@ -971,26 +1075,35 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
             on:pointermove=moving
             on:pointerup=up
             on:pointercancel=up
-            on:pointerleave=up
+            on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                if ev.key() == "Escape" {
+                    ui.sel.set(None);
+                }
+            }
         >
+            // A pointer surface, not a control: out of the tab order (Escape
+            // clears the selection from the keyboard).
             <button
                 type="button"
                 class="kg-bg"
+                tabindex="-1"
                 aria-label="Clear selection and drag to move the map"
-                on:click=move |_| {
-                    if !mu.drag.with_value(|g| g.moved) {
+                on:click=move |ev: leptos::ev::MouseEvent| {
+                    let moved = mu.drag.try_update_value(|g| std::mem::take(&mut g.moved)).unwrap_or(false);
+                    if ep::is_tap(moved, ev.detail()) {
                         ui.sel.set(None);
                     }
-                    mu.drag.update_value(|g| g.moved = false);
                 }
             ></button>
-            {lines}
-            {dot_views}
-            {labels}
+            <div class="kg-layer" style=layer_style>
+                {lines}
+                {dot_views}
+                {labels}
+            </div>
             <div class="kg-zoom">
                 <button type="button" aria-label="Zoom in" on:click=move |_| mu.zoom(ep::ZOOM_STEP)>"+"</button>
                 <button type="button" aria-label="Zoom out" on:click=move |_| mu.zoom(1.0 / ep::ZOOM_STEP)>"\u{2212}"</button>
-                <button type="button" class="fit" aria-label="Whole map" on:click=move |_| mu.view.set((1.0, 0.0, 0.0))>"Fit"</button>
+                <button type="button" class="fit" aria-label="Whole map" on:click=move |_| mu.place((1.0, 0.0, 0.0))>"Fit"</button>
             </div>
             {move || mu.until.get().map(|y| view! { <div class="kg-year" aria-hidden="true">{y}</div> })}
         </div>
@@ -1002,24 +1115,30 @@ fn map_view(ui: Ui, mu: MapUi) -> AnyView {
                 {move || {
                     let l = live.get();
                     mu.data.with(|(m, _)| {
-                        let shown = MapData {
-                            dots: m.dots.iter().filter(|d| l.contains(&d.id)).cloned().collect(),
-                            lines: m
-                                .lines
-                                .iter()
-                                .filter(|x| l.contains(&x.a) && l.contains(&x.b))
-                                .cloned()
-                                .collect(),
-                            ..MapData::default()
-                        };
-                        ep::count_line(&shown)
+                        let lines = m
+                            .lines
+                            .iter()
+                            .filter(|x| l.contains(&x.a) && l.contains(&x.b))
+                            .count();
+                        ep::count_words(l.len(), lines)
                     })
                 }}
             </span>
             {move || mu.data.with(|(m, _)| ep::map_note(m)).map(|t| view! { <span>{t}</span> })}
             {move || mu.busy.get().then(|| view! { <span class="iv-status">"Loading your map\u{2026}"</span> })}
         </div>
-        {move || mu.error.get().map(|e| view! { <p class="box amber" role="alert">{e}</p> })}
+        {move || {
+            mu.error.get().map(|e| {
+                view! {
+                    <p class="box amber" role="alert">
+                        {e} " "
+                        <button type="button" class="kg-more" on:click=move |_| mu.retry.update(|r| *r += 1)>
+                            "Try again"
+                        </button>
+                    </p>
+                }
+            })
+        }}
     }
     .into_any()
 }

@@ -792,6 +792,20 @@ async fn the_map_is_drawn_with_a_button_per_dot() {
     assert!(m.contains(r#"viewBox="0 0 860 720""#));
     assert_eq!(m.matches("<line ").count(), map.lines.len());
     assert!(m.contains(r#"stroke-dasharray="4 3""#));
+    // Lines keep their width under zoom; the background is a pointer
+    // surface, out of the tab order.
+    assert!(m.contains(r#"vector-effect="non-scaling-stroke""#));
+    let bg = regex::Regex::new(r#"<button[^>]*class="kg-bg"[^>]*>"#)
+        .unwrap()
+        .find(&m)
+        .expect("the background button")
+        .as_str()
+        .to_string();
+    assert!(bg.contains(r#"tabindex="-1""#), "{bg}");
+    // The page's phone layout starts where the phone frame does.
+    assert_eq!(ep::PHONE_BELOW, 700.0);
+    assert!(m.contains("@media (min-width:700px)"));
+    assert!(m.contains("@media (max-width:699.98px)"));
     assert!(m.contains("Time-lapse by paper year"));
     assert!(m.contains("Show on the map"));
     // The disease row names the run's certainty.
