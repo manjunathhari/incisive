@@ -15,13 +15,16 @@ const MAX_NAME: usize = 80;
 const MAX_DISEASES: usize = 2;
 const MAX_TREATMENTS: usize = 4;
 const MAX_OUTCOMES: usize = 3;
+const MAX_ORGANS: usize = 2;
 
 pub const SYSTEM: &str = "You file one answered clinical question in a knowledge graph. \
 Name what the question is about, for any medical specialty. Reply with: the disease or condition \
-(at most two), the treatments or interventions compared (at most four), the organs involved, and \
+(at most two), the treatments or interventions compared (at most four), the organs involved (at most two), and \
 up to three outcomes.\n\
 - Expand abbreviations only when you are sure of them; otherwise keep the words as written.\n\
 - Use a broad treatment name, for example \"Robotic surgery\", not a device or technique detail.\n\
+- For drugs, name the drug or class actually compared, for example \"SGLT2 inhibitors\", and keep \
+two compared drugs or classes as separate treatments; do not merge them under one broad name.\n\
 - When a name in the listed known names fits, reuse it exactly.\n\
 - Pick outcomes named in the question first, then those that matter most to the bottom line.\n\
 - For each outcome give the number of its row from the numbered outcome rows, and use only listed \
@@ -171,7 +174,9 @@ pub fn check(raw: RawPicks, a: &AnswerV3) -> Picks {
         }
         let key = norm_label(&s);
         match ORGANS.iter().find(|o| norm_label(o) == key) {
-            Some(o) if !organs.iter().any(|x| x == o) => organs.push((*o).to_string()),
+            Some(o) if !organs.iter().any(|x| x == o) && organs.len() < MAX_ORGANS => {
+                organs.push((*o).to_string())
+            }
             _ => dropped += 1,
         }
     }
@@ -481,6 +486,25 @@ mod tests {
         let p = check(r, &hernia());
         assert_eq!(p.diseases, s(&["Inguinal hernia repair"]));
         assert_eq!(p.outcomes[0].name, "Chronic pain");
+    }
+
+    #[test]
+    fn organs_are_capped_and_extras_counted() {
+        let r = RawPicks {
+            organs: s(&["Liver", "Pancreas", "Stomach"]),
+            ..Default::default()
+        };
+        let p = check(r, &hernia());
+        assert_eq!(p.organs.len(), MAX_ORGANS);
+        assert_eq!(MAX_ORGANS, 2);
+        assert_eq!(p.dropped, 1);
+    }
+
+    #[test]
+    fn system_states_the_organ_limit_and_drug_class_rule() {
+        assert!(SYSTEM.contains("organs involved (at most two)"));
+        assert!(SYSTEM.contains("SGLT2 inhibitors"));
+        assert!(SYSTEM.contains("separate"));
     }
 
     #[test]

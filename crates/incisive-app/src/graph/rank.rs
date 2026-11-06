@@ -47,7 +47,9 @@ impl Rank {
 pub struct Ranked {
     pub rank: Rank,
     pub label: &'static str,
-    /// Meta-analysis or review that pools more than randomised trials.
+    /// Meta-analysis or review that is stated to pool more than randomised
+    /// trials. False means "not stated to include non-RCT designs", not
+    /// "RCTs only".
     pub includes_non_rct: bool,
 }
 
@@ -59,17 +61,97 @@ fn ranked(rank: Rank, label: &'static str) -> Ranked {
     }
 }
 
-/// "rct" / "rcts" as a whole word (not inside e.g. "arctic").
-fn has_word_rct(t: &str) -> bool {
-    t.split(|c: char| !c.is_alphanumeric())
-        .any(|w| w == "rct" || w == "rcts")
+/// Lower-case, with the Unicode hyphens and dashes (U+2010 to U+2015) as "-".
+fn normalise(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if ('\u{2010}'..='\u{2015}').contains(&c) {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
-/// Classify one lower-cased text; `None` when nothing matches.
-fn classify(t: &str) -> Option<Ranked> {
+fn words(t: &str) -> impl Iterator<Item = &str> {
+    t.split(|c: char| !c.is_alphanumeric())
+}
+
+/// "rct" / "rcts" as a whole word (not inside e.g. "arctic").
+fn has_word_rct(t: &str) -> bool {
+    words(t).any(|w| w == "rct" || w == "rcts")
+}
+
+/// A text that only talks about a study (protocol, commentary, review that is
+/// not systematic) or is not a human study (animal work).
+fn is_mention_only(t: &str) -> bool {
+    t.contains("narrative review")
+        || t.contains("scoping review")
+        || t.contains("in vitro")
+        || words(t).any(|w| {
+            matches!(
+                w,
+                "editorial"
+                    | "letter"
+                    | "commentary"
+                    | "comment"
+                    | "protocol"
+                    | "porcine"
+                    | "swine"
+                    | "murine"
+                    | "mouse"
+                    | "mice"
+                    | "rat"
+                    | "rats"
+                    | "rodent"
+                    | "canine"
+                    | "animal"
+            )
+        })
+}
+
+/// Any word that names a study design, so "guideline" is not the study type.
+fn names_a_design(t: &str) -> bool {
+    has_word_rct(t)
+        || [
+            "randomi",
+            "trial",
+            "cohort",
+            "retrospective",
+            "prospective",
+            "case series",
+            "case report",
+            "case-control",
+            "case control",
+            "meta-analysis",
+            "meta analysis",
+            "systematic review",
+            "observational",
+            "comparative",
+            "single-arm",
+            "single arm",
+            "claims",
+            "database",
+        ]
+        .iter()
+        .any(|w| t.contains(w))
+}
+
+enum Class {
+    Hit(Ranked),
+    /// Only mentions a study, or is not a human study: never ranked.
+    MentionOnly,
+    NoMatch,
+}
+
+/// Classify one normalised text.
+fn classify(t: &str) -> Class {
     let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
-    if has(&["guideline", "consensus"]) {
-        return Some(ranked(Rank::Guideline, "Guideline"));
+    let hit = |rank, label| Class::Hit(ranked(rank, label));
+    if has(&["guideline", "consensus"]) && !names_a_design(t) {
+        return hit(Rank::Guideline, "Guideline");
     }
     if has(&[
         "markov",
@@ -78,25 +160,50 @@ fn classify(t: &str) -> Option<Ranked> {
         "decision model",
         "decision-analytic",
     ]) {
-        return Some(ranked(Rank::Model, "Model"));
+        return hit(Rank::Model, "Model");
     }
-    if has(&["meta-analysis", "meta analysis", "systematic review"]) {
+    let scoping_or_narrative = t.contains("narrative review") || t.contains("scoping review");
+    if has(&["meta-analysis", "meta analysis"])
+        || (t.contains("systematic review") && !scoping_or_narrative)
+    {
         let mut r = ranked(Rank::Meta, "Meta-analysis");
         r.includes_non_rct = has(&[
             "non-randomi",
             "nonrandomi",
             "non randomi",
+            "non-rct",
             "prospective",
             "cohort",
             "observational",
             "retrospective",
+            "case series",
+            "case-control",
+            "case control",
+            "registry",
+            "registries",
         ]);
-        return Some(r);
+        return Class::Hit(r);
+    }
+    if is_mention_only(t) {
+        return Class::MentionOnly;
+    }
+    let retro = |label| Class::Hit(ranked(Rank::Retrospective, label));
+    if t.contains("emulat") {
+        return retro(if t.contains("retrospective") {
+            "Retrospective"
+        } else {
+            "Retrospective or unstated"
+        });
     }
     if has(&[
         "non-randomi",
         "nonrandomi",
         "non randomi",
+        "not randomi",
+        "unrandomi",
+        "pseudo-randomi",
+        "pseudo randomi",
+        "non-rct",
         "single-arm",
         "single arm",
         "quasi-randomi",
@@ -104,31 +211,46 @@ fn classify(t: &str) -> Option<Ranked> {
         "quasirandomi",
     ]) {
         if t.contains("retrospective") {
-            return Some(ranked(Rank::Retrospective, "Retrospective"));
+            return retro("Retrospective");
         }
-        return Some(ranked(Rank::Prospective, "Prospective"));
+        if t.contains("trial") || has(&["single-arm", "single arm", "prospective"]) {
+            return hit(Rank::Prospective, "Prospective");
+        }
+        return retro("Retrospective or unstated");
     }
     if has_word_rct(t) || has(&["randomised", "randomized"]) {
-        return Some(ranked(Rank::Rct, "RCT"));
+        return hit(Rank::Rct, "RCT");
     }
     if has(&["case series", "case report"]) {
-        return Some(ranked(Rank::CaseSeries, "Case series"));
+        return hit(Rank::CaseSeries, "Case series");
+    }
+    if t.contains("retrospective") {
+        return retro("Retrospective");
     }
     if t.contains("prospective") {
-        return Some(ranked(Rank::Prospective, "Prospective"));
+        return hit(Rank::Prospective, "Prospective");
     }
-    if has(&["retrospective", "claims", "database"]) {
-        return Some(ranked(Rank::Retrospective, "Retrospective"));
+    if has(&["claims", "database"]) {
+        return retro("Retrospective");
     }
-    if has(&["cohort", "observational"]) {
-        return Some(ranked(Rank::Retrospective, "Retrospective or unstated"));
+    if has(&["cohort", "observational", "case-control", "case control"]) {
+        return retro("Retrospective or unstated");
     }
-    None
+    Class::NoMatch
 }
 
 pub fn rank_paper(design: &str, pub_types: &[String]) -> Ranked {
-    classify(&design.to_lowercase())
-        .or_else(|| pub_types.iter().find_map(|p| classify(&p.to_lowercase())))
+    match classify(&normalise(design)) {
+        Class::Hit(r) => return r,
+        Class::MentionOnly => return ranked(Rank::Unclassified, "Unclassified"),
+        Class::NoMatch => {}
+    }
+    pub_types
+        .iter()
+        .find_map(|p| match classify(&normalise(p)) {
+            Class::Hit(r) => Some(r),
+            _ => None,
+        })
         .unwrap_or_else(|| ranked(Rank::Unclassified, "Unclassified"))
 }
 
@@ -206,6 +328,110 @@ mod tests {
         );
         assert_eq!(r("Pooled RCTs"), Rank::Rct);
         assert_eq!(r("Open-label (RCT)"), Rank::Rct);
+    }
+
+    fn lab(d: &str) -> (Rank, &'static str) {
+        let x = rank_paper(d, &[]);
+        (x.rank, x.label)
+    }
+
+    #[test]
+    fn negated_designs_are_not_rct() {
+        for d in [
+            "Not randomised comparative study",
+            "Unrandomised comparison",
+            "Non-RCT comparative study",
+            "Pseudo-randomised trial",
+            "Non\u{2011}randomised trial",
+        ] {
+            assert_ne!(r(d), Rank::Rct, "{d}");
+            assert_ne!(r(d), Rank::Unclassified, "{d}");
+        }
+        assert_eq!(r("Pseudo-randomised trial"), Rank::Prospective);
+        assert_eq!(r("Non\u{2011}randomised trial"), Rank::Prospective);
+    }
+
+    #[test]
+    fn mere_mentions_of_an_rct_are_unclassified() {
+        for d in [
+            "Narrative review of RCTs",
+            "Study protocol for a randomised trial",
+            "Commentary on an RCT",
+            "Randomised trial in a porcine model",
+            "Editorial",
+            "Letter to the editor",
+            "Scoping review of randomised trials",
+        ] {
+            assert_eq!(r(d), Rank::Unclassified, "{d}");
+        }
+        assert_eq!(r("Systematic review of RCTs"), Rank::Meta);
+    }
+
+    #[test]
+    fn emulations_are_retrospective() {
+        for d in [
+            "Target trial emulation of an RCT",
+            "Propensity-matched cohort emulating a randomised trial",
+        ] {
+            assert_eq!(
+                lab(d),
+                (Rank::Retrospective, "Retrospective or unstated"),
+                "{d}"
+            );
+        }
+    }
+
+    #[test]
+    fn retrospective_beats_prospective_mentions() {
+        assert_eq!(
+            lab("Retrospective analysis of a prospectively maintained database"),
+            (Rank::Retrospective, "Retrospective")
+        );
+        for d in [
+            "Non-randomised cohort study",
+            "Non-randomised comparative study",
+        ] {
+            assert_eq!(
+                lab(d),
+                (Rank::Retrospective, "Retrospective or unstated"),
+                "{d}"
+            );
+        }
+        assert_eq!(r("Non-randomised trial"), Rank::Prospective);
+        assert_eq!(r("Single-arm trial"), Rank::Prospective);
+        assert_eq!(r("Non-randomised prospective cohort"), Rank::Prospective);
+        assert_eq!(r("Prospective multicentre database"), Rank::Prospective);
+        assert_eq!(r("Retrospective non-randomised trial"), Rank::Retrospective);
+    }
+
+    #[test]
+    fn guideline_word_inside_a_design_does_not_make_a_guideline() {
+        assert_eq!(r("RCT of guideline-directed medical therapy"), Rank::Rct);
+        assert_eq!(
+            r("Retrospective cohort of guideline-concordant care"),
+            Rank::Retrospective
+        );
+        assert_eq!(r("Clinical practice guideline"), Rank::Guideline);
+        assert_eq!(r("Consensus statement"), Rank::Guideline);
+    }
+
+    #[test]
+    fn meta_flags_more_non_rct_designs() {
+        for d in [
+            "Meta-analysis of 12 case series",
+            "Meta-analysis of case-control studies",
+            "Meta-analysis of registry data",
+        ] {
+            assert!(rank_paper(d, &[]).includes_non_rct, "{d}");
+        }
+    }
+
+    #[test]
+    fn case_control_is_retrospective_unstated() {
+        assert_eq!(
+            lab("Case-control study"),
+            (Rank::Retrospective, "Retrospective or unstated")
+        );
     }
 
     #[test]

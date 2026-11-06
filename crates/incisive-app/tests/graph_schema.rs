@@ -197,3 +197,83 @@ async fn unique_kind_and_label_and_checks_hold() {
             .await;
     assert!(self_merge.is_err(), "no self merge");
 }
+
+/// The merge SQL as the README gives it, with the two ids filled in.
+fn merge_sql(drop_id: i64, keep_id: i64) -> String {
+    let readme = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../infra/README.md"
+    ))
+    .expect("infra/README.md");
+    let after = readme
+        .split("**Merging two concepts**")
+        .nth(1)
+        .expect("merge section");
+    let sql = after
+        .split("```sql\n")
+        .nth(1)
+        .and_then(|b| b.split("```").next())
+        .expect("sql block");
+    assert!(sql.contains(":drop") && sql.contains(":keep"));
+    sql.replace(":drop", &drop_id.to_string())
+        .replace(":keep", &keep_id.to_string())
+}
+
+async fn run_merge(pool: &PgPool, drop_id: i64, keep_id: i64) -> i64 {
+    sqlx::query_scalar(merge_sql(drop_id, keep_id).trim().trim_end_matches(';'))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn merged_into(pool: &PgPool, id: i64) -> Option<i64> {
+    sqlx::query_scalar("SELECT merged_into FROM incisive.graph_concepts WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn readme_merge_sql_merges_same_kind_only() {
+    let Some(pool) = connect().await else { return };
+    let (user, run) = seed_run(&pool).await;
+    let keep = seed_concept(&pool, "treatment").await;
+    let drop = seed_concept(&pool, "treatment").await;
+    let other_kind = seed_concept(&pool, "disease").await;
+    for c in [drop, keep] {
+        sqlx::query(
+            "INSERT INTO incisive.graph_run_concepts (run_id, user_id, concept_id) VALUES ($1, $2, $3)",
+        )
+        .bind(run)
+        .bind(user)
+        .bind(c)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Cross-kind and self: nothing changes.
+    for (d, k) in [(other_kind, keep), (keep, keep)] {
+        let merged: i64 = run_merge(&pool, d, k).await;
+        assert_eq!(merged, 0, "{d} into {k}");
+        assert_eq!(merged_into(&pool, d).await, None);
+    }
+    assert_eq!(
+        count(&pool, "graph_run_concepts", "concept_id", &drop.to_string()).await,
+        1
+    );
+
+    // Same kind: merged; the link the keeper already has on the run is dropped.
+    let merged: i64 = run_merge(&pool, drop, keep).await;
+    assert_eq!(merged, 1);
+    assert_eq!(merged_into(&pool, drop).await, Some(keep));
+    assert_eq!(
+        count(&pool, "graph_run_concepts", "concept_id", &drop.to_string()).await,
+        0
+    );
+    assert_eq!(
+        count(&pool, "graph_run_concepts", "concept_id", &keep.to_string()).await,
+        1
+    );
+}

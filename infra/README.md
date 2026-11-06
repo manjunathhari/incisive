@@ -746,7 +746,8 @@ All three are checked before the build (only the ends trimmed), and the app refu
 at startup (`GRAPH=on` without `GRAPH_FROM`, a bad date, a model with a space, or an unpriced model in
 prod). Rolling back: set `GRAPH=off`; stored rows stay.
 
-**Merging two concepts** (same kind; keep `:keep`, fold in `:drop`). Run in the Supabase SQL editor.
+**Merging two concepts** (same kind; keep `:keep`, fold in `:drop`). Run in the Supabase SQL editor,
+after replacing `:drop` and `:keep` with the real concept ids (plain numbers; the editor does not bind them).
 It does nothing at all (no error, nothing changed) unless both ids exist, differ, are of the same
 kind, and `:keep` is not itself merged into another concept; check that the first line reports
 `merged = 1`. A link that the kept concept already has on the same run is dropped, not doubled.
