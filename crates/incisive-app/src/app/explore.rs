@@ -64,7 +64,7 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-lab.b { font-weight:600; }
 .iv-wrap button.kg-openfull { align-self:stretch; width:100%; min-height:46px; padding:0 16px; border-radius:999px; border:1px solid var(--iv-accent); background:var(--iv-card); color:var(--iv-accent); font-family:inherit; font-size:14.5px; font-weight:600; cursor:pointer; }
 .kg-full-head { display:flex; align-items:center; gap:10px; }
-.kg-full-head span { flex:1; font-size:16px; font-weight:600; color:var(--iv-ink); }
+.kg-full-head .kg-full-title { flex:1; font-size:16px; font-weight:600; color:var(--iv-ink); }
 .iv-wrap button.kg-close { flex:none; width:44px; height:44px; padding:0; border-radius:50%; border:1px solid var(--iv-border); background:var(--iv-card); color:var(--iv-ink); font-family:inherit; font-size:22px; cursor:pointer; }
 .kg-map.kg-full { position:fixed; inset:0; z-index:50; box-sizing:border-box; background:var(--iv-ground);
   padding:calc(12px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px)); }
@@ -345,6 +345,9 @@ fn filter_of(ui: Ui) -> MapFilter {
 /// count.
 type MapKey = (MapFilter, (f32, f32), u32);
 
+/// A laid-out map and the frame it was laid out for.
+type Laid = (MapData, (f32, f32));
+
 /// A pinch's start: the fingers' distance and middle, and the view then.
 type Pinch = (f32, (f32, f32), ep::ViewBox);
 
@@ -378,7 +381,7 @@ const FULL_MARK: &str = "incisive-explore-map-full";
 #[derive(Clone, Copy)]
 struct MapUi {
     /// The laid-out map and the frame it was laid out for.
-    data: RwSignal<(MapData, (f32, f32))>,
+    data: RwSignal<Laid>,
     /// The frame this browser wants (its width decides; in full screen,
     /// the frame's measured size).
     frame: RwSignal<(f32, f32)>,
@@ -400,8 +403,26 @@ struct MapUi {
     drag: StoredValue<Drag>,
     timer: StoredValue<Option<leptos::leptos_dom::helpers::IntervalHandle>, LocalStorage>,
     node: NodeRef<leptos::html::Div>,
+    /// The layer the dots are drawn on: the frame, or, while an old layout
+    /// waits for its new one, as much of it as fits without stretching.
+    layer: NodeRef<leptos::html::Div>,
+    /// The full screen dialog.
+    dialog: NodeRef<leptos::html::Div>,
     open_btn: NodeRef<leptos::html::Button>,
     close_btn: NodeRef<leptos::html::Button>,
+    /// The frame's drawn size in pixels (zero until measured).
+    bx: RwSignal<(f32, f32)>,
+    /// The page's state (Map or List, the filter).
+    ui: Ui,
+    /// The map on screen, and the one being fetched: `shown` moves only
+    /// when a fetch succeeds, so a failed one can be asked again ("Try
+    /// again" bumps `retry`).
+    shown: StoredValue<MapKey>,
+    asking: StoredValue<Option<MapKey>>,
+    /// The map on the page before full screen opened, put back on close.
+    before: StoredValue<Option<(MapKey, Laid)>>,
+    /// A full screen resize waiting to settle.
+    refit: StoredValue<Option<leptos::leptos_dom::helpers::TimeoutHandle>, LocalStorage>,
 }
 
 impl MapUi {
@@ -433,21 +454,24 @@ impl MapUi {
     /// A hidden frame (width 0) is skipped. Safe once the page is gone
     /// (it may run on a later frame).
     fn measure(self) {
-        #[cfg(feature = "hydrate")]
-        if let Some(el) = self.node.try_get_untracked().flatten() {
-            let w = el.get_bounding_client_rect().width();
-            let Some(fw) = self.data.try_with_untracked(|(_, f)| f.0) else {
-                return;
-            };
-            if w > 0.0 {
-                let u = fw / w as f32;
-                if self
-                    .unit
-                    .try_get_untracked()
-                    .is_some_and(|old| (old - u).abs() > 1e-3)
-                {
-                    let _ = self.unit.try_set(u);
-                }
+        let Some(b) = self.box_size() else {
+            return;
+        };
+        if self.bx.try_get_untracked().is_some_and(|old| old != b) {
+            let _ = self.bx.try_set(b);
+        }
+        let Some(f) = self.data.try_with_untracked(|(_, f)| *f) else {
+            return;
+        };
+        let (_, _, w, _) = ep::contain(b, f);
+        if w > 0.0 {
+            let u = f.0 / w;
+            if self
+                .unit
+                .try_get_untracked()
+                .is_some_and(|old| (old - u).abs() > 1e-3)
+            {
+                let _ = self.unit.try_set(u);
             }
         }
     }
@@ -458,7 +482,13 @@ impl MapUi {
     fn want_frame(self) {
         let full = self.full.try_get_untracked().unwrap_or(false);
         let f = if full {
-            self.box_size()
+            // Laid out again only for a real change of size; a small one
+            // (a toolbar) keeps the layout, drawn whole.
+            self.box_size().filter(|b| {
+                self.frame
+                    .try_get_untracked()
+                    .is_some_and(|old| ep::refit_needed(old, *b))
+            })
         } else {
             window_width().map(ep::frame_for)
         };
@@ -490,6 +520,13 @@ impl MapUi {
         if self.full.get_untracked() {
             return;
         }
+        // Full screen is the map's: from the List too (Forward into a full
+        // screen entry), the time-lapse stopped and every dot shown.
+        self.ui.view.set(View::Map);
+        self.stop();
+        self.until.set(None);
+        self.before
+            .set_value(Some((self.shown.get_value(), self.data.get_untracked())));
         self.full.set(true);
         self.fit();
         #[cfg(feature = "hydrate")]
@@ -534,6 +571,18 @@ impl MapUi {
             return;
         }
         let _ = self.full.try_set(false);
+        self.cancel_refit();
+        // The map the page had, back at once (when the filter is the same):
+        // no wait for a new layout and no frame of the full screen's shape.
+        let filter = untrack(|| filter_of(self.ui));
+        if let Some(Some((key, data))) = self.before.try_update_value(Option::take)
+            && key.0 == filter
+        {
+            self.asking.set_value(None);
+            let _ = self.busy.try_set(false);
+            self.shown.set_value(key);
+            let _ = self.data.try_set(data);
+        }
         self.fit();
         #[cfg(feature = "hydrate")]
         {
@@ -544,6 +593,33 @@ impl MapUi {
                     let _ = b.focus();
                 }
             });
+        }
+    }
+
+    /// A full screen resize: the layout waits until the size has settled
+    /// (200 ms after the last change); the drawing follows at once
+    /// (browser only).
+    #[cfg(feature = "hydrate")]
+    fn resized(self) {
+        if !self.full.get_untracked() {
+            request_animation_frame(move || self.want_frame());
+            return;
+        }
+        self.measure();
+        self.cancel_refit();
+        let h = leptos::leptos_dom::helpers::set_timeout_with_handle(
+            move || {
+                let _ = self.refit.try_update_value(|h| *h = None);
+                self.want_frame();
+            },
+            std::time::Duration::from_millis(200),
+        );
+        self.refit.set_value(h.ok());
+    }
+
+    fn cancel_refit(self) {
+        if let Some(h) = self.refit.try_update_value(Option::take).flatten() {
+            h.clear();
         }
     }
 
@@ -597,6 +673,37 @@ fn set_history(full: bool, push: bool) {
         } else {
             h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url))
         };
+    }
+}
+
+/// Tab and Shift+Tab stay inside the full screen map: off its last control
+/// to its first and back (browser only).
+#[cfg(feature = "hydrate")]
+fn trap_focus(mu: MapUi, ev: &leptos::ev::KeyboardEvent) {
+    use wasm_bindgen::JsCast;
+    let Some(dialog) = mu.dialog.try_get_untracked().flatten() else {
+        return;
+    };
+    let Ok(list) = dialog.query_selector_all("button, a[href], input, select") else {
+        return;
+    };
+    // Shown controls in the tab order only.
+    let controls: Vec<web_sys::HtmlElement> = (0..list.length())
+        .filter_map(|i| list.item(i))
+        .filter_map(|n| n.dyn_into::<web_sys::HtmlElement>().ok())
+        .filter(|e| e.offset_parent().is_some() && e.tab_index() >= 0)
+        .collect();
+    let active = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.active_element());
+    let at = active.and_then(|a| {
+        controls
+            .iter()
+            .position(|c| AsRef::<web_sys::Element>::as_ref(c) == &a)
+    });
+    if let Some(i) = ep::trap_step(controls.len(), at, ev.shift_key()) {
+        ev.prevent_default();
+        let _ = controls[i].focus();
     }
 }
 
@@ -734,8 +841,16 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
         drag: StoredValue::new(Drag::default()),
         timer: StoredValue::new_local(None),
         node: NodeRef::new(),
+        layer: NodeRef::new(),
+        dialog: NodeRef::new(),
         open_btn: NodeRef::new(),
         close_btn: NodeRef::new(),
+        bx: RwSignal::new((0.0, 0.0)),
+        ui,
+        shown: StoredValue::new((MapFilter::default(), start.frame, 0u32)),
+        asking: StoredValue::new(None),
+        before: StoredValue::new(None),
+        refit: StoredValue::new_local(None),
     };
     // The list under a filter; the whole map needs no second fetch.
     let picked = Resource::new(
@@ -757,9 +872,7 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
         mu.want_frame();
         #[cfg(feature = "hydrate")]
         {
-            let resize = window_event_listener(leptos::ev::resize, move |_| {
-                request_animation_frame(move || mu.want_frame());
-            });
+            let resize = window_event_listener(leptos::ev::resize, move |_| mu.resized());
             let back = window_event_listener(leptos::ev::popstate, move |_| {
                 if full_entry() {
                     mu.open_full(false);
@@ -768,11 +881,17 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
                 }
             });
             let keys = window_event_listener(leptos::ev::keydown, move |ev| {
-                if ev.key() == "Escape" && mu.full.get_untracked() {
-                    mu.ask_close();
+                if !mu.full.get_untracked() {
+                    return;
+                }
+                match ev.key().as_str() {
+                    "Escape" => mu.ask_close(),
+                    "Tab" => trap_focus(mu, &ev),
+                    _ => {}
                 }
             });
             on_cleanup(move || {
+                mu.cancel_refit();
                 resize.remove();
                 back.remove();
                 keys.remove();
@@ -796,11 +915,7 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
             mu.unmove();
         }
     });
-    // The map on screen, and the one being fetched: `shown` moves only
-    // when a fetch succeeds, so a failed one can be asked again ("Try
-    // again" bumps `retry`).
-    let shown = StoredValue::new((MapFilter::default(), start.frame, 0u32));
-    let asking: StoredValue<Option<MapKey>> = StoredValue::new(None);
+    let (shown, asking) = (mu.shown, mu.asking);
     Effect::new(move |_| {
         let key = (filter_of(ui), mu.frame.get(), mu.retry.get());
         let same = |k: &MapKey| k.0 == key.0 && k.1 == key.1;
@@ -835,6 +950,9 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
                     shown.set_value(key);
                     let _ = mu.data.try_set((m, (w, h)));
                     let _ = mu.error.try_set(None);
+                    // A new layout starts whole: a zoom or pan made on the
+                    // old one would not fit it.
+                    mu.fit();
                 }
                 Err(e) => {
                     let _ = mu.error.try_set(Some(error_text(&e)));
@@ -1208,7 +1326,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
     let to_frame = move |x: i32, y: i32| -> Option<(f32, f32)> {
         #[cfg(feature = "hydrate")]
         {
-            let el = mu.node.get_untracked()?;
+            let el = mu.layer.get_untracked()?;
             let rect = el.get_bounding_client_rect();
             let (w, h) = mu.frame_now();
             if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -1231,6 +1349,19 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
         (d, ((a.1 + b.1) / 2.0, (a.2 + b.2) / 2.0))
     };
     let down = move |ev: leptos::ev::PointerEvent| {
+        // The zoom buttons are buttons, not part of the map: no pan or drag.
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::JsCast;
+            if ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|t| t.closest(".kg-zoom").ok().flatten())
+                .is_some()
+            {
+                return;
+            }
+        }
         let Some((x, y)) = to_frame(ev.client_x(), ev.client_y()) else {
             return;
         };
@@ -1422,6 +1553,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
         <div
             id="kg-map"
             class="kg-map"
+            node_ref=mu.dialog
             class:kg-full=full
             hidden=move || ui.view.get() != View::Map
             role=move || full().then_some("dialog")
@@ -1429,7 +1561,8 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
             aria-label=move || full().then_some("Your map, full screen")
         >
             <div class="kg-full-head" hidden=move || !full()>
-                <span>"Your map"</span>
+                <span class="kg-full-title">"Your map"</span>
+                {move || mu.busy.get().then(|| view! { <span class="iv-status">"Drawing your map\u{2026}"</span> })}
                 <button type="button" class="kg-close" aria-label="Close full screen" node_ref=mu.close_btn on:click=move |_| mu.ask_close()>
                     "\u{d7}"
                 </button>
@@ -1474,7 +1607,28 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
                 ></button>
                 // Until the page runs in the browser the frame says so.
                 <div class="kg-drawing" hidden=move || ui.ready.get()>"Drawing your map\u{2026}"</div>
-                <div class="kg-layer" hidden=move || !ui.ready.get()>
+                <div
+                    class="kg-layer"
+                    node_ref=mu.layer
+                    hidden=move || !ui.ready.get()
+                    style=move || {
+                        // The map's own shape inside the frame: the whole
+                        // frame, or, while an old layout waits for the new
+                        // one, as much as fits, centred (never stretched).
+                        let b = mu.bx.get();
+                        if b.0 <= 0.0 || b.1 <= 0.0 {
+                            return String::new();
+                        }
+                        let (l, t, w, h) = ep::contain(b, frame());
+                        format!(
+                            "left:{};top:{};width:{};height:{}",
+                            pct(l, b.0),
+                            pct(t, b.1),
+                            pct(w, b.0),
+                            pct(h, b.1)
+                        )
+                    }
+                >
                     {lines}
                     {dot_views}
                     {labels}

@@ -670,6 +670,41 @@ pub fn wants_full(search: &str) -> bool {
         .any(|p| p == "map=full")
 }
 
+/// Where an old layout of `frame` units is drawn inside a `bx` pixel box
+/// until the new one arrives: as big as fits, centred, never stretched
+/// (left, top, width, height in pixels).
+pub fn contain(bx: (f32, f32), frame: (f32, f32)) -> (f32, f32, f32, f32) {
+    if frame.0 <= 0.0 || frame.1 <= 0.0 {
+        return (0.0, 0.0, bx.0.max(0.0), bx.1.max(0.0));
+    }
+    let s = (bx.0 / frame.0).min(bx.1 / frame.1).max(0.0);
+    let (w, h) = (frame.0 * s, frame.1 * s);
+    ((bx.0 - w) / 2.0, (bx.1 - h) / 2.0, w, h)
+}
+
+/// Whether a full screen box went from `old` to `new` by more than a tenth
+/// in either side, so the map is laid out again (smaller changes, such as
+/// a toolbar showing, keep the layout, drawn whole).
+pub fn refit_needed(old: (f32, f32), new: (f32, f32)) -> bool {
+    let far = |a: f32, b: f32| (a - b).abs() > a.abs().max(1.0) * 0.1;
+    far(old.0, new.0) || far(old.1, new.1)
+}
+
+/// Tab inside the full screen map: with `len` controls in it and focus on
+/// control `at` (`None`: outside it), where focus must go instead of where
+/// the browser would take it (`None`: let the browser move it).
+pub fn trap_step(len: usize, at: Option<usize>, back: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match at {
+        None => Some(if back { len - 1 } else { 0 }),
+        Some(0) if back => Some(len - 1),
+        Some(i) if !back && i + 1 >= len => Some(0),
+        Some(_) => None,
+    }
+}
+
 /// A label drawn on the map, under its dot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelBox {
@@ -1527,6 +1562,51 @@ mod tests {
             [(RUN.to_string(), "Inguinal hernia question".to_string())]
         );
         assert!(c.links.is_empty());
+    }
+
+    #[test]
+    fn tab_stays_inside_the_full_screen_map() {
+        // Forward off the last control goes to the first, back off the
+        // first to the last; elsewhere the browser moves focus.
+        assert_eq!(trap_step(5, Some(4), false), Some(0));
+        assert_eq!(trap_step(5, Some(0), true), Some(4));
+        assert_eq!(trap_step(5, Some(2), false), None);
+        assert_eq!(trap_step(5, Some(2), true), None);
+        // Focus outside the dialog comes in at its first (or last) control.
+        assert_eq!(trap_step(5, None, false), Some(0));
+        assert_eq!(trap_step(5, None, true), Some(4));
+        assert_eq!(trap_step(0, None, false), None);
+    }
+
+    #[test]
+    fn an_old_layout_is_drawn_whole_in_a_new_box() {
+        // Same shape: the whole box.
+        assert_eq!(
+            contain((358.0, 480.0), (358.0, 480.0)),
+            (0.0, 0.0, 358.0, 480.0)
+        );
+        assert_eq!(
+            contain((716.0, 960.0), (358.0, 480.0)),
+            (0.0, 0.0, 716.0, 960.0)
+        );
+        // A taller box: full width, centred (no stretch).
+        let (l, t, w, h) = contain((358.0, 700.0), (358.0, 480.0));
+        assert_eq!((l, w, h), (0.0, 358.0, 480.0));
+        assert_eq!(t, 110.0);
+        // A wider box: full height, centred.
+        let (l, t, w, h) = contain((1000.0, 480.0), (358.0, 480.0));
+        assert_eq!((t, w, h), (0.0, 358.0, 480.0));
+        assert_eq!(l, 321.0);
+        // Nothing measured yet: the box as it is.
+        assert_eq!(contain((0.0, 0.0), (358.0, 480.0)), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn full_screen_refits_only_for_a_real_change() {
+        assert!(!refit_needed((390.0, 700.0), (390.0, 700.0)));
+        assert!(!refit_needed((390.0, 700.0), (395.0, 690.0)));
+        assert!(refit_needed((390.0, 700.0), (700.0, 390.0)));
+        assert!(refit_needed((390.0, 700.0), (390.0, 600.0)));
     }
 
     /// The page's fetch bookkeeping, as `explore.rs` keeps it.
