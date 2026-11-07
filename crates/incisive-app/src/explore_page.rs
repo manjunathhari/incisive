@@ -15,9 +15,6 @@ pub const FOLD_AT: usize = 5;
 pub const PHONE_FRAME: (f32, f32) = (358.0, 480.0);
 pub const DESKTOP_FRAME: (f32, f32) = (860.0, 720.0);
 
-/// Where this browser keeps its Map/List choice.
-pub const VIEW_STORAGE_KEY: &str = "incisive.explore.view";
-
 pub const TITLE: &str = "Explore";
 pub const EMPTY: &str = "Ask your first question to start your map.";
 pub const NOT_FOUND: &str = "Page not found. Go back to the question box.";
@@ -286,6 +283,9 @@ pub fn organs(data: &MapData) -> Vec<(i64, String)> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Card {
     pub kicker: String,
+    /// A paper's rank chip before the kicker ("1 · RCT"; "Not ranked") and
+    /// its rank colour class.
+    pub chip: Option<(String, &'static str)>,
     pub title: String,
     pub body: String,
     /// Warnings shown on the card ("Retracted", "includes non-RCT studies").
@@ -300,6 +300,9 @@ pub struct Card {
     pub pubmed: Option<String>,
     /// "Ask about this": the Ask page with this concept's id (never its name).
     pub ask: Option<String>,
+    /// A paper's questions on the map ("From your question: ..."): (dot
+    /// id, name), each name once.
+    pub from: Vec<(String, String)>,
 }
 
 /// The card before anything is picked.
@@ -380,8 +383,18 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
     };
     match d.kind {
         DotKind::Paper => {
-            let (_, num, name) = rank_info(d.rank.as_deref());
-            c.kicker = format!("Paper \u{b7} Rank {num} \u{b7} {name}");
+            let (place, num, name) = rank_info(d.rank.as_deref());
+            c.kicker = "Paper".into();
+            let chip = if place < 5 {
+                format!("{num} \u{b7} {name}")
+            } else {
+                name.to_string()
+            };
+            c.chip = Some((chip, rank_class(d.rank.as_deref())));
+            let pmid = d
+                .pmid
+                .as_deref()
+                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
             let mut body: Vec<String> = Vec::new();
             if !d.design.trim().is_empty() {
                 body.push(d.design.trim().to_string());
@@ -392,6 +405,9 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if let Some(n) = d.n {
                 body.push(format!("n={}", indian_number(n)));
             }
+            if let Some(p) = pmid {
+                body.push(format!("PMID {p}"));
+            }
             c.body = body.join(" \u{b7} ");
             if d.retracted {
                 c.flags.push("Retracted".into());
@@ -399,12 +415,15 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if d.includes_non_rct {
                 c.flags.push("includes non-RCT studies".into());
             }
+            // A paper's lines go to its questions: named on the card
+            // ("From your question"), not offered as buttons.
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            c.from = std::mem::take(&mut c.links)
+                .into_iter()
+                .filter(|(_, label)| seen.insert(label.clone()))
+                .collect();
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
-            c.pubmed = d
-                .pmid
-                .as_deref()
-                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-                .map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
+            c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
         DotKind::Run => {
             // As on the board: the question as asked and its bottom line
@@ -563,44 +582,147 @@ pub fn frame_for_agent(user_agent: Option<&str>) -> (f32, f32) {
     }
 }
 
-/// The zoom range and one step of + / −.
-pub const ZOOM_MIN: f32 = 0.6;
-pub const ZOOM_MAX: f32 = 5.0;
-pub const ZOOM_STEP: f32 = 1.4;
+/// The zoom range (the registry's), one step of + / −, and one wheel
+/// notch.
+pub const ZOOM_MIN: f32 = 0.5;
+pub const ZOOM_MAX: f32 = 10.0;
+pub const ZOOM_STEP: f32 = 1.3;
+pub const WHEEL_STEP: f32 = 1.15;
+/// A pointer that moves this many screen pixels drags; less is a tap.
+pub const DRAG_FROM: f32 = 10.0;
+/// From this zoom every lit dot is labelled.
+pub const LABELS_FROM_ZOOM: f32 = 1.6;
+/// Dots this big or bigger (disease, organ, treatment) are always labelled.
+pub const LABELLED_FROM_R: f32 = 11.0;
+/// A full screen map with at most this many dots that are not papers
+/// labels every lit one.
+pub const ROOMY_UP_TO: usize = 40;
 
-/// A dot's radius at a zoom: dots grow a little when zoomed in, to 1.35x.
-pub fn zoom_radius(r: f32, zoom: f32) -> f32 {
-    if zoom > 1.0 {
-        r * (1.0 + (zoom - 1.0) * 0.15).min(1.35)
-    } else {
-        r
-    }
+/// Zoom and pan: k, then tx and ty in frame units.
+pub type ViewBox = (f32, f32, f32);
+
+/// How much dots grow with the zoom: k^0.2, kept within 0.8 to 1.5.
+pub fn grow(k: f32) -> f32 {
+    k.powf(0.2).clamp(0.8, 1.5)
 }
 
-/// A dot's tap target: at least 30 units across.
+/// A dot's radius on screen at a zoom.
+pub fn zoom_radius(r: f32, zoom: f32) -> f32 {
+    r * grow(zoom)
+}
+
+/// A dot's tap target: at least 30 pixels across.
 pub fn hit_size(r: f32) -> f32 {
     (r * 2.0 + 8.0).max(30.0)
 }
 
-/// A label drawn on the map: its top-left corner and width in frame units.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LabelBox {
-    pub id: String,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub text: String,
-    pub bold: bool,
+/// Zoom by `f` about point `p` of the frame (it stays where it is), the
+/// zoom kept within [`ZOOM_MIN`] and [`ZOOM_MAX`].
+pub fn zoom_about((k, tx, ty): ViewBox, (px, py): (f32, f32), f: f32) -> ViewBox {
+    let nk = (k * f).clamp(ZOOM_MIN, ZOOM_MAX);
+    let m = nk / k;
+    (nk, px - (px - tx) * m, py - (py - ty) * m)
 }
 
-/// A label's height in frame units.
-pub const LABEL_H: f32 = 14.0;
-/// The width one character of a label takes (12px Figtree).
-const CHAR_W: f32 = 6.3;
+/// A pinch: from `v0` with the fingers `d0` apart about `mid0`, to `d`
+/// apart about `mid`; the point under the fingers stays under them.
+pub fn pinch_view(v0: ViewBox, d0: f32, mid0: (f32, f32), d: f32, mid: (f32, f32)) -> ViewBox {
+    let (k0, tx0, ty0) = v0;
+    let k = (k0 * d / d0.max(1e-3)).clamp(ZOOM_MIN, ZOOM_MAX);
+    let (wx, wy) = ((mid0.0 - tx0) / k0, (mid0.1 - ty0) / k0);
+    (k, mid.0 - wx * k, mid.1 - wy * k)
+}
+
+/// Where a dot laid out at `xy`, dragged by `off` (layout units), is drawn
+/// under the view (frame units).
+pub fn screen_at((x, y): (f32, f32), (ox, oy): (f32, f32), (k, tx, ty): ViewBox) -> (f32, f32) {
+    (tx + (x + ox) * k, ty + (y + oy) * k)
+}
+
+/// Whether a pointer that moved `dx`, `dy` screen pixels is dragging.
+pub fn is_drag(dx: f32, dy: f32) -> bool {
+    dx.hypot(dy) >= DRAG_FROM
+}
+
+/// A page's query string with full screen (`map=full`) put in or taken
+/// out; nothing else in it changes.
+pub fn map_query(search: &str, full: bool) -> String {
+    let mut parts: Vec<&str> = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|p| !p.is_empty() && *p != "map=full")
+        .collect();
+    if full {
+        parts.push("map=full");
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// Whether a page's query string asks for the full screen map.
+pub fn wants_full(search: &str) -> bool {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .any(|p| p == "map=full")
+}
+
+/// Where an old layout of `frame` units is drawn inside a `bx` pixel box
+/// until the new one arrives: as big as fits, centred, never stretched
+/// (left, top, width, height in pixels).
+pub fn contain(bx: (f32, f32), frame: (f32, f32)) -> (f32, f32, f32, f32) {
+    if frame.0 <= 0.0 || frame.1 <= 0.0 {
+        return (0.0, 0.0, bx.0.max(0.0), bx.1.max(0.0));
+    }
+    let s = (bx.0 / frame.0).min(bx.1 / frame.1).max(0.0);
+    let (w, h) = (frame.0 * s, frame.1 * s);
+    ((bx.0 - w) / 2.0, (bx.1 - h) / 2.0, w, h)
+}
+
+/// Whether a full screen box went from `old` to `new` by more than a tenth
+/// in either side, so the map is laid out again (smaller changes, such as
+/// a toolbar showing, keep the layout, drawn whole).
+pub fn refit_needed(old: (f32, f32), new: (f32, f32)) -> bool {
+    let far = |a: f32, b: f32| (a - b).abs() > a.abs().max(1.0) * 0.1;
+    far(old.0, new.0) || far(old.1, new.1)
+}
+
+/// Tab inside the full screen map: with `len` controls in it and focus on
+/// control `at` (`None`: outside it), where focus must go instead of where
+/// the browser would take it (`None`: let the browser move it).
+pub fn trap_step(len: usize, at: Option<usize>, back: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match at {
+        None => Some(if back { len - 1 } else { 0 }),
+        Some(0) if back => Some(len - 1),
+        Some(i) if !back && i + 1 >= len => Some(0),
+        Some(_) => None,
+    }
+}
+
+/// A label drawn on the map, under its dot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelBox {
+    pub id: String,
+    pub text: String,
+    /// The selected dot's.
+    pub bold: bool,
+    /// 13px rather than 11px.
+    pub big: bool,
+}
+
+/// A label's font size in pixels.
+pub fn label_px(l: &LabelBox) -> u8 {
+    if l.big { 13 } else { 11 }
+}
+
 /// A label longer than this is cut.
 pub const LABEL_MAX: usize = 30;
-/// A frame at least this wide labels every outcome.
-const WIDE_FROM: f32 = 700.0;
 
 /// A label's text: names over [`LABEL_MAX`] characters keep the first 28,
 /// then "…" (the board's cut).
@@ -613,153 +735,64 @@ pub fn label_text(label: &str) -> String {
     }
 }
 
-/// A kind's place in the label order, after the picked dot and the find
-/// box's matches: disease, organ, treatment, outcome, question, paper.
-pub fn label_rank(kind: DotKind) -> u8 {
-    match kind {
-        DotKind::Disease => 3,
-        DotKind::Organ => 4,
-        DotKind::Treatment => 5,
-        DotKind::Outcome => 6,
-        DotKind::Run => 8,
-        DotKind::Paper => 9,
-    }
-}
-
-/// Whether two boxes (x, y, w, h) overlap.
-fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
-    a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1
-}
-
-/// What the label rules need of a dot: no more than this is copied when
-/// the map moves.
+/// What the label rule needs of a dot on the map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spot {
     pub id: String,
     pub kind: DotKind,
     pub label: String,
-    /// Where it sits in the frame, zoom and pan applied (frame units).
-    pub x: f32,
-    pub y: f32,
     /// Its radius at 1x, in screen pixels.
     pub r: f32,
 }
 
 impl Spot {
-    /// A dot placed by zoom `k` and pan (`tx`, `ty`).
-    pub fn of(d: &Dot, k: f32, tx: f32, ty: f32) -> Spot {
+    pub fn of(d: &Dot) -> Spot {
         Spot {
             id: d.id.clone(),
             kind: d.kind,
             label: d.label.clone(),
-            x: tx + d.x * k,
-            y: ty + d.y * k,
             r: d.r,
         }
     }
 }
 
-/// The labels the map shows, for spots placed in the frame. `unit` is how
-/// many frame units one screen pixel is (the frame may be drawn smaller or
-/// bigger than its units): dots and label text are sized in pixels, so the
-/// collision maths turns them into frame units first.
-///
-/// Order: the picked dot, the find box's matches, the picked dot's
-/// neighbours (not papers), then by [`label_rank`]. A label that would
-/// cover a dot or an earlier label is left out, except the picked dot's,
-/// which always shows. With a dot picked, only it, the matches and its
-/// neighbours (not papers) are labelled, as on the board. Otherwise
-/// diseases, organs and treatments are; outcomes on a wide frame or from
-/// 1.3x; papers from 2.5x; questions only when found. Labels sit under
-/// their dot and stay inside the frame.
+/// The labels the map shows (the registry's rule; overlaps are not
+/// hidden). `focus`: the lit dots when a dot is selected or the find box
+/// has words (`None`: nothing is dimmed). A paper is labelled only when it
+/// is the selected dot; any other dot when it is lit and it is big (radius
+/// [`LABELLED_FROM_R`] or more), or the zoom is [`LABELS_FROM_ZOOM`] or
+/// more, or something is in focus, or the map is full screen with at most
+/// [`ROOMY_UP_TO`] dots that are not papers. 13px for a disease, the
+/// selected dot or anything in full screen; 11px otherwise.
 pub fn visible_labels(
     spots: &[Spot],
     zoom: f32,
     sel: Option<&str>,
-    near: &HashSet<String>,
-    found: &HashSet<String>,
-    frame: (f32, f32),
-    unit: f32,
+    focus: Option<&HashSet<String>>,
+    full: bool,
 ) -> Vec<LabelBox> {
-    let (w_frame, h_frame) = frame;
-    let unit = if unit.is_finite() && unit > 0.0 {
-        unit
-    } else {
-        1.0
-    };
-    let neighbour = |d: &Spot| near.contains(&d.id) && d.kind != DotKind::Paper;
-    let prio = |d: &Spot| {
-        if Some(d.id.as_str()) == sel {
-            0
-        } else if found.contains(&d.id) {
-            1
-        } else if sel.is_some() && neighbour(d) {
-            2
-        } else {
-            label_rank(d.kind)
-        }
-    };
-    let mut order: Vec<&Spot> = spots.iter().collect();
-    order.sort_by(|a, b| prio(a).cmp(&prio(b)).then_with(|| a.id.cmp(&b.id)));
-    // Every dot is in the way of the labels but its own.
-    let radius = |d: &Spot| zoom_radius(d.r, zoom) * unit;
-    let mut boxes: Vec<(String, (f32, f32, f32, f32))> = spots
+    let roomy = full && spots.iter().filter(|d| d.kind != DotKind::Paper).count() <= ROOMY_UP_TO;
+    spots
         .iter()
-        .map(|d| {
-            let r = radius(d);
-            (d.id.clone(), (d.x - r, d.y - r, r * 2.0, r * 2.0))
-        })
-        .collect();
-    let (gap, h) = (2.0 * unit, LABEL_H * unit);
-    let mut out = Vec::new();
-    for d in order {
-        let picked = Some(d.id.as_str()) == sel;
-        let wanted = picked
-            || found.contains(&d.id)
-            || if sel.is_some() {
-                neighbour(d)
+        .filter(|d| {
+            let picked = Some(d.id.as_str()) == sel;
+            let lit = focus.is_none_or(|f| f.contains(&d.id));
+            lit && if d.kind == DotKind::Paper {
+                picked
             } else {
-                match d.kind {
-                    DotKind::Disease | DotKind::Organ | DotKind::Treatment => true,
-                    DotKind::Outcome => zoom >= 1.3 || w_frame >= WIDE_FROM,
-                    DotKind::Paper => zoom >= 2.5,
-                    DotKind::Run => false,
-                }
-            };
-        if !wanted {
-            continue;
-        }
-        let text = label_text(&d.label);
-        let w = ((text.chars().count() as f32 * CHAR_W + 6.0) * unit)
-            .min(w_frame - 2.0 * gap)
-            .max(0.0);
-        let x = (d.x - w / 2.0).min(w_frame - w - gap).max(gap);
-        let mut y = d.y + radius(d) + gap;
-        let outside = y < 0.0 || y > h_frame - h || d.x < 0.0 || d.x > w_frame;
-        if outside {
-            if !picked {
-                continue;
+                d.r >= LABELLED_FROM_R || zoom >= LABELS_FROM_ZOOM || focus.is_some() || roomy
             }
-            y = y.min(h_frame - h).max(0.0);
-        }
-        let mine = (x, y, w, h);
-        let covers = boxes
-            .iter()
-            .any(|(id, b)| *id != d.id && overlaps(mine, *b));
-        if covers && !picked {
-            continue;
-        }
-        boxes.push((format!("label:{}", d.id), mine));
-        out.push(LabelBox {
-            id: d.id.clone(),
-            x,
-            y,
-            w,
-            text,
-            bold: picked || d.kind == DotKind::Disease,
-        });
-    }
-    out
+        })
+        .map(|d| {
+            let picked = Some(d.id.as_str()) == sel;
+            LabelBox {
+                id: d.id.clone(),
+                text: label_text(&d.label),
+                bold: picked,
+                big: d.kind == DotKind::Disease || picked || full,
+            }
+        })
+        .collect()
 }
 
 /// What to do when the map's filter or frame changes.
@@ -1151,7 +1184,7 @@ mod tests {
         let c = card_for(&m, "p:300").unwrap();
         assert!(c.flags.iter().any(|f| f == "Retracted"), "{c:?}");
         let c = card_for(&m, "p:200").unwrap();
-        assert_eq!(c.kicker, "Paper \u{b7} Rank 2 \u{b7} Meta-analysis");
+        assert_eq!(c.kicker, "Paper");
         assert!(c.flags.iter().any(|f| f == "includes non-RCT studies"));
         assert!(!c.flags.iter().any(|f| f == "Retracted"));
         assert!(c.body.contains("n=1,43,717"), "{}", c.body);
@@ -1265,136 +1298,143 @@ mod tests {
 
     // ---------- the map ----------
 
-    const WIDE: (f32, f32) = (860.0, 720.0);
-    const PHONE: (f32, f32) = (358.0, 480.0);
-
-    fn at(mut d: Dot, x: f32, y: f32) -> Dot {
-        d.x = x;
-        d.y = y;
-        d
-    }
-
     fn ids(labels: &[LabelBox]) -> Vec<&str> {
         let mut v: Vec<&str> = labels.iter().map(|l| l.id.as_str()).collect();
         v.sort_unstable();
         v
     }
 
-    fn none() -> HashSet<String> {
-        HashSet::new()
+    fn spots(dots: &[Dot]) -> Vec<Spot> {
+        dots.iter().map(Spot::of).collect()
     }
 
-    /// The labels at a 1:1 frame, nothing picked's neighbours given.
-    fn labels(
-        dots: &[Dot],
-        k: f32,
-        sel: Option<&str>,
-        found: &HashSet<String>,
-        frame: (f32, f32),
-    ) -> Vec<LabelBox> {
-        let spots: Vec<Spot> = dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect();
-        visible_labels(&spots, k, sel, &none(), found, frame, 1.0)
+    fn outcome() -> Dot {
+        let mut d = dot("o:1", DotKind::Outcome, "Recurrence", "");
+        d.r = 8.0;
+        d
     }
 
-    /// Two dots side by side: their labels overlap, but neither label
-    /// touches the other dot.
-    fn pair(a: Dot, b: Dot) -> Vec<Dot> {
-        vec![at(a, 100.0, 100.0), at(b, 112.0, 100.0)]
+    fn big(id: &str, kind: DotKind, r: f32) -> Dot {
+        let mut d = dot(id, kind, "Some name", "");
+        d.r = r;
+        d
     }
 
     #[test]
-    fn colliding_labels_keep_the_higher_priority() {
-        let disease = dot("d:1", DotKind::Disease, "Inguinal hernia", "");
-        let organ = dot("g:1", DotKind::Organ, "Abdominal wall", "");
-        let treatment = dot("t:1", DotKind::Treatment, "Robotic surgery", "");
-        let outcome = dot("o:1", DotKind::Outcome, "Recurrence", "");
+    fn a_papers_label_shows_only_when_it_is_selected() {
         let mut p = paper("1", "rct", Some(2020));
-        p.label = "A paper".into();
-        // Every pair in the priority order: the first keeps its label.
-        let order = [disease, organ, treatment, outcome, p];
-        for i in 0..order.len() {
-            for j in (i + 1)..order.len() {
-                let dots = pair(order[j].clone(), order[i].clone());
-                let got = labels(&dots, 3.0, None, &none(), WIDE);
-                assert_eq!(
-                    ids(&got),
-                    [order[i].id.as_str()],
-                    "{} over {}",
-                    order[i].id,
-                    order[j].id
-                );
-            }
-        }
-        // Found beats a disease; selected beats found.
-        let dots = pair(
-            dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
-            dot("t:1", DotKind::Treatment, "Robotic surgery", ""),
+        p.r = 8.0;
+        let s = spots(&[p]);
+        let focus: HashSet<String> = ["p:1".to_string()].into();
+        // Not at any zoom, not in a roomy full screen, not when found.
+        assert!(visible_labels(&s, 10.0, None, None, true).is_empty());
+        assert!(visible_labels(&s, 1.0, None, Some(&focus), false).is_empty());
+        let got = visible_labels(&s, 1.0, Some("p:1"), Some(&focus), false);
+        assert_eq!(ids(&got), ["p:1"]);
+        assert!(got[0].bold && got[0].big, "{got:?}");
+    }
+
+    #[test]
+    fn big_kinds_are_labelled_and_small_ones_from_one_point_six() {
+        let dots = [
+            big("d:1", DotKind::Disease, 15.0),
+            big("g:1", DotKind::Organ, 12.0),
+            big("t:1", DotKind::Treatment, 11.0),
+            big(RUN, DotKind::Run, 9.0),
+            outcome(),
+        ];
+        let s = spots(&dots);
+        assert_eq!(
+            ids(&visible_labels(&s, 1.0, None, None, false)),
+            ["d:1", "g:1", "t:1"]
         );
-        let found: HashSet<String> = ["t:1".to_string()].into();
-        assert_eq!(ids(&labels(&dots, 1.0, None, &found, WIDE)), ["t:1"]);
-        let found: HashSet<String> = ["d:1".to_string()].into();
-        assert_eq!(ids(&labels(&dots, 1.0, Some("t:1"), &found, WIDE)), ["t:1"]);
-        // The whole order, questions and papers last.
-        let kinds = [
-            DotKind::Disease,
-            DotKind::Organ,
-            DotKind::Treatment,
-            DotKind::Outcome,
-            DotKind::Run,
-            DotKind::Paper,
-        ];
-        for w in kinds.windows(2) {
-            assert!(label_rank(w[0]) < label_rank(w[1]), "{:?}", w);
+        assert_eq!(
+            ids(&visible_labels(&s, 1.5, None, None, false)),
+            ["d:1", "g:1", "t:1"]
+        );
+        assert_eq!(
+            ids(&visible_labels(&s, 1.6, None, None, false)),
+            ["d:1", "g:1", "o:1", RUN, "t:1"]
+        );
+        // Overlapping labels are not hidden (the registry's rule).
+        let mut close = dots.clone();
+        for d in &mut close {
+            d.x = 100.0;
+            d.y = 100.0;
         }
-        // A disease label is bold.
-        let one = [at(
-            dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
-            100.0,
-            100.0,
-        )];
-        assert!(labels(&one, 1.0, None, &none(), WIDE)[0].bold);
+        assert_eq!(
+            visible_labels(&spots(&close), 2.0, None, None, false).len(),
+            5
+        );
     }
 
     #[test]
-    fn a_selected_dots_label_always_shows() {
-        // Squeezed between two diseases, a question has no label unless it
-        // is picked, and then it shows over theirs.
-        let dots = vec![
-            at(dot("d:1", DotKind::Disease, "Achalasia", ""), 100.0, 100.0),
-            at(dot(RUN, DotKind::Run, "Your question", ""), 106.0, 100.0),
-            at(dot("d:2", DotKind::Disease, "Hernia", ""), 112.0, 116.0),
+    fn a_selection_or_a_search_labels_every_lit_dot_and_never_a_dimmed_one() {
+        let dots = [
+            big("d:1", DotKind::Disease, 15.0),
+            outcome(),
+            big(RUN, DotKind::Run, 9.0),
         ];
-        let got = labels(&dots, 1.0, None, &none(), WIDE);
-        assert!(!ids(&got).contains(&RUN));
-        let got = labels(&dots, 1.0, Some(RUN), &none(), WIDE);
-        let l = got.iter().find(|l| l.id == RUN).expect("the picked label");
-        assert!(l.bold);
-        // At the bottom edge, where a label would leave the frame.
-        let low = [at(dot("t:1", DotKind::Treatment, "POEM", ""), 50.0, 478.0)];
-        assert!(labels(&low, 1.0, None, &none(), PHONE).is_empty());
-        let got = labels(&low, 1.0, Some("t:1"), &none(), PHONE);
-        assert_eq!(ids(&got), ["t:1"]);
-        assert!(got[0].y + LABEL_H <= PHONE.1);
+        let s = spots(&dots);
+        let lit: HashSet<String> = [RUN.to_string(), "o:1".to_string()].into();
+        // Picked: the run and its outcome; the dimmed disease has none.
+        assert_eq!(
+            ids(&visible_labels(&s, 1.0, Some(RUN), Some(&lit), false)),
+            ["o:1", RUN]
+        );
+        // A search with the same matches.
+        assert_eq!(
+            ids(&visible_labels(&s, 1.0, None, Some(&lit), false)),
+            ["o:1", RUN]
+        );
+        // Dimmed at any zoom and in full screen.
+        let only: HashSet<String> = ["o:1".to_string()].into();
+        assert_eq!(
+            ids(&visible_labels(&s, 10.0, None, Some(&only), true)),
+            ["o:1"]
+        );
     }
 
     #[test]
-    fn labels_stay_in_the_frame() {
-        let long = "Laparoscopic Heller myotomy with Dor fundoplication";
-        let dots = vec![
-            at(dot("d:1", DotKind::Disease, long, ""), 1.0, 40.0),
-            at(dot("d:2", DotKind::Disease, long, ""), 357.0, 120.0),
-            at(dot("d:3", DotKind::Disease, long, ""), 180.0, 300.0),
-            at(dot("t:1", DotKind::Treatment, "POEM", ""), 2.0, 470.0),
-        ];
-        for sel in [None, Some("t:1")] {
-            let got = labels(&dots, 1.0, sel, &none(), PHONE);
-            // With a dot picked only it (and its neighbours) are labelled.
-            assert!(got.len() >= if sel.is_some() { 1 } else { 3 }, "{got:?}");
-            for l in &got {
-                assert!(l.x >= 0.0 && l.x + l.w <= PHONE.0, "{l:?}");
-                assert!(l.y >= 0.0 && l.y + LABEL_H <= PHONE.1, "{l:?}");
+    fn a_roomy_full_screen_labels_every_dot_up_to_forty() {
+        let roomy = |n: usize| -> Vec<Dot> {
+            let mut v = vec![outcome()];
+            for i in 1..n {
+                v.push(big(&format!("t:{i}"), DotKind::Treatment, 11.0));
             }
-        }
+            // Papers do not count.
+            for i in 0..30 {
+                v.push(paper(&format!("{i}"), "rct", Some(2020)));
+            }
+            v
+        };
+        let forty = spots(&roomy(40));
+        assert!(ids(&visible_labels(&forty, 1.0, None, None, true)).contains(&"o:1"));
+        assert!(!ids(&visible_labels(&forty, 1.0, None, None, false)).contains(&"o:1"));
+        let forty_one = spots(&roomy(41));
+        assert!(!ids(&visible_labels(&forty_one, 1.0, None, None, true)).contains(&"o:1"));
+    }
+
+    #[test]
+    fn label_size_and_weight() {
+        let dots = [
+            big("d:1", DotKind::Disease, 15.0),
+            big("t:1", DotKind::Treatment, 11.0),
+        ];
+        let s = spots(&dots);
+        let got = visible_labels(&s, 1.0, None, None, false);
+        let of = |id: &str, got: &[LabelBox]| got.iter().find(|l| l.id == id).cloned().unwrap();
+        // 13px for a disease, 11px otherwise; bold only when selected.
+        assert!(of("d:1", &got).big && !of("d:1", &got).bold);
+        assert!(!of("t:1", &got).big);
+        assert_eq!(label_px(&of("d:1", &got)), 13);
+        assert_eq!(label_px(&of("t:1", &got)), 11);
+        // Everything is 13px in full screen.
+        let full = visible_labels(&s, 1.0, None, None, true);
+        assert!(full.iter().all(|l| l.big));
+        let lit: HashSet<String> = ["t:1".to_string(), "d:1".to_string()].into();
+        let picked = visible_labels(&s, 1.0, Some("t:1"), Some(&lit), false);
+        assert!(of("t:1", &picked).big && of("t:1", &picked).bold);
     }
 
     #[test]
@@ -1402,11 +1442,11 @@ mod tests {
         let long = "Laparoscopic Heller myotomy with Dor fundoplication";
         let thirty = "Robotic transabdominal repair!";
         assert_eq!(thirty.chars().count(), 30);
-        let dots = vec![
-            at(dot("d:1", DotKind::Disease, long, ""), 200.0, 100.0),
-            at(dot("d:2", DotKind::Disease, thirty, ""), 200.0, 300.0),
-        ];
-        let got = labels(&dots, 1.0, None, &none(), WIDE);
+        let mut a = big("d:1", DotKind::Disease, 15.0);
+        a.label = long.into();
+        let mut b = big("d:2", DotKind::Disease, 15.0);
+        b.label = thirty.into();
+        let got = visible_labels(&spots(&[a, b]), 1.0, None, None, false);
         let text = |id: &str| got.iter().find(|l| l.id == id).unwrap().text.clone();
         // The board's cut: 28 characters, then "…" (a trailing space dropped).
         assert_eq!(text("d:1"), "Laparoscopic Heller myotomy\u{2026}");
@@ -1414,90 +1454,159 @@ mod tests {
         assert_eq!(text("d:2"), thirty);
     }
 
+    fn close(a: (f32, f32, f32), b: (f32, f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3 && (a.2 - b.2).abs() < 1e-3
+    }
+
     #[test]
-    fn small_kinds_are_labelled_when_there_is_room() {
-        let dots = vec![
-            at(dot("o:1", DotKind::Outcome, "Recurrence", ""), 100.0, 100.0),
-            at(paper("1", "rct", Some(2020)), 200.0, 200.0),
-            at(dot(RUN, DotKind::Run, "Your question", ""), 300.0, 300.0),
-        ];
-        let at_zoom = |k: f32, frame| ids(&labels(&dots, k, None, &none(), frame)).len();
-        // A phone at 1x: no outcome, paper or question labels.
-        assert_eq!(at_zoom(1.0, PHONE), 0);
-        // Outcomes from 1.3x on a phone, always on a wide map.
-        assert_eq!(ids(&labels(&dots, 1.3, None, &none(), PHONE)), ["o:1"]);
-        assert_eq!(ids(&labels(&dots, 1.0, None, &none(), WIDE)), ["o:1"]);
-        // Papers from 2.5x; questions only when found or picked.
+    fn the_registrys_zoom_rules() {
+        assert_eq!((ZOOM_MIN, ZOOM_MAX), (0.5, 10.0));
+        assert_eq!(ZOOM_STEP, 1.3);
+        assert_eq!(WHEEL_STEP, 1.15);
+        // About a point: the point stays where it is.
+        let v = zoom_about((1.0, 0.0, 0.0), (100.0, 50.0), 2.0);
+        assert!(close(v, (2.0, -100.0, -50.0)), "{v:?}");
+        let (k, tx, ty) = v;
+        assert!(((100.0 - tx) / k - 100.0).abs() < 1e-3 && ((50.0 - ty) / k - 50.0).abs() < 1e-3);
+        // Clamped to 0.5..10, still about the point.
+        let v = zoom_about((8.0, 0.0, 0.0), (0.0, 0.0), 2.0);
+        assert!(close(v, (10.0, 0.0, 0.0)), "{v:?}");
+        let v = zoom_about((0.6, 10.0, 10.0), (10.0, 10.0), 0.5);
+        assert!(close(v, (0.5, 10.0, 10.0)), "{v:?}");
+        // A pinch: the point under the fingers stays under them.
+        let v = pinch_view((1.0, 0.0, 0.0), 100.0, (50.0, 50.0), 200.0, (60.0, 50.0));
+        assert!(close(v, (2.0, -40.0, -50.0)), "{v:?}");
+        let v = pinch_view((5.0, 0.0, 0.0), 10.0, (0.0, 0.0), 1000.0, (0.0, 0.0));
+        assert_eq!(v.0, 10.0);
+        // A dot's place on screen, with its dragged offset.
         assert_eq!(
-            ids(&labels(&dots, 2.5, None, &none(), PHONE)),
-            ["o:1", "p:1"]
+            screen_at((10.0, 20.0), (2.0, -4.0), (2.0, 5.0, 6.0)),
+            (29.0, 38.0)
         );
-        let found: HashSet<String> = [RUN.to_string()].into();
-        assert!(ids(&labels(&dots, 1.0, None, &found, PHONE)).contains(&RUN));
     }
 
     #[test]
-    fn a_picked_dots_neighbours_are_labelled_next() {
-        let spots = |dots: &[Dot]| -> Vec<Spot> {
-            dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect()
-        };
-        let mut p = paper("1", "rct", Some(2020));
-        p.label = "A paper".into();
-        let dots = vec![
-            at(dot(RUN, DotKind::Run, "Your question", ""), 300.0, 300.0),
-            at(dot("o:1", DotKind::Outcome, "Recurrence", ""), 100.0, 100.0),
-            at(dot("d:1", DotKind::Disease, "Hernia", ""), 600.0, 600.0),
-            at(p, 200.0, 200.0),
-        ];
-        let near: HashSet<String> = [RUN, "o:1", "p:1"].iter().map(|s| s.to_string()).collect();
-        // Picked: it and its neighbours, not papers, not the far disease
-        // (even at a zoom that labels papers).
-        let got = visible_labels(&spots(&dots), 3.0, Some(RUN), &near, &none(), PHONE, 1.0);
-        assert_eq!(ids(&got), ["o:1", RUN]);
-        // A neighbour beats a disease whose label it would cover.
-        let dots = pair(
-            dot("d:9", DotKind::Disease, "Inguinal hernia", ""),
-            dot("o:1", DotKind::Outcome, "Recurrence", ""),
-        );
-        let mut all = dots.clone();
-        all.push(at(
-            dot(RUN, DotKind::Run, "Your question", ""),
-            300.0,
-            300.0,
-        ));
-        let near: HashSet<String> = [RUN, "o:1", "d:9"].iter().map(|s| s.to_string()).collect();
-        let got = visible_labels(&spots(&all), 1.0, Some(RUN), &near, &none(), WIDE, 1.0);
-        assert_eq!(ids(&got), ["d:9", RUN]);
-        let near: HashSet<String> = [RUN, "o:1"].iter().map(|s| s.to_string()).collect();
-        let got = visible_labels(&spots(&all), 1.0, Some(RUN), &near, &none(), WIDE, 1.0);
-        assert_eq!(ids(&got), ["o:1", RUN]);
+    fn dots_grow_a_little_with_the_zoom() {
+        assert_eq!(zoom_radius(10.0, 1.0), 10.0);
+        assert!((zoom_radius(10.0, 2.0) - 10.0 * 2f32.powf(0.2)).abs() < 1e-4);
+        assert_eq!(zoom_radius(10.0, 10.0), 15.0);
+        assert!((zoom_radius(10.0, 0.5) - 10.0 * 0.5f32.powf(0.2)).abs() < 1e-4);
+        assert_eq!(zoom_radius(10.0, 0.1), 8.0);
+        // A tap target is at least 30px.
+        assert_eq!(hit_size(4.5), 30.0);
+        assert_eq!(hit_size(15.0), 38.0);
     }
 
     #[test]
-    fn collisions_are_counted_in_frame_units() {
-        // Clear at 1:1, but on a frame drawn at half size (2 units a
-        // pixel) the two labels meet.
-        let dots = [
-            at(
-                dot("d:1", DotKind::Disease, "Inguinal hernia", ""),
-                100.0,
-                100.0,
-            ),
-            at(
-                dot("d:2", DotKind::Disease, "Achalasia repair", ""),
-                260.0,
-                100.0,
-            ),
-        ];
-        let spots: Vec<Spot> = dots.iter().map(|d| Spot::of(d, 1.0, 0.0, 0.0)).collect();
-        let one = visible_labels(&spots, 1.0, None, &none(), &none(), WIDE, 1.0);
-        assert_eq!(one.len(), 2);
-        let half = visible_labels(&spots, 1.0, None, &none(), &none(), WIDE, 2.0);
-        assert_eq!(ids(&half), ["d:1"]);
-        assert!((half[0].w - one[0].w * 2.0).abs() < 0.01);
-        // Zoom and pan place a spot.
-        let s = Spot::of(&dots[0], 2.0, -50.0, 10.0);
-        assert_eq!((s.x, s.y), (150.0, 210.0));
+    fn ten_pixels_make_a_drag() {
+        assert!(!is_drag(6.0, 7.9));
+        assert!(is_drag(6.0, 8.0));
+        assert!(is_drag(-10.0, 0.0));
+        assert!(!is_drag(0.0, 9.99));
+    }
+
+    #[test]
+    fn full_screen_is_in_the_url_as_map_full_only() {
+        assert_eq!(map_query("", true), "?map=full");
+        assert_eq!(map_query("?a=1", true), "?a=1&map=full");
+        assert_eq!(map_query("?map=full", true), "?map=full");
+        assert_eq!(map_query("?a=1&map=full", false), "?a=1");
+        assert_eq!(map_query("?map=full&a=1", false), "?a=1");
+        assert_eq!(map_query("?map=full", false), "");
+        assert_eq!(map_query("", false), "");
+        assert!(wants_full("?map=full"));
+        assert!(wants_full("?a=1&map=full"));
+        assert!(!wants_full("?map=fullish"));
+        assert!(!wants_full(""));
+    }
+
+    #[test]
+    fn a_papers_card_has_its_rank_chip_pmid_and_questions() {
+        let m = sample();
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(c.kicker, "Paper");
+        assert_eq!(c.chip, Some(("2 \u{b7} Meta-analysis".to_string(), "meta")));
+        assert_eq!(
+            c.body,
+            "Meta-analysis of randomised and non-randomised studies \u{b7} 2025 \u{b7} n=1,43,717 \u{b7} PMID 200"
+        );
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        let c = card_for(&m, "p:101").unwrap();
+        assert_eq!(c.chip, Some(("1 \u{b7} RCT".to_string(), "rct")));
+        assert_eq!(c.body, "2019 \u{b7} PMID 101");
+        // Not ranked: its label alone; no question linked: none named.
+        let c = card_for(&m, "p:100").unwrap();
+        assert_eq!(c.chip, Some(("Not ranked".to_string(), "other")));
+        assert!(c.from.is_empty());
+        // Only papers have a chip.
+        assert_eq!(card_for(&m, "d:2").unwrap().chip, None);
+    }
+
+    #[test]
+    fn a_papers_questions_are_named_once() {
+        // A second run on the same disease cites the same paper: both are
+        // "Inguinal hernia question", named once (the first run's).
+        let mut m = sample();
+        let two = "r:00000000-0000-0000-0000-000000000002";
+        let mut run = dot(two, DotKind::Run, "Your question", "Full \u{b7} 1 Nov 2026");
+        run.run_id = Some(Uuid::from_u128(2));
+        m.dots.push(run);
+        m.lines.push(line("d:2", two, false));
+        m.lines.push(line(two, "p:200", true));
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        assert!(c.links.is_empty());
+    }
+
+    #[test]
+    fn tab_stays_inside_the_full_screen_map() {
+        // Forward off the last control goes to the first, back off the
+        // first to the last; elsewhere the browser moves focus.
+        assert_eq!(trap_step(5, Some(4), false), Some(0));
+        assert_eq!(trap_step(5, Some(0), true), Some(4));
+        assert_eq!(trap_step(5, Some(2), false), None);
+        assert_eq!(trap_step(5, Some(2), true), None);
+        // Focus outside the dialog comes in at its first (or last) control.
+        assert_eq!(trap_step(5, None, false), Some(0));
+        assert_eq!(trap_step(5, None, true), Some(4));
+        assert_eq!(trap_step(0, None, false), None);
+    }
+
+    #[test]
+    fn an_old_layout_is_drawn_whole_in_a_new_box() {
+        // Same shape: the whole box.
+        assert_eq!(
+            contain((358.0, 480.0), (358.0, 480.0)),
+            (0.0, 0.0, 358.0, 480.0)
+        );
+        assert_eq!(
+            contain((716.0, 960.0), (358.0, 480.0)),
+            (0.0, 0.0, 716.0, 960.0)
+        );
+        // A taller box: full width, centred (no stretch).
+        let (l, t, w, h) = contain((358.0, 700.0), (358.0, 480.0));
+        assert_eq!((l, w, h), (0.0, 358.0, 480.0));
+        assert_eq!(t, 110.0);
+        // A wider box: full height, centred.
+        let (l, t, w, h) = contain((1000.0, 480.0), (358.0, 480.0));
+        assert_eq!((t, w, h), (0.0, 358.0, 480.0));
+        assert_eq!(l, 321.0);
+        // Nothing measured yet: the box as it is.
+        assert_eq!(contain((0.0, 0.0), (358.0, 480.0)), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn full_screen_refits_only_for_a_real_change() {
+        assert!(!refit_needed((390.0, 700.0), (390.0, 700.0)));
+        assert!(!refit_needed((390.0, 700.0), (395.0, 690.0)));
+        assert!(refit_needed((390.0, 700.0), (700.0, 390.0)));
+        assert!(refit_needed((390.0, 700.0), (390.0, 600.0)));
     }
 
     /// The page's fetch bookkeeping, as `explore.rs` keeps it.
