@@ -55,6 +55,22 @@ pub fn fold<T: Clone>(rows: &[T], open: bool) -> (Vec<T>, Option<String>) {
     }
 }
 
+/// [`fold`], except that a folded group still shows the selected row:
+/// after the first `FOLD_AT`, with "Show N more" counting the rows still
+/// hidden (no button when none are).
+pub fn fold_keeping(rows: &[Row], open: bool, sel: Option<&str>) -> (Vec<Row>, Option<String>) {
+    let (mut shown, button) = fold(rows, open);
+    let Some(at) = sel.and_then(|s| rows.iter().position(|r| r.id == s)) else {
+        return (shown, button);
+    };
+    if open || at < shown.len() {
+        return (shown, button);
+    }
+    shown.push(rows[at].clone());
+    let hidden = rows.len() - shown.len();
+    (shown, (hidden > 0).then(|| format!("Show {hidden} more")))
+}
+
 /// One row of the List view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -1753,6 +1769,38 @@ mod tests {
         assert!(c.links.is_empty());
         // None: no line.
         assert!(card_for(&sample(), "p:200").unwrap().supports.is_empty());
+    }
+
+    #[test]
+    fn a_folded_group_still_shows_the_selected_row() {
+        let rows: Vec<Row> = (1..=7)
+            .map(|i| Row {
+                id: format!("p:{i}"),
+                title: format!("Paper {i}"),
+                sub: String::new(),
+                kind: DotKind::Paper,
+                rank: None,
+            })
+            .collect();
+        let ids = |v: &[Row]| v.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        // The 6th selected: the first four, then it; the rest still counted.
+        let (shown, button) = fold_keeping(&rows, false, Some("p:6"));
+        assert_eq!(ids(&shown), ["p:1", "p:2", "p:3", "p:4", "p:6"]);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
+        // Selected among the first four, elsewhere, or none: the plain fold.
+        for sel in [Some("p:2"), Some("x:1"), None] {
+            assert_eq!(
+                fold_keeping(&rows, false, sel),
+                fold(&rows, false),
+                "{sel:?}"
+            );
+        }
+        // Open: every row.
+        assert_eq!(fold_keeping(&rows, true, Some("p:6")), fold(&rows, true));
+        // The last of five selected: nothing left behind the button.
+        let (shown, button) = fold_keeping(&rows[..5], false, Some("p:5"));
+        assert_eq!(shown.len(), 5);
+        assert_eq!(button, None);
     }
 
     #[test]

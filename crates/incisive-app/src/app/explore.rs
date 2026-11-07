@@ -1867,7 +1867,8 @@ fn group_view(
     open: &BTreeSet<String>,
 ) -> AnyView {
     let is_open = open.contains(&g.name);
-    let (rows, button) = ep::fold(&g.rows, is_open);
+    // A selected row behind the fold (picked from a card) still shows.
+    let (rows, button) = ep::fold_keeping(&g.rows, is_open, sel);
     let heading = ep::group_heading(&g, g.rows.len());
     let rows = rows
         .into_iter()
@@ -1918,7 +1919,7 @@ fn row_view(ui: Ui, r: Row, on: bool, card: Option<Card>) -> AnyView {
     let id = r.id.clone();
     let swatch = swatch_class(&r);
     view! {
-        <div class="kg-row" class:on=on>
+        <div class="kg-row" class:on=on data-row=r.id.clone()>
             <button
                 type="button"
                 class="kg-row-btn"
@@ -2258,6 +2259,48 @@ mod tests {
         assert!(html.find("From your question").unwrap() < html.find("Supports: ").unwrap());
         // None: no line.
         assert!(!render(paper_card(), false).contains("Supports"));
+    }
+
+    #[test]
+    fn a_selected_row_behind_the_fold_shows_with_its_card() {
+        use crate::graph_view::{Dot, Line};
+        let paper = |i: i32| Dot {
+            id: format!("p:{i}"),
+            kind: DotKind::Paper,
+            label: format!("Paper {i}"),
+            sub: String::new(),
+            first_year: Some(2026 - i),
+            r: 5.0,
+            rank: Some("rct".into()),
+            x: 0.0,
+            y: 0.0,
+            run_id: None,
+            concept_id: None,
+            pmid: Some(i.to_string()),
+            retracted: false,
+            design: String::new(),
+            n: None,
+            includes_non_rct: false,
+            sheet: None,
+            question: None,
+            bottom_line: None,
+            certainty: None,
+        };
+        let m = MapData {
+            dots: (1..=6).map(paper).collect(),
+            lines: Vec::<Line>::new(),
+            ..MapData::default()
+        };
+        let g = ep::groups(&m).remove(0);
+        let html = Owner::new()
+            .with(|| group_view(Ui::new(), &m, g, Some("p:6"), &BTreeSet::new()).to_html());
+        let at = |s: &str| html.find(s).unwrap_or_else(|| panic!("no {s} in {html}"));
+        assert!(!html.contains("Paper 5"), "the 5th stays folded: {html}");
+        assert!(at("Paper 4") < at("Paper 6"));
+        assert!(html.contains("kg-card kg-inline"), "its card: {html}");
+        assert!(html.contains("PMID 6"), "{html}");
+        assert!(at("Paper 6") < at("Show 1 more"));
+        assert!(html.contains(r#"data-row="p:6""#), "{html}");
     }
 
     #[test]
