@@ -98,7 +98,12 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-nomatch { margin:0; padding:14px; border:1px dashed var(--iv-line); border-radius:14px; font-size:14px; line-height:1.5; color:var(--iv-body); }
 .kg-card { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:16px; padding:14px; display:flex; flex-direction:column; gap:8px; }
 .kg-card.kg-inline { background:transparent; border:0; border-radius:0; padding:0 12px 12px; }
-.kg-kicker { font-size:11px; font-weight:600; color:var(--iv-muted); }
+.kg-kicker { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:11px; font-weight:600; color:var(--iv-muted); }
+.kg-chip { font-size:11.5px; font-weight:700; border-radius:5px; padding:1px 7px; color:var(--iv-ink); }
+.kg-chip.rct { background:var(--kg-rct); color:#fff; } .kg-chip.meta { background:var(--kg-meta); color:#fff; } .kg-chip.prospective { background:var(--kg-pro); }
+.kg-chip.retrospective { background:var(--kg-retro); } .kg-chip.case_series { background:var(--kg-series); } .kg-chip.other { background:var(--kg-other); }
+.kg-from { margin:0; font-size:13px; line-height:1.45; color:var(--iv-body); background:var(--iv-soft); border-radius:10px; padding:8px 10px; overflow-wrap:anywhere; }
+.kg-acts { display:flex; flex-wrap:wrap; gap:8px; }
 .kg-card-title { font-size:16px; font-weight:600; line-height:1.3; overflow-wrap:anywhere; }
 .kg-card-body { font-size:14px; line-height:1.5; color:var(--iv-body); overflow-wrap:anywhere; }
 .kg-flag { margin:0; align-self:flex-start; font-size:12px; font-weight:600; padding:3px 9px; border-radius:999px; background:var(--iv-warn-bg); color:var(--iv-warn); }
@@ -314,6 +319,24 @@ struct Ui {
     legend_open: RwSignal<bool>,
 }
 
+impl Ui {
+    /// The page as it is first drawn: the List, nothing picked.
+    fn new() -> Ui {
+        Ui {
+            view: RwSignal::new(View::List),
+            organ: RwSignal::new(None),
+            query: RwSignal::new(String::new()),
+            sel: RwSignal::new(None),
+            open: RwSignal::new(BTreeSet::new()),
+            ready: RwSignal::new(false),
+            hidden: RwSignal::new(BTreeSet::new()),
+            years: RwSignal::new("all"),
+            certainty: RwSignal::new("all"),
+            legend_open: RwSignal::new(false),
+        }
+    }
+}
+
 /// The filter the chips and "Show on the map" make.
 fn filter_of(ui: Ui) -> MapFilter {
     let years = ui.years.get();
@@ -494,18 +517,7 @@ pub fn ExplorePage() -> impl IntoView {
     // Drawn on the server as the List, which works with no script; the
     // switch shows, and Map (the default) or the remembered choice is
     // taken, once the page runs in the browser.
-    let ui = Ui {
-        view: RwSignal::new(View::List),
-        organ: RwSignal::new(None),
-        query: RwSignal::new(String::new()),
-        sel: RwSignal::new(None),
-        open: RwSignal::new(BTreeSet::new()),
-        ready: RwSignal::new(false),
-        hidden: RwSignal::new(BTreeSet::new()),
-        years: RwSignal::new("all"),
-        certainty: RwSignal::new("all"),
-        legend_open: RwSignal::new(false),
-    };
+    let ui = Ui::new();
     Effect::new(move |_| {
         ui.view.set(load_view().unwrap_or(View::Map));
         ui.ready.set(true);
@@ -743,7 +755,7 @@ fn explore_body(ui: Ui, start: ExploreStart) -> impl IntoView {
                         let papers = sel
                             .as_deref()
                             .map(|id| side_papers(ui, &d, id, mu.until.get()));
-                        view! { {card_view(ui, card, false)} {papers} }
+                        view! { {card_view(ui, card, false, "kg-card")} {papers} }
                     }}
                 </div>
                 {legend_view(ui)}
@@ -1483,19 +1495,17 @@ fn row_view(ui: Ui, r: Row, on: bool, card: Option<Card>) -> AnyView {
                     <span class="kg-row-sub">{r.sub}</span>
                 </span>
             </button>
-            {card.map(|c| card_view(ui, c, true))}
+            {card.map(|c| card_view(ui, c, true, "kg-card kg-inline"))}
         </div>
     }
     .into_any()
 }
 
-/// A card: in place under its row (`inline`, phones) or in the side column.
-fn card_view(ui: Ui, c: Card, inline: bool) -> AnyView {
-    let class = if inline {
-        "kg-card kg-inline"
-    } else {
-        "kg-card"
-    };
+/// A card: in place under its row (`inline`, phones: no title, no link
+/// buttons), or in the side column.
+/// A paper's has its rank chip, its details line, the questions it came
+/// from, "Open in PubMed ↗" (a new tab) and its study sheet; no abstract.
+fn card_view(ui: Ui, c: Card, inline: bool, class: &'static str) -> AnyView {
     let flags = c
         .flags
         .into_iter()
@@ -1522,18 +1532,122 @@ fn card_view(ui: Ui, c: Card, inline: bool) -> AnyView {
             .collect_view();
         view! { <div class="kg-links">{buttons}</div> }
     });
+    let chip = c
+        .chip
+        .map(|(text, rank)| view! { <span class=format!("kg-chip {rank}")>{text}</span> });
+    let from = (!c.from.is_empty()).then(
+        || view! { <p class="kg-from">{format!("From your question: {}", c.from.join("; "))}</p> },
+    );
+    let acts = (c.answer.is_some() || c.pubmed.is_some() || c.sheet.is_some() || c.ask.is_some())
+        .then(|| {
+            view! {
+                <div class="kg-acts">
+                    {c.answer.map(|href| view! { <a class="kg-act" href=href>"Open the full answer"</a> })}
+                    {c.pubmed.map(|href| view! {
+                        <a class="kg-act" href=href target="_blank" rel="noopener noreferrer">"Open in PubMed \u{2197}"</a>
+                    })}
+                    {c.sheet.map(|href| view! { <a class="kg-act alt" href=href rel="external">"Open the study sheet"</a> })}
+                    {c.ask.map(|href| view! { <a class="kg-act alt" href=href>"Ask about this"</a> })}
+                </div>
+            }
+        });
     view! {
         <div class=class>
-            <div class="kg-kicker">{c.kicker}</div>
+            <div class="kg-kicker">{chip} <span>{c.kicker}</span></div>
             {(!inline).then(|| view! { <div class="kg-card-title">{c.title}</div> })}
             <div class="kg-card-body">{c.body}</div>
             {flags}
+            {from}
             {links}
-            {c.answer.map(|href| view! { <a class="kg-act" href=href>"Open the full answer"</a> })}
-            {c.sheet.map(|href| view! { <a class="kg-act" href=href rel="external">"Open the study sheet"</a> })}
-            {c.pubmed.map(|href| view! { <a class="kg-act alt" href=href rel="external">"Open the paper"</a> })}
-            {c.ask.map(|href| view! { <a class="kg-act alt" href=href>"Ask about this"</a> })}
+            {acts}
         </div>
     }
     .into_any()
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+    use leptos::tachys::view::RenderHtml;
+
+    fn render(c: Card, inline: bool) -> String {
+        Owner::new().with(|| card_view(Ui::new(), c, inline, "kg-card").to_html())
+    }
+
+    fn paper_card() -> Card {
+        Card {
+            kicker: "Paper".into(),
+            chip: Some(("1 \u{b7} RCT".into(), "rct")),
+            title: "RIVAL 2020, JAMA Surg".into(),
+            body: "Multicentre pilot RCT \u{b7} 2020 \u{b7} n=113 \u{b7} PMID 32186683".into(),
+            flags: vec!["Retracted".into()],
+            sheet: Some("/runs/00000000-0000-0000-0000-000000000001#ref-4".into()),
+            pubmed: Some("https://pubmed.ncbi.nlm.nih.gov/32186683/".into()),
+            from: vec!["Inguinal hernia question".into()],
+            ..Card::default()
+        }
+    }
+
+    #[test]
+    fn a_papers_card_previews_it_and_opens_pubmed_in_a_new_tab() {
+        let html = render(paper_card(), false);
+        let at = |s: &str| html.find(s).unwrap_or_else(|| panic!("no {s} in {html}"));
+        // The rank chip, coloured by rank, then "Paper".
+        assert!(at("<span class=\"kg-chip rct\">1 \u{b7} RCT</span>") < at(">Paper<"));
+        assert!(html.contains("RIVAL 2020, JAMA Surg"));
+        assert!(html.contains("PMID 32186683"));
+        assert!(html.contains("n=113"));
+        assert!(html.contains("Retracted"));
+        assert!(html.contains("From your question: Inguinal hernia question"));
+        // PubMed first, a real link to a new tab; then the study sheet.
+        let pubmed = regex::Regex::new("<a [^>]*>Open in PubMed \u{2197}</a>")
+            .unwrap()
+            .find(&html)
+            .expect("Open in PubMed")
+            .as_str()
+            .to_string();
+        assert!(
+            pubmed.contains(r#"href="https://pubmed.ncbi.nlm.nih.gov/32186683/""#),
+            "{pubmed}"
+        );
+        assert!(pubmed.contains(r#"target="_blank""#), "{pubmed}");
+        assert!(pubmed.contains(r#"rel="noopener noreferrer""#), "{pubmed}");
+        assert!(pubmed.contains(r#"class="kg-act""#), "primary: {pubmed}");
+        let sheet = at("Open the study sheet");
+        assert!(at("Open in PubMed") < sheet);
+        let sheet = regex::Regex::new("<a [^>]*>Open the study sheet</a>")
+            .unwrap()
+            .find(&html)
+            .expect("Open the study sheet")
+            .as_str()
+            .to_string();
+        assert!(
+            sheet.contains(r#"href="/runs/00000000-0000-0000-0000-000000000001#ref-4""#),
+            "{sheet}"
+        );
+        assert!(
+            sheet.contains(r#"class="kg-act alt""#),
+            "secondary: {sheet}"
+        );
+        assert!(!sheet.contains("_blank"), "{sheet}");
+        // Title and details only: no abstract.
+        assert!(!html.to_lowercase().contains("abstract"), "{html}");
+    }
+
+    #[test]
+    fn other_cards_have_no_chip() {
+        let c = Card {
+            kicker: "Disease".into(),
+            title: "Achalasia".into(),
+            ask: Some("/?topic=7".into()),
+            ..Card::default()
+        };
+        let html = render(c, false);
+        assert!(!html.contains("kg-chip"));
+        assert!(!html.contains("PubMed"));
+        assert!(
+            html.contains(r#"<a href="/?topic=7" class="kg-act alt">Ask about this</a>"#),
+            "{html}"
+        );
+    }
 }

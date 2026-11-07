@@ -286,6 +286,9 @@ pub fn organs(data: &MapData) -> Vec<(i64, String)> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Card {
     pub kicker: String,
+    /// A paper's rank chip before the kicker ("1 · RCT"; "Not ranked") and
+    /// its rank colour class.
+    pub chip: Option<(String, &'static str)>,
     pub title: String,
     pub body: String,
     /// Warnings shown on the card ("Retracted", "includes non-RCT studies").
@@ -300,6 +303,8 @@ pub struct Card {
     pub pubmed: Option<String>,
     /// "Ask about this": the Ask page with this concept's id (never its name).
     pub ask: Option<String>,
+    /// A paper's questions on the map ("From your question: ...").
+    pub from: Vec<String>,
 }
 
 /// The card before anything is picked.
@@ -380,8 +385,18 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
     };
     match d.kind {
         DotKind::Paper => {
-            let (_, num, name) = rank_info(d.rank.as_deref());
-            c.kicker = format!("Paper \u{b7} Rank {num} \u{b7} {name}");
+            let (place, num, name) = rank_info(d.rank.as_deref());
+            c.kicker = "Paper".into();
+            let chip = if place < 5 {
+                format!("{num} \u{b7} {name}")
+            } else {
+                name.to_string()
+            };
+            c.chip = Some((chip, rank_class(d.rank.as_deref())));
+            let pmid = d
+                .pmid
+                .as_deref()
+                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
             let mut body: Vec<String> = Vec::new();
             if !d.design.trim().is_empty() {
                 body.push(d.design.trim().to_string());
@@ -392,6 +407,9 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if let Some(n) = d.n {
                 body.push(format!("n={}", indian_number(n)));
             }
+            if let Some(p) = pmid {
+                body.push(format!("PMID {p}"));
+            }
             c.body = body.join(" \u{b7} ");
             if d.retracted {
                 c.flags.push("Retracted".into());
@@ -399,12 +417,14 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if d.includes_non_rct {
                 c.flags.push("includes non-RCT studies".into());
             }
+            // A paper's lines go to its questions: named on the card
+            // ("From your question"), not offered as buttons.
+            c.from = std::mem::take(&mut c.links)
+                .into_iter()
+                .map(|(_, label)| label)
+                .collect();
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
-            c.pubmed = d
-                .pmid
-                .as_deref()
-                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-                .map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
+            c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
         DotKind::Run => {
             // As on the board: the question as asked and its bottom line
@@ -1151,7 +1171,7 @@ mod tests {
         let c = card_for(&m, "p:300").unwrap();
         assert!(c.flags.iter().any(|f| f == "Retracted"), "{c:?}");
         let c = card_for(&m, "p:200").unwrap();
-        assert_eq!(c.kicker, "Paper \u{b7} Rank 2 \u{b7} Meta-analysis");
+        assert_eq!(c.kicker, "Paper");
         assert!(c.flags.iter().any(|f| f == "includes non-RCT studies"));
         assert!(!c.flags.iter().any(|f| f == "Retracted"));
         assert!(c.body.contains("n=1,43,717"), "{}", c.body);
@@ -1498,6 +1518,28 @@ mod tests {
         // Zoom and pan place a spot.
         let s = Spot::of(&dots[0], 2.0, -50.0, 10.0);
         assert_eq!((s.x, s.y), (150.0, 210.0));
+    }
+
+    #[test]
+    fn a_papers_card_has_its_rank_chip_pmid_and_questions() {
+        let m = sample();
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(c.kicker, "Paper");
+        assert_eq!(c.chip, Some(("2 \u{b7} Meta-analysis".to_string(), "meta")));
+        assert_eq!(
+            c.body,
+            "Meta-analysis of randomised and non-randomised studies \u{b7} 2025 \u{b7} n=1,43,717 \u{b7} PMID 200"
+        );
+        assert_eq!(c.from, ["Inguinal hernia question"]);
+        let c = card_for(&m, "p:101").unwrap();
+        assert_eq!(c.chip, Some(("1 \u{b7} RCT".to_string(), "rct")));
+        assert_eq!(c.body, "2019 \u{b7} PMID 101");
+        // Not ranked: its label alone; no question linked: none named.
+        let c = card_for(&m, "p:100").unwrap();
+        assert_eq!(c.chip, Some(("Not ranked".to_string(), "other")));
+        assert!(c.from.is_empty());
+        // Only papers have a chip.
+        assert_eq!(card_for(&m, "d:2").unwrap().chip, None);
     }
 
     /// The page's fetch bookkeeping, as `explore.rs` keeps it.
