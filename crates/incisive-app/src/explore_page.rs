@@ -300,8 +300,9 @@ pub struct Card {
     pub pubmed: Option<String>,
     /// "Ask about this": the Ask page with this concept's id (never its name).
     pub ask: Option<String>,
-    /// A paper's questions on the map ("From your question: ...").
-    pub from: Vec<String>,
+    /// A paper's questions on the map ("From your question: ..."): (dot
+    /// id, name), each name once.
+    pub from: Vec<(String, String)>,
 }
 
 /// The card before anything is picked.
@@ -416,9 +417,10 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             }
             // A paper's lines go to its questions: named on the card
             // ("From your question"), not offered as buttons.
+            let mut seen: BTreeSet<String> = BTreeSet::new();
             c.from = std::mem::take(&mut c.links)
                 .into_iter()
-                .map(|(_, label)| label)
+                .filter(|(_, label)| seen.insert(label.clone()))
                 .collect();
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
             c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
@@ -1493,7 +1495,10 @@ mod tests {
             c.body,
             "Meta-analysis of randomised and non-randomised studies \u{b7} 2025 \u{b7} n=1,43,717 \u{b7} PMID 200"
         );
-        assert_eq!(c.from, ["Inguinal hernia question"]);
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
         let c = card_for(&m, "p:101").unwrap();
         assert_eq!(c.chip, Some(("1 \u{b7} RCT".to_string(), "rct")));
         assert_eq!(c.body, "2019 \u{b7} PMID 101");
@@ -1503,6 +1508,25 @@ mod tests {
         assert!(c.from.is_empty());
         // Only papers have a chip.
         assert_eq!(card_for(&m, "d:2").unwrap().chip, None);
+    }
+
+    #[test]
+    fn a_papers_questions_are_named_once() {
+        // A second run on the same disease cites the same paper: both are
+        // "Inguinal hernia question", named once (the first run's).
+        let mut m = sample();
+        let two = "r:00000000-0000-0000-0000-000000000002";
+        let mut run = dot(two, DotKind::Run, "Your question", "Full \u{b7} 1 Nov 2026");
+        run.run_id = Some(Uuid::from_u128(2));
+        m.dots.push(run);
+        m.lines.push(line("d:2", two, false));
+        m.lines.push(line(two, "p:200", true));
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        assert!(c.links.is_empty());
     }
 
     /// The page's fetch bookkeeping, as `explore.rs` keeps it.

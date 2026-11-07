@@ -116,6 +116,7 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-chip.rct { background:var(--kg-rct); color:#fff; } .kg-chip.meta { background:var(--kg-meta); color:#fff; } .kg-chip.prospective { background:var(--kg-pro); }
 .kg-chip.retrospective { background:var(--kg-retro); } .kg-chip.case_series { background:var(--kg-series); } .kg-chip.other { background:var(--kg-other); }
 .kg-from { margin:0; font-size:13px; line-height:1.45; color:var(--iv-body); background:var(--iv-soft); border-radius:10px; padding:8px 10px; overflow-wrap:anywhere; }
+.iv-wrap button.kg-from-q { display:inline; min-height:0; padding:0; border:0; background:none; font:inherit; color:var(--iv-accent); text-decoration:underline; text-underline-offset:2px; text-align:left; cursor:pointer; }
 .kg-acts { display:flex; flex-wrap:wrap; gap:8px; }
 .kg-card-title { font-size:16px; font-weight:600; line-height:1.3; overflow-wrap:anywhere; }
 .kg-card-body { font-size:14px; line-height:1.5; color:var(--iv-body); overflow-wrap:anywhere; }
@@ -1820,9 +1821,24 @@ fn card_view(ui: Ui, c: Card, inline: bool, class: &'static str) -> AnyView {
     let chip = c
         .chip
         .map(|(text, rank)| view! { <span class=format!("kg-chip {rank}")>{text}</span> });
-    let from = (!c.from.is_empty()).then(
-        || view! { <p class="kg-from">{format!("From your question: {}", c.from.join("; "))}</p> },
-    );
+    // Each question it came from: a text-style button that picks it.
+    let from = (!c.from.is_empty()).then(|| {
+        let n = c.from.len();
+        let names = c
+            .from
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, label))| {
+                view! {
+                    <button type="button" class="kg-from-q" on:click=move |_| ui.sel.set(Some(id.clone()))>
+                        {label}
+                    </button>
+                    {(i + 1 < n).then_some("; ")}
+                }
+            })
+            .collect_view();
+        view! { <p class="kg-from">"From your question: " {names}</p> }
+    });
     let acts = (c.answer.is_some() || c.pubmed.is_some() || c.sheet.is_some() || c.ask.is_some())
         .then(|| {
             view! {
@@ -1868,7 +1884,10 @@ mod tests {
             flags: vec!["Retracted".into()],
             sheet: Some("/runs/00000000-0000-0000-0000-000000000001#ref-4".into()),
             pubmed: Some("https://pubmed.ncbi.nlm.nih.gov/32186683/".into()),
-            from: vec!["Inguinal hernia question".into()],
+            from: vec![
+                ("r:1".into(), "Inguinal hernia question".into()),
+                ("r:2".into(), "Achalasia question".into()),
+            ],
             ..Card::default()
         }
     }
@@ -1883,7 +1902,12 @@ mod tests {
         assert!(html.contains("PMID 32186683"));
         assert!(html.contains("n=113"));
         assert!(html.contains("Retracted"));
-        assert!(html.contains("From your question: Inguinal hernia question"));
+        assert!(html.contains("From your question:"));
+        // Each question is a button that picks it.
+        let q =
+            regex::Regex::new(r#"<button [^>]*class="kg-from-q"[^>]*>([^<]*)</button>"#).unwrap();
+        let names: Vec<String> = q.captures_iter(&html).map(|c| c[1].to_string()).collect();
+        assert_eq!(names, ["Inguinal hernia question", "Achalasia question"]);
         // PubMed first, a real link to a new tab; then the study sheet.
         let pubmed = regex::Regex::new("<a [^>]*>Open in PubMed \u{2197}</a>")
             .unwrap()
