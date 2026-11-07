@@ -278,6 +278,14 @@ fn first_html(html: &str) -> String {
     m
 }
 
+/// The whole opening tag that holds `needle`.
+fn tag_with(html: &str, needle: &str) -> String {
+    let at = html.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+    let start = html[..at].rfind('<').unwrap();
+    let end = at + html[at..].find('>').unwrap();
+    html[start..=end].to_string()
+}
+
 /// Text as the page writes it (quotes may be escaped in text).
 fn unescaped(html: &str) -> String {
     html.replace("&quot;", "\"").replace("&#34;", "\"")
@@ -472,8 +480,7 @@ async fn the_list_groups_folds_and_escapes() {
     assert!(html.contains(r#"aria-label="Organ""#));
     assert!(html.contains(r#"aria-label="View""#));
     assert!(html.contains("Find on your map"));
-    // Before the page hydrates (or with no script) the List shows, and the
-    // Map's place and the switch, which need the script, do not.
+    // The list is in the first HTML, but hidden: the page opens on the Map.
     let first = first_html(&html);
     for want in [
         r#"class="kg-list""#,
@@ -485,19 +492,15 @@ async fn the_list_groups_folds_and_escapes() {
     ] {
         assert!(first.contains(want), "{want} is not in the first HTML");
     }
-    let tag_with = |needle: &str| -> String {
-        let at = html.find(needle).unwrap_or_else(|| panic!("no {needle}"));
-        let start = html[..at].rfind('<').unwrap();
-        let end = at + html[at..].find('>').unwrap();
-        html[start..=end].to_string()
-    };
     assert!(
-        !tag_with(r#"class="kg-list""#).contains("hidden"),
-        "the List is hidden"
+        tag_with(&html, r#"class="kg-list""#).contains(" hidden"),
+        "the List shows"
     );
-    assert!(tag_with(r#"id="kg-map""#).contains(" hidden"));
-    assert!(tag_with(r#"class="kg-switch""#).contains(" hidden"));
-    assert!(html.contains(r#"data-view="list""#));
+    assert!(
+        !tag_with(&html, r#"id="kg-map""#).contains(" hidden"),
+        "the Map is hidden"
+    );
+    assert!(html.contains(r#"data-view="map""#));
 
     // The fixed words, exactly.
     assert!(text.contains(NOT_ALL));
@@ -801,9 +804,9 @@ async fn the_map_is_drawn_with_a_button_per_dot() {
     // Lines are drawn, paper lines dashed; the frame is the desktop's.
     assert!(m.contains(r#"viewBox="0 0 860 720""#));
     assert_eq!(m.matches("<line ").count(), map.lines.len());
-    assert!(m.contains(r#"stroke-dasharray="4 3""#));
-    // Lines keep their width under zoom; the background is a pointer
-    // surface, out of the tab order.
+    assert!(m.contains(r#"stroke-dasharray="3 3""#));
+    // Lines keep their screen width when the frame is drawn smaller than
+    // its units; the background is a pointer surface, out of the tab order.
     assert!(m.contains(r#"vector-effect="non-scaling-stroke""#));
     let bg = regex::Regex::new(r#"<button[^>]*class="kg-bg"[^>]*>"#)
         .unwrap()
@@ -855,6 +858,76 @@ async fn the_map_is_drawn_with_a_button_per_dot() {
     assert!(!theirs.contains(&question) && !theirs.contains(&t));
     let (_, body) = call(router(st), "explore_list", "{}", Some(&other)).await;
     assert!(!body.contains(&question));
+}
+
+/// The page opens on the Map: the switch (Map pressed), the frame saying
+/// it is drawing, "Open full screen", and a map drawn sharp at any zoom (no
+/// stretched layer).
+#[tokio::test]
+async fn the_page_opens_on_the_map() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (uid, email) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    mapped_run(
+        &pool,
+        uid,
+        &t,
+        &[paper(&pmid(&t, 1), "A trial", 2024, "RCT")],
+    )
+    .await;
+    let st = state(pool.clone(), true);
+    let pressed = |name: &str| {
+        regex::Regex::new(&format!(
+            r#"<button type="button" aria-pressed="(true|false)"[^>]*>\s*{name}"#
+        ))
+        .unwrap()
+    };
+    let (map_re, list_re) = (pressed("Map"), pressed("List"));
+    for ua in [None, Some(IPHONE)] {
+        let (s, html) = match ua {
+            None => get(router(st.clone()), "/explore", Some(&email)).await,
+            Some(ua) => get_as(router(st.clone()), "/explore", &email, ua).await,
+        };
+        assert_eq!(s, StatusCode::OK);
+        let first = first_html(&html);
+        // The switch shows from the first HTML, with Map pressed.
+        let switch = tag_with(&first, r#"class="kg-switch""#);
+        assert!(!switch.contains("hidden"), "{switch}");
+        let map_btn = map_re.captures(&first).expect("the Map button");
+        assert_eq!(&map_btn[1], "true");
+        let list_btn = list_re.captures(&first).expect("the List button");
+        assert_eq!(&list_btn[1], "false");
+        // The frame says it is drawing until the script runs.
+        let frame_at = first.find(r#"class="kg-map-frame""#).expect("the frame");
+        let drawing = first
+            .find("Drawing your map\u{2026}")
+            .expect("Drawing your map…");
+        assert!(drawing > frame_at, "the drawing note is inside the frame");
+        // The list is there, hidden.
+        assert!(tag_with(&first, r#"class="kg-list""#).contains(" hidden"));
+        // Full screen.
+        let open = tag_with(&first, ">Open full screen<");
+        assert!(
+            open.starts_with("<button") && open.contains("kg-openfull"),
+            "{open}"
+        );
+        assert!(first.contains(r#"aria-label="Close full screen""#));
+        // The map is a dialog only while it is full screen.
+        assert!(!first.contains(r#"role="dialog""#));
+        assert!(!first.contains("kg-full\""), "opened full screen");
+        // Nothing is stretched: no transform on a layer, no will-change.
+        let m = markup(&html);
+        let style = &m[m.find(".kg-map-frame").expect("the styles")..];
+        let style = &style[..style.find("</style>").unwrap()];
+        assert!(!style.contains("will-change"), "will-change in the styles");
+        assert!(!style.contains("scale("), "scale( in the styles");
+        let map = &m[m.find(r#"id="kg-map""#).unwrap()..m.find(r#"class="kg-list""#).unwrap()];
+        assert!(!map.contains("scale("), "a scaled layer");
+        assert!(!map.contains("--ik"), "counter-scaled dots");
+        // No remembered view.
+        assert!(!html.contains("incisive.explore.view"));
+    }
 }
 
 // ---------- Ask about this ----------
