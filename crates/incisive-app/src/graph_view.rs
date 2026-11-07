@@ -48,6 +48,37 @@ pub struct Dot {
     pub concept_id: Option<i64>,
     pub pmid: Option<String>,
     pub retracted: bool,
+    /// A paper's design line as the engine wrote it; empty for other dots.
+    #[serde(default)]
+    pub design: String,
+    /// A paper's number of participants, when the study row gave one.
+    #[serde(default)]
+    pub n: Option<i64>,
+    /// A meta-analysis or review stated to pool more than randomised trials.
+    #[serde(default)]
+    pub includes_non_rct: bool,
+    /// Where a paper's study sheet is: one of the user's runs that cites it,
+    /// and its reference number in that run's answer.
+    #[serde(default)]
+    pub sheet: Option<SheetRef>,
+    /// A run dot's question as the user asked it. Only ever loaded for the
+    /// signed-in user's own runs, and never logged.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// A run dot's bottom line (citations stripped).
+    #[serde(default)]
+    pub bottom_line: Option<String>,
+    /// A run's bottom-line certainty ("High" ... "Very low"); a disease's
+    /// is its newest run's.
+    #[serde(default)]
+    pub certainty: Option<String>,
+}
+
+/// A study sheet on a run page (`/runs/<run>#ref-<n>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SheetRef {
+    pub run: Uuid,
+    pub n: u16,
 }
 
 /// A line between two dot ids; `paper` for a run–paper line.
@@ -79,6 +110,10 @@ pub struct MapData {
     pub papers_hidden_by_size: bool,
     /// The user's runs on the map.
     pub runs: u32,
+    /// The map had too many dots, so only this many papers were kept (the
+    /// highest ranked, newest first).
+    #[serde(default)]
+    pub top_papers: Option<u32>,
 }
 
 const STEPS: usize = 300;

@@ -290,6 +290,7 @@ details.iv-thread[open] .iv-thread-toggle::after { content:'Hide'; }
 pub enum NavPage {
     Ask,
     Library,
+    Explore,
     Activity,
     Other,
 }
@@ -299,15 +300,19 @@ pub fn nav_page(path: &str) -> NavPage {
     match path.trim_end_matches('/') {
         "" => NavPage::Ask,
         "/history" => NavPage::Library,
+        "/explore" => NavPage::Explore,
         "/activity" => NavPage::Activity,
         _ => NavPage::Other,
     }
 }
 
-/// Ask and the Library use the wide ivory layout; the run page and
-/// Activity keep today's width.
+/// Ask, the Library and Explore use the wide ivory layout; the run page
+/// and Activity keep today's width.
 pub fn is_wide(path: &str) -> bool {
-    matches!(nav_page(path), NavPage::Ask | NavPage::Library)
+    matches!(
+        nav_page(path),
+        NavPage::Ask | NavPage::Library | NavPage::Explore
+    )
 }
 
 fn mark_svg() -> impl IntoView {
@@ -333,6 +338,15 @@ fn nav_icon(page: NavPage) -> AnyView {
                 <rect x="3" y="3" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
                 <rect x="9" y="3" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.6"></rect>
                 <path d="M15 4 L18 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+            </svg>
+        }
+        .into_any(),
+        NavPage::Explore => view! {
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false">
+                <circle cx="6" cy="7" r="2.5"></circle>
+                <circle cx="18" cy="6" r="2.5"></circle>
+                <circle cx="13" cy="18" r="2.5"></circle>
+                <path d="M8.3 8 11.6 16M15.8 7.5 13.7 15.6M8.5 6.8 15.5 6.2"></path>
             </svg>
         }
         .into_any(),
@@ -363,6 +377,18 @@ pub fn SiteHeader() -> impl IntoView {
             </a>
         }
     };
+    let explore_link = move || {
+        view! {
+            <a
+                href="/explore"
+                aria-label="Explore, opens your map"
+                aria-current=move || (current() == NavPage::Explore).then_some("page")
+            >
+                <span class="iv-nav-icon" aria-hidden="true">{nav_icon(NavPage::Explore)}</span>
+                "Explore"
+            </a>
+        }
+    };
     view! {
         <header class="iv-head">
             <div class="iv-head-in">
@@ -381,13 +407,27 @@ pub fn SiteHeader() -> impl IntoView {
                     <nav class="iv-nav" aria-label="Main">
                         {link(NavPage::Ask, "/", "Ask")}
                         {link(NavPage::Library, "/history", "Library")}
-                        // Activity is the owner's page, shown once sign-in is known.
+                        // Explore (with `GRAPH=on`) and Activity (the owner's
+                        // page), shown once sign-in is known. With neither the
+                        // markup is as it was before Explore.
                         <Suspense fallback=|| ()>
                             {move || {
-                                me.get()
-                                    .and_then(|r| r.ok())
-                                    .filter(|m| m.role == "owner")
-                                    .map(|_| link(NavPage::Activity, "/activity", "Activity"))
+                                me.get().and_then(|r| r.ok()).and_then(|m| {
+                                    match (m.graph, m.role == "owner") {
+                                        (false, false) => None,
+                                        (false, true) => {
+                                            Some(link(NavPage::Activity, "/activity", "Activity").into_any())
+                                        }
+                                        (true, false) => Some(explore_link().into_any()),
+                                        (true, true) => Some(
+                                            view! {
+                                                {explore_link()}
+                                                {link(NavPage::Activity, "/activity", "Activity")}
+                                            }
+                                                .into_any(),
+                                        ),
+                                    }
+                                })
                             }}
                         </Suspense>
                     </nav>
@@ -415,11 +455,25 @@ pub fn SiteHeader() -> impl IntoView {
     }
 }
 
-/// `<main>`, wide on Ask and the Library.
+/// Set while the page on screen does not exist (Explore with `GRAPH`
+/// off): `<main>` then has the width of any unknown path.
+#[derive(Clone, Copy)]
+pub(super) struct PageMissing(pub RwSignal<bool>);
+
+/// `<main>`, wide on Ask, the Library and Explore. The server knows
+/// whether Explore exists as it draws; in the browser the page says so
+/// ([`PageMissing`]) once its first read answers.
 #[component]
 pub fn PageMain(children: Children) -> impl IntoView {
     let path = use_location().pathname;
-    let class = move || is_wide(&path.get()).then_some("wide");
+    #[cfg(feature = "ssr")]
+    let missing_now =
+        nav_page(&path.get_untracked()) == NavPage::Explore && super::explore::graph_off();
+    #[cfg(not(feature = "ssr"))]
+    let missing_now = false;
+    let missing = RwSignal::new(missing_now);
+    provide_context(PageMissing(missing));
+    let class = move || (is_wide(&path.get()) && !missing.get()).then_some("wide");
     view! { <main class=class>{children()}</main> }
 }
 
@@ -474,6 +528,8 @@ mod tests {
         assert_eq!(nav_page("/history"), NavPage::Library);
         assert_eq!(nav_page("/history/"), NavPage::Library);
         assert_eq!(nav_page("/activity"), NavPage::Activity);
+        assert_eq!(nav_page("/explore"), NavPage::Explore);
+        assert!(is_wide("/explore"));
         assert_eq!(nav_page("/runs/abc"), NavPage::Other);
         assert!(is_wide("/") && is_wide("/history"));
         assert!(!is_wide("/activity") && !is_wide("/runs/x"));

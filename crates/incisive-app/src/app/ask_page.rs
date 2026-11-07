@@ -4,7 +4,7 @@
 //! Question check. Submit, depth memory and Edit & re-run are unchanged.
 
 use leptos::prelude::*;
-use leptos_router::hooks::use_navigate;
+use leptos_router::hooks::{use_navigate, use_query_map};
 
 use super::ivory::{asked_times, cert_view, spine_view, verdict_or_status};
 use super::{
@@ -16,6 +16,11 @@ use crate::ask::{AskOutcome, FullWords, full_words_text, word_count};
 use crate::library::{self as lib, ASK_LATEST, RunGroup, TodayCounts};
 use crate::question_check::{self as qc, PICO_FIELDS, Pico, STARTERS};
 use crate::runs::RunMode;
+
+/// What "Ask about this" puts in the question box.
+fn topic_question(name: &str) -> String {
+    format!("{name}: ")
+}
 
 fn latest_card(g: RunGroup) -> impl IntoView {
     let c = g.newest().clone();
@@ -100,6 +105,23 @@ pub fn AskPage() -> impl IntoView {
             set_question.set(q);
         }
         mode.set(initial_mode(rerun_mode, load_mode().as_deref()));
+    });
+    // "Ask about this" arrives as `/?topic=<concept id>`: once the browser
+    // has the name (the server gives it only for the signed-in user's own
+    // concepts) the empty box gets `name: `. Nothing is sent; without
+    // `topic` nothing here runs and the page is as it was.
+    let topic =
+        use_query_map().with_untracked(|q| q.get("topic").and_then(|t| t.parse::<i64>().ok()));
+    Effect::new(move |_| {
+        let Some(id) = topic else { return };
+        leptos::task::spawn_local(async move {
+            if let Ok(Some(name)) = super::explore::topic_label(id).await {
+                // Never over words the person has already typed.
+                if question.get_untracked().is_empty() {
+                    set_question.set(topic_question(&name));
+                }
+            }
+        });
     });
     // Once the question is accepted, follow its run.
     Effect::new(move |_| {
@@ -526,5 +548,15 @@ fn today_card(body: impl IntoView) -> impl IntoView {
             <h2 class="iv-kicker">"Today"</h2>
             {body}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_topic_fills_the_box_with_its_name_and_a_colon() {
+        assert_eq!(topic_question("Inguinal hernia"), "Inguinal hernia: ");
     }
 }

@@ -167,6 +167,9 @@ pub struct MeView {
     pub quick_limit_paise: i64,
     /// Cost limit of a Focused run in paise (`RUN_LIMITS`).
     pub focused_limit_paise: i64,
+    /// `GRAPH=on`: the nav shows Explore. Left out of the JSON while off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -676,6 +679,7 @@ mod server {
             daily_cap_paise: user.daily_cap_paise,
             quick_limit_paise: state.runs.limits(RunMode::Quick, state.engines()).0,
             focused_limit_paise: state.runs.limits(RunMode::Focused, state.engines()).0,
+            graph: state.graph.settings.on,
         })
     }
 

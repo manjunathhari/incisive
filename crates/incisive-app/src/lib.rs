@@ -22,6 +22,8 @@ pub mod deid;
 pub mod draft_page;
 /// Temporal T4: the Expert Opinion screens' rules (no Leptos).
 pub mod expert_page;
+/// The Explore page's list, card and map-size rules (no Leptos).
+pub mod explore_page;
 #[cfg(feature = "ssr")]
 pub mod gate;
 /// The knowledge graph (off by default).

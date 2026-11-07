@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::layout::{concept_radius, paper_radius};
 use super::store::MAX_CHAIN;
-use crate::graph_view::{Dot, DotKind, Line, MapData, MapFilter};
+use crate::graph_view::{Dot, DotKind, Line, MapData, MapFilter, SheetRef};
 
 /// Above this many dots, papers are left out unless the user chose what to
 /// hide.
@@ -27,6 +27,9 @@ const RANK_ORDER: [&str; 8] = [
     "unclassified",
 ];
 
+/// The bottom-line certainties an answer can state.
+const CERTAINTIES: [&str; 4] = ["High", "Moderate", "Low", "Very low"];
+
 fn rank_order(code: &str) -> usize {
     RANK_ORDER
         .iter()
@@ -38,6 +41,10 @@ struct RunRow {
     id: Uuid,
     mode: String,
     day: String,
+    /// The user's own question; never logged.
+    question: String,
+    bottom_line: Option<String>,
+    certainty: Option<String>,
 }
 
 struct ConceptLink {
@@ -57,6 +64,9 @@ struct PaperLink {
     retracted: bool,
     rank: String,
     rank_label: String,
+    includes_non_rct: bool,
+    design: String,
+    n: Option<i64>,
 }
 
 fn concept_kind(kind: &str) -> Option<DotKind> {
@@ -87,12 +97,22 @@ fn paper_dot_id(pmid: &str) -> String {
     format!("p:{pmid}")
 }
 
-/// The user's runs that have any link, newest first.
+/// The user's runs that have any link, newest first, each with its
+/// question, and its stored bottom line and certainty when it has an
+/// answer (version 3; version 2 has no certainty).
 async fn user_runs(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<RunRow>> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+    type Row = (Uuid, String, String, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = sqlx::query_as(
         "SELECT r.id, r.mode, \
-                to_char(r.created_at AT TIME ZONE 'Asia/Kolkata', 'FMDD Mon YYYY') \
+                to_char(r.created_at AT TIME ZONE 'Asia/Kolkata', 'FMDD Mon YYYY'), \
+                r.question, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,text}' \
+                     ELSE a.body #>> '{bottom_line,0,text}' END, \
+                CASE WHEN a.answer_version = 3 \
+                     THEN a.body #>> '{answer,bottom_line,certainty}' END \
            FROM incisive.runs r \
+           LEFT JOIN incisive.run_answers a ON a.run_id = r.id \
           WHERE r.user_id = $1 \
             AND (EXISTS (SELECT 1 FROM incisive.graph_run_concepts rc \
                           WHERE rc.run_id = r.id AND rc.user_id = $1) \
@@ -105,7 +125,17 @@ async fn user_runs(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<RunRow>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, mode, day)| RunRow { id, mode, day })
+        .map(|(id, mode, day, question, bottom_line, certainty)| RunRow {
+            id,
+            mode,
+            day,
+            question,
+            // As stored, citations and all; the page strips them.
+            bottom_line: bottom_line.filter(|b| !b.trim().is_empty()),
+            certainty: certainty
+                .map(|c| c.trim().to_string())
+                .filter(|c| CERTAINTIES.contains(&c.as_str())),
+        })
         .collect())
 }
 
@@ -147,7 +177,8 @@ async fn concept_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<ConceptL
 
 async fn paper_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<PaperLink>> {
     sqlx::query_as(
-        "SELECT rp.run_id AS run, p.pmid, p.title, p.year, p.retracted, rp.rank, rp.rank_label \
+        "SELECT rp.run_id AS run, p.pmid, p.title, p.year, p.retracted, rp.rank, rp.rank_label, \
+                rp.includes_non_rct, rp.design, rp.n \
            FROM incisive.graph_run_papers rp \
            JOIN incisive.runs r ON r.id = rp.run_id AND r.user_id = $1 \
            JOIN incisive.graph_papers p ON p.pmid = rp.pmid \
@@ -156,6 +187,30 @@ async fn paper_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<PaperLink>
     .bind(user_id)
     .fetch_all(pool)
     .await
+}
+
+/// Each linked paper's reference number in its run's stored answer, by run
+/// and PMID (the user's own runs only).
+async fn sheet_refs(pool: &PgPool, user_id: i64) -> sqlx::Result<HashMap<(Uuid, String), u16>> {
+    let rows: Vec<(Uuid, String, i32)> = sqlx::query_as(
+        "SELECT rp.run_id, rp.pmid, (ref->>'n')::int \
+           FROM incisive.graph_run_papers rp \
+           JOIN incisive.runs r ON r.id = rp.run_id AND r.user_id = $1 \
+           JOIN incisive.run_answers a ON a.run_id = rp.run_id \
+           CROSS JOIN LATERAL jsonb_array_elements( \
+                CASE WHEN jsonb_typeof(a.body->'references') = 'array' \
+                     THEN a.body->'references' ELSE '[]'::jsonb END) ref \
+          WHERE rp.user_id = $1 AND ref->>'pmid' = rp.pmid \
+            AND jsonb_typeof(ref->'n') = 'number' \
+            AND (ref->>'n') ~ '^[0-9]{1,5}$'",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(run, pmid, n)| Some(((run, pmid), u16::try_from(n).ok()?)))
+        .collect())
 }
 
 fn blank_dot(id: String, kind: DotKind) -> Dot {
@@ -173,6 +228,13 @@ fn blank_dot(id: String, kind: DotKind) -> Dot {
         concept_id: None,
         pmid: None,
         retracted: false,
+        design: String::new(),
+        n: None,
+        includes_non_rct: false,
+        sheet: None,
+        question: None,
+        bottom_line: None,
+        certainty: None,
     }
 }
 
@@ -183,12 +245,55 @@ fn in_years(year: Option<i32>, f: &MapFilter) -> bool {
     year.is_some_and(|y| f.year_from.is_none_or(|lo| y >= lo) && f.year_to.is_none_or(|hi| y <= hi))
 }
 
+/// The name of concept `concept_id`, only when it is on `user_id`'s own map:
+/// some concept of theirs (`graph_run_concepts` for this user) is it, or
+/// merged into it, as the map's dots are. `None` for anyone else's concept
+/// and for an id that does not exist.
+pub async fn topic_label(
+    pool: &PgPool,
+    user_id: i64,
+    concept_id: i64,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE walk(start, id, merged_into, d) AS ( \
+           SELECT c.id, c.id, c.merged_into, 0 FROM incisive.graph_concepts c \
+            WHERE c.id IN (SELECT concept_id FROM incisive.graph_run_concepts WHERE user_id = $1) \
+           UNION ALL \
+           SELECT w.start, c.id, c.merged_into, w.d + 1 FROM walk w \
+             JOIN incisive.graph_concepts c ON c.id = w.merged_into WHERE w.d < $3), \
+         fin AS (SELECT DISTINCT ON (start) start, id FROM walk ORDER BY start, d DESC) \
+         SELECT c.label FROM incisive.graph_concepts c \
+          WHERE c.id = $2 AND c.id IN (SELECT id FROM fin)",
+    )
+    .bind(user_id)
+    .bind(concept_id)
+    .bind(MAX_CHAIN)
+    .fetch_optional(pool)
+    .await
+}
+
 /// One user's map under a filter. Dots come sorted by id with `x`/`y` at 0;
-/// the page places them with [`crate::graph_view::layout`].
+/// the page places them with [`crate::graph_view::layout`]. Above
+/// [`MAX_DOTS`] the papers are left out unless the user chose what to hide.
 pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Result<MapData> {
+    let mut m = load_map_all(pool, user_id, f).await?;
+    if f.hidden.is_empty() && m.dots.len() > MAX_DOTS {
+        m.dots.retain(|d| d.kind != DotKind::Paper);
+        let present: HashSet<&str> = m.dots.iter().map(|d| d.id.as_str()).collect();
+        m.lines
+            .retain(|l| present.contains(l.a.as_str()) && present.contains(l.b.as_str()));
+        m.papers_hidden_by_size = true;
+    }
+    Ok(m)
+}
+
+/// [`load_map`] with every dot the filter keeps, however many (the Explore
+/// list, and the map before it is cut to size).
+pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Result<MapData> {
     let runs = user_runs(pool, user_id).await?;
     let concepts = concept_links(pool, user_id).await?;
     let papers = paper_links(pool, user_id).await?;
+    let sheets = sheet_refs(pool, user_id).await?;
 
     // Runs the organ and certainty filters keep.
     let keep: HashSet<Uuid> = runs
@@ -200,14 +305,21 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
                     .iter()
                     .any(|c| c.run == run && c.kind == DotKind::Organ && c.id == organ)
             });
-            let certainty_ok = f.certainty.as_deref().is_none_or(|want| {
-                concepts.iter().any(|c| {
+            // The run's own (bottom-line) certainty; a run with no stored
+            // certainty goes by its outcomes' certainty.
+            let own = runs
+                .iter()
+                .find(|r| r.id == run)
+                .and_then(|r| r.certainty.as_deref());
+            let certainty_ok = f.certainty.as_deref().is_none_or(|want| match own {
+                Some(got) => got.eq_ignore_ascii_case(want),
+                None => concepts.iter().any(|c| {
                     c.run == run
                         && c.kind == DotKind::Outcome
                         && c.certainty
                             .as_deref()
                             .is_some_and(|got| got.eq_ignore_ascii_case(want))
-                })
+                }),
             });
             organ_ok && certainty_ok
         })
@@ -247,6 +359,9 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
         d.first_year = run_year.get(&r.id).copied();
         d.r = concept_radius(DotKind::Run, 1);
         d.run_id = Some(r.id);
+        d.question = Some(r.question.clone());
+        d.bottom_line = r.bottom_line.clone();
+        d.certainty = r.certainty.clone();
         dots.push(d);
     }
 
@@ -324,6 +439,13 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
             _ => String::new(),
         };
         d.first_year = earliest(&s.runs);
+        if s.kind == DotKind::Disease {
+            // The newest of its runs that has a certainty.
+            d.certainty = runs
+                .iter()
+                .filter(|r| s.runs.contains(&r.id))
+                .find_map(|r| r.certainty.clone());
+        }
         d.r = concept_radius(s.kind, s.runs.len());
         d.concept_id = Some(id);
         dots.push(d);
@@ -350,6 +472,22 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
         d.rank = Some(best.rank.clone());
         d.pmid = Some(pmid.to_string());
         d.retracted = best.retracted;
+        d.design = best.design.clone();
+        d.n = best.n;
+        d.includes_non_rct = best.includes_non_rct;
+        // The newest run that cites it.
+        d.sheet = links
+            .iter()
+            .filter_map(|p| {
+                let n = sheets.get(&(p.run, p.pmid.clone()))?;
+                Some((
+                    newness.get(&p.run).copied().unwrap_or(usize::MAX),
+                    p.run,
+                    *n,
+                ))
+            })
+            .min()
+            .map(|(_, run, n)| SheetRef { run, n });
         dots.push(d);
         for p in links {
             lines.insert(line(&run_dot_id(p.run), &paper_dot_id(pmid), true));
@@ -361,12 +499,6 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
     dots.retain(|d| {
         !hidden.contains(d.kind.as_str()) && d.rank.as_deref().is_none_or(|r| !hidden.contains(r))
     });
-    let mut papers_hidden_by_size = false;
-    if f.hidden.is_empty() && dots.len() > MAX_DOTS {
-        dots.retain(|d| d.kind != DotKind::Paper);
-        papers_hidden_by_size = true;
-    }
-
     dots.sort_by(|a, b| a.id.cmp(&b.id));
     let present: HashSet<&str> = dots.iter().map(|d| d.id.as_str()).collect();
     let lines: Vec<Line> = lines
@@ -376,7 +508,8 @@ pub async fn load_map(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::Resul
     Ok(MapData {
         dots,
         lines,
-        papers_hidden_by_size,
+        papers_hidden_by_size: false,
         runs: u32::try_from(runs.len()).unwrap_or(u32::MAX),
+        top_papers: None,
     })
 }

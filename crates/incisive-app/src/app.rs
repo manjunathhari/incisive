@@ -38,6 +38,8 @@ mod draft;
 mod chat;
 // Temporal T4: the Expert Opinion option, view and board page.
 mod expert;
+// The knowledge graph's Explore page (GRAPH=on).
+mod explore;
 mod intro;
 mod ivory;
 mod library_page;
@@ -796,6 +798,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("runs/:id") view=RunPage />
                     <Route path=path!("run/:id/temporal") view=expert::TemporalPage />
                     <Route path=path!("history") view=library_page::LibraryPage />
+                    <Route path=path!("explore") view=explore::ExplorePage />
                     <Route path=path!("activity") view=ActivityPage />
                 </Routes>
             </ivory::PageMain>
@@ -1054,8 +1057,23 @@ fn RunPage() -> impl IntoView {
             timer.set_value(h.ok());
         }
     };
+    // A link to `/runs/<id>#ref-n` (Explore's "Open the study sheet", the
+    // board's citations) opens that sheet once the run is drawn: the
+    // reference itself sits in a closed card. Once per run.
+    let hash_followed: StoredValue<Option<Uuid>> = StoredValue::new(None);
     Effect::new(move |_| match data.get() {
         Some(Ok(v)) => {
+            if hash_followed.get_value() != Some(v.run.summary.id) {
+                hash_followed.set_value(Some(v.run.summary.id));
+                // Effects run in the browser only (the hash never reaches
+                // the server).
+                if let Some(n) = page::sheet_in_hash(&expert::current_hash()) {
+                    // On the next frame: the sheet is drawn by then.
+                    request_animation_frame(move || {
+                        page::open_sheet(n);
+                    });
+                }
+            }
             let active = v.run.summary.status.is_active();
             // A Full run that ended with a written answer: its expert opinion
             // row comes moments later.
