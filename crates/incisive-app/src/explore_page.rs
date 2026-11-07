@@ -480,6 +480,11 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
                 })
                 .collect();
             c.supports = supports;
+            c.supports.sort_by(|a, b| {
+                a.1.to_lowercase()
+                    .cmp(&b.1.to_lowercase())
+                    .then(a.0.cmp(&b.0))
+            });
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
             c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
@@ -1757,9 +1762,10 @@ mod tests {
         assert_eq!(
             c.supports,
             [
-                ("o:4".to_string(), "Recurrence".to_string()),
                 ("o:5".to_string(), "Pain".to_string()),
-            ]
+                ("o:4".to_string(), "Recurrence".to_string()),
+            ],
+            "by name, not by dot id"
         );
         // Its questions are still only the questions.
         assert_eq!(
