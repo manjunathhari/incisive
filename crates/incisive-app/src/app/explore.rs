@@ -1840,8 +1840,39 @@ fn legend_view(ui: Ui) -> AnyView {
     .into_any()
 }
 
+/// Scroll the List row for dot `id` to the top of the screen when it is
+/// out of sight (browser only).
+#[cfg(feature = "hydrate")]
+fn scroll_row_into_view(id: &str) {
+    let Some(w) = web_sys::window() else { return };
+    let Some(doc) = w.document() else { return };
+    let sel = format!("[data-row=\"{}\"]", id.replace(['"', '\\'], ""));
+    let Ok(Some(row)) = doc.query_selector(&sel) else {
+        return;
+    };
+    let top = row.get_bounding_client_rect().top();
+    let height = w
+        .inner_height()
+        .ok()
+        .and_then(|h| h.as_f64())
+        .unwrap_or(0.0);
+    if top < 0.0 || top > height * 0.8 {
+        row.scroll_into_view_with_bool(true);
+    }
+}
+
 /// The groups that match the find box, each folded at four rows.
 fn list_view(ui: Ui, data: MapData) -> impl IntoView {
+    // A row picked from a card can be off screen: bring it (and its card)
+    // into view, once it is drawn. A row already in view does not move.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(id) = ui.sel.get() else { return };
+        if ui.view.get_untracked() != View::List {
+            return;
+        }
+        request_animation_frame(move || scroll_row_into_view(&id));
+    });
     let groups = StoredValue::new(ep::groups(&data));
     let data = StoredValue::new(data);
     move || {
