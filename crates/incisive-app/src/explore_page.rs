@@ -886,6 +886,18 @@ pub fn map_fetch(on_screen: bool, in_flight: Option<bool>) -> MapFetch {
     }
 }
 
+/// A map line's class and stroke width. `lit`: on, with a dot selected.
+/// A lit outcome–paper line is drawn in the outcome colour, 1.8 wide;
+/// otherwise a paper line is 1 wide and any other 1.6.
+pub fn line_look(on: bool, selected: bool, out: bool, paper: bool) -> (&'static str, &'static str) {
+    let lit = on && selected;
+    match (lit, out) {
+        (true, true) => ("kg-ln on out", "1.8"),
+        (true, false) => ("kg-ln on", if paper { "1" } else { "1.6" }),
+        _ => ("kg-ln", if paper { "1" } else { "1.6" }),
+    }
+}
+
 /// Whether a click on a dot picks it: a keyboard or screen-reader press
 /// (`detail` 0) always does; a pointer click does unless the map was just
 /// dragged.
@@ -1741,6 +1753,18 @@ mod tests {
         assert!(c.links.is_empty());
         // None: no line.
         assert!(card_for(&sample(), "p:200").unwrap().supports.is_empty());
+    }
+
+    #[test]
+    fn a_lit_outcome_line_takes_the_outcome_colour() {
+        // (on, something selected, out) -> class, width.
+        assert_eq!(line_look(true, true, true, true), ("kg-ln on out", "1.8"));
+        assert_eq!(line_look(true, true, false, true), ("kg-ln on", "1"));
+        assert_eq!(line_look(true, true, false, false), ("kg-ln on", "1.6"));
+        // Unlit or dimmed: like any other paper line.
+        assert_eq!(line_look(true, false, true, true), ("kg-ln", "1"));
+        assert_eq!(line_look(false, true, true, true), ("kg-ln", "1"));
+        assert_eq!(line_look(false, false, false, false), ("kg-ln", "1.6"));
     }
 
     #[test]
