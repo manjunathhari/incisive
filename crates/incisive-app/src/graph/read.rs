@@ -53,6 +53,9 @@ struct ConceptLink {
     kind: DotKind,
     label: String,
     certainty: Option<String>,
+    /// An outcome's row in its run's stored answer, 1-based (as the
+    /// extract step numbers the rows).
+    source_row: Option<i32>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -142,7 +145,8 @@ async fn user_runs(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<RunRow>> {
 /// The user's concept links, each resolved to the concept it was merged
 /// into.
 async fn concept_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<ConceptLink>> {
-    let rows: Vec<(Uuid, i64, String, String, Option<String>)> = sqlx::query_as(
+    type Row = (Uuid, i64, String, String, Option<String>, Option<i32>);
+    let rows: Vec<Row> = sqlx::query_as(
         "WITH RECURSIVE walk(start, id, merged_into, d) AS ( \
            SELECT c.id, c.id, c.merged_into, 0 FROM incisive.graph_concepts c \
             WHERE c.id IN (SELECT concept_id FROM incisive.graph_run_concepts WHERE user_id = $1) \
@@ -150,7 +154,7 @@ async fn concept_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<ConceptL
            SELECT w.start, c.id, c.merged_into, w.d + 1 FROM walk w \
              JOIN incisive.graph_concepts c ON c.id = w.merged_into WHERE w.d < $2), \
          fin AS (SELECT DISTINCT ON (start) start, id FROM walk ORDER BY start, d DESC) \
-         SELECT rc.run_id, c.id, c.kind, c.label, rc.certainty \
+         SELECT rc.run_id, c.id, c.kind, c.label, rc.certainty, rc.source_row \
            FROM incisive.graph_run_concepts rc \
            JOIN incisive.runs r ON r.id = rc.run_id AND r.user_id = $1 \
            JOIN fin ON fin.start = rc.concept_id \
@@ -163,13 +167,14 @@ async fn concept_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<ConceptL
     .await?;
     Ok(rows
         .into_iter()
-        .filter_map(|(run, id, kind, label, certainty)| {
+        .filter_map(|(run, id, kind, label, certainty, source_row)| {
             Some(ConceptLink {
                 run,
                 id,
                 kind: concept_kind(&kind)?,
                 label,
                 certainty,
+                source_row,
             })
         })
         .collect())
@@ -187,6 +192,40 @@ async fn paper_links(pool: &PgPool, user_id: i64) -> sqlx::Result<Vec<PaperLink>
     .bind(user_id)
     .fetch_all(pool)
     .await
+}
+
+/// The PMIDs each outcome row of a run's stored answer cites that are also
+/// that run's own linked papers, by (run, 1-based row). The user's own runs
+/// only; an answer with no `answer.outcomes` array (an old shape), a row
+/// past the end, or a row without a `pmids` array gives nothing.
+async fn outcome_papers(
+    pool: &PgPool,
+    user_id: i64,
+) -> sqlx::Result<HashMap<(Uuid, i32), Vec<String>>> {
+    let rows: Vec<(Uuid, i32, String)> = sqlx::query_as(
+        "SELECT DISTINCT rc.run_id, rc.source_row, rp.pmid \
+           FROM incisive.graph_run_concepts rc \
+           JOIN incisive.runs r ON r.id = rc.run_id AND r.user_id = $1 \
+           JOIN incisive.run_answers a ON a.run_id = rc.run_id \
+           CROSS JOIN LATERAL ( \
+                SELECT CASE WHEN jsonb_typeof(a.body #> '{answer,outcomes}') = 'array' \
+                            THEN a.body #> '{answer,outcomes}' -> (rc.source_row - 1) -> 'pmids' \
+                       END AS pmids) cited \
+           CROSS JOIN LATERAL jsonb_array_elements_text( \
+                CASE WHEN jsonb_typeof(cited.pmids) = 'array' \
+                     THEN cited.pmids ELSE '[]'::jsonb END) pm(pmid) \
+           JOIN incisive.graph_run_papers rp \
+             ON rp.run_id = rc.run_id AND rp.user_id = $1 AND rp.pmid = pm.pmid \
+          WHERE rc.user_id = $1 AND rc.source_row >= 1",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    let mut out: HashMap<(Uuid, i32), Vec<String>> = HashMap::new();
+    for (run, row, pmid) in rows {
+        out.entry((run, row)).or_default().push(pmid);
+    }
+    Ok(out)
 }
 
 /// Each linked paper's reference number in its run's stored answer, by run
@@ -294,6 +333,7 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
     let concepts = concept_links(pool, user_id).await?;
     let papers = paper_links(pool, user_id).await?;
     let sheets = sheet_refs(pool, user_id).await?;
+    let cited = outcome_papers(pool, user_id).await?;
 
     // Runs the organ and certainty filters keep.
     let keep: HashSet<Uuid> = runs
@@ -349,6 +389,7 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
         a: a.to_string(),
         b: b.to_string(),
         paper,
+        out: false,
     };
 
     for r in &runs {
@@ -491,6 +532,24 @@ pub async fn load_map_all(pool: &PgPool, user_id: i64, f: &MapFilter) -> sqlx::R
         dots.push(d);
         for p in links {
             lines.insert(line(&run_dot_id(p.run), &paper_dot_id(pmid), true));
+        }
+    }
+
+    // Each outcome to the papers its own answer row cites, on the map
+    // (one line per pair, however many runs share the outcome).
+    for c in concepts.iter().filter(|c| c.kind == DotKind::Outcome) {
+        let Some(pmids) = c.source_row.and_then(|row| cited.get(&(c.run, row))) else {
+            continue;
+        };
+        for pmid in pmids {
+            if by_pmid.contains_key(pmid.as_str()) {
+                lines.insert(Line {
+                    a: concept_dot_id(DotKind::Outcome, c.id),
+                    b: paper_dot_id(pmid),
+                    paper: true,
+                    out: true,
+                });
+            }
         }
     }
 

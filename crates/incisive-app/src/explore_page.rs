@@ -1,5 +1,5 @@
 //! The Explore page's rules (no Leptos): the List view's groups, rows and
-//! five-row folds, the card for a dot, the map's size cut, and the page's
+//! four-row folds, the card for a dot, the map's size cut, and the page's
 //! fixed words. Built for the browser too.
 
 use std::cmp::Ordering;
@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::graph_view::{Dot, DotKind, MapData};
 
-/// Rows a group shows before "Show all N".
-pub const FOLD_AT: usize = 5;
+/// Rows a list on Explore shows before "Show N more".
+pub const FOLD_AT: usize = 4;
 
 /// The map's frames (width, height): the server lays the dots out once for
 /// one of these.
@@ -29,9 +29,18 @@ pub const SQUARES: &str = "Bigger, darker squares are higher-ranked papers.";
 pub const PAPERS_HIDDEN: &str = "Papers are hidden on this map; see them in List";
 pub const FIND_LABEL: &str = "Find on your map";
 pub const FIND_HINT: &str = "e.g. hernia, bile duct, POEM";
+/// An outcome's card when none of the papers its answer row cites is on
+/// the map.
+pub const NO_OUTCOME_PAPERS: &str = "No papers on your map for this outcome.";
 
-/// The first `FOLD_AT` rows and the fold's button ("Show all N", or "Show
-/// fewer" when open); no button for `FOLD_AT` rows or fewer.
+/// The heading of an outcome card's paper list.
+pub fn outcome_papers_heading(n: usize) -> String {
+    format!("Papers behind this outcome \u{b7} {n}")
+}
+
+/// The first `FOLD_AT` rows and the fold's button ("Show N more", N the
+/// rows folded away, or "Show fewer" when open); no button for `FOLD_AT`
+/// rows or fewer.
 pub fn fold<T: Clone>(rows: &[T], open: bool) -> (Vec<T>, Option<String>) {
     if rows.len() <= FOLD_AT {
         return (rows.to_vec(), None);
@@ -41,9 +50,25 @@ pub fn fold<T: Clone>(rows: &[T], open: bool) -> (Vec<T>, Option<String>) {
     } else {
         (
             rows[..FOLD_AT].to_vec(),
-            Some(format!("Show all {}", rows.len())),
+            Some(format!("Show {} more", rows.len() - FOLD_AT)),
         )
     }
+}
+
+/// [`fold`], except that a folded group still shows the selected row:
+/// after the first `FOLD_AT`, with "Show N more" counting the rows still
+/// hidden (no button when none are).
+pub fn fold_keeping(rows: &[Row], open: bool, sel: Option<&str>) -> (Vec<Row>, Option<String>) {
+    let (mut shown, button) = fold(rows, open);
+    let Some(at) = sel.and_then(|s| rows.iter().position(|r| r.id == s)) else {
+        return (shown, button);
+    };
+    if open || at < shown.len() {
+        return (shown, button);
+    }
+    shown.push(rows[at].clone());
+    let hidden = rows.len() - shown.len();
+    (shown, (hidden > 0).then(|| format!("Show {hidden} more")))
 }
 
 /// One row of the List view.
@@ -157,6 +182,25 @@ fn paper_sub(d: &Dot) -> String {
     }
     if let Some(y) = d.first_year {
         parts.push(y.to_string());
+    }
+    if d.retracted {
+        parts.push("Retracted".into());
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// A paper's "design · year" (and "Retracted"); its rank's name when it
+/// has neither.
+fn design_year(d: &Dot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !d.design.trim().is_empty() {
+        parts.push(d.design.trim().to_string());
+    }
+    if let Some(y) = d.first_year {
+        parts.push(y.to_string());
+    }
+    if parts.is_empty() {
+        parts.push(rank_info(d.rank.as_deref()).2.to_string());
     }
     if d.retracted {
         parts.push("Retracted".into());
@@ -303,6 +347,12 @@ pub struct Card {
     /// A paper's questions on the map ("From your question: ..."): (dot
     /// id, name), each name once.
     pub from: Vec<(String, String)>,
+    /// The outcomes a paper's answer rows link it to ("Supports: ..."):
+    /// (dot id, name).
+    pub supports: Vec<(String, String)>,
+    /// An outcome's papers on the map, ranked then newest (each row's sub
+    /// is "design · year"); `None` on any other card.
+    pub papers: Option<Vec<Row>>,
 }
 
 /// The card before anything is picked.
@@ -415,13 +465,26 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if d.includes_non_rct {
                 c.flags.push("includes non-RCT studies".into());
             }
-            // A paper's lines go to its questions: named on the card
-            // ("From your question"), not offered as buttons.
+            // A paper's lines go to its questions ("From your question")
+            // and to the outcomes it supports ("Supports"), each named on
+            // the card rather than offered as link buttons.
             let mut seen: BTreeSet<String> = BTreeSet::new();
-            c.from = std::mem::take(&mut c.links)
+            let kind_of = |id: &str| near.iter().find(|n| n.id == id).map(|n| n.kind);
+            let (supports, from): (Vec<_>, Vec<_>) = std::mem::take(&mut c.links)
                 .into_iter()
-                .filter(|(_, label)| seen.insert(label.clone()))
+                .partition(|(id, _)| kind_of(id) == Some(DotKind::Outcome));
+            c.from = from
+                .into_iter()
+                .filter(|(id, label)| {
+                    kind_of(id) == Some(DotKind::Run) && seen.insert(label.clone())
+                })
                 .collect();
+            c.supports = supports;
+            c.supports.sort_by(|a, b| {
+                a.1.to_lowercase()
+                    .cmp(&b.1.to_lowercase())
+                    .then(a.0.cmp(&b.0))
+            });
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
             c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
@@ -444,14 +507,41 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             c.answer = d.run_id.map(run_href);
         }
         DotKind::Outcome => {
-            c.kicker = if d.sub.is_empty() {
-                "Outcome".into()
-            } else {
-                format!("Outcome \u{b7} Certainty: {}", d.sub)
-            };
-            c.body =
-                "One of up to four outcomes chosen for this run. The figures are in the answer."
-                    .into();
+            c.kicker = "Outcome \u{b7} from your question".into();
+            // Its question(s), each name once, then its certainty.
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let questions: Vec<String> = near
+                .iter()
+                .filter(|n| n.kind == DotKind::Run)
+                .map(|n| run_title(data, n))
+                .filter(|t| seen.insert(t.clone()))
+                .collect();
+            c.body = with_certainty(questions.join("; "), Some(d.sub.as_str()));
+            // The papers its answer rows cite (the `out` lines).
+            let cited: BTreeSet<&str> = data
+                .lines
+                .iter()
+                .filter(|l| l.out && l.a == id)
+                .map(|l| l.b.as_str())
+                .collect();
+            let mut papers: Vec<&Dot> = near
+                .iter()
+                .copied()
+                .filter(|n| n.kind == DotKind::Paper && cited.contains(n.id.as_str()))
+                .collect();
+            papers.sort_by(|a, b| paper_order(a, b));
+            c.papers = Some(
+                papers
+                    .into_iter()
+                    .map(|p| Row {
+                        id: p.id.clone(),
+                        title: p.label.clone(),
+                        sub: design_year(p),
+                        kind: p.kind,
+                        rank: p.rank.clone(),
+                    })
+                    .collect(),
+            );
             c.answer = first_run.map(run_href);
         }
         DotKind::Treatment => {
@@ -817,6 +907,18 @@ pub fn map_fetch(on_screen: bool, in_flight: Option<bool>) -> MapFetch {
     }
 }
 
+/// A map line's class and stroke width. `lit`: on, with a dot selected.
+/// A lit outcome–paper line is drawn in the outcome colour, 1.8 wide;
+/// otherwise a paper line is 1 wide and any other 1.6.
+pub fn line_look(on: bool, selected: bool, out: bool, paper: bool) -> (&'static str, &'static str) {
+    let lit = on && selected;
+    match (lit, out) {
+        (true, true) => ("kg-ln on out", "1.8"),
+        (true, false) => ("kg-ln on", if paper { "1" } else { "1.6" }),
+        _ => ("kg-ln", if paper { "1" } else { "1.6" }),
+    }
+}
+
 /// Whether a click on a dot picks it: a keyboard or screen-reader press
 /// (`detail` 0) always does; a pointer click does unless the map was just
 /// dragged.
@@ -1075,6 +1177,7 @@ mod tests {
             a: a.into(),
             b: b.into(),
             paper,
+            out: false,
         }
     }
 
@@ -1128,18 +1231,24 @@ mod tests {
     }
 
     #[test]
-    fn fold_shows_five_then_a_button() {
+    fn fold_shows_four_then_a_button() {
+        assert_eq!(FOLD_AT, 4);
         let six: Vec<u32> = (1..=6).collect();
         let (shown, button) = fold(&six, false);
-        assert_eq!(shown, vec![1, 2, 3, 4, 5]);
-        assert_eq!(button.as_deref(), Some("Show all 6"));
+        assert_eq!(shown, vec![1, 2, 3, 4]);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
         let (shown, button) = fold(&six, true);
         assert_eq!(shown.len(), 6);
         assert_eq!(button.as_deref(), Some("Show fewer"));
         let five: Vec<u32> = (1..=5).collect();
-        assert_eq!(fold(&five, false), (five.clone(), None));
-        assert_eq!(fold(&five, true), (five, None));
-        assert_eq!(FOLD_AT, 5);
+        assert_eq!(
+            fold(&five, false),
+            (vec![1, 2, 3, 4], Some("Show 1 more".into()))
+        );
+        assert_eq!(fold(&five, true).1.as_deref(), Some("Show fewer"));
+        let four: Vec<u32> = (1..=4).collect();
+        assert_eq!(fold(&four, false), (four.clone(), None));
+        assert_eq!(fold(&four, true), (four.clone(), None));
     }
 
     #[test]
@@ -1562,6 +1671,154 @@ mod tests {
             [(RUN.to_string(), "Inguinal hernia question".to_string())]
         );
         assert!(c.links.is_empty());
+    }
+
+    fn out(o: &str, p: &str) -> Line {
+        Line {
+            out: true,
+            ..line(o, p, true)
+        }
+    }
+
+    /// The sample with the outcome citing six papers of its run.
+    fn with_outcome_papers() -> MapData {
+        let mut m = sample();
+        for p in ["p:101", "p:102", "p:103", "p:104", "p:200", "p:300"] {
+            if !m.lines.iter().any(|l| l.a == RUN && l.b == p) {
+                m.lines.push(line(RUN, p, true));
+            }
+            m.lines.push(out("o:4", p));
+        }
+        for d in m.dots.iter_mut() {
+            match d.id.as_str() {
+                "p:102" => d.design = "Randomised trial".into(),
+                "p:300" => d.design = "Retrospective cohort".into(),
+                _ => {}
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn an_outcomes_card_lists_its_papers_ranked_then_newest() {
+        let m = with_outcome_papers();
+        let c = card_for(&m, "o:4").unwrap();
+        assert_eq!(c.kicker, "Outcome \u{b7} from your question");
+        assert_eq!(c.title, "Recurrence");
+        assert_eq!(c.body, "Inguinal hernia question \u{b7} Certainty: Low");
+        let papers = c.papers.as_ref().expect("an outcome has a paper list");
+        let ids: Vec<&str> = papers.iter().map(|r| r.id.as_str()).collect();
+        // RCTs newest first, meta-analysis, prospective, retrospective,
+        // case series.
+        assert_eq!(ids, ["p:102", "p:101", "p:200", "p:104", "p:300", "p:103"]);
+        assert_eq!(papers[0].title, "Paper 102");
+        assert_eq!(papers[0].sub, "Randomised trial \u{b7} 2023");
+        assert_eq!(
+            papers[4].sub,
+            "Retrospective cohort \u{b7} 2020 \u{b7} Retracted"
+        );
+        assert_eq!(papers[0].rank.as_deref(), Some("rct"));
+        let (shown, button) = fold(papers, false);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
+        assert_eq!(
+            outcome_papers_heading(papers.len()),
+            "Papers behind this outcome \u{b7} 6"
+        );
+        // Still opens the answer; the question is still a link.
+        assert_eq!(
+            c.answer.as_deref(),
+            Some("/runs/00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            c.links,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        // Selecting the outcome lights its papers.
+        let lit = near(&m, "o:4");
+        for p in ids {
+            assert!(lit.contains(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn an_outcome_with_no_papers_on_the_map_says_so() {
+        let c = card_for(&sample(), "o:4").unwrap();
+        assert_eq!(c.papers.as_deref(), Some(&[][..]));
+        assert_eq!(NO_OUTCOME_PAPERS, "No papers on your map for this outcome.");
+        // Other cards have no such list.
+        assert_eq!(card_for(&sample(), "d:2").unwrap().papers, None);
+        assert_eq!(card_for(&sample(), "p:200").unwrap().papers, None);
+    }
+
+    #[test]
+    fn a_papers_card_names_the_outcomes_it_supports() {
+        let mut m = with_outcome_papers();
+        m.dots
+            .push(dot("o:5", DotKind::Outcome, "Pain", "Moderate"));
+        m.lines.push(line(RUN, "o:5", false));
+        m.lines.push(out("o:5", "p:200"));
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(
+            c.supports,
+            [
+                ("o:5".to_string(), "Pain".to_string()),
+                ("o:4".to_string(), "Recurrence".to_string()),
+            ],
+            "by name, not by dot id"
+        );
+        // Its questions are still only the questions.
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        assert!(c.links.is_empty());
+        // None: no line.
+        assert!(card_for(&sample(), "p:200").unwrap().supports.is_empty());
+    }
+
+    #[test]
+    fn a_folded_group_still_shows_the_selected_row() {
+        let rows: Vec<Row> = (1..=7)
+            .map(|i| Row {
+                id: format!("p:{i}"),
+                title: format!("Paper {i}"),
+                sub: String::new(),
+                kind: DotKind::Paper,
+                rank: None,
+            })
+            .collect();
+        let ids = |v: &[Row]| v.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        // The 6th selected: the first four, then it; the rest still counted.
+        let (shown, button) = fold_keeping(&rows, false, Some("p:6"));
+        assert_eq!(ids(&shown), ["p:1", "p:2", "p:3", "p:4", "p:6"]);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
+        // Selected among the first four, elsewhere, or none: the plain fold.
+        for sel in [Some("p:2"), Some("x:1"), None] {
+            assert_eq!(
+                fold_keeping(&rows, false, sel),
+                fold(&rows, false),
+                "{sel:?}"
+            );
+        }
+        // Open: every row.
+        assert_eq!(fold_keeping(&rows, true, Some("p:6")), fold(&rows, true));
+        // The last of five selected: nothing left behind the button.
+        let (shown, button) = fold_keeping(&rows[..5], false, Some("p:5"));
+        assert_eq!(shown.len(), 5);
+        assert_eq!(button, None);
+    }
+
+    #[test]
+    fn a_lit_outcome_line_takes_the_outcome_colour() {
+        // (on, something selected, out) -> class, width.
+        assert_eq!(line_look(true, true, true, true), ("kg-ln on out", "1.8"));
+        assert_eq!(line_look(true, true, false, true), ("kg-ln on", "1"));
+        assert_eq!(line_look(true, true, false, false), ("kg-ln on", "1.6"));
+        // Unlit or dimmed: like any other paper line.
+        assert_eq!(line_look(true, false, true, true), ("kg-ln", "1"));
+        assert_eq!(line_look(false, true, true, true), ("kg-ln", "1"));
+        assert_eq!(line_look(false, false, false, false), ("kg-ln", "1.6"));
     }
 
     #[test]

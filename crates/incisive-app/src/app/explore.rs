@@ -1,6 +1,6 @@
 //! The Explore page (`/explore`, `GRAPH=on`): the user's own map as a list
 //! of diseases, treatments, outcomes, questions and ranked papers, each
-//! group folded at five rows, with a card for the picked row (in place on a
+//! group folded at four rows, with a card for the picked row (in place on a
 //! phone, at the side on a wide screen), and the map: the dots the server
 //! laid out once, drawn as real buttons over SVG lines, with tap to light up
 //! a dot's neighbours, zoom (sharp: every place is worked out again, nothing
@@ -49,7 +49,7 @@ pub const EXPLORE_STYLE: &str = r#"
 .kg-layer { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
 .kg-drawing { position:absolute; left:0; top:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:14px; color:var(--iv-muted); pointer-events:none; }
 .kg-svg { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
-.kg-ln { stroke:var(--kg-other); } .kg-ln.on { stroke:var(--iv-body); }
+.kg-ln { stroke:var(--kg-other); } .kg-ln.on { stroke:var(--iv-body); } .kg-ln.on.out { stroke:var(--kg-outcome); }
 .iv-wrap button.kg-dot { position:absolute; transform:translate(-50%,-50%); padding:0; border:0; background:transparent; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:50%; pointer-events:auto; touch-action:none; }
 .kg-mk { display:block; box-sizing:border-box; border-radius:50%; }
 .kg-dot .kg-mk { width:var(--m); height:var(--m); }
@@ -1145,11 +1145,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
                         Some(s) => x.a == s || x.b == s,
                         None => !focusing,
                     };
-                    let class = if on && s.is_some() {
-                        "kg-ln on"
-                    } else {
-                        "kg-ln"
-                    };
+                    let (class, width) = ep::line_look(on, s.is_some(), x.out, x.paper);
                     let end = move |id: String, i: usize| {
                         move || {
                             place(&id).map_or_else(String::new, |((x, y), _)| {
@@ -1164,7 +1160,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
                             y1=end(x.a.clone(), 1)
                             x2=end(x.b.clone(), 0)
                             y2=end(x.b.clone(), 1)
-                            stroke-width=if x.paper { "1" } else { "1.6" }
+                            stroke-width=width
                             stroke-dasharray=x.paper.then_some("3 3")
                             vector-effect="non-scaling-stroke"
                             opacity=if on { "1" } else { "0.18" }
@@ -1681,7 +1677,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
     .into_any()
 }
 
-/// The picked question's or disease's papers, ranked, folded at five.
+/// The picked question's or disease's papers, ranked, folded at four.
 fn side_papers(ui: Ui, d: &MapData, id: &str, until: Option<i32>) -> Option<AnyView> {
     let live = ep::visible_until(d, until);
     let rows: Vec<Row> = ep::papers_for(d, id)
@@ -1844,8 +1840,39 @@ fn legend_view(ui: Ui) -> AnyView {
     .into_any()
 }
 
-/// The groups that match the find box, each folded at five rows.
+/// Scroll the List row for dot `id` to the top of the screen when it is
+/// out of sight (browser only).
+#[cfg(feature = "hydrate")]
+fn scroll_row_into_view(id: &str) {
+    let Some(w) = web_sys::window() else { return };
+    let Some(doc) = w.document() else { return };
+    let sel = format!("[data-row=\"{}\"]", id.replace(['"', '\\'], ""));
+    let Ok(Some(row)) = doc.query_selector(&sel) else {
+        return;
+    };
+    let top = row.get_bounding_client_rect().top();
+    let height = w
+        .inner_height()
+        .ok()
+        .and_then(|h| h.as_f64())
+        .unwrap_or(0.0);
+    if top < 0.0 || top > height * 0.8 {
+        row.scroll_into_view_with_bool(true);
+    }
+}
+
+/// The groups that match the find box, each folded at four rows.
 fn list_view(ui: Ui, data: MapData) -> impl IntoView {
+    // A row picked from a card can be off screen: bring it (and its card)
+    // into view, once it is drawn. A row already in view does not move.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let Some(id) = ui.sel.get() else { return };
+        if ui.view.get_untracked() != View::List {
+            return;
+        }
+        request_animation_frame(move || scroll_row_into_view(&id));
+    });
     let groups = StoredValue::new(ep::groups(&data));
     let data = StoredValue::new(data);
     move || {
@@ -1871,7 +1898,8 @@ fn group_view(
     open: &BTreeSet<String>,
 ) -> AnyView {
     let is_open = open.contains(&g.name);
-    let (rows, button) = ep::fold(&g.rows, is_open);
+    // A selected row behind the fold (picked from a card) still shows.
+    let (rows, button) = ep::fold_keeping(&g.rows, is_open, sel);
     let heading = ep::group_heading(&g, g.rows.len());
     let rows = rows
         .into_iter()
@@ -1922,7 +1950,7 @@ fn row_view(ui: Ui, r: Row, on: bool, card: Option<Card>) -> AnyView {
     let id = r.id.clone();
     let swatch = swatch_class(&r);
     view! {
-        <div class="kg-row" class:on=on>
+        <div class="kg-row" class:on=on data-row=r.id.clone()>
             <button
                 type="button"
                 class="kg-row-btn"
@@ -1936,6 +1964,63 @@ fn row_view(ui: Ui, r: Row, on: bool, card: Option<Card>) -> AnyView {
                 </span>
             </button>
             {card.map(|c| card_view(ui, c, true, "kg-card kg-inline"))}
+        </div>
+    }
+    .into_any()
+}
+
+/// An outcome card's papers, ranked, as buttons that pick them, folded at
+/// four (opened again for each card); a line saying so when there are none.
+fn outcome_papers_view(ui: Ui, rows: Vec<Row>) -> AnyView {
+    let total = rows.len();
+    if total == 0 {
+        return view! {
+            <div class="kg-papers">
+                <h3>{ep::outcome_papers_heading(0)}</h3>
+                <p class="kg-card-body">{ep::NO_OUTCOME_PAPERS}</p>
+            </div>
+        }
+        .into_any();
+    }
+    let open = RwSignal::new(false);
+    let list = move || {
+        let (shown, button) = ep::fold(&rows, open.get());
+        let items = shown
+            .into_iter()
+            .map(|r| {
+                let (_, num, _) = ep::rank_info(r.rank.as_deref());
+                let class = format!("kg-num {}", ep::rank_class(r.rank.as_deref()));
+                let id = r.id.clone();
+                view! {
+                    <button type="button" class="kg-paper" on:click=move |_| ui.sel.set(Some(id.clone()))>
+                        <span class=class aria-hidden="true">{num}</span>
+                        <span class="kg-row-text">
+                            <span class="kg-row-title">{r.title}</span>
+                            <span class="kg-row-sub">{r.sub}</span>
+                        </span>
+                    </button>
+                }
+            })
+            .collect_view();
+        let is_open = open.get();
+        view! {
+            {items}
+            {button.map(|label| view! {
+                <button
+                    type="button"
+                    class="kg-more"
+                    aria-expanded=is_open.to_string()
+                    on:click=move |_| open.update(|o| *o = !*o)
+                >
+                    {label}
+                </button>
+            })}
+        }
+    };
+    view! {
+        <div class="kg-papers">
+            <h3>{ep::outcome_papers_heading(total)}</h3>
+            {list}
         </div>
     }
     .into_any()
@@ -1993,6 +2078,25 @@ fn card_view(ui: Ui, c: Card, inline: bool, class: &'static str) -> AnyView {
             .collect_view();
         view! { <p class="kg-from">"From your question: " {names}</p> }
     });
+    // The outcomes it supports: text-style buttons that pick them.
+    let supports = (!c.supports.is_empty()).then(|| {
+        let n = c.supports.len();
+        let names = c
+            .supports
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, label))| {
+                view! {
+                    <button type="button" class="kg-from-q kg-sup" on:click=move |_| ui.sel.set(Some(id.clone()))>
+                        {label}
+                    </button>
+                    {(i + 1 < n).then_some(" \u{b7} ")}
+                }
+            })
+            .collect_view();
+        view! { <p class="kg-from">"Supports: " {names}</p> }
+    });
+    let papers = c.papers.map(|rows| outcome_papers_view(ui, rows));
     let acts = (c.answer.is_some() || c.pubmed.is_some() || c.sheet.is_some() || c.ask.is_some())
         .then(|| {
             view! {
@@ -2012,7 +2116,9 @@ fn card_view(ui: Ui, c: Card, inline: bool, class: &'static str) -> AnyView {
             {(!inline).then(|| view! { <div class="kg-card-title">{c.title}</div> })}
             <div class="kg-card-body">{c.body}</div>
             {flags}
+            {papers}
             {from}
+            {supports}
             {links}
             {acts}
         </div>
@@ -2095,6 +2201,137 @@ mod tests {
         assert!(!sheet.contains("_blank"), "{sheet}");
         // Title and details only: no abstract.
         assert!(!html.to_lowercase().contains("abstract"), "{html}");
+    }
+
+    fn outcome_card(n: usize) -> Card {
+        let ranks = [
+            "rct",
+            "meta",
+            "prospective",
+            "retrospective",
+            "case_series",
+            "model",
+        ];
+        Card {
+            kicker: "Outcome \u{b7} from your question".into(),
+            title: "Recurrence".into(),
+            body: "Inguinal hernia question \u{b7} Certainty: Low".into(),
+            answer: Some("/runs/00000000-0000-0000-0000-000000000001".into()),
+            papers: Some(
+                (0..n)
+                    .map(|i| Row {
+                        id: format!("p:{i}"),
+                        title: format!("Paper {i}"),
+                        sub: format!("Randomised trial \u{b7} 202{i}"),
+                        kind: DotKind::Paper,
+                        rank: Some(ranks[i % ranks.len()].into()),
+                    })
+                    .collect(),
+            ),
+            ..Card::default()
+        }
+    }
+
+    #[test]
+    fn an_outcomes_card_lists_four_papers_then_folds() {
+        let html = render(outcome_card(6), false);
+        let at = |s: &str| html.find(s).unwrap_or_else(|| panic!("no {s} in {html}"));
+        assert!(at("Outcome \u{b7} from your question") < at("Recurrence"));
+        assert!(at("Recurrence") < at("Inguinal hernia question"));
+        assert!(at("Inguinal hernia question") < at("Papers behind this outcome \u{b7} 6"));
+        let rows = regex::Regex::new(r#"<button [^>]*class="kg-paper""#).unwrap();
+        assert_eq!(rows.find_iter(&html).count(), 4, "{html}");
+        assert!(html.contains("Paper 3") && !html.contains("Paper 4"));
+        // Rank chip numbers, title, design and year.
+        assert!(
+            html.contains(r#"<span aria-hidden="true" class="kg-num rct">1</span>"#),
+            "{html}"
+        );
+        assert!(html.contains("Randomised trial \u{b7} 2020"));
+        assert!(at("Papers behind this outcome") < at("Show 2 more"));
+        assert!(at("Show 2 more") < at("Open the full answer"));
+        assert!(!html.contains(ep::NO_OUTCOME_PAPERS));
+        // Four or fewer: no fold.
+        let html = render(outcome_card(4), false);
+        assert!(!html.contains("more</button>"), "{html}");
+    }
+
+    #[test]
+    fn an_outcome_with_no_papers_says_so() {
+        let html = render(outcome_card(0), false);
+        assert!(html.contains(ep::NO_OUTCOME_PAPERS), "{html}");
+        assert!(
+            html.contains("Papers behind this outcome \u{b7} 0"),
+            "{html}"
+        );
+        assert!(!html.contains("kg-paper\""));
+        assert!(html.contains("Open the full answer"));
+        // Other cards have no paper list.
+        let html = render(paper_card(), false);
+        assert!(!html.contains("Papers behind this outcome"));
+        assert!(!html.contains(ep::NO_OUTCOME_PAPERS));
+    }
+
+    #[test]
+    fn a_papers_card_names_what_it_supports_as_buttons() {
+        let mut c = paper_card();
+        c.supports = vec![
+            ("o:4".into(), "Recurrence".into()),
+            ("o:5".into(), "Pain".into()),
+        ];
+        let html = render(c, false);
+        assert!(html.contains("Supports: "), "{html}");
+        let q = regex::Regex::new(r#"<button [^>]*class="kg-from-q kg-sup"[^>]*>([^<]*)</button>"#)
+            .unwrap();
+        let names: Vec<String> = q.captures_iter(&html).map(|c| c[1].to_string()).collect();
+        assert_eq!(names, ["Recurrence", "Pain"]);
+        assert!(html.contains("</button> \u{b7} <button"), "{html}");
+        // After "From your question".
+        assert!(html.find("From your question").unwrap() < html.find("Supports: ").unwrap());
+        // None: no line.
+        assert!(!render(paper_card(), false).contains("Supports"));
+    }
+
+    #[test]
+    fn a_selected_row_behind_the_fold_shows_with_its_card() {
+        use crate::graph_view::{Dot, Line};
+        let paper = |i: i32| Dot {
+            id: format!("p:{i}"),
+            kind: DotKind::Paper,
+            label: format!("Paper {i}"),
+            sub: String::new(),
+            first_year: Some(2026 - i),
+            r: 5.0,
+            rank: Some("rct".into()),
+            x: 0.0,
+            y: 0.0,
+            run_id: None,
+            concept_id: None,
+            pmid: Some(i.to_string()),
+            retracted: false,
+            design: String::new(),
+            n: None,
+            includes_non_rct: false,
+            sheet: None,
+            question: None,
+            bottom_line: None,
+            certainty: None,
+        };
+        let m = MapData {
+            dots: (1..=6).map(paper).collect(),
+            lines: Vec::<Line>::new(),
+            ..MapData::default()
+        };
+        let g = ep::groups(&m).remove(0);
+        let html = Owner::new()
+            .with(|| group_view(Ui::new(), &m, g, Some("p:6"), &BTreeSet::new()).to_html());
+        let at = |s: &str| html.find(s).unwrap_or_else(|| panic!("no {s} in {html}"));
+        assert!(!html.contains("Paper 5"), "the 5th stays folded: {html}");
+        assert!(at("Paper 4") < at("Paper 6"));
+        assert!(html.contains("kg-card kg-inline"), "its card: {html}");
+        assert!(html.contains("PMID 6"), "{html}");
+        assert!(at("Paper 6") < at("Show 1 more"));
+        assert!(html.contains(r#"data-row="p:6""#), "{html}");
     }
 
     #[test]
