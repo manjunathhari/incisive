@@ -29,6 +29,14 @@ pub const SQUARES: &str = "Bigger, darker squares are higher-ranked papers.";
 pub const PAPERS_HIDDEN: &str = "Papers are hidden on this map; see them in List";
 pub const FIND_LABEL: &str = "Find on your map";
 pub const FIND_HINT: &str = "e.g. hernia, bile duct, POEM";
+/// An outcome's card when none of the papers its answer row cites is on
+/// the map.
+pub const NO_OUTCOME_PAPERS: &str = "No papers on your map for this outcome.";
+
+/// The heading of an outcome card's paper list.
+pub fn outcome_papers_heading(n: usize) -> String {
+    format!("Papers behind this outcome \u{b7} {n}")
+}
 
 /// The first `FOLD_AT` rows and the fold's button ("Show N more", N the
 /// rows folded away, or "Show fewer" when open); no button for `FOLD_AT`
@@ -158,6 +166,25 @@ fn paper_sub(d: &Dot) -> String {
     }
     if let Some(y) = d.first_year {
         parts.push(y.to_string());
+    }
+    if d.retracted {
+        parts.push("Retracted".into());
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// A paper's "design · year" (and "Retracted"); its rank's name when it
+/// has neither.
+fn design_year(d: &Dot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !d.design.trim().is_empty() {
+        parts.push(d.design.trim().to_string());
+    }
+    if let Some(y) = d.first_year {
+        parts.push(y.to_string());
+    }
+    if parts.is_empty() {
+        parts.push(rank_info(d.rank.as_deref()).2.to_string());
     }
     if d.retracted {
         parts.push("Retracted".into());
@@ -304,6 +331,12 @@ pub struct Card {
     /// A paper's questions on the map ("From your question: ..."): (dot
     /// id, name), each name once.
     pub from: Vec<(String, String)>,
+    /// The outcomes a paper's answer rows link it to ("Supports: ..."):
+    /// (dot id, name).
+    pub supports: Vec<(String, String)>,
+    /// An outcome's papers on the map, ranked then newest (each row's sub
+    /// is "design · year"); `None` on any other card.
+    pub papers: Option<Vec<Row>>,
 }
 
 /// The card before anything is picked.
@@ -416,13 +449,21 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             if d.includes_non_rct {
                 c.flags.push("includes non-RCT studies".into());
             }
-            // A paper's lines go to its questions: named on the card
-            // ("From your question"), not offered as buttons.
+            // A paper's lines go to its questions ("From your question")
+            // and to the outcomes it supports ("Supports"), each named on
+            // the card rather than offered as link buttons.
             let mut seen: BTreeSet<String> = BTreeSet::new();
-            c.from = std::mem::take(&mut c.links)
+            let kind_of = |id: &str| near.iter().find(|n| n.id == id).map(|n| n.kind);
+            let (supports, from): (Vec<_>, Vec<_>) = std::mem::take(&mut c.links)
                 .into_iter()
-                .filter(|(_, label)| seen.insert(label.clone()))
+                .partition(|(id, _)| kind_of(id) == Some(DotKind::Outcome));
+            c.from = from
+                .into_iter()
+                .filter(|(id, label)| {
+                    kind_of(id) == Some(DotKind::Run) && seen.insert(label.clone())
+                })
                 .collect();
+            c.supports = supports;
             c.sheet = d.sheet.map(|s| format!("{}#ref-{}", run_href(s.run), s.n));
             c.pubmed = pmid.map(|p| format!("https://pubmed.ncbi.nlm.nih.gov/{p}/"));
         }
@@ -445,14 +486,41 @@ pub fn card_for(data: &MapData, id: &str) -> Option<Card> {
             c.answer = d.run_id.map(run_href);
         }
         DotKind::Outcome => {
-            c.kicker = if d.sub.is_empty() {
-                "Outcome".into()
-            } else {
-                format!("Outcome \u{b7} Certainty: {}", d.sub)
-            };
-            c.body =
-                "One of up to four outcomes chosen for this run. The figures are in the answer."
-                    .into();
+            c.kicker = "Outcome \u{b7} from your question".into();
+            // Its question(s), each name once, then its certainty.
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            let questions: Vec<String> = near
+                .iter()
+                .filter(|n| n.kind == DotKind::Run)
+                .map(|n| run_title(data, n))
+                .filter(|t| seen.insert(t.clone()))
+                .collect();
+            c.body = with_certainty(questions.join("; "), Some(d.sub.as_str()));
+            // The papers its answer rows cite (the `out` lines).
+            let cited: BTreeSet<&str> = data
+                .lines
+                .iter()
+                .filter(|l| l.out && l.a == id)
+                .map(|l| l.b.as_str())
+                .collect();
+            let mut papers: Vec<&Dot> = near
+                .iter()
+                .copied()
+                .filter(|n| n.kind == DotKind::Paper && cited.contains(n.id.as_str()))
+                .collect();
+            papers.sort_by(|a, b| paper_order(a, b));
+            c.papers = Some(
+                papers
+                    .into_iter()
+                    .map(|p| Row {
+                        id: p.id.clone(),
+                        title: p.label.clone(),
+                        sub: design_year(p),
+                        kind: p.kind,
+                        rank: p.rank.clone(),
+                    })
+                    .collect(),
+            );
             c.answer = first_run.map(run_href);
         }
         DotKind::Treatment => {
@@ -1570,6 +1638,109 @@ mod tests {
             [(RUN.to_string(), "Inguinal hernia question".to_string())]
         );
         assert!(c.links.is_empty());
+    }
+
+    fn out(o: &str, p: &str) -> Line {
+        Line {
+            out: true,
+            ..line(o, p, true)
+        }
+    }
+
+    /// The sample with the outcome citing six papers of its run.
+    fn with_outcome_papers() -> MapData {
+        let mut m = sample();
+        for p in ["p:101", "p:102", "p:103", "p:104", "p:200", "p:300"] {
+            if !m.lines.iter().any(|l| l.a == RUN && l.b == p) {
+                m.lines.push(line(RUN, p, true));
+            }
+            m.lines.push(out("o:4", p));
+        }
+        for d in m.dots.iter_mut() {
+            match d.id.as_str() {
+                "p:102" => d.design = "Randomised trial".into(),
+                "p:300" => d.design = "Retrospective cohort".into(),
+                _ => {}
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn an_outcomes_card_lists_its_papers_ranked_then_newest() {
+        let m = with_outcome_papers();
+        let c = card_for(&m, "o:4").unwrap();
+        assert_eq!(c.kicker, "Outcome \u{b7} from your question");
+        assert_eq!(c.title, "Recurrence");
+        assert_eq!(c.body, "Inguinal hernia question \u{b7} Certainty: Low");
+        let papers = c.papers.as_ref().expect("an outcome has a paper list");
+        let ids: Vec<&str> = papers.iter().map(|r| r.id.as_str()).collect();
+        // RCTs newest first, meta-analysis, prospective, retrospective,
+        // case series.
+        assert_eq!(ids, ["p:102", "p:101", "p:200", "p:104", "p:300", "p:103"]);
+        assert_eq!(papers[0].title, "Paper 102");
+        assert_eq!(papers[0].sub, "Randomised trial \u{b7} 2023");
+        assert_eq!(
+            papers[4].sub,
+            "Retrospective cohort \u{b7} 2020 \u{b7} Retracted"
+        );
+        assert_eq!(papers[0].rank.as_deref(), Some("rct"));
+        let (shown, button) = fold(papers, false);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
+        assert_eq!(
+            outcome_papers_heading(papers.len()),
+            "Papers behind this outcome \u{b7} 6"
+        );
+        // Still opens the answer; the question is still a link.
+        assert_eq!(
+            c.answer.as_deref(),
+            Some("/runs/00000000-0000-0000-0000-000000000001")
+        );
+        assert_eq!(
+            c.links,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        // Selecting the outcome lights its papers.
+        let lit = near(&m, "o:4");
+        for p in ids {
+            assert!(lit.contains(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn an_outcome_with_no_papers_on_the_map_says_so() {
+        let c = card_for(&sample(), "o:4").unwrap();
+        assert_eq!(c.papers.as_deref(), Some(&[][..]));
+        assert_eq!(NO_OUTCOME_PAPERS, "No papers on your map for this outcome.");
+        // Other cards have no such list.
+        assert_eq!(card_for(&sample(), "d:2").unwrap().papers, None);
+        assert_eq!(card_for(&sample(), "p:200").unwrap().papers, None);
+    }
+
+    #[test]
+    fn a_papers_card_names_the_outcomes_it_supports() {
+        let mut m = with_outcome_papers();
+        m.dots
+            .push(dot("o:5", DotKind::Outcome, "Pain", "Moderate"));
+        m.lines.push(line(RUN, "o:5", false));
+        m.lines.push(out("o:5", "p:200"));
+        let c = card_for(&m, "p:200").unwrap();
+        assert_eq!(
+            c.supports,
+            [
+                ("o:4".to_string(), "Recurrence".to_string()),
+                ("o:5".to_string(), "Pain".to_string()),
+            ]
+        );
+        // Its questions are still only the questions.
+        assert_eq!(
+            c.from,
+            [(RUN.to_string(), "Inguinal hernia question".to_string())]
+        );
+        assert!(c.links.is_empty());
+        // None: no line.
+        assert!(card_for(&sample(), "p:200").unwrap().supports.is_empty());
     }
 
     #[test]
