@@ -460,16 +460,17 @@ async fn the_list_groups_folds_and_escapes() {
     for w in order.windows(2) {
         assert!(at(w[0]) < at(w[1]), "{} before {}", w[0], w[1]);
     }
-    // Five papers, then the fold.
-    assert!(html.contains("Show all 6"));
+    // Four papers, then the fold.
+    assert!(html.contains("Show 2 more"));
     assert!(html.contains("Paper five"));
     // (The map has a button for every paper; the List folds.)
     let m = markup(&html);
     let list = &m[m.find(r#"class="kg-list""#).unwrap()..m.find(r#"class="kg-side""#).unwrap()];
-    assert!(list.contains("Paper five"));
+    assert!(list.contains("Paper four"));
+    assert!(!list.contains("Show all"), "the old wording");
     assert!(
-        !list.contains("Paper six"),
-        "the sixth paper is folded away"
+        !list.contains("Paper five") && !list.contains("Paper six"),
+        "the fifth and sixth papers are folded away"
     );
     assert!(html.contains(&format!("Inguinal hernia {t} question")));
     assert!(html.contains("Full run \u{b7} 31 Oct 2026"));
@@ -486,7 +487,7 @@ async fn the_list_groups_folds_and_escapes() {
         r#"class="kg-list""#,
         "Papers, ranked \u{b7} 6",
         "Paper five",
-        "Show all 6",
+        "Show 2 more",
         NOT_ALL,
         "Tap a dot",
     ] {

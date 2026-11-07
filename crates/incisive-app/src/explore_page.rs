@@ -1,5 +1,5 @@
 //! The Explore page's rules (no Leptos): the List view's groups, rows and
-//! five-row folds, the card for a dot, the map's size cut, and the page's
+//! four-row folds, the card for a dot, the map's size cut, and the page's
 //! fixed words. Built for the browser too.
 
 use std::cmp::Ordering;
@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::graph_view::{Dot, DotKind, MapData};
 
-/// Rows a group shows before "Show all N".
-pub const FOLD_AT: usize = 5;
+/// Rows a list on Explore shows before "Show N more".
+pub const FOLD_AT: usize = 4;
 
 /// The map's frames (width, height): the server lays the dots out once for
 /// one of these.
@@ -30,8 +30,9 @@ pub const PAPERS_HIDDEN: &str = "Papers are hidden on this map; see them in List
 pub const FIND_LABEL: &str = "Find on your map";
 pub const FIND_HINT: &str = "e.g. hernia, bile duct, POEM";
 
-/// The first `FOLD_AT` rows and the fold's button ("Show all N", or "Show
-/// fewer" when open); no button for `FOLD_AT` rows or fewer.
+/// The first `FOLD_AT` rows and the fold's button ("Show N more", N the
+/// rows folded away, or "Show fewer" when open); no button for `FOLD_AT`
+/// rows or fewer.
 pub fn fold<T: Clone>(rows: &[T], open: bool) -> (Vec<T>, Option<String>) {
     if rows.len() <= FOLD_AT {
         return (rows.to_vec(), None);
@@ -41,7 +42,7 @@ pub fn fold<T: Clone>(rows: &[T], open: bool) -> (Vec<T>, Option<String>) {
     } else {
         (
             rows[..FOLD_AT].to_vec(),
-            Some(format!("Show all {}", rows.len())),
+            Some(format!("Show {} more", rows.len() - FOLD_AT)),
         )
     }
 }
@@ -1129,18 +1130,24 @@ mod tests {
     }
 
     #[test]
-    fn fold_shows_five_then_a_button() {
+    fn fold_shows_four_then_a_button() {
+        assert_eq!(FOLD_AT, 4);
         let six: Vec<u32> = (1..=6).collect();
         let (shown, button) = fold(&six, false);
-        assert_eq!(shown, vec![1, 2, 3, 4, 5]);
-        assert_eq!(button.as_deref(), Some("Show all 6"));
+        assert_eq!(shown, vec![1, 2, 3, 4]);
+        assert_eq!(button.as_deref(), Some("Show 2 more"));
         let (shown, button) = fold(&six, true);
         assert_eq!(shown.len(), 6);
         assert_eq!(button.as_deref(), Some("Show fewer"));
         let five: Vec<u32> = (1..=5).collect();
-        assert_eq!(fold(&five, false), (five.clone(), None));
-        assert_eq!(fold(&five, true), (five, None));
-        assert_eq!(FOLD_AT, 5);
+        assert_eq!(
+            fold(&five, false),
+            (vec![1, 2, 3, 4], Some("Show 1 more".into()))
+        );
+        assert_eq!(fold(&five, true).1.as_deref(), Some("Show fewer"));
+        let four: Vec<u32> = (1..=4).collect();
+        assert_eq!(fold(&four, false), (four.clone(), None));
+        assert_eq!(fold(&four, true), (four.clone(), None));
     }
 
     #[test]

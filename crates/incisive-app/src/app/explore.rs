@@ -1,6 +1,6 @@
 //! The Explore page (`/explore`, `GRAPH=on`): the user's own map as a list
 //! of diseases, treatments, outcomes, questions and ranked papers, each
-//! group folded at five rows, with a card for the picked row (in place on a
+//! group folded at four rows, with a card for the picked row (in place on a
 //! phone, at the side on a wide screen), and the map: the dots the server
 //! laid out once, drawn as real buttons over SVG lines, with tap to light up
 //! a dot's neighbours, zoom (sharp: every place is worked out again, nothing
@@ -1681,7 +1681,7 @@ fn map_view(ui: Ui, mu: MapUi, chips: Vec<(i64, String)>) -> AnyView {
     .into_any()
 }
 
-/// The picked question's or disease's papers, ranked, folded at five.
+/// The picked question's or disease's papers, ranked, folded at four.
 fn side_papers(ui: Ui, d: &MapData, id: &str, until: Option<i32>) -> Option<AnyView> {
     let live = ep::visible_until(d, until);
     let rows: Vec<Row> = ep::papers_for(d, id)
@@ -1844,7 +1844,7 @@ fn legend_view(ui: Ui) -> AnyView {
     .into_any()
 }
 
-/// The groups that match the find box, each folded at five rows.
+/// The groups that match the find box, each folded at four rows.
 fn list_view(ui: Ui, data: MapData) -> impl IntoView {
     let groups = StoredValue::new(ep::groups(&data));
     let data = StoredValue::new(data);
