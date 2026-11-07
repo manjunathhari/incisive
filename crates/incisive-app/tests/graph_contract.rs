@@ -35,6 +35,8 @@ fn read_fields(name: &str, a: &AnswerV3) {
             !o.certainty.as_str().is_empty(),
             "{name}: outcomes[].certainty"
         );
+        // The map's outcome -> paper lines.
+        let _: &Vec<String> = &o.pmids;
     }
     assert!(!w.studies.is_empty(), "{name}: no studies");
     for s in &w.studies {
@@ -74,6 +76,7 @@ fn keys_survive_a_round_trip(name: &str, a: &AnswerV3) {
     for o in ans["outcomes"].as_array().unwrap() {
         need(o, "outcome", "outcomes[]");
         need(o, "certainty", "outcomes[]");
+        need(o, "pmids", "outcomes[]");
     }
     for s in ans["studies"].as_array().unwrap() {
         for k in ["pmid", "design", "n"] {

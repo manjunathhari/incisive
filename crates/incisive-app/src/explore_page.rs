@@ -1075,6 +1075,7 @@ mod tests {
             a: a.into(),
             b: b.into(),
             paper,
+            out: false,
         }
     }
 

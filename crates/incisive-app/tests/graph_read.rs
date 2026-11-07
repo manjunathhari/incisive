@@ -49,6 +49,7 @@ fn line(a: &str, b: &str, paper: bool) -> Line {
         a: a.into(),
         b: b.into(),
         paper,
+        out: false,
     }
 }
 
@@ -73,6 +74,11 @@ fn sample() -> (Vec<Dot>, Vec<Line>) {
         line("r:1", "p:100", true),
         line("r:2", "p:101", true),
         line("r:2", "p:missing", true),
+        // An outcome's paper: a paper spring like the rest.
+        Line {
+            out: true,
+            ..line("o:4", "p:100", true)
+        },
     ];
     (dots, lines)
 }
@@ -814,4 +820,255 @@ async fn an_organ_without_a_disease_hangs_from_the_run() {
     let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
     assert!(has_line(&m, &format!("g:{organ}"), &format!("r:{r}")));
     assert_eq!(m.dots.len(), 4);
+}
+
+// ---------- outcome -> paper lines ----------
+
+async fn seed_answer(pool: &PgPool, run: Uuid, body: &serde_json::Value) {
+    sqlx::query(
+        "INSERT INTO incisive.run_answers (run_id, body, answer_version) VALUES ($1, $2, 3)",
+    )
+    .bind(run)
+    .bind(body)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn fixture_body(name: &str) -> serde_json::Value {
+    let p = format!(
+        "{}/tests/fixtures/temporal/full/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap()
+}
+
+/// An answer whose outcome rows cite these PMIDs, row by row.
+fn body_with_rows(rows: &[&[&str]]) -> serde_json::Value {
+    let outcomes: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|p| serde_json::json!({"outcome": "x", "certainty": "Low", "pmids": p}))
+        .collect();
+    serde_json::json!({"version": 3, "answer": {"outcomes": outcomes}})
+}
+
+fn picks_with_outcomes(tag: &str, outcomes: &[(&str, usize)]) -> Picks {
+    let mut p = picks(tag, &HERNIA);
+    p.outcomes = outcomes
+        .iter()
+        .map(|(name, row)| PickedOutcome {
+            row: *row,
+            name: format!("{name} {tag}"),
+            certainty: "Low".into(),
+        })
+        .collect();
+    p
+}
+
+fn out_lines(m: &MapData) -> Vec<(&str, &str)> {
+    m.lines
+        .iter()
+        .filter(|l| l.out)
+        .map(|l| (l.a.as_str(), l.b.as_str()))
+        .collect()
+}
+
+/// `source_row` is 1-based (the extract message numbers rows from 1): row 3
+/// of the stored hernia answer is "Hernia recurrence", citing 35578051,
+/// 40277023 and 42541618. The run has the first two (and 41511872, which
+/// row 3 does not cite), so the outcome gets exactly those two lines. A row
+/// past the end, and row 0, give none.
+#[tokio::test]
+async fn an_outcome_links_to_its_rows_papers_on_that_run() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let u = seed_user(&pool).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let r = seed_run(&pool, u, "focused").await;
+    let body = fixture_body("hernia");
+    let row3: Vec<&str> = body["answer"]["outcomes"][2]["pmids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(row3, ["35578051", "40277023", "42541618"], "fixture row 3");
+    seed_answer(&pool, r, &body).await;
+    write_run(
+        &pool,
+        r,
+        &picks_with_outcomes(&tag, &[("Recurrence", 3), ("Past end", 99), ("Zero", 0)]),
+        &[
+            paper("35578051", 2022, "randomised trial"),
+            paper("40277023", 2025, "retrospective cohort"),
+            paper("41511872", 2025, "randomised trial"),
+        ],
+    )
+    .await
+    .unwrap();
+    let rec = format!(
+        "o:{}",
+        concept(&pool, "outcome", &format!("Recurrence {tag}")).await
+    );
+    let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
+    let mut got = out_lines(&m);
+    got.sort();
+    assert_eq!(
+        got,
+        [(rec.as_str(), "p:35578051"), (rec.as_str(), "p:40277023")]
+    );
+    for l in m.lines.iter().filter(|l| l.out) {
+        assert!(l.paper, "an outcome line is a paper line: {l:?}");
+    }
+    // The question's own paper lines are still there.
+    let run = format!("r:{r}");
+    for p in ["p:35578051", "p:40277023", "p:41511872"] {
+        assert!(has_line(&m, &run, p), "{p}");
+    }
+}
+
+/// Another user's run, with the same outcome concept, the same paper and
+/// an answer that cites it, adds nothing to this user's map.
+#[tokio::test]
+async fn another_users_answer_adds_no_outcome_line() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let tag = Uuid::new_v4().simple().to_string();
+    let a = pmid(&tag, 1);
+    let (u, other) = (seed_user(&pool).await, seed_user(&pool).await);
+    let mine = seed_run(&pool, u, "focused").await;
+    let theirs = seed_run(&pool, other, "focused").await;
+    let picks = picks_with_outcomes(&tag, &[("Pain", 1)]);
+    // Mine cites nothing for the outcome; theirs cites A.
+    seed_answer(&pool, mine, &body_with_rows(&[&[]])).await;
+    seed_answer(&pool, theirs, &body_with_rows(&[&[a.as_str()]])).await;
+    for run in [mine, theirs] {
+        write_run(&pool, run, &picks, &[paper(&a, 2020, "randomised trial")])
+            .await
+            .unwrap();
+    }
+    let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
+    assert!(out_lines(&m).is_empty(), "{:?}", out_lines(&m));
+    let m = load_map(&pool, other, &MapFilter::default()).await.unwrap();
+    assert_eq!(out_lines(&m).len(), 1);
+}
+
+/// Two runs sharing an outcome concept, both citing A: one line.
+#[tokio::test]
+async fn a_shared_outcome_has_one_line_per_paper() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let u = seed_user(&pool).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let a = pmid(&tag, 1);
+    let picks = picks_with_outcomes(&tag, &[("Pain", 2)]);
+    for _ in 0..2 {
+        let r = seed_run(&pool, u, "focused").await;
+        seed_answer(&pool, r, &body_with_rows(&[&[], &[a.as_str()]])).await;
+        write_run(&pool, r, &picks, &[paper(&a, 2020, "randomised trial")])
+            .await
+            .unwrap();
+    }
+    let o = format!(
+        "o:{}",
+        concept(&pool, "outcome", &format!("Pain {tag}")).await
+    );
+    let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
+    assert_eq!(out_lines(&m), [(o.as_str(), format!("p:{a}").as_str())]);
+}
+
+/// Hidden papers (the user's kind filter, or the 400-dot rule) take their
+/// outcome lines with them.
+#[tokio::test]
+async fn hidden_papers_have_no_outcome_lines() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let u = seed_user(&pool).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let r = seed_run(&pool, u, "focused").await;
+    let papers: Vec<PaperRow> = (0..400)
+        .map(|i| paper(&pmid(&tag, i), 2020, "randomised trial"))
+        .collect();
+    let (a, b) = (pmid(&tag, 0), pmid(&tag, 1));
+    seed_answer(&pool, r, &body_with_rows(&[&[a.as_str(), b.as_str()]])).await;
+    write_run(
+        &pool,
+        r,
+        &picks_with_outcomes(&tag, &[("Pain", 1)]),
+        &papers,
+    )
+    .await
+    .unwrap();
+
+    // Shown when there is room (hiding treatments keeps the papers).
+    let m = load_map(
+        &pool,
+        u,
+        &MapFilter {
+            hidden: vec!["treatment".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(out_lines(&m).len(), 2);
+
+    let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
+    assert!(m.papers_hidden_by_size);
+    assert!(out_lines(&m).is_empty());
+
+    let m = load_map(
+        &pool,
+        u,
+        &MapFilter {
+            hidden: vec!["paper".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out_lines(&m).is_empty());
+
+    // A year range that leaves the papers out leaves no line either.
+    let m = load_map(
+        &pool,
+        u,
+        &MapFilter {
+            year_from: Some(2021),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out_lines(&m).is_empty());
+}
+
+/// An answer body without `answer` (an old shape) gives no outcome lines
+/// and no error.
+#[tokio::test]
+async fn an_answer_without_rows_gives_no_outcome_lines() {
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let u = seed_user(&pool).await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let a = pmid(&tag, 1);
+    for body in [
+        serde_json::json!({"version": 2, "bottom_line": [{"text": "x"}]}),
+        serde_json::json!({"version": 3, "answer": {"outcomes": [{"pmids": "not a list"}]}}),
+        serde_json::json!({"version": 3, "answer": null}),
+    ] {
+        let r = seed_run(&pool, u, "focused").await;
+        seed_answer(&pool, r, &body).await;
+        write_run(
+            &pool,
+            r,
+            &picks_with_outcomes(&tag, &[("Pain", 1)]),
+            &[paper(&a, 2020, "randomised trial")],
+        )
+        .await
+        .unwrap();
+    }
+    let m = load_map(&pool, u, &MapFilter::default()).await.unwrap();
+    assert!(out_lines(&m).is_empty());
+    assert_eq!(m.runs, 3);
 }

@@ -81,12 +81,16 @@ pub struct SheetRef {
     pub n: u16,
 }
 
-/// A line between two dot ids; `paper` for a run–paper line.
+/// A line between two dot ids; `paper` for a line to a paper (dashed);
+/// `out` for an outcome–paper line (`a` the outcome, `b` the paper), drawn
+/// in the outcome colour when lit.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Line {
     pub a: String,
     pub b: String,
     pub paper: bool,
+    #[serde(default)]
+    pub out: bool,
 }
 
 /// What the map shows. `organ` is an organ concept id; years bound papers;
