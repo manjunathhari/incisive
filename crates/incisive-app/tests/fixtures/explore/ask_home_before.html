@@ -544,6 +544,8 @@ details.iv-thread[open] .iv-thread-toggle::after { content:'Hide'; }
 .rx-seg .rx-tab[data-clicked="true"] { box-shadow:inset 0 0 0 1px #A9B8D6; }
 .rx-seg .rx-dot, .rx-seg .rk-dot { flex:none; width:8px; height:8px; border-radius:999px; background:#5E8A72; }
 .rk-card { margin:0 0 10px; padding:20px 24px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:20px; color:var(--iv-ink); }
+/* S1c (owner): the run's top cards and folded rows end where the answer's do (760px). */
+.run-chrome .rk-card, .run-chrome .rx-seg, .run-chrome details[class$="-fold"] { max-width:760px; }
 .rk-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding-bottom:14px; }
 .rk-head > div { min-width:0; }
 .run-chrome .rk-card h2 { margin:0; font-size:19px; line-height:1.25; font-weight:700; color:var(--iv-ink); }
