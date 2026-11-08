@@ -12,12 +12,13 @@ use leptos::prelude::*;
 
 use super::tracker::TrackerUi;
 use crate::draft_page::{
-    BANNER, COMING, DraftText, Item, Kind, Piece, Section, read_answer, read_opinion,
+    BANNER, COMING, DraftText, Item, Kind, Piece, REWRITING, Section, read_answer, read_opinion,
 };
 use crate::run_tracker as rt;
 
 const DRAFT_STYLE: &str = r##"
 .dr { display:flex; flex-direction:column; gap:12px; width:100%; max-width:760px; margin:10px 0 0; font-family:var(--iv-font); color:var(--iv-ink); min-width:0; overflow-wrap:anywhere; }
+.dr-rewrite { margin:0; padding:10px 12px; background:var(--iv-tint); color:var(--iv-accent); border-radius:10px; font-size:13px; font-weight:600; }
 .dr-banner { margin:0; padding:10px 12px; background:var(--iv-warn-bg); color:var(--iv-warn); border:1px solid #F0E2C2; border-radius:10px; font-size:13px; font-weight:600; }
 .dr-card { padding:14px 16px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:14px; }
 .dr-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin:0 0 6px; }
@@ -124,6 +125,7 @@ fn section_view(s: Section) -> AnyView {
 fn draft_view(
     read: fn(&str) -> Vec<Section>,
     text: impl Fn() -> String + Send + Sync + 'static,
+    rewriting: bool,
 ) -> AnyView {
     let sections = Memo::new(move |_| read(&text()));
     let cards = (0..sections.with_untracked(Vec::len))
@@ -132,6 +134,17 @@ fn draft_view(
             view! { {move || one.get().map(section_view)} }.into_any()
         })
         .collect::<Vec<AnyView>>();
+    if rewriting {
+        return view! {
+            <style>{DRAFT_STYLE}</style>
+            <div class="dr">
+                <p class="dr-rewrite" role="status">{REWRITING}</p>
+                <p class="dr-banner" role="status">{BANNER}</p>
+                {cards}
+            </div>
+        }
+        .into_any();
+    }
     view! {
         <style>{DRAFT_STYLE}</style>
         <div class="dr">
@@ -142,14 +155,30 @@ fn draft_view(
     .into_any()
 }
 
-/// The answer as far as it is written, following `live`.
-pub(super) fn answer_view(live: RwSignal<Option<String>>) -> AnyView {
-    draft_view(read_answer, move || live.get().unwrap_or_default())
+/// The answer as far as it is written, following `live`; with `rewriting`
+/// (S1c, D1 A) under the line saying it is being written again in one piece.
+pub(super) fn answer_view(live: RwSignal<Option<String>>, rewriting: bool) -> AnyView {
+    draft_view(
+        read_answer,
+        move || live.get().unwrap_or_default(),
+        rewriting,
+    )
+}
+
+/// S1c (D1 A): the one line while the one-piece writer has no words yet.
+pub(super) fn rewriting_view() -> AnyView {
+    view! {
+        <style>{DRAFT_STYLE}</style>
+        <div class="dr">
+            <p class="dr-rewrite" role="status">{REWRITING}</p>
+        </div>
+    }
+    .into_any()
 }
 
 /// The opinion as far as it is written, following `live`.
 pub(super) fn opinion_view(live: Memo<Option<String>>) -> AnyView {
-    draft_view(read_opinion, move || live.get().unwrap_or_default())
+    draft_view(read_opinion, move || live.get().unwrap_or_default(), false)
 }
 
 /// The results card folded to a row with the clock; it opens to the card.

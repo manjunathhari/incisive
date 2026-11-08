@@ -1016,8 +1016,18 @@ fn RunPage() -> impl IntoView {
     // so the page is drawn again only if something besides the draft changed.
     let draft_poll = StoredValue::new(false);
     let poll = move || {
-        let drawn = last_good.with_untracked(|l| l.as_ref().map(|d| d.run.summary.id));
-        let Some((id, shown)) = drawn.zip(live_draft.get_untracked()) else {
+        // S1c: a page showing early sections polls the same way (`shown`
+        // empty: it shows no draft).
+        let drawn = last_good.with_untracked(|l| {
+            l.as_ref()
+                .map(|d| (d.run.summary.id, d.run.early.is_some()))
+        });
+        let shown = match (drawn, live_draft.get_untracked()) {
+            (Some((id, _)), Some(t)) => Some((id, t)),
+            (Some((id, true)), None) => Some((id, String::new())),
+            _ => None,
+        };
+        let Some((id, shown)) = shown else {
             tick.update(|t| *t += 1);
             return;
         };
@@ -1243,10 +1253,23 @@ fn run_view(
     let status = v.summary.status;
     let run_id = v.summary.id;
     let intro_row = v.intro;
+    // S1c (D1 A): a part failed and the answer is written again in one
+    // piece: the early sections go (the engine deletes them too) and the page
+    // says so in one line.
+    let rewriting = status.is_active() && crate::draft_page::rewriting(&v.steps);
+    // S1c: the finished, checked sections of an answer written in four parts
+    // (the API sends them only while the run is running with no answer).
+    let early = v
+        .early
+        .as_deref()
+        .filter(|_| status.is_active() && !rewriting && v.answer.is_none())
+        .and_then(crate::draft_page::EarlyAnswer::read);
     // Stage S1: the answer as far as it is written (the API sends it only
     // while the run is running with no answer).
     let draft_text = v.draft.filter(|t| {
-        status.is_active() && crate::draft_page::has_content(&crate::draft_page::read_answer(t))
+        early.is_none()
+            && status.is_active()
+            && crate::draft_page::has_content(&crate::draft_page::read_answer(t))
     });
     let ended_without_answer = v.answer.is_none() && !status.is_active();
     // The stored body is drawn from its fields, never shown raw: Phase 3
@@ -1395,17 +1418,22 @@ fn run_view(
     // Stage S1: once the first words are there, the card and the introduction
     // fold into rows, so the answer sits near the top.
     let drafting = draft_text.is_some();
-    let card = if drafting {
+    // S1c: the early sections fold them the same way.
+    let folded = drafting || early.is_some();
+    let card = if folded {
         card.map(|c| draft::fold_results(ui, clock_from, c))
     } else {
         card
     };
     // In front of the card, in every layout below; nothing without a text.
-    let card = intro::with_results(intro_ui, working && !drafting, intro_row, card);
+    let card = intro::with_results(intro_ui, working && !folded, intro_row, card);
     if live_draft.get_untracked() != draft_text {
         live_draft.set(draft_text);
     }
-    let answer_block = answer_block.or_else(|| drafting.then(|| draft::answer_view(live_draft)));
+    let answer_block = answer_block
+        .or_else(|| early.map(page::early_page_view))
+        .or_else(|| drafting.then(|| draft::answer_view(live_draft, rewriting)))
+        .or_else(|| rewriting.then(draft::rewriting_view));
     let Some(t) = temporal else {
         return view! {
             // Page chrome (ivory redesign): Figtree; the answer below is untouched.

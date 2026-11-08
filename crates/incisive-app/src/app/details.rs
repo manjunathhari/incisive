@@ -294,7 +294,7 @@ fn folded_view(c: &Ctx, folded: &[GuidelineSource]) -> AnyView {
         .into_any()
 }
 
-fn applicability(c: &Ctx) -> Option<AnyView> {
+pub(super) fn applicability(c: &Ctx) -> Option<AnyView> {
     let a = &c.w?.applicability;
     let fields = [
         ("Case mix", &a.case_mix, "applicability.case_mix"),
@@ -325,7 +325,7 @@ fn applicability(c: &Ctx) -> Option<AnyView> {
     ))
 }
 
-fn would_change(c: &Ctx) -> Option<AnyView> {
+pub(super) fn would_change(c: &Ctx) -> Option<AnyView> {
     let w = c.w?;
     if w.would_change.is_empty() {
         return None;

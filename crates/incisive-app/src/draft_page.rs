@@ -853,6 +853,52 @@ pub fn read_opinion(reply: &str) -> Vec<Section> {
     ]
 }
 
+// ---------- S1c: the finished sections, shown early ----------
+
+/// S1c (`QUICK_PARALLEL=on`): the finished, checked sections of a Quick
+/// answer written in four parts, stored as the run's `early` draft while the
+/// other parts are still being written. `answer` is the stored answer's shape
+/// (`references` already the final ones, numbered in selection order before
+/// the writer started); its `answer` holds only the parts flagged here, each
+/// after the citation check, and `untraced` the number check's marks on
+/// them. The rest is empty and never drawn.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EarlyAnswer {
+    /// The summary part: bottom line, at a glance, clinical practice.
+    pub summary: bool,
+    /// The context part: applicability, what would change this answer.
+    pub context: bool,
+    pub answer: crate::agent::answer_v3::AnswerV3,
+}
+
+impl EarlyAnswer {
+    /// The stored text read back; `None` when it does not read, or holds
+    /// nothing finished (the page then shows what it shows without it).
+    pub fn read(text: &str) -> Option<EarlyAnswer> {
+        serde_json::from_str::<EarlyAnswer>(text)
+            .ok()
+            .filter(|e| (e.summary || e.context) && e.answer.answer.is_some())
+    }
+}
+
+/// The page-level line while a four-part answer is written again in one
+/// piece (S1c, D1 A).
+pub const REWRITING: &str = "The answer is being rewritten in one piece";
+
+/// The four parts' names in the one-piece step line
+/// (`agent::writer_v3::Section::name`).
+const PART_NAMES: [&str; 4] = ["trials", "outcomes", "context", "summary"];
+
+/// Whether a part failed and the answer is being written again in one piece:
+/// the writer's stored step line says so (`run_tracker::one_piece_line`).
+pub fn rewriting(steps: &[crate::runs::StepLine]) -> bool {
+    steps.iter().any(|s| {
+        PART_NAMES
+            .iter()
+            .any(|n| s.line == crate::run_tracker::one_piece_line(n))
+    })
+}
+
 /// What one poll means for a page showing a draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PollStep {
@@ -866,12 +912,22 @@ pub enum PollStep {
 }
 
 /// `now` against the page drawn from `drawn`, with `shown` as its draft.
+/// S1c: a page showing early sections is left alone while nothing (the early
+/// sections included) has changed; any change draws it again.
 pub fn poll_step(drawn: &RunView, shown: &str, now: &RunView) -> PollStep {
     let same = drawn.summary == now.summary
         && drawn.steps == now.steps
         && drawn.answer == now.answer
         && drawn.answer_version == now.answer_version
-        && drawn.intro == now.intro;
+        && drawn.intro == now.intro
+        && drawn.early == now.early;
+    if now.early.is_some() {
+        return if same {
+            PollStep::Same
+        } else {
+            PollStep::Rebuild
+        };
+    }
     match &now.draft {
         Some(t) if same && has_content(&read_answer(t)) => {
             if t == shown {
@@ -978,6 +1034,96 @@ mod tests {
         let mut other = run(Some(t));
         other.answer = Some(json!({"version": 3}));
         assert_eq!(poll_step(&drawn, t, &other), PollStep::Rebuild);
+    }
+
+    /// S1c: a page showing early sections is left alone until something,
+    /// the early sections included, changes; the draft never redraws it.
+    #[test]
+    fn a_poll_with_early_sections_redraws_only_on_a_change() {
+        let with = |early: Option<&str>, draft: Option<&str>| {
+            let mut r = run(draft);
+            r.early = early.map(str::to_string);
+            r
+        };
+        let drawn = with(Some("e1"), None);
+        assert_eq!(
+            poll_step(&drawn, "", &with(Some("e1"), None)),
+            PollStep::Same
+        );
+        assert_eq!(
+            poll_step(&drawn, "", &with(Some("e2"), None)),
+            PollStep::Rebuild
+        );
+        assert_eq!(poll_step(&drawn, "", &with(None, None)), PollStep::Rebuild);
+        assert_eq!(
+            poll_step(
+                &drawn,
+                "",
+                &with(None, Some(r#"{"bottom_line":{"text":"x"#))
+            ),
+            PollStep::Rebuild
+        );
+        // First early sections over a draft: drawn again.
+        let t = r#"{"bottom_line":{"text":"So far"#;
+        assert_eq!(
+            poll_step(&run(Some(t)), t, &with(Some("e1"), None)),
+            PollStep::Rebuild
+        );
+        let mut other = with(Some("e1"), None);
+        other.summary.status = crate::runs::RunStatus::Done;
+        assert_eq!(poll_step(&drawn, "", &other), PollStep::Rebuild);
+    }
+
+    #[test]
+    fn an_early_answer_reads_only_when_it_holds_a_finished_part() {
+        let a: crate::agent::answer_v3::AnswerV3 = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/temporal/full/hernia.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let e = EarlyAnswer {
+            summary: true,
+            context: false,
+            answer: a.clone(),
+        };
+        let text = serde_json::to_string(&e).unwrap();
+        assert_eq!(EarlyAnswer::read(&text), Some(e.clone()));
+        let none = EarlyAnswer {
+            summary: false,
+            context: false,
+            ..e.clone()
+        };
+        assert_eq!(
+            EarlyAnswer::read(&serde_json::to_string(&none).unwrap()),
+            None
+        );
+        let mut empty = e;
+        empty.answer.answer = None;
+        assert_eq!(
+            EarlyAnswer::read(&serde_json::to_string(&empty).unwrap()),
+            None
+        );
+        assert_eq!(EarlyAnswer::read("{"), None);
+    }
+
+    #[test]
+    fn the_one_piece_line_means_rewriting() {
+        let step = |line: &str| crate::runs::StepLine {
+            seq: 1,
+            at: chrono::Utc::now(),
+            kind: crate::runs::StepKind::Write,
+            line: line.to_string(),
+        };
+        assert!(!rewriting(&[step("Writer: first words after 9 s")]));
+        for n in PART_NAMES {
+            assert!(rewriting(&[step(&crate::run_tracker::one_piece_line(n))]));
+        }
+        assert!(!rewriting(&[step(
+            "Writer: section x failed; writing the answer in one piece"
+        )]));
     }
 
     #[test]
