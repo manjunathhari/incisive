@@ -2027,9 +2027,11 @@ pub enum PartEvent {
     Summary(SummaryPart),
     /// The context part, read.
     Context(ContextPart),
-    /// A part failed and the answer is being written again in one piece:
-    /// nothing reported before will be in the answer.
-    OnePiece,
+    /// A part failed for good (its retry included), or the writer failed:
+    /// the merged answer will not be written, so nothing reported before
+    /// will be in the answer. Sent at once, before the other parts are in;
+    /// nothing is reported after it.
+    Withdraw,
 }
 
 /// The answer holding only `summary` and `context` (either may be absent),
@@ -2149,18 +2151,39 @@ pub async fn write_quick_parallel(
 }
 
 /// [`write_quick_parallel`], reporting to `parts` (S1c) the summary and the
-/// context part the moment each is read, and [`PartEvent::OnePiece`] before
-/// the one-piece fallback is written. Reporting never waits and never fails
-/// the writer (a closed channel is ignored).
+/// context part the moment each is read, and [`PartEvent::Withdraw`] the
+/// moment any part fails for good (after which nothing more is reported).
+/// Reporting never waits and never fails the writer (a closed channel is
+/// ignored).
 pub async fn write_quick_parallel_with(
     ctx: &RunContext,
     llm: &AgentLlm,
     user: &str,
     parts: Option<tokio::sync::mpsc::UnboundedSender<PartEvent>>,
 ) -> Result<(WrittenAnswer, u32, bool), WriteFailure> {
+    // S1c: whether a part has failed for good. Reports are sent under this
+    // lock, so a part read after a sibling failed is never reported, and a
+    // withdrawal always comes after any part reported before it.
+    let failed_once = std::sync::Mutex::new(false);
     let report = |e: PartEvent| {
-        if let Some(tx) = &parts {
+        let failed = failed_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(tx) = &parts
+            && !*failed
+        {
             let _ = tx.send(e);
+        }
+    };
+    let withdraw = || {
+        let mut failed = failed_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*failed {
+            *failed = true;
+            if let Some(tx) = &parts {
+                let _ = tx.send(PartEvent::Withdraw);
+            }
         }
     };
     let mut hooks: Vec<Option<super::llm::Streaming>> = vec![None, None, None, None];
@@ -2204,21 +2227,37 @@ pub async fn write_quick_parallel_with(
     // the decision (merge, fall back, fail) is made once every part is in.
     //
     // S1c: the context and summary parts are reported as soon as each is
-    // read, before the others are in.
+    // read, before the others are in; the first part to fail for good (its
+    // reply includes its retry) withdraws them at once.
     let (t, o, c, s) = tokio::join!(
-        section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials),
-        section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes),
+        async {
+            let r = section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials).await;
+            if r.is_err() {
+                withdraw();
+            }
+            r
+        },
+        async {
+            let r =
+                section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes).await;
+            if r.is_err() {
+                withdraw();
+            }
+            r
+        },
         async {
             let r = section_reply::<ContextPart>(ctx, &calls[2], &users[2], Section::Context).await;
-            if let Ok(p) = &r {
-                report(PartEvent::Context(p.clone()));
+            match &r {
+                Ok(p) => report(PartEvent::Context(p.clone())),
+                Err(_) => withdraw(),
             }
             r
         },
         async {
             let r = section_reply::<SummaryPart>(ctx, &calls[3], &users[3], Section::Summary).await;
-            if let Ok(p) = &r {
-                report(PartEvent::Summary(p.clone()));
+            match &r {
+                Ok(p) => report(PartEvent::Summary(p.clone())),
+                Err(_) => withdraw(),
             }
             r
         },
@@ -2252,8 +2291,6 @@ pub async fn write_quick_parallel_with(
         tracing::info!(run_id = %ctx.run_id, "no time for the one-piece writer");
         return Err(failure);
     }
-    // S1c: what was reported early will not be in the one-piece answer.
-    report(PartEvent::OnePiece);
     super::add_line(
         ctx,
         crate::runs::StepKind::Write,

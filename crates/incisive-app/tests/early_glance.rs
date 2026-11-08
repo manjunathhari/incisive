@@ -15,9 +15,10 @@ use claude_client::{ContentBlock, MessagesRequest, StopReason, Usage};
 use http_body_util::BodyExt;
 use incisive_app::agent::answer_v3::AnswerV3;
 use incisive_app::agent::llm::{LlmClient, ScriptedLlm};
-use incisive_app::agent::team::run_team;
+use incisive_app::agent::team::{early_body, run_team};
 use incisive_app::agent::writer_v3::{
-    SECTION_HEAD, STUDIES_HEADING, Section, reserve_for, sections_reserve,
+    ContextPart, PartEvent, SECTION_HEAD, STUDIES_HEADING, Section, SummaryPart, reserve_for,
+    sections_reserve,
 };
 use incisive_app::agent::{AgentLlm, Literature, PipelineFuture, PipelineOutcome, RunContext};
 use incisive_app::db::{lazy_pool, migrate};
@@ -641,6 +642,214 @@ async fn the_one_piece_fallback_deletes_the_early_answer() {
     );
 }
 
+/// Holds chosen parts' calls until a condition, and watches the early row.
+struct Ordered {
+    inner: Arc<ScriptedLlm>,
+    pool: PgPool,
+    run: std::sync::Mutex<Option<Uuid>>,
+    /// Set when the trials part's retry has been answered.
+    trials_done: std::sync::atomic::AtomicBool,
+    /// Case A: hold the summary and context until the trials failed for good.
+    hold_summary: bool,
+    /// Case B: hold the trials retry until the early row exists, and the
+    /// outcomes until it is gone (recorded).
+    hold_trials: bool,
+    outcomes_saw_gone: std::sync::Mutex<Option<bool>>,
+}
+
+impl Ordered {
+    fn new(
+        inner: Arc<ScriptedLlm>,
+        pool: PgPool,
+        hold_summary: bool,
+        hold_trials: bool,
+    ) -> Ordered {
+        Ordered {
+            inner,
+            pool,
+            run: std::sync::Mutex::new(None),
+            trials_done: std::sync::atomic::AtomicBool::new(false),
+            hold_summary,
+            hold_trials,
+            outcomes_saw_gone: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for Ordered {
+    async fn call(
+        &self,
+        req: &MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, claude_client::ClaudeError> {
+        use std::sync::atomic::Ordering;
+        let text = request_user_text(req);
+        let run = (*self.run.lock().unwrap()).unwrap();
+        let retry = text.contains(incisive_app::agent::llm::SCHEMA_NUDGE.trim());
+        let is = |s: Section| text.contains(&key(s));
+        if self.hold_summary && (is(Section::Summary) || is(Section::Context)) {
+            for _ in 0..300 {
+                if self.trials_done.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // The trials' final failure is reported by now.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if self.hold_trials && is(Section::Trials) && retry {
+            for _ in 0..300 {
+                if has_early(&self.pool, run).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        if self.hold_trials && is(Section::Outcomes) {
+            let mut gone = false;
+            for _ in 0..300 {
+                if self.trials_done.load(Ordering::Acquire) && !has_early(&self.pool, run).await {
+                    gone = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            *self.outcomes_saw_gone.lock().unwrap() = Some(gone);
+        }
+        let r = self.inner.call(req).await;
+        if is(Section::Trials) && retry {
+            self.trials_done.store(true, Ordering::Release);
+        }
+        r
+    }
+}
+
+/// The trials part cut off twice, the other parts and the one piece scripted.
+fn trials_fail_script() -> Arc<ScriptedLlm> {
+    let cut = "{\"studies\": [{\"pmid\": \"cut";
+    let mut llm = research_then(ScriptedLlm::new());
+    for _ in 0..2 {
+        llm = llm.when(&key(Section::Trials)).reply_stop(
+            cut,
+            StopReason::MaxTokens,
+            usage(3000, 5000),
+        );
+    }
+    let llm = sections_after(
+        llm,
+        &[Section::Outcomes, Section::Context, Section::Summary],
+    );
+    Arc::new(
+        llm.when(STUDIES_HEADING)
+            .reply_json(writer_json(), usage(3000, 2800)),
+    )
+}
+
+/// Polls the early row until stopped; true if it was ever there.
+fn watch_early(
+    pool: PgPool,
+    run: Uuid,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    tokio::task::JoinHandle<bool>,
+) {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s = stop.clone();
+    let h = tokio::spawn(async move {
+        let mut seen = false;
+        while !s.load(std::sync::atomic::Ordering::Acquire) {
+            seen |= has_early(&pool, run).await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        seen
+    });
+    (stop, h)
+}
+
+/// Review 1: a part that fails for good before the summary is read means
+/// no early answer is ever stored (the summary read after it is not).
+#[tokio::test]
+async fn a_part_failing_before_the_summary_stores_no_early_answer() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let probe = Arc::new(Ordered::new(
+        trials_fail_script(),
+        pool.clone(),
+        true,
+        false,
+    ));
+    let ctx = ctx_with(&pool, &server, probe.clone(), parallel_limit(), true).await;
+    *probe.run.lock().unwrap() = Some(ctx.run_id);
+    let (stop, watch) = watch_early(pool.clone(), ctx.run_id);
+    let out = run_team(&ctx).await;
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    assert!(matches!(out, PipelineOutcome::Done(_)), "{out:?}");
+    assert!(probe.trials_done.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!watch.await.unwrap(), "never stored");
+    assert!(!has_early(&pool, ctx.run_id).await);
+}
+
+/// Review 1: a part failing for good after the summary was stored deletes
+/// it at once, before the other parts are in (the outcomes, held, see it
+/// gone before they answer).
+#[tokio::test]
+async fn a_part_failing_after_the_summary_deletes_it_before_the_others_finish() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let probe = Arc::new(Ordered::new(
+        trials_fail_script(),
+        pool.clone(),
+        false,
+        true,
+    ));
+    let ctx = ctx_with(&pool, &server, probe.clone(), parallel_limit(), true).await;
+    *probe.run.lock().unwrap() = Some(ctx.run_id);
+    let (stop, watch) = watch_early(pool.clone(), ctx.run_id);
+    let out = run_team(&ctx).await;
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    assert!(matches!(out, PipelineOutcome::Done(_)), "{out:?}");
+    assert!(watch.await.unwrap(), "stored first");
+    assert_eq!(
+        *probe.outcomes_saw_gone.lock().unwrap(),
+        Some(true),
+        "deleted before the outcomes were in"
+    );
+    assert!(!has_early(&pool, ctx.run_id).await);
+}
+
+/// Review 4: reporting the parts changes nothing in the answer: the writer
+/// with a channel gives what it gives without one, for the same replies.
+#[tokio::test]
+async fn reporting_the_parts_leaves_the_answer_unchanged() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let user = format!("{STUDIES_HEADING}\nthe same user message");
+    let mut got = Vec::new();
+    for with in [false, true] {
+        let llm = Arc::new(sections_after(ScriptedLlm::new(), &Section::ALL));
+        let ctx = ctx_with(&pool, &server, llm, parallel_limit(), true).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let r = incisive_app::agent::writer_v3::write_quick_parallel_with(
+            &ctx,
+            &ctx.llm,
+            &user,
+            with.then_some(tx),
+        )
+        .await;
+        let Ok(r) = r else { panic!("writer failed") };
+        let mut events = 0;
+        while let Ok(e) = rx.try_recv() {
+            assert!(matches!(e, PartEvent::Summary(_) | PartEvent::Context(_)));
+            events += 1;
+        }
+        assert_eq!(events, if with { 2 } else { 0 });
+        got.push(r);
+    }
+    assert!(got[0].2 && got[1].2, "merged");
+    assert_eq!(got[0].0, got[1].0);
+    assert_eq!(got[0].1, got[1].1);
+}
+
 /// The switch off, or a run that writes in one piece: no early answer.
 #[tokio::test]
 async fn switch_off_or_a_one_piece_run_stores_no_early_answer() {
@@ -882,34 +1091,62 @@ fn fixture() -> Value {
     serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
 }
 
-/// The fixture's answer as an early answer: only the summary and context
-/// parts' fields kept (as `early_answer` leaves them), the rest emptied.
-fn early_from_fixture(summary: bool, context: bool) -> EarlyAnswer {
-    let mut a: AnswerV3 = serde_json::from_value(fixture()).unwrap();
-    let w = a.answer.as_mut().unwrap();
-    w.outcomes.clear();
-    w.studies.clear();
-    w.conflicts.clear();
-    w.guidelines.clear();
-    w.notable_findings.clear();
-    if !summary {
-        w.at_a_glance = None;
-        w.clinical_practice = None;
-    }
-    if !context {
-        w.would_change.clear();
-    }
-    a.skeptic = None;
-    a.evidence.clear();
-    a.notes.clear();
-    a.notable_code.clear();
-    a.coverage = None;
-    a.completeness = None;
-    EarlyAnswer {
-        summary,
-        context,
-        answer: a,
-    }
+/// The fixture's summary and context parts as the engine makes an early
+/// answer of them (`team::early_body`), on the fixture's answer as the base.
+fn early_via_body(summary: bool, context: bool) -> EarlyAnswer {
+    let f = fixture();
+    let w = &f["answer"];
+    let s: SummaryPart = serde_json::from_value(json!({
+        "bottom_line": w["bottom_line"],
+        "at_a_glance": w["at_a_glance"],
+        "clinical_practice": w["clinical_practice"],
+    }))
+    .unwrap();
+    let c: ContextPart = serde_json::from_value(json!({
+        "applicability": w["applicability"],
+        "would_change": w["would_change"],
+    }))
+    .unwrap();
+    let mut base: AnswerV3 = serde_json::from_value(f).unwrap();
+    base.answer = None;
+    let selected: Vec<String> = base.references.iter().map(|r| r.pmid.clone()).collect();
+    early_body(
+        &base,
+        summary.then_some(&s),
+        context.then_some(&c),
+        &selected,
+        &[],
+    )
+}
+
+/// A real four-part run (`run_team`, the scripted replies): the early
+/// answer it stored, as stored, and its final answer.
+async fn a_real_four_part_run(pool: &PgPool) -> (String, Value) {
+    let server = hernia_server().await;
+    let llm = Arc::new(sections_after(
+        research_then(ScriptedLlm::new()),
+        &Section::ALL,
+    ));
+    let ctx = ctx_with(pool, &server, llm, parallel_limit(), true).await;
+    let out = run_team(&ctx).await;
+    let body = match out {
+        PipelineOutcome::Done(v) => v,
+        other => panic!("{other:?}"),
+    };
+    let early = drafts::get(pool, ctx.run_id, Part::Early)
+        .await
+        .unwrap()
+        .expect("an early answer");
+    (early, body)
+}
+
+/// The glance card with the tiles' source labels blanked: the study's
+/// short name comes from the trials part, so the early card reads "Ref [n]"
+/// where the final reads the name (accepted by the owner); the reference
+/// number in it is kept.
+fn without_tile_names(card: &str) -> String {
+    let re = regex::Regex::new(r#"(<a [^>]*ap-tile-src[^>]*>)([^<]*?)( \[\d+\])?(</a>)"#).unwrap();
+    re.replace_all(card, "$1NAME$3$4").into_owned()
 }
 
 /// A running Quick run at the writer (four parts).
@@ -952,9 +1189,15 @@ fn draft_text() -> String {
 #[tokio::test]
 async fn the_early_sections_render_with_the_final_components() {
     let Some(pool) = pool().await else { return };
+    // The early answer and the final answer of one real run.
+    let (early, final_body) = a_real_four_part_run(&pool).await;
     let (uid, email) = new_user(&pool).await;
     let run = writing(&pool, uid).await;
-    store_early(&pool, run, &early_from_fixture(true, true)).await;
+    assert!(
+        drafts::upsert(&pool, run, Part::Early, &early)
+            .await
+            .unwrap()
+    );
     // A draft too: not shown while the early sections are.
     assert!(
         drafts::upsert(&pool, run, Part::Answer, &draft_text())
@@ -968,9 +1211,9 @@ async fn the_early_sections_render_with_the_final_components() {
     assert!(!m.contains(BANNER), "no draft banner");
     assert!(!m.contains("Zebra draft words so far"), "no draft");
     assert!(m.contains(r#"class="dr-fold""#), "the results card folded");
-    // The finished page of the same answer.
+    // The finished page of the same run's final answer.
     let (uid2, email2) = new_user(&pool).await;
-    let fin = create_run(&pool, uid2, "q", RunMode::Focused, 4000)
+    let fin = create_run(&pool, uid2, QUESTION, RunMode::Quick, 4000)
         .await
         .unwrap()
         .unwrap();
@@ -979,11 +1222,12 @@ async fn the_early_sections_render_with_the_final_components() {
             .await
             .unwrap()
     );
-    assert!(save_answer(&pool, fin, &fixture()).await.unwrap());
+    assert!(save_answer(&pool, fin, &final_body).await.unwrap());
     assert!(set_status(&pool, fin, RunStatus::Done, None).await.unwrap());
     let f = markup(&page(&st, fin, &email2).await.1);
-    // Same markup for the bottom line (certainty pill), clinical practice
-    // and applicability / what would change.
+    // Same markup, whole, for the bottom line (certainty pill), clinical
+    // practice and applicability / what would change: text, citation chips
+    // (the same reference numbers) and "not traced" marks.
     for (start, end) in [
         (
             r#"<section aria-label="Bottom line" class="ap-card">"#,
@@ -1004,33 +1248,23 @@ async fn the_early_sections_render_with_the_final_components() {
     ] {
         assert_eq!(piece(&m, start, end), piece(&f, start, end), "{start}");
     }
-    assert!(
-        piece(
-            &m,
-            r#"aria-label="Bottom line" class="ap-card">"#,
-            "</section>"
-        )
-        .contains("Certainty: ")
+    let bl = piece(
+        &m,
+        r#"aria-label="Bottom line" class="ap-card">"#,
+        "</section>",
     );
-    // The dark At a glance card, the same citation numbers in it.
+    assert!(bl.contains("Certainty: "));
+    assert!(bl.contains(r##"href="#ref-"##), "citation chips");
+    assert!(m.contains("data-mark=\"w:"), "a not-traced mark");
+    // The dark At a glance card: the whole card the same, but for the
+    // tiles' source names.
     let g_start = r#"<section aria-label="At a glance" class="ap-card ap-glance">"#;
     let (eg, fg) = (
         piece(&m, g_start, "</section>"),
         piece(&f, g_start, "</section>"),
     );
-    let refs = |s: &str| -> Vec<String> {
-        regex::Regex::new(r##"href="#ref-\d+""##)
-            .unwrap()
-            .find_iter(s)
-            .map(|x| x.as_str().to_string())
-            .collect()
-    };
-    assert!(!refs(eg).is_empty(), "the card cites");
-    assert_eq!(refs(eg), refs(fg));
-    let verdict = |s: &str| piece(s, r#"<p class="ap-verdict">"#, "</p>").to_string();
-    assert_eq!(verdict(eg), verdict(fg));
-    let caveat = |s: &str| piece(s, r#"<p class="ap-caveat">"#, "</p>").to_string();
-    assert_eq!(caveat(eg), caveat(fg));
+    assert!(eg.contains(r##"href="#ref-"##), "the card cites");
+    assert_eq!(without_tile_names(eg), without_tile_names(fg));
     // Placeholders, in the mockup's order, after the finished sections.
     let order = [
         g_start,
@@ -1064,7 +1298,7 @@ async fn the_context_alone_shows_with_a_placeholder_for_the_summary() {
     let Some(pool) = pool().await else { return };
     let (uid, email) = new_user(&pool).await;
     let run = writing(&pool, uid).await;
-    store_early(&pool, run, &early_from_fixture(false, true)).await;
+    store_early(&pool, run, &early_via_body(false, true)).await;
     let st = ui_state(pool.clone(), true, true);
     let m = markup(&page(&st, run, &email).await.1);
     assert!(m.contains(r#"aria-label="At a glance · Bottom line · Clinical practice""#));
@@ -1082,7 +1316,7 @@ async fn a_one_piece_rewrite_takes_the_early_sections_away_with_one_line() {
     let Some(pool) = pool().await else { return };
     let (uid, email) = new_user(&pool).await;
     let run = writing(&pool, uid).await;
-    store_early(&pool, run, &early_from_fixture(true, true)).await;
+    store_early(&pool, run, &early_via_body(true, true)).await;
     add_step(
         &pool,
         run,
@@ -1140,7 +1374,7 @@ async fn without_an_early_answer_the_page_is_todays() {
     }
     // An early row with the switch off: not read.
     let before = strip_clock(&markup(&page(&off, run, &email).await.1));
-    store_early(&pool, run, &early_from_fixture(true, true)).await;
+    store_early(&pool, run, &early_via_body(true, true)).await;
     let after = page(&off, run, &email).await.1;
     assert!(strip_clock(&markup(&after)) == before);
     assert!(!early_key(&after));
@@ -1176,7 +1410,7 @@ async fn another_user_gets_no_early_answer() {
     let (uid, _) = new_user(&pool).await;
     let (_, other) = new_user(&pool).await;
     let run = writing(&pool, uid).await;
-    store_early(&pool, run, &early_from_fixture(true, true)).await;
+    store_early(&pool, run, &early_via_body(true, true)).await;
     let st = ui_state(pool.clone(), true, true);
     let html = page(&st, run, &other).await.1;
     assert!(!html.contains("ap-card ap-glance") && !early_key(&html));

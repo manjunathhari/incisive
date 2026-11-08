@@ -788,11 +788,15 @@ pub fn early_body(
     }
 }
 
+/// How long one early-answer write may take: a slow pool skips it rather
+/// than delay the final answer.
+const EARLY_WRITE_LIMIT: Duration = Duration::from_secs(2);
+
 /// Store each early answer as the parts arrive, until the writer is done; at
-/// [`writer_v3::PartEvent::OnePiece`] delete it and stop (owner D1 A: never
-/// show text the final answer will not hold). Never fails the run: a failed
-/// write is logged by id and size only (the end of the run, or recovery,
-/// removes the row).
+/// [`writer_v3::PartEvent::Withdraw`] (a part failed for good) delete it and
+/// stop (owner D1 A: never show text the final answer will not hold). Never
+/// fails the run: a failed or slow write is skipped and logged by id (and
+/// size) only (the end of the run, or recovery, removes the row).
 async fn store_early(
     ctx: &RunContext,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<writer_v3::PartEvent>,
@@ -808,9 +812,9 @@ async fn store_early(
         match e {
             PartEvent::Summary(p) => summary = Some(p),
             PartEvent::Context(p) => context = Some(p),
-            PartEvent::OnePiece => {
+            PartEvent::Withdraw => {
                 drafts::clear(&ctx.state.pool, ctx.run_id, Part::Early).await;
-                tracing::info!(run_id = %ctx.run_id, "quick parallel: early answer withdrawn for the one-piece writer");
+                tracing::info!(run_id = %ctx.run_id, "quick parallel: a part failed; early answer withdrawn");
                 return;
             }
         }
@@ -819,12 +823,16 @@ async fn store_early(
             tracing::warn!(run_id = %ctx.run_id, "early answer could not be serialised");
             continue;
         };
-        match drafts::upsert(&ctx.state.pool, ctx.run_id, Part::Early, &text).await {
-            Ok(_) => {
+        let write = drafts::upsert(&ctx.state.pool, ctx.run_id, Part::Early, &text);
+        match tokio::time::timeout(EARLY_WRITE_LIMIT, write).await {
+            Ok(Ok(_)) => {
                 tracing::info!(run_id = %ctx.run_id, summary = early.summary, context = early.context, bytes = text.len(), "quick parallel: early answer stored");
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 tracing::warn!(run_id = %ctx.run_id, bytes = text.len(), "early answer could not be stored");
+            }
+            Err(_) => {
+                tracing::warn!(run_id = %ctx.run_id, "early answer write too slow; skipped");
             }
         }
     }
