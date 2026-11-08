@@ -678,17 +678,20 @@ check after the writer runs on it unchanged. Full runs are never affected.
   assumed). At the default prices (Opus $4/$20, `USD_INR` 88) that is 9,941 paise against 4,606 for
   one piece, so at the default Quick limit (10,000) research would get far less room. The app
   therefore writes in four parts only when `limit − four-part reserve ≥ 10,000 − one-piece reserve`
-  (research keeps today's 5,394 paise); otherwise the run reserves and writes exactly as today, with
-  the note line "The Quick cost limit is too low for writing in four parts, so one writer will write
-  the answer". **Raise the Quick limit when you turn the switch on**, with `RUN_LIMITS`, keeping the
+  (research keeps today's 5,394 paise); otherwise the run reserves and writes exactly as today,
+  quietly (no new step line). If the configured Quick limit is below what a question at the
+  4,000-character cap needs, the app logs one warning at startup naming the paise needed. **Raise the Quick limit when you turn the switch on**, with `RUN_LIMITS`, keeping the
   Full settings you already have: `{"quick": {"agent_limit_paise": 15500}, ...}`. At the default
   prices a short question needs at least 15,335 and a question at the 4,000-character cap 15,474
   (the reserve grows with the question); `quick_parallel_smoke --emit-requests` prints the figure
   for your `MODEL_PRICES`. A run whose limit is too low for its question writes in one piece. The limit is a hold: a run is charged what its calls really cost.
+- **Overshoot.** Every hold estimates its input at 3 bytes a token, so a call can cost more than its
+  hold (token-dense text). With four parts in flight at once, the worst case past the cost limit is
+  up to four parts' input excess, not one. It is bounded by the prompt size and accepted for now.
 - **A part that fails.** A part's reply that is cut off or unreadable gets one retry at low effort,
   for that part only. A part still failing discards all four, and the answer is written in one piece
   by today's writer, with the step line `Writer: section <name> failed; writing the answer in one
-  piece`. That one-piece writer is **not** reserved for: it runs only if the money (its own hold)
+  piece`; the four parts' draft is cleared first. That one-piece writer is **not** reserved for: it runs only if the money (its own hold)
   and time (the writer's 150 s start gate) left allow it; otherwise the run ends as a failed writer
   does today (`writer_truncated`, `writer_unreadable` or `write_refused`).
 - **Checks after merging** (code only, notes on the answer, nothing removed or rewritten): every

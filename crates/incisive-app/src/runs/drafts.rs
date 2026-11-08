@@ -337,43 +337,44 @@ impl Drop for OpenParts {
 }
 
 /// One draft from the parts' texts so far, as one JSON text the page's
-/// parser reads (`draft_page::read_prefix`): every part's fields read so far
-/// written as finished JSON, except one part still being written, whose raw
-/// text closes the object, so the page still marks where it is cut off. That
-/// part is `raw_first` when it is still open (the summary: the page shows a
-/// certainty only once it is whole), else the first open one. `None`:
-/// nothing yet.
-pub fn merged_draft(parts: &[String], raw_first: usize) -> Option<String> {
+/// parser reads (`draft_page::read_prefix`). The fields come in a fixed
+/// order, part by part and, within a part, in `fields` order (S1 review M2:
+/// the draft's citation numbers, given by first appearance, do not jump as
+/// parts arrive). Every part but the last is written as finished JSON (what
+/// is read so far); the last part (the summary: the page shows a certainty
+/// only once it is whole) comes last as its raw text while it is still
+/// open, so the page marks where it is cut off. `None`: nothing yet.
+pub fn merged_draft(parts: &[String], fields: &[Vec<String>]) -> Option<String> {
     use crate::draft_page::read_prefix;
     let read: Vec<_> = parts.iter().map(|t| read_prefix(t)).collect();
-    let open = |i: usize| read[i].value.is_object() && read[i].open.is_some();
-    let raw = if raw_first < parts.len() && open(raw_first) {
-        Some(raw_first)
-    } else {
-        (0..parts.len()).find(|&i| open(i))
-    };
-    let mut fields: Vec<String> = Vec::new();
+    let last = parts.len().checked_sub(1)?;
+    let raw_open = read[last].value.is_object() && read[last].open.is_some();
+    let mut out_fields: Vec<String> = Vec::new();
     for (i, p) in read.iter().enumerate() {
-        if Some(i) == raw {
+        if i == last && raw_open {
             continue;
         }
-        if let serde_json::Value::Object(m) = &p.value {
-            for (k, v) in m {
-                fields.push(format!("{}:{v}", serde_json::Value::String(k.clone())));
+        let serde_json::Value::Object(m) = &p.value else {
+            continue;
+        };
+        for k in fields.get(i).map(Vec::as_slice).unwrap_or_default() {
+            if let Some(v) = m.get(k) {
+                out_fields.push(format!("{}:{v}", serde_json::Value::String(k.clone())));
             }
         }
     }
-    let tail = raw
-        .and_then(|i| parts[i].find('{').map(|at| &parts[i][at + 1..]))
+    let tail = raw_open
+        .then(|| parts[last].find('{').map(|at| &parts[last][at + 1..]))
+        .flatten()
         .filter(|t| !t.trim().is_empty());
-    if fields.is_empty() && tail.is_none() {
+    if out_fields.is_empty() && tail.is_none() {
         return None;
     }
     let mut out = String::from("{");
-    out.push_str(&fields.join(","));
+    out.push_str(&out_fields.join(","));
     match tail {
         Some(t) => {
-            if !fields.is_empty() {
+            if !out_fields.is_empty() {
                 out.push(',');
             }
             out.push_str(t);
@@ -383,17 +384,29 @@ pub fn merged_draft(parts: &[String], raw_first: usize) -> Option<String> {
     Some(out)
 }
 
-/// The hooks for `n` calls writing one answer together, with `deadline` as
-/// each call's overall limit (see the section docs). `raw_first` as in
-/// [`merged_draft`].
+/// The merged draft's writing task, to wait for before the draft is
+/// cleared (the one-piece fallback): its last write is then done.
+#[must_use = "wait for it before clearing the draft"]
+pub struct PartsDraft(tokio::task::JoinHandle<()>);
+
+impl PartsDraft {
+    /// Wait (at most 10 s) until every part's call is over and the last
+    /// merged write is done.
+    pub async fn finished(self) {
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.0).await;
+    }
+}
+
+/// The hooks for one call per entry of `fields` (each part's top-level
+/// fields, in order), writing one answer together, with `deadline` as each
+/// call's overall limit (see the section docs and [`merged_draft`]).
 pub fn streaming_parts(
     pool: PgPool,
     run_id: Uuid,
     deadline: Instant,
-    n: usize,
-    raw_first: usize,
-) -> Vec<Streaming> {
-    streaming_parts_every(pool, run_id, deadline, n, raw_first, WRITE_EVERY)
+    fields: &[&[&str]],
+) -> (Vec<Streaming>, PartsDraft) {
+    streaming_parts_every(pool, run_id, deadline, fields, WRITE_EVERY)
 }
 
 /// [`streaming_parts`] writing at most once every `every` (shorter only in
@@ -402,10 +415,14 @@ pub fn streaming_parts_every(
     pool: PgPool,
     run_id: Uuid,
     deadline: Instant,
-    n: usize,
-    raw_first: usize,
+    fields: &[&[&str]],
     every: Duration,
-) -> Vec<Streaming> {
+) -> (Vec<Streaming>, PartsDraft) {
+    let n = fields.len();
+    let fields: Vec<Vec<String>> = fields
+        .iter()
+        .map(|f| f.iter().map(|x| (*x).to_string()).collect())
+        .collect();
     let shared = Arc::new(SharedParts {
         parts: Mutex::new(Parts {
             texts: vec![String::new(); n],
@@ -414,18 +431,18 @@ pub fn streaming_parts_every(
         wake: Notify::new(),
         closed: AtomicBool::new(false),
     });
-    tokio::spawn(write_parts_task(
+    let task = tokio::spawn(write_parts_task(
         pool.clone(),
         run_id,
         shared.clone(),
-        raw_first,
+        fields,
         every,
     ));
     let open = Arc::new(OpenParts(shared));
     // From the first part's first attempt: the first words of any part.
     let started: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let said = Arc::new(AtomicBool::new(false));
-    (0..n)
+    let hooks = (0..n)
         .map(|i| {
             let on_attempt = {
                 let (open, started) = (open.clone(), started.clone());
@@ -485,7 +502,8 @@ pub fn streaming_parts_every(
                 deadline: Some(deadline),
             }
         })
-        .collect()
+        .collect();
+    (hooks, PartsDraft(task))
 }
 
 /// The one task writing the merged draft ([`write_task`]'s rules: one write
@@ -495,7 +513,7 @@ async fn write_parts_task(
     pool: PgPool,
     run_id: Uuid,
     shared: Arc<SharedParts>,
-    raw_first: usize,
+    fields: Vec<Vec<String>>,
     every: Duration,
 ) {
     let mut throttle = Throttle {
@@ -510,7 +528,7 @@ async fn write_parts_task(
             Some(wait) if wait.is_zero() || closed => {
                 let (text, changes) = {
                     let p = shared.lock();
-                    (merged_draft(&p.texts, raw_first), p.changes)
+                    (merged_draft(&p.texts, &fields), p.changes)
                 };
                 let now = Instant::now();
                 if let Some(text) = text
@@ -534,6 +552,18 @@ async fn write_parts_task(
 mod tests {
     use super::*;
 
+    fn order() -> Vec<Vec<String>> {
+        [
+            &["studies", "conflicts", "notable_findings"][..],
+            &["outcomes"],
+            &["applicability", "would_change"],
+            &["bottom_line", "at_a_glance", "clinical_practice"],
+        ]
+        .iter()
+        .map(|f| f.iter().map(|x| (*x).to_string()).collect())
+        .collect()
+    }
+
     /// S1: four parts half-written merge into one draft the page reads, each
     /// part's content under its own section, the summary's cut-off kept.
     #[test]
@@ -546,7 +576,7 @@ mod tests {
             r#"{"bottom_line": {"text": "No consistent benefit [111].", "certainty": "Mod"#
                 .to_string();
         let parts = vec![trials, outcomes, context, summary];
-        let d = merged_draft(&parts, 3).expect("a draft");
+        let d = merged_draft(&parts, &order()).expect("a draft");
         // One JSON text: open where the summary was cut off.
         let p = read_prefix(&d);
         assert!(p.open.is_some());
@@ -574,22 +604,39 @@ mod tests {
             get("At a glance").items.is_empty(),
             "{COMING} until it arrives"
         );
-        // The summary whole: the first open part is the raw one.
+        // A fixed order: the parts' fields in Section order, the summary last.
+        let at = |k: &str| d.find(&format!("\"{k}\"")).unwrap();
+        assert!(at("studies") < at("conflicts") && at("conflicts") < at("notable_findings"));
+        assert!(at("notable_findings") < at("outcomes") && at("outcomes") < at("applicability"));
+        assert!(at("applicability") < at("would_change") && at("would_change") < at("bottom_line"));
+        // More text in an earlier part never moves a later one ahead of it.
+        let mut more = parts.clone();
+        more[1].push_str(" [222]\", \"numbers\": []");
+        let d2 = merged_draft(&more, &order()).unwrap();
+        assert_eq!(d2.find("\"studies\""), d.find("\"studies\""));
+        assert!(d2.find("\"bottom_line\"").unwrap() > d2.find("\"would_change\"").unwrap());
+        // The summary whole: everything as finished JSON, in the same order.
         let mut whole = parts.clone();
         whole[3] = r#"{"bottom_line": {"text": "x [111].", "certainty": "Low", "certainty_reason": "small"}, "at_a_glance": "No benefit.", "clinical_practice": "Default choice: lap."}"#.into();
-        let d = merged_draft(&whole, 3).unwrap();
+        let d = merged_draft(&whole, &order()).unwrap();
         let p = read_prefix(&d);
         assert_eq!(p.value["bottom_line"]["certainty"], "Low");
         assert_eq!(p.value["outcomes"][0]["outcome"], "Chronic pain");
-        assert!(p.open.is_some(), "the outcomes are still open");
+        assert_eq!(
+            p.value["outcomes"][0]["effect_text"], "No difference at 30 d",
+            "an open earlier part as read so far"
+        );
         // All whole: a whole object.
         whole[1] = r#"{"outcomes": []}"#.into();
-        let d = merged_draft(&whole, 3).unwrap();
+        let d = merged_draft(&whole, &order()).unwrap();
         assert_eq!(read_prefix(&d).open, None);
         assert!(serde_json::from_str::<serde_json::Value>(&d).is_ok());
         // Nothing yet: no draft.
-        assert_eq!(merged_draft(&vec![String::new(); 4], 3), None);
-        assert_eq!(merged_draft(&["{".to_string(), String::new()], 0), None);
+        assert_eq!(merged_draft(&vec![String::new(); 4], &order()), None);
+        assert_eq!(
+            merged_draft(&[String::new(), "{".to_string()], &order()),
+            None
+        );
     }
 
     #[test]

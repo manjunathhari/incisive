@@ -1909,6 +1909,51 @@ pub fn sections_reserve(
     Some(total)
 }
 
+/// The smallest Quick cost limit that writes in four parts for a question of
+/// `question_bytes` (worst case: every byte one character), at these prices:
+/// the four parts' reserve plus today's research room under the default
+/// Quick limit (`parallel_fits`). For the startup warning (S1 review I1).
+/// `None`: the writer model is unpriced.
+pub fn parallel_limit_needed(
+    prices: crate::spend::Prices,
+    usd_inr: f64,
+    writer_model: &str,
+    question_bytes: usize,
+    writer_max_tokens: u32,
+    default_limit: i64,
+) -> Option<i64> {
+    let budget = std::sync::Arc::new(RunBudget::new(
+        uuid::Uuid::nil(),
+        0,
+        0,
+        Instant::now(),
+        prices,
+        usd_inr,
+    ));
+    let q = "q".repeat(question_bytes);
+    let worst = worst_case_user(&q);
+    let single = hold_estimate(
+        &budget,
+        writer_model,
+        SYSTEM,
+        &worst,
+        Some(&OutputSchema::new(writer_schema())),
+        writer_max_tokens,
+    )?;
+    let mut parallel: i64 = 0;
+    for s in Section::ALL {
+        parallel = parallel.saturating_add(hold_estimate(
+            &budget,
+            writer_model,
+            SYSTEM,
+            &section_user(&worst, s),
+            Some(&OutputSchema::new(section_schema(s))),
+            s.max_tokens(writer_max_tokens),
+        )?);
+    }
+    Some(parallel.saturating_add(default_limit.saturating_sub(single)))
+}
+
 /// Whether a Quick run with cost limit `limit` may write in four parts: only
 /// when research keeps at least the room it has today under the code's
 /// default Quick limit (`default_limit − single`, `single` being the
@@ -1983,6 +2028,7 @@ async fn section_reply<T: serde::de::DeserializeOwned>(
     let first = first_reply(ctx, call, SYSTEM, user, &schema, max)
         .await
         .map_err(WriteFailure::Step)?;
+    log_cut_off(ctx, s, &first, max, "first");
     let fault = match read_structured::<T>(&first) {
         Ok(p) => return Ok(p),
         Err(f) => f,
@@ -2002,6 +2048,7 @@ async fn section_reply<T: serde::de::DeserializeOwned>(
     let retry_user = format!("{user}{SCHEMA_NUDGE}");
     match call.reply(SYSTEM, &retry_user, Some(&low), max).await {
         Ok(r) => read_structured::<T>(&r).map_err(|f| {
+            log_cut_off(ctx, s, &r, max, "retry");
             log_unreadable(call, &r, f, "writer part retry unusable");
             if r.truncated() {
                 fail = WriteFailure::Truncated;
@@ -2015,6 +2062,18 @@ async fn section_reply<T: serde::de::DeserializeOwned>(
             tracing::info!(run_id = %ctx.run_id, part = s.name(), error_kind = e.kind(), "writer part retry not made or failed");
             Err(fail)
         }
+    }
+}
+
+/// A part's reply cut off by its `max_tokens` (S1 review M4: measured before
+/// release). Sizes and codes only, never text.
+fn log_cut_off(ctx: &RunContext, s: Section, r: &Reply, max: u32, attempt: &'static str) {
+    if r.truncated() {
+        tracing::warn!(
+            run_id = %ctx.run_id, part = s.name(), attempt, max_tokens = max,
+            output_tokens = r.output_tokens, reply_chars = r.chars(),
+            "writer part cut off at max_tokens"
+        );
     }
 }
 
@@ -2034,16 +2093,18 @@ pub async fn write_quick_parallel(
     user: &str,
 ) -> Result<(WrittenAnswer, u32, bool), WriteFailure> {
     let mut hooks: Vec<Option<super::llm::Streaming>> = vec![None, None, None, None];
+    let mut draft: Option<drafts::PartsDraft> = None;
     if ctx.state.stream {
         let left = ctx.budget.until_hard_stop(Instant::now());
-        let parts = drafts::streaming_parts(
+        let fields: Vec<&[&str]> = Section::ALL.iter().map(|s| s.fields()).collect();
+        let (parts, d) = drafts::streaming_parts(
             ctx.state.pool.clone(),
             ctx.run_id,
             Instant::now() + left,
-            Section::ALL.len(),
-            Section::Summary.index(),
+            &fields,
         );
         hooks = parts.into_iter().map(Some).collect();
+        draft = Some(d);
     }
     let calls: Vec<LlmCall> = hooks
         .into_iter()
@@ -2059,6 +2120,17 @@ pub async fn write_quick_parallel(
         .iter()
         .map(|s| section_user(user, *s))
         .collect();
+    // Money: every part is an ordinary finishing hold (step `write`), all
+    // four taken at once from the reserve sized for them. Each hold's input
+    // side is an estimate (3 bytes a token, `llm::estimate_usage`), so a
+    // part can cost more than its hold, as a single call can; with four
+    // parts in flight the worst-case overshoot past the cost limit is up to
+    // four parts' input excess, not one. Bounded by the prompt size and
+    // accepted for now (S1 review I2).
+    //
+    // `tokio::join!` waits for all four, also when one fails early: a failed
+    // part never cancels the others (their calls are already paid for), and
+    // the decision (merge, fall back, fail) is made once every part is in.
     let (t, o, c, s) = tokio::join!(
         section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials),
         section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes),
@@ -2067,6 +2139,9 @@ pub async fn write_quick_parallel(
     );
     // The hooks end with the calls: the merged draft makes its last write.
     drop(calls);
+    if let Some(d) = draft {
+        d.finished().await;
+    }
     let failed: Vec<(Section, WriteFailure)> = [
         (Section::Trials, t.as_ref().err().copied()),
         (Section::Outcomes, o.as_ref().err().copied()),
@@ -2100,6 +2175,10 @@ pub async fn write_quick_parallel(
         &crate::run_tracker::one_piece_line(section.name()),
     )
     .await;
+    // The discarded parts' draft goes: the page waits for the one piece.
+    if ctx.state.stream {
+        drafts::clear(&ctx.state.pool, ctx.run_id, Part::Answer).await;
+    }
     write_counted(ctx, llm, SYSTEM, user)
         .await
         .map(|(a, d)| (a, d, false))

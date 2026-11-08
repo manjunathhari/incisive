@@ -649,7 +649,7 @@ async fn a_part_that_cannot_be_held_falls_back_then_ends_as_a_refused_writer() {
 }
 
 /// Owner rule 2: with the switch on but the default limit, research would
-/// get less room: the run reserves and writes as today, with a note line.
+/// get less room: the run reserves and writes as today, quietly.
 #[tokio::test]
 async fn too_low_a_limit_writes_in_one_piece_as_today() {
     let Some(pool) = pool().await else { return };
@@ -666,12 +666,9 @@ async fn too_low_a_limit_writes_in_one_piece_as_today() {
     assert_eq!(ctx.budget.committed().finish_reserve, single);
     assert_eq!(single_requests(&llm).len(), 1);
     assert_eq!(writer_requests(&llm).len(), 1);
+    // Quiet (review I1): nothing new on the run's steps.
     let l = lines(&steps_of(&ctx, uid).await);
-    assert!(
-        l.iter().any(|x| x
-            == "The Quick cost limit is too low for writing in four parts, so one writer will write the answer"),
-        "{l:?}"
-    );
+    assert!(!l.iter().any(|x| x.contains("four parts")), "{l:?}");
 }
 
 /// Test 4 (switch off): the same limit, the switch off: one writer, today's
@@ -750,4 +747,85 @@ async fn four_streamed_parts_say_first_words_once() {
     let l = lines(&steps_of(&ctx, uid).await);
     let n = l.iter().filter(|x| x.contains("first words")).count();
     assert_eq!((first, n), (1, 1), "{l:?}");
+}
+
+/// Review I3: before the one-piece writer runs, the discarded parts' draft
+/// is cleared, so the page waits for the one piece instead of showing it.
+struct DraftProbe {
+    inner: Arc<ScriptedLlm>,
+    pool: PgPool,
+    run: std::sync::Mutex<Option<Uuid>>,
+    /// The answer drafts stored when the one-piece writer's call arrived.
+    seen: std::sync::Mutex<Vec<i64>>,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for DraftProbe {
+    async fn call(
+        &self,
+        req: &MessagesRequest,
+    ) -> Result<claude_client::MessagesResponse, claude_client::ClaudeError> {
+        let text = request_user_text(req);
+        let run = *self.run.lock().unwrap();
+        if let Some(run) = run
+            && text.contains(STUDIES_HEADING)
+            && !text.contains(SECTION_HEAD)
+        {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM incisive.run_drafts WHERE run_id = $1 AND part = 'answer'",
+            )
+            .bind(run)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+            self.seen.lock().unwrap().push(n);
+        }
+        self.inner.call(req).await
+    }
+}
+
+#[tokio::test]
+async fn the_parts_draft_is_cleared_before_the_one_piece_writer() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (_, _, limit) = reserves();
+    let cut = "{\"applicability\": {\"case_mix\": \"cut";
+    let mut llm = research_then(ScriptedLlm::new());
+    for _ in 0..2 {
+        llm = llm.when(&key(Section::Context)).reply_stop(
+            cut,
+            StopReason::MaxTokens,
+            usage(3000, 5000),
+        );
+    }
+    let llm = Arc::new(
+        sections_script_after(llm)
+            .when(STUDIES_HEADING)
+            .reply_json(writer_json(), usage(3000, 2800)),
+    );
+    let probe = Arc::new(DraftProbe {
+        inner: llm.clone(),
+        pool: pool.clone(),
+        run: std::sync::Mutex::new(None),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let (mut ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(probe.clone(), MODEL),
+        limit,
+        DepthSettings::QUICK,
+    )
+    .await;
+    ctx.state.runs.quick_parallel = true;
+    ctx.state.stream = true;
+    *probe.run.lock().unwrap() = Some(ctx.run_id);
+    let out = run_team(&ctx).await;
+    assert!(matches!(out, PipelineOutcome::Done(_)), "{out:?}");
+    assert_eq!(single_requests(&llm).len(), 1, "the fallback ran");
+    // The parts did write a draft (three whole parts and a cut one) ...
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(l.iter().any(|x| x.contains("one piece")), "{l:?}");
+    // ... and it was gone when the one-piece writer started.
+    assert_eq!(*probe.seen.lock().unwrap(), [0]);
 }

@@ -65,7 +65,12 @@
 //! ([`writer_v3::parallel_fits`]: `limit − parallel ≥ 10,000 − single` at
 //! the defaults); the owner raises the Quick limit with `RUN_LIMITS` when he
 //! turns the switch on. Otherwise the run reserves and writes exactly as
-//! today, with a note line. The one-piece fallback after a part fails twice
+//! today (quietly: config warns once at startup with the limit needed).
+//! Each part's hold, like every hold, estimates its input at 3 bytes a
+//! token, so a part can cost more than its hold; with four parts in flight
+//! the worst-case overshoot past the cost limit is up to four parts' input
+//! excess, not one (bounded by the prompt size; accepted for now). The
+//! one-piece fallback after a part fails twice
 //! is not reserved for: it runs only if the money (its own hold) and time
 //! (the writer's start gate) left allow it, else the run ends as a failed
 //! writer does today. The merged answer then gets code consistency notes
@@ -291,13 +296,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
                 reserve = p;
             }
             _ => {
+                // Quiet: the startup warning (config) names the limit
+                // needed; the run itself shows nothing new (review I1).
                 tracing::info!(run_id = %ctx.run_id, single = reserve, parallel = ?sections, limit = ctx.budget.limit_paise(), "quick parallel: cost limit too low; one writer");
-                add_line(
-                    ctx,
-                    StepKind::Note,
-                    "The Quick cost limit is too low for writing in four parts, so one writer will write the answer",
-                )
-                .await;
             }
         }
     }

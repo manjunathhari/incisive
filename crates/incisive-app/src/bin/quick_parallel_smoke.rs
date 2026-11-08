@@ -365,6 +365,22 @@ mod real {
                 }
             }
         }
+        // Review M4: truncation measured before release.
+        let stops: Vec<String> = Section::ALL
+            .iter()
+            .zip(&replies)
+            .map(|(s, r)| match r {
+                Some(r) if r.truncated() => format!(
+                    "{} CUT OFF at max_tokens {} ({} out)",
+                    s.name(),
+                    s.max_tokens(max_tokens(args).unwrap_or(20_000)),
+                    r.output_tokens
+                ),
+                Some(r) => format!("{} {:?}", s.name(), r.stop_reason),
+                None => format!("{} no reply", s.name()),
+            })
+            .collect();
+        println!("  stop reasons: {}", stops.join(" · "));
         let merged = (|| -> Result<(WrittenAnswer, u32), String> {
             let get = |i: usize| replies[i].as_ref().ok_or("missing".to_string());
             let t: TrialsPart = part(get(0)?).map_err(|e| format!("trials {e}"))?;
