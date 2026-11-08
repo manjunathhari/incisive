@@ -1700,6 +1700,598 @@ async fn first_reply(
     }
 }
 
+// ---------- Quick in four parts (S1, `QUICK_PARALLEL=on`) ----------
+//
+// Quick only, and only with the switch on and a cost limit that leaves
+// research at least today's room ([`parallel_fits`]). Four calls run at
+// once on the writer model, step `write`, each with the COMPLETE Quick
+// system prompt ([`SYSTEM`]) and the COMPLETE user message
+// ([`writer_user`]), then a short section instruction ([`section_user`])
+// that names only the fields to write and what the other three parts cover.
+// Each call's schema is its own top-level fields cut from the live schema
+// ([`section_schema`]); every live field belongs to exactly one part. The
+// four replies are read into part types holding the same wire types as
+// [`WireAnswer`] and merged into one ([`merge_sections`]), which goes
+// through [`WireAnswer::into_answer`] exactly as the single writer's reply
+// does: no parsing rule is repeated.
+//
+// **Money.** The finish reserve is the four parts' worst cases summed
+// ([`sections_reserve`]: each the hold for [`worst_case_user`] plus its
+// instruction, its own schema and its own `max_tokens`, no cache hit
+// assumed). The one-piece fallback is NOT reserved for: it runs only if the
+// money and time left allow it (its own ordinary finishing hold); otherwise
+// the run ends as a failed writer does today.
+//
+// **Retries.** Each part gets its first call (with the same broken-stream
+// retry as the single writer) and, when its reply is cut off or unreadable,
+// ONE retry at low effort with [`SCHEMA_NUDGE`], for that part only. A part
+// still failing discards all four and the answer is written in one piece
+// ([`write_counted`], unchanged), with a step line; parts that succeeded
+// are never re-called.
+
+/// Marks a part's instruction (and keys it in tests).
+pub const SECTION_HEAD: &str = "SECTION TO WRITE: ";
+
+/// One part of a Quick answer written in four parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Trials,
+    Outcomes,
+    Context,
+    Summary,
+}
+
+impl Section {
+    /// The four, in the order their drafts and replies are kept.
+    pub const ALL: [Section; 4] = [
+        Section::Trials,
+        Section::Outcomes,
+        Section::Context,
+        Section::Summary,
+    ];
+
+    /// The part's name in step lines and logs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Section::Trials => "trials",
+            Section::Outcomes => "outcomes",
+            Section::Context => "context",
+            Section::Summary => "summary",
+        }
+    }
+
+    /// Its index in [`Section::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            Section::Trials => 0,
+            Section::Outcomes => 1,
+            Section::Context => 2,
+            Section::Summary => 3,
+        }
+    }
+
+    /// The top-level fields of the live schema this part writes.
+    pub fn fields(self) -> &'static [&'static str] {
+        match self {
+            Section::Trials => &["studies", "conflicts", "notable_findings"],
+            Section::Outcomes => &["outcomes"],
+            Section::Context => &["applicability", "would_change"],
+            Section::Summary => &["bottom_line", "at_a_glance", "clinical_practice"],
+        }
+    }
+
+    /// What the part covers, in words, for the other parts' instructions.
+    fn covers(self) -> &'static str {
+        match self {
+            Section::Trials => {
+                "the trials table (studies), where studies disagree (conflicts) and the other notable findings (notable_findings)"
+            }
+            Section::Outcomes => {
+                "the outcome-by-outcome table with every outcome's effect, structured numbers and certainty (outcomes)"
+            }
+            Section::Context => {
+                "applicability: case mix, India and cost, training (applicability), and what new evidence would change the answer (would_change)"
+            }
+            Section::Summary => {
+                "the bottom line with the overall certainty (bottom_line), the at-a-glance summary (at_a_glance) and what it means for clinical practice (clinical_practice)"
+            }
+        }
+    }
+
+    /// This part's `max_tokens`, derived from `writer_max_tokens` (`w`;
+    /// thinking counts toward it). No part gets less room than it uses in
+    /// today's single answer: on the stored answers (three Full fixtures,
+    /// larger than Quick's) the outcomes are about 55% of the reply, the
+    /// trials, conflicts and notable findings about 40%, applicability and
+    /// what would change about 8%, the summary fields about 10%, and each
+    /// call also thinks on its own. So, erring generous: outcomes 3/5 of
+    /// `w`, trials 1/2, context and summary 1/4 each (1.6 × `w` together;
+    /// 12,000 + 10,000 + 5,000 + 5,000 at the default 20,000). Never 0.
+    pub fn max_tokens(self, w: u32) -> u32 {
+        let w = u64::from(w);
+        let t = match self {
+            Section::Trials => w / 2,
+            Section::Outcomes => w * 3 / 5,
+            Section::Context | Section::Summary => w / 4,
+        };
+        u32::try_from(t).unwrap_or(u32::MAX).max(1)
+    }
+
+    /// The instruction appended after the whole user message: which fields
+    /// to write, in full, and what the other three parts cover.
+    pub fn instruction(self) -> String {
+        let others: Vec<String> = Section::ALL
+            .iter()
+            .filter(|s| **s != self)
+            .map(|s| format!("- {}", s.covers()))
+            .collect();
+        format!(
+            "\n\n{SECTION_HEAD}{}\nThis answer is written in four parts at once, by four writers given the same question, studies, \
+notes and rules. You write only this part: {}. Every rule above applies in full. Write each of your fields completely, exactly \
+as the FIELDS rules describe it, as if you were writing the whole answer: never shorten or leave out anything in your fields \
+because another part may touch on it. The other three parts, written by the other writers, cover:\n{}\nDo not write their \
+fields. Reply with JSON matching the schema, which holds only your fields.",
+            self.name().to_uppercase(),
+            self.fields().join(", "),
+            others.join("\n")
+        )
+    }
+}
+
+/// The part's schema: its own top-level fields cut from the live schema
+/// (strict-compatible as the whole one is).
+pub fn section_schema(s: Section) -> Value {
+    let whole = writer_schema();
+    let props = whole["properties"].as_object().expect("properties object");
+    let mut p = serde_json::Map::new();
+    for f in s.fields() {
+        p.insert((*f).to_string(), props[*f].clone());
+    }
+    let required: Vec<String> = p.keys().cloned().collect();
+    json!({"type": "object", "additionalProperties": false, "properties": p, "required": required})
+}
+
+/// A part's user message: the whole single-writer message, then its
+/// instruction (so the shared text comes first).
+pub fn section_user(user: &str, s: Section) -> String {
+    format!("{user}{}", s.instruction())
+}
+
+/// The single Quick writer's request exactly as it is sent (the smoke tool).
+pub fn quick_request(model: &str, user: &str, max_tokens: u32) -> claude_client::MessagesRequest {
+    super::llm::build_request(
+        model,
+        SYSTEM,
+        user,
+        Some(&OutputSchema::new(writer_schema())),
+        max_tokens,
+    )
+}
+
+/// A part's request exactly as it is sent (the smoke tool; the run sends
+/// the same through [`LlmCall::reply`]).
+pub fn section_request(
+    model: &str,
+    user: &str,
+    s: Section,
+    writer_max_tokens: u32,
+) -> claude_client::MessagesRequest {
+    super::llm::build_request(
+        model,
+        SYSTEM,
+        &section_user(user, s),
+        Some(&OutputSchema::new(section_schema(s))),
+        s.max_tokens(writer_max_tokens),
+    )
+}
+
+/// The finish reserve with `QUICK_PARALLEL=on`: the four parts' worst-case
+/// holds summed (see the section docs). `None`: unpriced.
+pub fn sections_reserve(
+    llm: &AgentLlm,
+    budget: &RunBudget,
+    question: &str,
+    writer_max_tokens: u32,
+) -> Option<i64> {
+    let worst = worst_case_user(question);
+    let mut total: i64 = 0;
+    for s in Section::ALL {
+        let h = hold_estimate(
+            budget,
+            &llm.models.writer,
+            SYSTEM,
+            &section_user(&worst, s),
+            Some(&OutputSchema::new(section_schema(s))),
+            s.max_tokens(writer_max_tokens),
+        )?;
+        total = total.saturating_add(h);
+    }
+    Some(total)
+}
+
+/// The smallest Quick cost limit that writes in four parts for a question of
+/// `question_bytes` (worst case: every byte one character), at these prices:
+/// the four parts' reserve plus today's research room under the default
+/// Quick limit (`parallel_fits`). For the startup warning (S1 review I1).
+/// `None`: the writer model is unpriced.
+pub fn parallel_limit_needed(
+    prices: crate::spend::Prices,
+    usd_inr: f64,
+    writer_model: &str,
+    question_bytes: usize,
+    writer_max_tokens: u32,
+    default_limit: i64,
+) -> Option<i64> {
+    let budget = std::sync::Arc::new(RunBudget::new(
+        uuid::Uuid::nil(),
+        0,
+        0,
+        Instant::now(),
+        prices,
+        usd_inr,
+    ));
+    let q = "q".repeat(question_bytes);
+    let worst = worst_case_user(&q);
+    let single = hold_estimate(
+        &budget,
+        writer_model,
+        SYSTEM,
+        &worst,
+        Some(&OutputSchema::new(writer_schema())),
+        writer_max_tokens,
+    )?;
+    let mut parallel: i64 = 0;
+    for s in Section::ALL {
+        parallel = parallel.saturating_add(hold_estimate(
+            &budget,
+            writer_model,
+            SYSTEM,
+            &section_user(&worst, s),
+            Some(&OutputSchema::new(section_schema(s))),
+            s.max_tokens(writer_max_tokens),
+        )?);
+    }
+    Some(parallel.saturating_add(default_limit.saturating_sub(single)))
+}
+
+/// Whether a Quick run with cost limit `limit` may write in four parts: only
+/// when research keeps at least the room it has today under the code's
+/// default Quick limit (`default_limit − single`, `single` being the
+/// one-piece reserve). Otherwise the run reserves and writes as today.
+pub fn parallel_fits(limit: i64, parallel: i64, single: i64, default_limit: i64) -> bool {
+    limit.saturating_sub(parallel) >= default_limit.saturating_sub(single)
+}
+
+/// The trials part as the wire carries it.
+#[derive(Deserialize)]
+pub struct TrialsPart {
+    studies: Vec<WireStudy>,
+    conflicts: Vec<Conflict>,
+    #[serde(default)]
+    notable_findings: Option<Value>,
+}
+
+/// The outcomes part as the wire carries it.
+#[derive(Deserialize)]
+pub struct OutcomesPart {
+    outcomes: Vec<WireOutcome>,
+}
+
+/// The context part as the wire carries it.
+#[derive(Deserialize)]
+pub struct ContextPart {
+    applicability: Applicability,
+    would_change: Vec<String>,
+}
+
+/// The summary part as the wire carries it.
+#[derive(Deserialize)]
+pub struct SummaryPart {
+    bottom_line: WireBottomLine,
+    #[serde(default)]
+    at_a_glance: Option<Value>,
+    #[serde(default)]
+    clinical_practice: Option<Value>,
+}
+
+/// The four parts as one reply, of the single writer's shape.
+pub fn merge_sections(
+    t: TrialsPart,
+    o: OutcomesPart,
+    c: ContextPart,
+    s: SummaryPart,
+) -> WireAnswer {
+    WireAnswer {
+        bottom_line: s.bottom_line,
+        outcomes: o.outcomes,
+        studies: t.studies,
+        conflicts: t.conflicts,
+        applicability: c.applicability,
+        would_change: c.would_change,
+        at_a_glance: s.at_a_glance,
+        clinical_practice: s.clinical_practice,
+        notable_findings: t.notable_findings,
+    }
+}
+
+/// One part's call: the first reply (with the broken-stream retry), then,
+/// when it is cut off or unreadable, one retry at low effort for this part
+/// only, if the budget allows. As [`write_counted`] does for the whole.
+async fn section_reply<T: serde::de::DeserializeOwned>(
+    ctx: &RunContext,
+    call: &LlmCall,
+    user: &str,
+    s: Section,
+) -> Result<T, WriteFailure> {
+    let schema = OutputSchema::new(section_schema(s));
+    let max = s.max_tokens(ctx.settings.writer_max_tokens);
+    let first = first_reply(ctx, call, SYSTEM, user, &schema, max)
+        .await
+        .map_err(WriteFailure::Step)?;
+    log_cut_off(ctx, s, &first, max, "first");
+    let fault = match read_structured::<T>(&first) {
+        Ok(p) => return Ok(p),
+        Err(f) => f,
+    };
+    log_unreadable(
+        call,
+        &first,
+        fault,
+        "writer part unusable; one retry at low effort if the budget allows",
+    );
+    let mut fail = if first.truncated() {
+        WriteFailure::Truncated
+    } else {
+        WriteFailure::Unreadable
+    };
+    let low = schema.clone().with_effort(Effort::Low);
+    let retry_user = format!("{user}{SCHEMA_NUDGE}");
+    match call.reply(SYSTEM, &retry_user, Some(&low), max).await {
+        Ok(r) => read_structured::<T>(&r).map_err(|f| {
+            log_cut_off(ctx, s, &r, max, "retry");
+            log_unreadable(call, &r, f, "writer part retry unusable");
+            if r.truncated() {
+                fail = WriteFailure::Truncated;
+            }
+            fail
+        }),
+        Err(e @ (StepError::Cancelled | StepError::Unrecorded | StepError::HardStop)) => {
+            Err(WriteFailure::Step(e))
+        }
+        Err(e) => {
+            tracing::info!(run_id = %ctx.run_id, part = s.name(), error_kind = e.kind(), "writer part retry not made or failed");
+            Err(fail)
+        }
+    }
+}
+
+/// A part's reply cut off by its `max_tokens` (S1 review M4: measured before
+/// release). Sizes and codes only, never text.
+fn log_cut_off(ctx: &RunContext, s: Section, r: &Reply, max: u32, attempt: &'static str) {
+    if r.truncated() {
+        tracing::warn!(
+            run_id = %ctx.run_id, part = s.name(), attempt, max_tokens = max,
+            output_tokens = r.output_tokens, reply_chars = r.chars(),
+            "writer part cut off at max_tokens"
+        );
+    }
+}
+
+fn fatal(f: &WriteFailure) -> bool {
+    matches!(
+        f,
+        WriteFailure::Step(StepError::Cancelled | StepError::Unrecorded | StepError::HardStop)
+    )
+}
+
+/// The Quick answer in four parts (see the section docs): the answer, the
+/// labels set to their default, and whether it was merged from the four
+/// parts (`false`: written in one piece after a part failed).
+pub async fn write_quick_parallel(
+    ctx: &RunContext,
+    llm: &AgentLlm,
+    user: &str,
+) -> Result<(WrittenAnswer, u32, bool), WriteFailure> {
+    let mut hooks: Vec<Option<super::llm::Streaming>> = vec![None, None, None, None];
+    let mut draft: Option<drafts::PartsDraft> = None;
+    if ctx.state.stream {
+        let left = ctx.budget.until_hard_stop(Instant::now());
+        let fields: Vec<&[&str]> = Section::ALL.iter().map(|s| s.fields()).collect();
+        let (parts, d) = drafts::streaming_parts(
+            ctx.state.pool.clone(),
+            ctx.run_id,
+            Instant::now() + left,
+            &fields,
+        );
+        hooks = parts.into_iter().map(Some).collect();
+        draft = Some(d);
+    }
+    let calls: Vec<LlmCall> = hooks
+        .into_iter()
+        .map(|h| {
+            let c = llm.call(ctx, &llm.models.writer, "write");
+            match h {
+                Some(s) => c.streaming(s),
+                None => c,
+            }
+        })
+        .collect();
+    let users: Vec<String> = Section::ALL
+        .iter()
+        .map(|s| section_user(user, *s))
+        .collect();
+    // Money: every part is an ordinary finishing hold (step `write`), all
+    // four taken at once from the reserve sized for them. Each hold's input
+    // side is an estimate (3 bytes a token, `llm::estimate_usage`), so a
+    // part can cost more than its hold, as a single call can; with four
+    // parts in flight the worst-case overshoot past the cost limit is up to
+    // four parts' input excess, not one. Bounded by the prompt size and
+    // accepted for now (S1 review I2).
+    //
+    // `tokio::join!` waits for all four, also when one fails early: a failed
+    // part never cancels the others (their calls are already paid for), and
+    // the decision (merge, fall back, fail) is made once every part is in.
+    let (t, o, c, s) = tokio::join!(
+        section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials),
+        section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes),
+        section_reply::<ContextPart>(ctx, &calls[2], &users[2], Section::Context),
+        section_reply::<SummaryPart>(ctx, &calls[3], &users[3], Section::Summary),
+    );
+    // The hooks end with the calls: the merged draft makes its last write.
+    drop(calls);
+    let failed: Vec<(Section, WriteFailure)> = [
+        (Section::Trials, t.as_ref().err().copied()),
+        (Section::Outcomes, o.as_ref().err().copied()),
+        (Section::Context, c.as_ref().err().copied()),
+        (Section::Summary, s.as_ref().err().copied()),
+    ]
+    .into_iter()
+    .filter_map(|(s, f)| f.map(|f| (s, f)))
+    .collect();
+    if let Some((_, f)) = failed.iter().find(|(_, f)| fatal(f)) {
+        return Err(*f);
+    }
+    let Some(&(section, failure)) = failed.first() else {
+        let (Ok(t), Ok(o), Ok(c), Ok(s)) = (t, o, c, s) else {
+            unreachable!("every part read");
+        };
+        let (a, defaulted) = merge_sections(t, o, c, s).into_answer();
+        return Ok((a, defaulted, true));
+    };
+    let names: Vec<&str> = failed.iter().map(|(s, _)| s.name()).collect();
+    tracing::warn!(run_id = %ctx.run_id, parts = ?names, "writer parts failed; the answer is written in one piece if time and money allow");
+    // The fallback is not reserved for: only with time left (the writer's
+    // start gate) and money (its own hold, refused as today's writer is).
+    if ctx.budget.until_hard_stop(Instant::now()) < writer_min_time(ctx.mode) {
+        tracing::info!(run_id = %ctx.run_id, "no time for the one-piece writer");
+        return Err(failure);
+    }
+    super::add_line(
+        ctx,
+        crate::runs::StepKind::Write,
+        &crate::run_tracker::one_piece_line(section.name()),
+    )
+    .await;
+    // The discarded parts' draft goes: the page waits for the one piece.
+    // Its last write is waited for first (here only: on the merged path the
+    // run's end clears it), so no late write brings it back.
+    if let Some(d) = draft {
+        d.finished().await;
+        drafts::clear(&ctx.state.pool, ctx.run_id, Part::Answer).await;
+    }
+    write_counted(ctx, llm, SYSTEM, user)
+        .await
+        .map(|(a, d)| (a, d, false))
+}
+
+fn certainty_rank(c: Certainty) -> u8 {
+    match c {
+        Certainty::High => 3,
+        Certainty::Moderate => 2,
+        Certainty::Low => 1,
+        Certainty::VeryLow => 0,
+    }
+}
+
+/// Words that say little about which outcome a label names.
+const NAME_STOP: [&str; 8] = [
+    "with", "from", "than", "versus", "after", "mean", "median", "rate",
+];
+
+fn name_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 4 && !NAME_STOP.contains(&w.as_str()))
+        .collect()
+}
+
+/// Whether an at-a-glance label names one of `outcomes` (case ignored: one
+/// contains the other, or they share a word of 4+ letters). Lenient on
+/// purpose: a note is for a clear miss only.
+fn names_an_outcome(label: &str, outcomes: &[Outcome]) -> bool {
+    let l = label.trim().to_lowercase();
+    let lw = name_words(&l);
+    outcomes.iter().any(|o| {
+        let n = o.outcome.trim().to_lowercase();
+        (!n.is_empty() && (l.contains(&n) || n.contains(&l)))
+            || name_words(&n).iter().any(|w| lw.contains(w))
+    })
+}
+
+/// The checks after merging the four parts (code only; flag, never delete,
+/// nothing rewritten). Each finding is a note for the answer:
+/// * every PMID the outcomes cite (their `pmids`, markers and numbers) is a
+///   row of the trials table;
+/// * every outcome the at-a-glance key numbers name is in the outcome table
+///   (the bottom line and clinical practice are free text and not checked);
+/// * the bottom line's certainty is not above the highest outcome's.
+pub fn merge_checks(a: &WrittenAnswer) -> Vec<String> {
+    const LEAD: &str = "Consistency check (answer written in four parts):";
+    let mut notes = Vec::new();
+    let listed: Vec<&str> = a.studies.iter().map(|s| s.pmid.trim()).collect();
+    let mut missing: Vec<String> = Vec::new();
+    for o in &a.outcomes {
+        let ids = o
+            .pmids
+            .iter()
+            .map(|p| p.trim().to_string())
+            .chain(cited_ids(&o.rct_evidence))
+            .chain(cited_ids(&o.effect_text))
+            .chain(cited_ids(&o.why))
+            .chain(o.numbers.iter().map(|n| n.pmid.trim().to_string()));
+        for id in ids {
+            if !id.is_empty() && !listed.contains(&id.as_str()) && !missing.contains(&id) {
+                missing.push(id);
+            }
+        }
+    }
+    if !missing.is_empty() {
+        notes.push(format!(
+            "{LEAD} the outcome table cites {} the trials table does not list (PMID {}).",
+            if missing.len() == 1 {
+                "1 study".to_string()
+            } else {
+                format!("{} studies", missing.len())
+            },
+            missing.join(", ")
+        ));
+    }
+    if let Some(g) = &a.at_a_glance {
+        let unnamed: Vec<String> = g
+            .key_numbers
+            .iter()
+            .map(|k| k.label.trim())
+            .filter(|l| !l.is_empty() && !names_an_outcome(l, &a.outcomes))
+            .map(|l| format!("\u{201c}{l}\u{201d}"))
+            .collect();
+        if !unnamed.is_empty() {
+            notes.push(format!(
+                "{LEAD} At a glance names {} not in the outcome table ({}).",
+                if unnamed.len() == 1 {
+                    "1 outcome".to_string()
+                } else {
+                    format!("{} outcomes", unnamed.len())
+                },
+                unnamed.join(", ")
+            ));
+        }
+    }
+    if let Some(top) = a
+        .outcomes
+        .iter()
+        .map(|o| o.certainty)
+        .max_by_key(|c| certainty_rank(*c))
+        && certainty_rank(a.bottom_line.certainty) > certainty_rank(top)
+    {
+        notes.push(format!(
+            "{LEAD} the bottom line's certainty ({}) is higher than any outcome's (highest: {}); both are shown as written.",
+            a.bottom_line.certainty.as_str(),
+            top.as_str()
+        ));
+    }
+    notes
+}
+
 // ---------- Stage 4 item 5: the number trace ----------
 
 /// The values of the numbers written in `text` that `spans` does not mark
@@ -3247,5 +3839,325 @@ mod tests {
         ] {
             assert!(SYSTEM_FULL.contains(must), "{must}");
         }
+    }
+
+    // ---------- S1: Quick in four parts ----------
+
+    /// A whole single-writer reply (every live field, odd values included).
+    fn whole_reply() -> Value {
+        json!({
+            "bottom_line": {"text": "No benefit [11111111].", "certainty": "moderate", "certainty_reason": "two RCTs"},
+            "outcomes": [{
+                "outcome": "Chronic pain", "rct_evidence": "2 RCTs [11111111]", "effect_text": "RR 0.76 [11111111]",
+                "numbers": [{"label": "RR", "value": 0.76, "unit": null, "arm": null, "ci_low": "0.49",
+                    "ci_high": "about one", "p": null, "pmid": "11111111"}],
+                "certainty": "SURE", "why": "small [22222222]", "pmids": ["11111111"]
+            }],
+            "studies": [
+                {"pmid": "11111111", "label": "A 2020", "design": "RCT", "n": "60", "setting": "s", "comparison": "c",
+                 "key_results": "k [11111111]", "appraisal": "a"},
+                {"pmid": "22222222", "label": "B 2021", "design": "RCT", "n": 0, "setting": "", "comparison": "",
+                 "key_results": "", "appraisal": ""}
+            ],
+            "conflicts": [{"text": "B differs [22222222]", "pmids": ["22222222"]}],
+            "applicability": {"case_mix": "simple", "india_cost_context": "not known", "training": "none"},
+            "would_change": ["A larger RCT"],
+            "at_a_glance": "No benefit.\nChronic pain: RR 0.76 [11111111]\nMain caveat: small",
+            "clinical_practice": "Default choice: lap\nCost per case: not known",
+            "notable_findings": "- Withdrawals 2 vs 9 [11111111].\n- Funding [22222222]."
+        })
+    }
+
+    /// The part of `whole` a section writes (its own fields only).
+    fn part_of(whole: &Value, s: Section) -> Value {
+        let mut m = serde_json::Map::new();
+        for f in s.fields() {
+            m.insert((*f).to_string(), whole[*f].clone());
+        }
+        Value::Object(m)
+    }
+
+    /// Test 1: a single-writer reply cut into its four parts and merged is
+    /// the same answer, with the same defaulted labels.
+    #[test]
+    fn four_parts_merge_into_the_single_writers_answer() {
+        let whole = whole_reply();
+        let single = serde_json::from_value::<WireAnswer>(whole.clone())
+            .unwrap()
+            .into_answer();
+        let merged = merge_sections(
+            serde_json::from_value(part_of(&whole, Section::Trials)).unwrap(),
+            serde_json::from_value(part_of(&whole, Section::Outcomes)).unwrap(),
+            serde_json::from_value(part_of(&whole, Section::Context)).unwrap(),
+            serde_json::from_value(part_of(&whole, Section::Summary)).unwrap(),
+        )
+        .into_answer();
+        assert_eq!(merged, single);
+        assert_eq!(merged.1, 1, "the unknown certainty, counted once");
+        // A part with another part's field: that field is not taken from it.
+        let mut extra = part_of(&whole, Section::Context);
+        extra["bottom_line"] =
+            json!({"text": "other", "certainty": "High", "certainty_reason": ""});
+        let c: ContextPart = serde_json::from_value(extra).unwrap();
+        let again = merge_sections(
+            serde_json::from_value(part_of(&whole, Section::Trials)).unwrap(),
+            serde_json::from_value(part_of(&whole, Section::Outcomes)).unwrap(),
+            c,
+            serde_json::from_value(part_of(&whole, Section::Summary)).unwrap(),
+        )
+        .into_answer();
+        assert_eq!(again, single);
+        // A part missing a field is unreadable.
+        assert!(serde_json::from_value::<ContextPart>(json!({"would_change": []})).is_err());
+    }
+
+    /// Every live field belongs to exactly one part, each part's schema is its
+    /// fields cut from the live schema, unchanged and strict.
+    #[test]
+    fn the_parts_cover_every_live_field_exactly_once() {
+        let whole = writer_schema();
+        let live: Vec<&String> = whole["properties"].as_object().unwrap().keys().collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for s in Section::ALL {
+            let sch = section_schema(s);
+            assert_eq!(sch["additionalProperties"], json!(false));
+            let props = sch["properties"].as_object().unwrap();
+            assert_eq!(props.len(), s.fields().len());
+            let req: Vec<&str> = sch["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            for f in s.fields() {
+                assert_eq!(props[*f], whole["properties"][*f], "{f}");
+                assert!(req.contains(f));
+                assert!(!seen.contains(f), "{f} twice");
+                seen.push(f);
+            }
+            assert_eq!(Section::ALL[s.index()], s);
+        }
+        seen.sort_unstable();
+        let mut live: Vec<&str> = live.iter().map(|k| k.as_str()).collect();
+        live.sort_unstable();
+        assert_eq!(seen, live);
+    }
+
+    /// Quality: the part's prompt is the whole Quick prompt, unchanged, then
+    /// its instruction (its fields, the other three parts' cover); each part
+    /// has at least the room it uses in a single answer, more in all.
+    #[test]
+    fn each_part_gets_the_whole_prompt_and_room_to_write() {
+        let user = writer_user("q?", &[input("11111111", "Pain 2.1 vs 2.4.")], &[], &[]);
+        for s in Section::ALL {
+            let r = section_request("m", &user, s, 20_000);
+            let single = quick_request("m", &user, 20_000);
+            assert_eq!(r.system, single.system, "the whole system prompt");
+            let text = match &r.messages[0].content[0] {
+                claude_client::ContentBlock::Text { text } => text.clone(),
+                _ => unreachable!(),
+            };
+            assert!(text.starts_with(&user), "the whole user message first");
+            let tail = &text[user.len()..];
+            assert!(tail.contains(&format!("{SECTION_HEAD}{}", s.name().to_uppercase())));
+            for f in s.fields() {
+                assert!(tail.contains(f), "{f}");
+            }
+            for o in Section::ALL.iter().filter(|o| **o != s) {
+                assert!(tail.contains(o.covers()), "{:?} names {:?}", s, o);
+            }
+            assert_eq!(r.max_tokens, s.max_tokens(20_000));
+        }
+        let m: Vec<u32> = Section::ALL.iter().map(|s| s.max_tokens(20_000)).collect();
+        assert_eq!(m, [10_000, 12_000, 5_000, 5_000]);
+        assert!(m.iter().sum::<u32>() >= 20_000);
+        // Derived from writer_max_tokens, never 0.
+        assert_eq!(Section::Outcomes.max_tokens(10_000), 6_000);
+        assert_eq!(Section::Context.max_tokens(1), 1);
+    }
+
+    fn opus_budget() -> std::sync::Arc<RunBudget> {
+        std::sync::Arc::new(RunBudget::new(
+            uuid::Uuid::nil(),
+            1,
+            10_000,
+            Instant::now(),
+            crate::spend::Prices::from_json(
+                r#"{"claude-opus-5-5": {"input": 4.0, "output": 20.0}}"#,
+            )
+            .unwrap(),
+            88.0,
+        ))
+    }
+
+    fn opus_llm() -> AgentLlm {
+        AgentLlm {
+            client: std::sync::Arc::new(crate::agent::llm::ScriptedLlm::new()),
+            models: crate::agent::llm::AgentModels::default(),
+        }
+    }
+
+    /// Test 3 (the formula): the parallel reserve is the four parts' holds for
+    /// the worst-case prompt summed, and it decides whether a limit may write
+    /// in four parts. The numbers at the dev Opus prices are printed.
+    #[test]
+    fn the_parallel_reserve_is_the_four_worst_cases_summed() {
+        let (llm, b) = (opus_llm(), opus_budget());
+        let q = "Is robotic inguinal hernia repair better than laparoscopic repair?";
+        let w = 20_000;
+        let worst = worst_case_user(q);
+        let sum: i64 = Section::ALL
+            .iter()
+            .map(|s| {
+                hold_estimate(
+                    &b,
+                    &llm.models.writer,
+                    SYSTEM,
+                    &section_user(&worst, *s),
+                    Some(&OutputSchema::new(section_schema(*s))),
+                    s.max_tokens(w),
+                )
+                .unwrap()
+            })
+            .sum();
+        let parallel = sections_reserve(&llm, &b, q, w).unwrap();
+        assert_eq!(parallel, sum);
+        let single = reserve_for(&llm, &b, q, w).unwrap();
+        let room = 10_000 - single;
+        let needed = parallel + room;
+        eprintln!(
+            "S1 MONEY (dev Opus, USD_INR 88): single {single} · parallel {parallel} · today's room {room} · Quick limit needed {needed}"
+        );
+        assert!(parallel > single);
+        assert!(parallel_fits(needed, parallel, single, 10_000));
+        assert!(!parallel_fits(needed - 1, parallel, single, 10_000));
+        assert!(
+            !parallel_fits(10_000, parallel, single, 10_000),
+            "the default limit: one piece"
+        );
+        // The owner's RUN_LIMITS figure, 15,500, covers any question up to
+        // the 4,000-character cap (ASCII): the reserve grows with it.
+        let long = "q".repeat(crate::ask::MAX_QUESTION_CHARS);
+        let (s4, p4) = (
+            reserve_for(&llm, &b, &long, w).unwrap(),
+            sections_reserve(&llm, &b, &long, w).unwrap(),
+        );
+        eprintln!(
+            "S1 MONEY (4,000-character question): single {s4} · parallel {p4} · Quick limit needed {}",
+            p4 + 10_000 - s4
+        );
+        assert!(parallel_fits(15_500, p4, s4, 10_000));
+        // A real prompt's holds are within the reserve.
+        let real = section_user(
+            &writer_user(q, &[input("11111111", "x")], &[], &[]),
+            Section::Outcomes,
+        );
+        assert!(real.len() < section_user(&worst, Section::Outcomes).len());
+    }
+
+    fn written(
+        bottom: Certainty,
+        outcomes: &[(&str, Certainty, &str)],
+        glance: &[&str],
+    ) -> WrittenAnswer {
+        let mut a = answer();
+        a.bottom_line.certainty = bottom;
+        let template = a.outcomes[0].clone();
+        a.outcomes = outcomes
+            .iter()
+            .map(|(name, c, pmid)| Outcome {
+                outcome: (*name).into(),
+                certainty: *c,
+                pmids: vec![(*pmid).into()],
+                rct_evidence: String::new(),
+                effect_text: String::new(),
+                why: String::new(),
+                numbers: vec![],
+                ..template.clone()
+            })
+            .collect();
+        a.at_a_glance = Some(AtAGlance {
+            verdict: "v".into(),
+            key_numbers: glance
+                .iter()
+                .map(|l| KeyNumber {
+                    label: (*l).into(),
+                    value_text: "x".into(),
+                    pmid: String::new(),
+                })
+                .collect(),
+            main_caveat: String::new(),
+        });
+        a
+    }
+
+    /// Test 5 and the other merge checks: notes only, nothing changed.
+    #[test]
+    fn the_merge_checks_flag_and_never_change() {
+        let listed =
+            |a: &WrittenAnswer| a.studies.iter().map(|s| s.pmid.clone()).collect::<Vec<_>>();
+        let base = answer();
+        let p = listed(&base)[0].clone();
+        // All consistent: no note.
+        let ok = written(
+            Certainty::Low,
+            &[
+                ("Chronic pain", Certainty::Low, &p),
+                ("Operative time", Certainty::Moderate, &p),
+            ],
+            &["Chronic pain at 3 months", "Time in theatre"],
+        );
+        assert!(merge_checks(&ok).is_empty(), "{:?}", merge_checks(&ok));
+        // Summary certainty above every outcome's.
+        let high = written(
+            Certainty::High,
+            &[
+                ("Pain", Certainty::Low, &p),
+                ("Cost", Certainty::Moderate, &p),
+            ],
+            &[],
+        );
+        let before = high.clone();
+        let n = merge_checks(&high);
+        assert_eq!(n.len(), 1, "{n:?}");
+        assert!(n[0].contains("certainty (High) is higher than any outcome's (highest: Moderate)"));
+        assert_eq!(high, before, "nothing rewritten");
+        // Equal to the highest: no note; no outcomes: nothing to compare.
+        assert!(
+            merge_checks(&written(
+                Certainty::Moderate,
+                &[("Pain", Certainty::Moderate, &p)],
+                &[]
+            ))
+            .is_empty()
+        );
+        assert!(merge_checks(&written(Certainty::High, &[], &[])).is_empty());
+        // An outcome citing a study the trials table does not list.
+        let mut cites = written(Certainty::Low, &[("Pain", Certainty::Low, "33333333")], &[]);
+        cites.outcomes[0].effect_text = "less [44444444]".into();
+        let n = merge_checks(&cites);
+        assert_eq!(n.len(), 1);
+        assert!(
+            n[0].contains(
+                "cites 2 studies the trials table does not list (PMID 33333333, 44444444)"
+            ),
+            "{}",
+            n[0]
+        );
+        // At a glance naming an outcome the table does not have.
+        let g = written(
+            Certainty::Low,
+            &[("Chronic pain", Certainty::Low, &p)],
+            &["Recurrence", "Pain (VAS)"],
+        );
+        let n = merge_checks(&g);
+        assert_eq!(n.len(), 1);
+        assert!(
+            n[0].contains(
+                "At a glance names 1 outcome not in the outcome table (\u{201c}Recurrence\u{201d})"
+            ),
+            "{}",
+            n[0]
+        );
     }
 }

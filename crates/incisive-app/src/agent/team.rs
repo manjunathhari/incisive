@@ -58,6 +58,24 @@
 //! As in Phase 2, a JSON retry is not reserved for, and the input-side
 //! estimate can be exceeded by token-dense text (documented in `llm`).
 //!
+//! **Quick in four parts (S1, `QUICK_PARALLEL=on`).** The finish reserve is
+//! the four section writers' worst cases summed
+//! ([`writer_v3::sections_reserve`]), taken only when research keeps at
+//! least today's room under the default Quick limit
+//! ([`writer_v3::parallel_fits`]: `limit − parallel ≥ 10,000 − single` at
+//! the defaults); the owner raises the Quick limit with `RUN_LIMITS` when he
+//! turns the switch on. Otherwise the run reserves and writes exactly as
+//! today (quietly: config warns once at startup with the limit needed).
+//! Each part's hold, like every hold, estimates its input at 3 bytes a
+//! token, so a part can cost more than its hold; with four parts in flight
+//! the worst-case overshoot past the cost limit is up to four parts' input
+//! excess, not one (bounded by the prompt size; accepted for now). The
+//! one-piece fallback after a part fails twice
+//! is not reserved for: it runs only if the money (its own hold) and time
+//! (the writer's start gate) left allow it, else the run ends as a failed
+//! writer does today. The merged answer then gets code consistency notes
+//! ([`writer_v3::merge_checks`]); everything after the writer is unchanged.
+//!
 //! **Time.** Research wraps up at the time limit less the writer's
 //! allowance (`writer_time_allowance_s`, set by the worker). The writer is
 //! not started with less than [`writer_min_time`] (Quick 150 s, Full 180 s)
@@ -109,7 +127,7 @@ use super::writer_v3::{
 };
 use super::{PipelineOutcome, RunContext, add_line};
 use crate::lit::Paper;
-use crate::runs::{RunMode, StepKind};
+use crate::runs::{DepthSettings, RunMode, StepKind};
 
 /// Bottom line when none of the selected studies' records could be read.
 pub const UNFETCHED: &str =
@@ -249,10 +267,41 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             ctx.settings.writer_max_tokens,
         )
     };
-    let Some(reserve) = writer_reserve else {
+    let Some(mut reserve) = writer_reserve else {
         tracing::error!(run_id = %ctx.run_id, model = %ctx.llm.models.writer, "no price for the writer model; run not started");
         return Err("llm");
     };
+    // S1 (Quick, `QUICK_PARALLEL=on`): the answer in four parts, reserved
+    // for in full (the four worst cases summed; the one-piece fallback is
+    // not reserved for), but only when research keeps at least the room it
+    // has today under the default Quick limit. Otherwise as today.
+    let mut parallel = false;
+    if !full && ctx.state.runs.quick_parallel {
+        let sections = writer_v3::sections_reserve(
+            &ctx.llm,
+            &ctx.budget,
+            &ctx.question,
+            ctx.settings.writer_max_tokens,
+        );
+        match sections {
+            Some(p)
+                if writer_v3::parallel_fits(
+                    ctx.budget.limit_paise(),
+                    p,
+                    reserve,
+                    DepthSettings::QUICK.agent_limit_paise,
+                ) =>
+            {
+                parallel = true;
+                reserve = p;
+            }
+            _ => {
+                // Quiet: the startup warning (config) names the limit
+                // needed; the run itself shows nothing new (review I1).
+                tracing::info!(run_id = %ctx.run_id, single = reserve, parallel = ?sections, limit = ctx.budget.limit_paise(), "quick parallel: cost limit too low; one writer");
+            }
+        }
+    }
     // Full: research also leaves the review phase its share (see the module
     // docs); unpriced extractor or skeptic models fail the run up front.
     let review = if full {
@@ -519,10 +568,23 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .chain(&reviewed.cited)
         .map(|s| s.pmid.clone())
         .collect();
-    match writer_v3::write_counted(ctx, &ctx.llm, system, &user).await {
-        Ok((mut written, labels_defaulted)) => {
+    let written = if parallel {
+        writer_v3::write_quick_parallel(ctx, &ctx.llm, &user).await
+    } else {
+        writer_v3::write_counted(ctx, &ctx.llm, system, &user)
+            .await
+            .map(|(a, d)| (a, d, false))
+    };
+    match written {
+        Ok((mut written, labels_defaulted, merged)) => {
             integrity.labels_defaulted = labels_defaulted;
             check_citations(&mut written, &selected, &mut integrity);
+            // S1: the merged four parts' consistency checks (notes only).
+            if merged {
+                let notes = writer_v3::merge_checks(&written);
+                tracing::info!(run_id = %ctx.run_id, notes = notes.len(), "quick parallel: answer merged from four parts");
+                answer.notes.extend(notes);
+            }
             // R-S4a: the evidence label per outcome, from the cited studies'
             // designs (the researcher's labels; missed trials are RCTs).
             let designs: Vec<(String, String)> = studies

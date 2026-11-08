@@ -662,6 +662,60 @@ No other role streams.
 Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
 Rolling back: set `STREAM=off` and re-run Deploy; old code ignores the empty table.
 
+### Quick in four parts (`QUICK_PARALLEL`)
+
+With `QUICK_PARALLEL=on`, Quick's writer runs as four calls at once instead of one: trials
+(`studies`, `conflicts`, `notable_findings`), outcomes (`outcomes`), context (`applicability`,
+`would_change`) and summary (`bottom_line`, `at_a_glance`, `clinical_practice`). Each gets the whole
+Quick system prompt and the whole study input, then a short instruction naming its own fields and
+what the other three cover; code merges the four replies into one answer of today's shape, and every
+check after the writer runs on it unchanged. Full runs are never affected.
+
+- **Output room.** Each part's `max_tokens` is a share of `writer_max_tokens`: outcomes 3/5, trials
+  1/2, context and summary 1/4 each (12,000 + 10,000 + 5,000 + 5,000 at the default 20,000), so no
+  part has less room than it uses in a single answer.
+- **Money.** Before research the finish reserve is the four parts' worst cases summed (no cache hit
+  assumed). At the default prices (Opus $4/$20, `USD_INR` 88) that is 9,941 paise against 4,606 for
+  one piece, so at the default Quick limit (10,000) research would get far less room. The app
+  therefore writes in four parts only when `limit − four-part reserve ≥ 10,000 − one-piece reserve`
+  (research keeps today's 5,394 paise); otherwise the run reserves and writes exactly as today,
+  quietly (no new step line). If the configured Quick limit is below what a question at the
+  4,000-character cap needs, the app logs one warning at startup naming the paise needed. **Raise the Quick limit when you turn the switch on**, with `RUN_LIMITS`, keeping the
+  Full settings you already have: `{"quick": {"agent_limit_paise": 15500}, ...}`. At the default
+  prices a short question needs at least 15,335 and a question at the 4,000-character cap 15,474
+  (the reserve grows with the question); `quick_parallel_smoke --emit-requests` prints the figure
+  for your `MODEL_PRICES`. A run whose limit is too low for its question writes in one piece. The limit is a hold: a run is charged what its calls really cost.
+- **Overshoot.** Every hold estimates its input at 3 bytes a token, so a call can cost more than its
+  hold (token-dense text). With four parts in flight at once, the worst case past the cost limit is
+  up to four parts' input excess, not one. It is bounded by the prompt size and accepted for now.
+- **A part that fails.** A part's reply that is cut off or unreadable gets one retry at low effort,
+  for that part only. A part still failing discards all four, and the answer is written in one piece
+  by today's writer, with the step line `Writer: section <name> failed; writing the answer in one
+  piece`; the four parts' draft is cleared first. That one-piece writer is **not** reserved for: it runs only if the money (its own hold)
+  and time (the writer's 150 s start gate) left allow it; otherwise the run ends as a failed writer
+  does today (`writer_truncated`, `writer_unreadable` or `write_refused`).
+- **Checks after merging** (code only, notes on the answer, nothing removed or rewritten): every
+  study the outcomes cite is in the trials table; every outcome the At a glance key numbers name is
+  in the outcome table; the bottom line's certainty is not above the highest outcome certainty.
+- **Streaming.** With `STREAM=on` the four replies are kept apart and written as one answer draft at
+  the usual cadence; the page reads it unchanged. `Writer: first words after N s` is added once, for
+  the first part to write (a one-piece fallback adds its own).
+- **Comparing.** `cargo run -p incisive-app --bin quick_parallel_smoke -- --emit-requests DIR` writes
+  the single writer's request and the four parts' requests for the stored hernia input; send each
+  with curl, save `DIR/<name>-response.json`, then `--check-responses DIR` prints both answers side by
+  side with every check.
+
+| Variable | Required? | What it is | Default |
+|---|---|---|---|
+Known limitations (minor, accepted):
+- While streaming, a part still being written shows without its faded cut-off once the summary has finished first (only the summary is kept raw).
+- The startup warning sizes the worst-case question as 4,000 one-byte characters; a long non-Latin question can need slightly more (that run then writes in one piece).
+
+| `QUICK_PARALLEL` | no | `on` or `off`. With `off`: today's single Quick writer, reserve and answer exactly. | `off` |
+
+Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
+Rolling back: set `QUICK_PARALLEL=off` (and the Quick limit back, if you raised it) and re-run Deploy.
+
 ## Memory layer (Gemma embeddings)
 
 The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama

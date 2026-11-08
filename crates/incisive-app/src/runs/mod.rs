@@ -282,6 +282,11 @@ impl DepthSettings {
 pub struct RunsConfig {
     pub quick: DepthSettings,
     pub focused: DepthSettings,
+    /// S1: Quick's answer written in four parts at once (`QUICK_PARALLEL`:
+    /// `off`, the default, or `on`; set by `config`, never part of
+    /// `RUN_LIMITS`). Carried here so it reaches the run with the limits.
+    #[serde(skip)]
+    pub quick_parallel: bool,
 }
 
 impl Default for RunsConfig {
@@ -289,6 +294,7 @@ impl Default for RunsConfig {
         RunsConfig {
             quick: DepthSettings::QUICK,
             focused: DepthSettings::FOCUSED,
+            quick_parallel: false,
         }
     }
 }

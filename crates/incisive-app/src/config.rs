@@ -405,6 +405,18 @@ impl Config {
             }
         };
 
+        // S1: Quick's answer in four parts (default off; trimmed like STREAM).
+        let quick_parallel = match lookup("QUICK_PARALLEL").as_deref().map(str::trim) {
+            None | Some("") | Some("off") => false,
+            Some("on") => true,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "QUICK_PARALLEL",
+                    reason: "expected on or off".into(),
+                });
+            }
+        };
+
         let intro = {
             use crate::runs::intro::IntroSettings;
             let on = match lookup("INTRO").as_deref() {
@@ -543,13 +555,26 @@ impl Config {
             }
         };
 
-        let runs = match lookup("RUN_LIMITS") {
+        let mut runs = match lookup("RUN_LIMITS") {
             None => RunsConfig::default(),
             Some(json) => RunsConfig::from_json(&json).map_err(|reason| ConfigError::Invalid {
                 var: "RUN_LIMITS",
                 reason,
             })?,
         };
+        runs.quick_parallel = quick_parallel;
+        // S1 review I1: say once, at startup, when the Quick limit is too low
+        // for the four parts (every Quick run then writes in one piece).
+        if let Some(needed) = quick_parallel_shortfall(&runs, &model_prices, usd_inr, &agent_models)
+        {
+            tracing::warn!(
+                quick_limit_paise = runs.quick.agent_limit_paise,
+                needed_paise = needed,
+                "QUICK_PARALLEL=on but the Quick agent_limit_paise is below what four writer parts need \
+                 (for a question at the length cap); Quick runs whose limit is too low write in one piece. \
+                 Raise it with RUN_LIMITS"
+            );
+        }
 
         let unpaywall_email = match (app_env, lookup("UNPAYWALL_EMAIL")) {
             (_, Some(e)) => {
@@ -592,6 +617,29 @@ impl Config {
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
         })
     }
+}
+
+/// With `QUICK_PARALLEL=on`, the Quick limit needed for four writer parts
+/// on a question at the length cap, when the configured one is below it
+/// (`None`: off, enough, or an unpriced writer model).
+pub fn quick_parallel_shortfall(
+    runs: &RunsConfig,
+    prices: &Prices,
+    usd_inr: f64,
+    models: &AgentModels,
+) -> Option<i64> {
+    if !runs.quick_parallel {
+        return None;
+    }
+    let needed = crate::agent::writer_v3::parallel_limit_needed(
+        prices.clone(),
+        usd_inr,
+        &models.writer,
+        crate::ask::MAX_QUESTION_CHARS,
+        runs.quick.writer_max_tokens,
+        crate::runs::DepthSettings::QUICK.agent_limit_paise,
+    )?;
+    (runs.quick.agent_limit_paise < needed).then_some(needed)
 }
 
 #[cfg(test)]
@@ -1383,6 +1431,57 @@ mod tests {
             assert!(matches!(
                 Config::from_lookup(lookup(&pairs)),
                 Err(ConfigError::Invalid { var: "STREAM", .. })
+            ));
+        }
+    }
+
+    /// S1: `QUICK_PARALLEL` is `off` (default) or `on`, trimmed; anything else
+    /// refuses at startup. It reaches the run on `runs` and never changes the
+    /// limits.
+    #[test]
+    fn quick_parallel_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.runs.quick_parallel, "off by default");
+        for (v, want) in [("on", true), ("off", false), (" on ", true), ("", false)] {
+            let mut pairs = full();
+            pairs.push(("QUICK_PARALLEL", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.runs.quick_parallel, want, "{v:?}");
+            assert_eq!(c.runs.quick, crate::runs::DepthSettings::QUICK);
+        }
+        let mut pairs = full();
+        pairs.push(("QUICK_PARALLEL", "on"));
+        pairs.push(("RUN_LIMITS", r#"{"quick": {"agent_limit_paise": 15500}}"#));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert!(c.runs.quick_parallel);
+        assert_eq!(c.runs.quick.agent_limit_paise, 15500);
+        // The startup warning's figure: 15,500 is enough at the dev prices;
+        // the default 10,000 is not (and off never warns).
+        let shortfall = |c: &Config| {
+            quick_parallel_shortfall(&c.runs, &c.model_prices, c.usd_inr, &c.agent_models)
+        };
+        assert_eq!(shortfall(&c), None);
+        let mut low = c.runs;
+        low.quick.agent_limit_paise = 10_000;
+        let needed = quick_parallel_shortfall(&low, &c.model_prices, c.usd_inr, &c.agent_models);
+        assert!(
+            needed.is_some_and(|n| n > 15_000 && n <= 15_500),
+            "{needed:?}"
+        );
+        low.quick_parallel = false;
+        assert_eq!(
+            quick_parallel_shortfall(&low, &c.model_prices, c.usd_inr, &c.agent_models),
+            None
+        );
+        for bad in ["true", "ON", "1"] {
+            let mut pairs = full();
+            pairs.push(("QUICK_PARALLEL", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&pairs)),
+                Err(ConfigError::Invalid {
+                    var: "QUICK_PARALLEL",
+                    ..
+                })
             ));
         }
     }
