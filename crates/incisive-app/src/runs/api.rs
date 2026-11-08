@@ -79,7 +79,15 @@ pub async fn get_view(state: &AppState, user: &User, run_id: Uuid) -> Result<Run
     };
     // Stage S1: the answer as far as it is written, to its owner (checked
     // above), only while it is being written. A failed read shows no draft.
-    if state.stream && v.summary.status == super::RunStatus::Running && v.answer.is_none() {
+    let writing = v.summary.status == super::RunStatus::Running && v.answer.is_none();
+    // S1c: the finished sections of an answer written in four parts, to its
+    // owner, on the same terms. While they show, the draft is not sent.
+    if writing && state.runs.quick_parallel {
+        v.early = super::drafts::get(&state.pool, run_id, super::drafts::Part::Early)
+            .await
+            .unwrap_or_default();
+    }
+    if state.stream && writing && v.early.is_none() {
         v.draft = super::drafts::get(&state.pool, run_id, super::drafts::Part::Answer)
             .await
             .unwrap_or_default();

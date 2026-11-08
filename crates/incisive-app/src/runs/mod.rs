@@ -512,6 +512,12 @@ pub struct RunView {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
+    /// S1c (`QUICK_PARALLEL=on`): the finished, checked sections of an answer
+    /// written in four parts (`draft_page::EarlyAnswer` JSON), only while the
+    /// run is running with no answer; the draft is then not sent. Absent from
+    /// the wire otherwise, so other pages are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early: Option<String>,
 }
 
 /// What the run page may know of a run's introduction. A failed, skipped or

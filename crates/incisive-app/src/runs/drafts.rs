@@ -13,6 +13,10 @@
 //! cannot bring one back after the final is saved. Each is deleted when the run or the opinion ends
 //! ([`clear`]), and recovery removes any left behind ([`sweep`]).
 //!
+//! S1c: the `early` part is not a stream: the four-part Quick writer's
+//! finished and checked summary and context sections, stored once each by the
+//! team (`agent::team`), live and cleared exactly as the answer draft is.
+//!
 //! Privacy: a draft is reply text, like `run_answers`. It is read only through
 //! the run's owner scoping and never logged: ids and sizes only.
 
@@ -38,6 +42,10 @@ const STALE_AFTER_MIN: i32 = 30;
 pub enum Part {
     Answer,
     Opinion,
+    /// S1c (`QUICK_PARALLEL=on`): the finished, checked sections of a Quick
+    /// answer written in four parts, as [`crate::draft_page::EarlyAnswer`]
+    /// JSON. Live while the run is, like [`Part::Answer`].
+    Early,
 }
 
 impl Part {
@@ -45,6 +53,7 @@ impl Part {
         match self {
             Part::Answer => "answer",
             Part::Opinion => "opinion",
+            Part::Early => "early",
         }
     }
 }
@@ -52,7 +61,7 @@ impl Part {
 /// Store the draft, only while its writer's row is live. False: nothing stored.
 pub async fn upsert(pool: &PgPool, run_id: Uuid, part: Part, text: &str) -> sqlx::Result<bool> {
     let live = match part {
-        Part::Answer => {
+        Part::Answer | Part::Early => {
             "SELECT id FROM incisive.runs WHERE id = $1 AND status = 'running' FOR SHARE"
         }
         Part::Opinion => {
@@ -103,7 +112,7 @@ pub async fn sweep(pool: &PgPool) -> sqlx::Result<u64> {
     let r = sqlx::query(
         "DELETE FROM incisive.run_drafts d USING incisive.runs r \
          WHERE r.id = d.run_id AND ( \
-           (d.part = 'answer' AND r.status <> 'running') \
+           (d.part IN ('answer','early') AND r.status <> 'running') \
            OR (d.part = 'opinion' AND NOT EXISTS ( \
                  SELECT 1 FROM incisive.run_temporal t \
                  WHERE t.run_id = d.run_id AND t.status = 'pending')) \
