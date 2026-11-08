@@ -2139,9 +2139,6 @@ pub async fn write_quick_parallel(
     );
     // The hooks end with the calls: the merged draft makes its last write.
     drop(calls);
-    if let Some(d) = draft {
-        d.finished().await;
-    }
     let failed: Vec<(Section, WriteFailure)> = [
         (Section::Trials, t.as_ref().err().copied()),
         (Section::Outcomes, o.as_ref().err().copied()),
@@ -2176,7 +2173,10 @@ pub async fn write_quick_parallel(
     )
     .await;
     // The discarded parts' draft goes: the page waits for the one piece.
-    if ctx.state.stream {
+    // Its last write is waited for first (here only: on the merged path the
+    // run's end clears it), so no late write brings it back.
+    if let Some(d) = draft {
+        d.finished().await;
         drafts::clear(&ctx.state.pool, ctx.run_id, Part::Answer).await;
     }
     write_counted(ctx, llm, SYSTEM, user)

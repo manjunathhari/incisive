@@ -757,6 +757,19 @@ struct DraftProbe {
     run: std::sync::Mutex<Option<Uuid>>,
     /// The answer drafts stored when the one-piece writer's call arrived.
     seen: std::sync::Mutex<Vec<i64>>,
+    /// The answer drafts stored when the failing part's retry arrived
+    /// (after the other parts' replies were streamed), polled up to 2 s.
+    before: std::sync::Mutex<Vec<i64>>,
+}
+
+async fn answer_drafts(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM incisive.run_drafts WHERE run_id = $1 AND part = 'answer'",
+    )
+    .bind(run)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 #[async_trait::async_trait]
@@ -767,6 +780,20 @@ impl LlmClient for DraftProbe {
     ) -> Result<claude_client::MessagesResponse, claude_client::ClaudeError> {
         let text = request_user_text(req);
         let run = *self.run.lock().unwrap();
+        if let Some(run) = run
+            && text.contains(&key(Section::Context))
+            && text.contains(incisive_app::agent::llm::SCHEMA_NUDGE.trim())
+        {
+            let mut n = 0;
+            for _ in 0..200 {
+                n = answer_drafts(&self.pool, run).await;
+                if n > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            self.before.lock().unwrap().push(n);
+        }
         if let Some(run) = run
             && text.contains(STUDIES_HEADING)
             && !text.contains(SECTION_HEAD)
@@ -808,6 +835,7 @@ async fn the_parts_draft_is_cleared_before_the_one_piece_writer() {
         pool: pool.clone(),
         run: std::sync::Mutex::new(None),
         seen: std::sync::Mutex::new(Vec::new()),
+        before: std::sync::Mutex::new(Vec::new()),
     });
     let (mut ctx, uid) = quick_ctx(
         &pool,
@@ -826,6 +854,7 @@ async fn the_parts_draft_is_cleared_before_the_one_piece_writer() {
     // The parts did write a draft (three whole parts and a cut one) ...
     let l = lines(&steps_of(&ctx, uid).await);
     assert!(l.iter().any(|x| x.contains("one piece")), "{l:?}");
+    assert_eq!(*probe.before.lock().unwrap(), [1], "a draft existed before");
     // ... and it was gone when the one-piece writer started.
     assert_eq!(*probe.seen.lock().unwrap(), [0]);
 }

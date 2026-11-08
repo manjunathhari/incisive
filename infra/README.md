@@ -707,6 +707,10 @@ check after the writer runs on it unchanged. Full runs are never affected.
 
 | Variable | Required? | What it is | Default |
 |---|---|---|---|
+Known limitations (minor, accepted):
+- While streaming, a part still being written shows without its faded cut-off once the summary has finished first (only the summary is kept raw).
+- The startup warning sizes the worst-case question as 4,000 one-byte characters; a long non-Latin question can need slightly more (that run then writes in one piece).
+
 | `QUICK_PARALLEL` | no | `on` or `off`. With `off`: today's single Quick writer, reserve and answer exactly. | `off` |
 
 Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
