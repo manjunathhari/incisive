@@ -44,6 +44,7 @@ jobs:
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           STREAM: ${{ vars.STREAM }}
+          QUICK_PARALLEL: ${{ vars.QUICK_PARALLEL }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           GRAPH: ${{ vars.GRAPH }}
@@ -201,6 +202,14 @@ jobs:
             ""|on|off) ;;
             *) echo "::error::vars.STREAM must be on or off (see infra/README.md section 15)"; exit 1 ;;
           esac
+          # Optional Quick answer in four parts (infra/README.md section 15): unset
+          # (off), off or on. The same trim.
+          qp="${QUICK_PARALLEL#"${QUICK_PARALLEL%%[![:space:]]*}"}"
+          qp="${qp%"${qp##*[![:space:]]}"}"
+          case "$qp" in
+            ""|on|off) ;;
+            *) echo "::error::vars.QUICK_PARALLEL must be on or off (see infra/README.md section 15)"; exit 1 ;;
+          esac
           # Optional introduction agent (infra/README.md section 14): unset (off), off
           # or on. The same trim. When on, INTRO_MODEL (default claude-sonnet-5-5,
           # mirrors runs::intro::DEFAULT_MODEL) must be priced, as the app refuses
@@ -343,6 +352,7 @@ jobs:
           TEMPORAL: ${{ vars.TEMPORAL }}
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           STREAM: ${{ vars.STREAM }}
+          QUICK_PARALLEL: ${{ vars.QUICK_PARALLEL }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           GRAPH: ${{ vars.GRAPH }}
@@ -380,6 +390,8 @@ jobs:
           optional += ["TEMPORAL", "TEMPORAL_MAX_TOKENS"]
           # Writer streaming (infra/README.md section 15): optional too.
           optional += ["STREAM"]
+          # Quick in four parts (infra/README.md section 15): optional too.
+          optional += ["QUICK_PARALLEL"]
           # The introduction agent (infra/README.md section 14): optional too.
           optional += ["INTRO", "INTRO_MODEL"]
           # The knowledge graph (infra/README.md, "Knowledge graph"): optional too.

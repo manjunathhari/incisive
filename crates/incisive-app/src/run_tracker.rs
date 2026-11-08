@@ -156,6 +156,15 @@ pub fn first_words_line(expert: bool, secs: u64) -> String {
     format!("{role}: {FIRST_WORDS}{secs} s")
 }
 
+/// S1 (`QUICK_PARALLEL=on`): the words after "Writer: section <name>" when a
+/// part of a Quick answer written in four parts failed twice.
+const ONE_PIECE: &str = " failed; writing the answer in one piece";
+
+/// The step line when the four-part writer falls back to the single writer.
+pub fn one_piece_line(section: &str) -> String {
+    format!("Writer: section {section}{ONE_PIECE}")
+}
+
 /// The Expert Opinion writer's first-words line. It is stored after the run has
 /// ended, so it says nothing about when the answer was ready.
 pub fn is_expert_first_words(line: &str) -> bool {
@@ -439,6 +448,26 @@ impl Seen {
             }
             // Stage S1: a note on the writer already counted; the fill goes on.
             "Writer" if body.starts_with(FIRST_WORDS) => {}
+            // S1: a part failed; the answer is written again in one piece, so
+            // the writer's timed fill starts again from this line.
+            "Writer" if body.starts_with("section ") && body.ends_with(ONE_PIECE) => {
+                self.any = true;
+                self.answer = Some("being written");
+                self.sentence = Some("Writing the answer in one piece".into());
+                self.raise(second_end);
+                // Never back: the fill goes on from where it had got to.
+                let so_far = Fill {
+                    floor: self.floor,
+                    timed: self.timed,
+                }
+                .at(s.at);
+                self.raise(f32::from(so_far));
+                self.timed = Some(Timed {
+                    from: s.at,
+                    to_pct: write_end,
+                    usual_secs: usual,
+                });
+            }
             "Writer" => {
                 self.any = true;
                 self.answer = Some("being written");
@@ -1456,6 +1485,63 @@ mod tests {
         assert_eq!(b.rolling, "First words after 26 s");
         let now = at(130);
         assert_eq!(b.fill.at(now), a.fill.at(now));
+    }
+
+    /// S1: the four-part writer's fallback line keeps the card on the writer,
+    /// says it plainly and restarts the writer's timed fill from itself.
+    #[test]
+    fn the_one_piece_fallback_line_restarts_the_writers_fill() {
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-11-08T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let at = |s: i64| t0 + chrono::Duration::seconds(s);
+        let fallback = one_piece_line("outcomes");
+        assert_eq!(
+            fallback,
+            "Writer: section outcomes failed; writing the answer in one piece"
+        );
+        let base = [
+            Step {
+                at: at(0),
+                line: "Researcher: selected 5 studies (5 RCTs)",
+            },
+            Step {
+                at: at(60),
+                line: "Writer: writing the answer from 5 studies (5 with an abstract)",
+            },
+        ];
+        let with: Vec<Step<'_>> = base
+            .iter()
+            .copied()
+            .chain([Step {
+                at: at(100),
+                line: &fallback,
+            }])
+            .collect();
+        let a = read(RunMode::Quick, &base, RunState::Working, None);
+        let b = read(RunMode::Quick, &with, RunState::Working, None);
+        assert_eq!(
+            b.rows, a.rows,
+            "the card still says the answer is being written"
+        );
+        assert_eq!(b.role, "Writer");
+        assert_eq!(b.sentence, "Writing the answer in one piece");
+        // The fill goes on from where it was (never back), then moves on.
+        assert_eq!(b.fill.at(at(100)), a.fill.at(at(100)));
+        assert!(b.fill.at(at(130)) > b.fill.at(at(100)));
+        // Its first-words line afterwards changes nothing.
+        let first = first_words_line(false, 20);
+        let more: Vec<Step<'_>> = with
+            .iter()
+            .copied()
+            .chain([Step {
+                at: at(120),
+                line: &first,
+            }])
+            .collect();
+        let c = read(RunMode::Quick, &more, RunState::Working, None);
+        assert_eq!(c.sentence, b.sentence);
+        assert_eq!(c.fill, b.fill);
     }
 
     /// The Expert Opinion's line lands after the run has ended: the finished

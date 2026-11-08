@@ -405,6 +405,18 @@ impl Config {
             }
         };
 
+        // S1: Quick's answer in four parts (default off; trimmed like STREAM).
+        let quick_parallel = match lookup("QUICK_PARALLEL").as_deref().map(str::trim) {
+            None | Some("") | Some("off") => false,
+            Some("on") => true,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "QUICK_PARALLEL",
+                    reason: "expected on or off".into(),
+                });
+            }
+        };
+
         let intro = {
             use crate::runs::intro::IntroSettings;
             let on = match lookup("INTRO").as_deref() {
@@ -543,13 +555,14 @@ impl Config {
             }
         };
 
-        let runs = match lookup("RUN_LIMITS") {
+        let mut runs = match lookup("RUN_LIMITS") {
             None => RunsConfig::default(),
             Some(json) => RunsConfig::from_json(&json).map_err(|reason| ConfigError::Invalid {
                 var: "RUN_LIMITS",
                 reason,
             })?,
         };
+        runs.quick_parallel = quick_parallel;
 
         let unpaywall_email = match (app_env, lookup("UNPAYWALL_EMAIL")) {
             (_, Some(e)) => {
@@ -1383,6 +1396,39 @@ mod tests {
             assert!(matches!(
                 Config::from_lookup(lookup(&pairs)),
                 Err(ConfigError::Invalid { var: "STREAM", .. })
+            ));
+        }
+    }
+
+    /// S1: `QUICK_PARALLEL` is `off` (default) or `on`, trimmed; anything else
+    /// refuses at startup. It reaches the run on `runs` and never changes the
+    /// limits.
+    #[test]
+    fn quick_parallel_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.runs.quick_parallel, "off by default");
+        for (v, want) in [("on", true), ("off", false), (" on ", true), ("", false)] {
+            let mut pairs = full();
+            pairs.push(("QUICK_PARALLEL", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.runs.quick_parallel, want, "{v:?}");
+            assert_eq!(c.runs.quick, crate::runs::DepthSettings::QUICK);
+        }
+        let mut pairs = full();
+        pairs.push(("QUICK_PARALLEL", "on"));
+        pairs.push(("RUN_LIMITS", r#"{"quick": {"agent_limit_paise": 15500}}"#));
+        let c = Config::from_lookup(lookup(&pairs)).unwrap();
+        assert!(c.runs.quick_parallel);
+        assert_eq!(c.runs.quick.agent_limit_paise, 15500);
+        for bad in ["true", "ON", "1"] {
+            let mut pairs = full();
+            pairs.push(("QUICK_PARALLEL", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&pairs)),
+                Err(ConfigError::Invalid {
+                    var: "QUICK_PARALLEL",
+                    ..
+                })
             ));
         }
     }
