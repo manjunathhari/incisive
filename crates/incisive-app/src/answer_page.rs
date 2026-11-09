@@ -1719,6 +1719,7 @@ mod tests {
             notable_code: vec![],
             coverage: None,
             completeness: None,
+            numbers_completed: vec![],
         }
     }
 

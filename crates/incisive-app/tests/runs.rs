@@ -3533,6 +3533,7 @@ fn answer_v3_json(retracted: bool) -> serde_json::Value {
         notable_code: vec![],
         coverage: None,
         completeness: None,
+        numbers_completed: vec![],
     };
     serde_json::to_value(a).unwrap()
 }
