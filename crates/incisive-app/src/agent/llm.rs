@@ -557,7 +557,10 @@ pub fn wrap_source(id: &str, text: &str) -> String {
 /// reserve; every other step's calls must leave it free.
 /// Stage 4b: the completeness writer (`completeness`) is a finishing step
 /// too: it runs after the writer, from its own share of the finish reserve.
-pub const FINISHING_STEPS: [&str; 3] = ["write", "check", "completeness"];
+/// Q3: the number completeness step (`number_complete`) too: it runs after
+/// the writer and holds from what is left of the limit (no share of its
+/// own; with too little left it is refused and skipped).
+pub const FINISHING_STEPS: [&str; 4] = ["write", "check", "completeness", "number_complete"];
 
 /// The JSON Schema a structured call asks for ([`LlmCall::structured`]),
 /// sent as `output_config.format` (structured outputs). It must be

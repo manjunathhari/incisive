@@ -45,6 +45,7 @@ jobs:
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           STREAM: ${{ vars.STREAM }}
           QUICK_PARALLEL: ${{ vars.QUICK_PARALLEL }}
+          NUMBER_COMPLETE: ${{ vars.NUMBER_COMPLETE }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           GRAPH: ${{ vars.GRAPH }}
@@ -210,6 +211,14 @@ jobs:
             ""|on|off) ;;
             *) echo "::error::vars.QUICK_PARALLEL must be on or off (see infra/README.md section 15)"; exit 1 ;;
           esac
+          # Optional number completeness (infra/README.md section 15): unset (off),
+          # off or on. The same trim.
+          nc="${NUMBER_COMPLETE#"${NUMBER_COMPLETE%%[![:space:]]*}"}"
+          nc="${nc%"${nc##*[![:space:]]}"}"
+          case "$nc" in
+            ""|on|off) ;;
+            *) echo "::error::vars.NUMBER_COMPLETE must be on or off (see infra/README.md section 15)"; exit 1 ;;
+          esac
           # Optional introduction agent (infra/README.md section 14): unset (off), off
           # or on. The same trim. When on, INTRO_MODEL (default claude-sonnet-5-5,
           # mirrors runs::intro::DEFAULT_MODEL) must be priced, as the app refuses
@@ -353,6 +362,7 @@ jobs:
           TEMPORAL_MAX_TOKENS: ${{ vars.TEMPORAL_MAX_TOKENS }}
           STREAM: ${{ vars.STREAM }}
           QUICK_PARALLEL: ${{ vars.QUICK_PARALLEL }}
+          NUMBER_COMPLETE: ${{ vars.NUMBER_COMPLETE }}
           INTRO: ${{ vars.INTRO }}
           INTRO_MODEL: ${{ vars.INTRO_MODEL }}
           GRAPH: ${{ vars.GRAPH }}
@@ -392,6 +402,8 @@ jobs:
           optional += ["STREAM"]
           # Quick in four parts (infra/README.md section 15): optional too.
           optional += ["QUICK_PARALLEL"]
+          # Number completeness (infra/README.md section 15): optional too.
+          optional += ["NUMBER_COMPLETE"]
           # The introduction agent (infra/README.md section 14): optional too.
           optional += ["INTRO", "INTRO_MODEL"]
           # The knowledge graph (infra/README.md, "Knowledge graph"): optional too.

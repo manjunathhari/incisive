@@ -537,6 +537,71 @@ pub struct IntegrityV3 {
     /// writer gave that were not recognised, set to Very low / mixed.
     #[serde(default)]
     pub labels_defaulted: u32,
+    /// Q3 (additive): "not traced" numbers completed against the words of a
+    /// cited abstract (their marks removed; see [`CompletedNumber`]). Not
+    /// stored when 0, so answers without the step are stored as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub numbers_completed: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Q3: how a completed number follows from its source's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionRule {
+    /// The same number, written with other spacing ("- 0.02" for "−0.02").
+    AsWritten,
+    /// The source's signed number written as its size and a word
+    /// ("13.4 min shorter" for "−13.4 min").
+    SignInWords,
+    /// The sum of two numbers of the quote ("10 … 10" gives 20).
+    Sum,
+    /// The difference of two numbers of the quote.
+    Difference,
+    /// A percentage worked out from two numbers of the quote, or 100 minus
+    /// a percentage of it ("77 (75%)" gives 25%).
+    PercentFromCounts,
+}
+
+impl CompletionRule {
+    /// The rule a reply names (`as_written`, …); `None` for anything else.
+    pub fn parse(s: &str) -> Option<CompletionRule> {
+        Some(match s.trim() {
+            "as_written" => CompletionRule::AsWritten,
+            "sign_in_words" => CompletionRule::SignInWords,
+            "sum" => CompletionRule::Sum,
+            "difference" => CompletionRule::Difference,
+            "percent_from_counts" => CompletionRule::PercentFromCounts,
+            _ => return None,
+        })
+    }
+
+    /// In plain words, for the study sheet.
+    pub fn label(self) -> &'static str {
+        match self {
+            CompletionRule::AsWritten => "as written",
+            CompletionRule::SignInWords => "sign written in words",
+            CompletionRule::Sum => "a sum",
+            CompletionRule::Difference => "a difference",
+            CompletionRule::PercentFromCounts => "a percentage worked out",
+        }
+    }
+}
+
+/// Q3: a "not traced" number completed against a cited abstract: `span`
+/// (removed from `AnswerV3.untraced`), the number as written, the study,
+/// the abstract's exact words (checked by code to be in that abstract, the
+/// number following from them by `rule`). The answer's text is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedNumber {
+    pub span: Span,
+    pub written: String,
+    pub pmid: String,
+    pub quote: String,
+    pub rule: CompletionRule,
 }
 
 // ---------- Stage 4b item 1: the coverage check ----------
@@ -870,6 +935,12 @@ pub struct AnswerV3 {
     /// `None`: Quick, `COMPLETENESS=off`, or answers stored before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completeness: Option<CompletenessV3>,
+    /// Q3 (additive): "not traced" numbers completed against their cited
+    /// abstracts (`NUMBER_COMPLETE=on`); their spans are gone from
+    /// `untraced`. Empty (not stored): the step was off, found nothing, or
+    /// answers stored before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numbers_completed: Vec<CompletedNumber>,
 }
 
 impl AnswerV3 {
@@ -2159,6 +2230,7 @@ mod tests {
             }],
             coverage: None,
             completeness: None,
+            numbers_completed: vec![],
         }
     }
 

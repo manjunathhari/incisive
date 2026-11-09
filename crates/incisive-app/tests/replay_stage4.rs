@@ -665,6 +665,7 @@ async fn the_prototype_payloads_replay_with_nothing_lost() {
         notable_code: team::notable_code(Some(&review), &extraction),
         coverage: None,
         completeness: None,
+        numbers_completed: vec![],
     };
     // Stored and read back as the run page does.
     let stored: AnswerV3 = serde_json::from_value(serde_json::to_value(&answer).unwrap()).unwrap();
@@ -1053,6 +1054,7 @@ fn replay_answers() -> (AnswerV3, AnswerV3) {
         notable_code: team::notable_code(Some(&review), &extraction),
         coverage: None,
         completeness: None,
+        numbers_completed: vec![],
     };
     // Run 1: three outcomes left out, then the review's additions.
     let mut f1 = fixture("evidence.json");
@@ -1328,6 +1330,7 @@ fn run1_review_user() -> (String, usize) {
         notable_code: vec![],
         coverage: Some(cov.clone()),
         completeness: None,
+        numbers_completed: vec![],
     };
     let full = FullInput {
         rows: &rows,

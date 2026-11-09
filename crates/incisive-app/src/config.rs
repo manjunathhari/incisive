@@ -417,6 +417,19 @@ impl Config {
             }
         };
 
+        // Q3: complete the "not traced" numbers (default off; trimmed like
+        // QUICK_PARALLEL).
+        let number_complete = match lookup("NUMBER_COMPLETE").as_deref().map(str::trim) {
+            None | Some("") | Some("off") => false,
+            Some("on") => true,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "NUMBER_COMPLETE",
+                    reason: "expected on or off".into(),
+                });
+            }
+        };
+
         let intro = {
             use crate::runs::intro::IntroSettings;
             let on = match lookup("INTRO").as_deref() {
@@ -563,6 +576,7 @@ impl Config {
             })?,
         };
         runs.quick_parallel = quick_parallel;
+        runs.number_complete = number_complete;
         // S1 review I1: say once, at startup, when the Quick limit is too low
         // for the four parts (every Quick run then writes in one piece).
         if let Some(needed) = quick_parallel_shortfall(&runs, &model_prices, usd_inr, &agent_models)
@@ -1480,6 +1494,35 @@ mod tests {
                 Config::from_lookup(lookup(&pairs)),
                 Err(ConfigError::Invalid {
                     var: "QUICK_PARALLEL",
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// Q3: `NUMBER_COMPLETE` is `off` (default) or `on`, trimmed; anything
+    /// else refuses at startup. It reaches the run on `runs` and never
+    /// changes the limits.
+    #[test]
+    fn number_complete_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.runs.number_complete, "off by default");
+        for (v, want) in [("on", true), ("off", false), (" on ", true), ("", false)] {
+            let mut pairs = full();
+            pairs.push(("NUMBER_COMPLETE", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.runs.number_complete, want, "{v:?}");
+            assert_eq!(c.runs.quick, crate::runs::DepthSettings::QUICK);
+            assert_eq!(c.runs.focused, crate::runs::DepthSettings::FOCUSED);
+            assert!(!c.runs.quick_parallel);
+        }
+        for bad in ["true", "ON", "1"] {
+            let mut pairs = full();
+            pairs.push(("NUMBER_COMPLETE", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&pairs)),
+                Err(ConfigError::Invalid {
+                    var: "NUMBER_COMPLETE",
                     ..
                 })
             ));

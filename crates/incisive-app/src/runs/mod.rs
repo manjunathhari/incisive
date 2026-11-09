@@ -287,6 +287,11 @@ pub struct RunsConfig {
     /// `RUN_LIMITS`). Carried here so it reaches the run with the limits.
     #[serde(skip)]
     pub quick_parallel: bool,
+    /// Q3: the "not traced" numbers completed against their cited abstracts
+    /// after the number check, Quick and Full (`NUMBER_COMPLETE`: `off`, the
+    /// default, or `on`; set by `config`, never part of `RUN_LIMITS`).
+    #[serde(skip)]
+    pub number_complete: bool,
 }
 
 impl Default for RunsConfig {
@@ -295,6 +300,7 @@ impl Default for RunsConfig {
             quick: DepthSettings::QUICK,
             focused: DepthSettings::FOCUSED,
             quick_parallel: false,
+            number_complete: false,
         }
     }
 }

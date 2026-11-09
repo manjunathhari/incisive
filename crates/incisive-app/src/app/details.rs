@@ -556,7 +556,7 @@ fn trials(c: &Ctx) -> Option<AnyView> {
                 // in a closed <dialog>).
                 <details class="ap-study-details">
                     <summary>"Study details"</summary>
-                    {study_body(c, &s.pmid, c.a.references.iter().find(|r| r.pmid.trim() == s.pmid.trim()))}
+                    {study_body(c, &s.pmid, c.a.references.iter().find(|r| r.pmid.trim() == s.pmid.trim()), false)}
                 </details>
             };
             view! { <div class="ap-trial">{body}</div> }.into_any()
@@ -856,15 +856,46 @@ fn sheet(c: &Ctx, r: &ReferenceV3) -> AnyView {
                     <button class="ap-close" aria-label="Close">"\u{2715}"</button>
                 </form>
             </div>
-            {study_body(c, pmid, Some(r))}
+            {study_body(c, pmid, Some(r), true)}
         </dialog>
     }
     .into_any()
 }
 
+/// Q3 (in the study sheet only): the "not traced" numbers completed against
+/// this study's abstract, each as written with the abstract's words (text,
+/// escaped). `None` when there are none.
+fn completed_view(c: &Ctx, pmid: &str) -> Option<AnyView> {
+    let items: Vec<AnyView> =
+        c.a.numbers_completed
+            .iter()
+            .filter(|n| n.pmid.trim() == pmid)
+            .map(|n| {
+                view! {
+                    <li>
+                        <span class="ap-mono">{n.written.clone()}</span>
+                        {format!(" \u{b7} Source: '{}' ({})", n.quote, n.rule.label())}
+                    </li>
+                }
+                .into_any()
+            })
+            .collect();
+    (!items.is_empty()).then(|| {
+        view! {
+            <div class="ap-sheet-row ap-completed">
+                <div class="ap-kicker">"Numbers checked against this abstract"</div>
+                <ul>{items}</ul>
+            </div>
+        }
+        .into_any()
+    })
+}
+
 /// A study sheet's body (no ids in it): drawn in the sheet's `<dialog>`
 /// and, readable with no script, in the trial card's "Study details".
-fn study_body(c: &Ctx, pmid: &str, r: Option<&ReferenceV3>) -> AnyView {
+/// `sheet`: the sheet itself, which alone lists the completed numbers
+/// (Q3; nothing new on the cards).
+fn study_body(c: &Ctx, pmid: &str, r: Option<&ReferenceV3>, sheet: bool) -> AnyView {
     let pmid = pmid.trim();
     let n = r.map(|r| r.n);
     let w = c.w;
@@ -960,6 +991,11 @@ fn study_body(c: &Ctx, pmid: &str, r: Option<&ReferenceV3>) -> AnyView {
             view! { {reg} " " <span class="flag-label">"named in the record; the source text does not repeat it"</span> }
                 .into_any(),
         ));
+    }
+    // Q3: pushed only when there are completions, so a sheet without them
+    // is drawn exactly as before.
+    if sheet && let Some(v) = completed_view(c, pmid) {
+        rows.push(v);
     }
     let tags = badges(c, pmid, e, true);
     // A neutral box for the skeptic's unverified leads on this study.

@@ -21,6 +21,7 @@ pub mod extract;
 pub mod extractor;
 pub mod frame;
 pub mod llm;
+pub mod numbers_complete;
 mod pipeline;
 pub mod researcher;
 pub mod retrieve;

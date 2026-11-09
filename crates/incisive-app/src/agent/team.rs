@@ -217,6 +217,7 @@ fn base(ctx: &RunContext, research: &Research, integrity: IntegrityV3) -> Answer
         notable_code: Vec::new(),
         coverage: None,
         completeness: None,
+        numbers_completed: vec![],
     }
 }
 
@@ -714,6 +715,31 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
                     .map_err(StepError::kind)?;
                 add_line(ctx, StepKind::Check, &c.line()).await;
                 answer.completeness = Some(c);
+            }
+            // Q3 (Quick and Full, NUMBER_COMPLETE on): the numbers the number
+            // check marked, completed against the abstracts they cite (marks
+            // removed only for what code verifies; the text is unchanged).
+            // After Full's completeness review, so it never takes that
+            // review's share of money or time. It never fails the run.
+            if ctx.state.runs.number_complete && !answer.untraced.is_empty() {
+                let given: Vec<StudyInput> = studies
+                    .iter()
+                    .chain(&reviewed.missed)
+                    .chain(&reviewed.cited)
+                    .cloned()
+                    .collect();
+                let n = super::numbers_complete::complete(
+                    ctx,
+                    &ctx.llm,
+                    &answer,
+                    &given,
+                    &allowed,
+                    |p| selected.iter().any(|s| s == p),
+                )
+                .await
+                .map_err(StepError::kind)?;
+                super::numbers_complete::apply(&mut answer, &n);
+                add_line(ctx, StepKind::Check, &n.line()).await;
             }
             // R-S2b: an answer after research stopped by a limit is done; a
             // failed research turn still marks it partial.

@@ -2656,3 +2656,57 @@ async fn a_streamed_full_run_stores_exactly_what_a_plain_one_does() {
     l.retain(|x| !x.starts_with("Writer: first words after "));
     assert_eq!(l, plain.3);
 }
+
+/// Q3 (D1 A): Full runs the number completeness step too, after its
+/// checks: a "not traced" number that follows from its cited abstract
+/// loses its mark and keeps its source's words; the text is unchanged.
+#[tokio::test]
+async fn full_completes_a_marked_number_against_its_abstract() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    const NUMBERS_KEY: &str = "NUMBERS TO CHECK";
+    let quote = "P 15.4%, A 3.1%";
+    let mut w = writer_json();
+    let text = format!("Moderate or severe pain was 12.3 points apart [{SEEN_B}].");
+    w["bottom_line"]["text"] = json!(text);
+    let base = ScriptedLlm::new()
+        .when(NUMBERS_KEY)
+        .reply_json(
+            json!({"items": [{"id": "1", "pmid": SEEN_B, "quote": quote, "rule": "difference"}]}),
+            u(),
+        )
+        .when(STUDIES_HEADING)
+        .reply_json(w, usage(3000, 2500));
+    let llm = Arc::new(full_script_on(base, 2, None, None, |_| usage(1500, 1500)));
+    let mut st = app_state(pool.clone(), literature(&server));
+    st.runs.number_complete = true;
+    st.llm = Some(agent_llm(llm.clone(), MODEL));
+    let (uid, user) = new_user(&pool).await;
+    let AskOutcome::RunStarted { run_id, .. } =
+        start_run(&st, Uuid::new_v4(), &user, QUESTION, RunMode::Focused, None)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    let v = wait_done(&pool, uid, run_id).await;
+    assert_eq!(v.summary.status, RunStatus::Done, "{:?}", v.steps);
+    let a: AnswerV3 = serde_json::from_value(v.answer.clone().unwrap()).unwrap();
+    assert_eq!(a.answer.as_ref().unwrap().bottom_line.text, text);
+    assert!(
+        !a.untraced.iter().any(|s| s.field == "bottom_line.text"),
+        "{:?}",
+        a.untraced
+    );
+    assert_eq!(a.numbers_completed.len(), 1);
+    assert_eq!(a.numbers_completed[0].written, "12.3");
+    assert_eq!(a.numbers_completed[0].quote, quote);
+    assert_eq!(a.integrity.numbers_completed, 1);
+    assert_eq!(by_key(&llm.requests(), NUMBERS_KEY).len(), 1);
+    let l = lines(&v.steps);
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Number completeness: 1 of ")),
+        "{l:?}"
+    );
+}
