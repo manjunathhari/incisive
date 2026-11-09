@@ -55,6 +55,91 @@ pub const PAGE_ORDER: [Block; 10] = [
     Block::Original,
 ];
 
+/// S1e (`ANSWER_LAYOUT=on`): the page's order in the new layout. The same
+/// blocks; [`PAIRS`] puts two of them side by side under a heading.
+pub const LAYOUT_ORDER: [Block; 10] = [
+    Block::Header,
+    Block::Glance,
+    Block::BottomLine,
+    Block::Practice,
+    Block::Forest,
+    Block::Outcomes,
+    Block::OutOf100,
+    Block::Compare,
+    Block::Details,
+    Block::Original,
+];
+
+/// S1e: a pair of blocks drawn side by side (left, right) under a heading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pair {
+    pub left: Block,
+    pub right: Block,
+    pub heading: &'static str,
+    pub sub: &'static str,
+}
+
+/// S1e: the two pairs, in [`LAYOUT_ORDER`].
+pub const PAIRS: [Pair; 2] = [
+    Pair {
+        left: Block::Forest,
+        right: Block::Outcomes,
+        heading: "Why this conclusion",
+        sub: "Every outcome, its numbers and how sure we can be",
+    },
+    Pair {
+        left: Block::OutOf100,
+        right: Block::Compare,
+        heading: "Counselling dashboard",
+        sub: "What it means for 100 patients like these, arm by arm",
+    },
+];
+
+// S1e: when the right card of a pair is folded. The fold itself is CSS (the
+// right card is cut to the left card's height), but the page cannot know
+// without a script whether the right card is the longer one, so the button
+// shows by a rule on item counts: the left card's height estimated high and
+// the right card's low (px at 1280 px wide, measured on the stored hernia
+// Full answer, 9 Nov: a CI row 91-108, a closed outcome 79-119 plus a 10 gap,
+// a comparison row 59-77 plus a 6 gap, the Out of 100 card 845), and a margin,
+// so the button never shows when the right card fits. When the rule says no
+// fold the two cards stretch to the taller one: both edges still align and
+// nothing is hidden.
+
+/// The CI card with `rows` rows, estimated high (both kickers, tall rows).
+pub fn forest_px(rows: usize) -> u32 {
+    FOREST_BASE_PX + FOREST_ROW_PX * rows as u32
+}
+
+/// The outcomes card with `n` closed outcomes, estimated low.
+pub fn outcomes_px(n: usize) -> u32 {
+    OUTCOMES_BASE_PX + OUTCOME_PX * n as u32
+}
+
+/// The comparison card with `measures` rows in its first comparison and
+/// the panel, estimated low.
+pub fn compare_px(measures: usize) -> u32 {
+    COMPARE_BASE_PX + MEASURE_PX * measures as u32
+}
+
+/// The "Out of 100" card hardly depends on its data (two 10 x 10 grids and
+/// two boxes): estimated high.
+pub const OUT_OF_100_PX: u32 = 900;
+const FOREST_BASE_PX: u32 = 280;
+const FOREST_ROW_PX: u32 = 110;
+const OUTCOMES_BASE_PX: u32 = 60;
+const OUTCOME_PX: u32 = 89;
+const COMPARE_BASE_PX: u32 = 420;
+const MEASURE_PX: u32 = 60;
+/// How much longer the right card must be estimated to be before it folds.
+pub const FOLD_MARGIN_PX: u32 = 150;
+
+/// The right card folds (with its button) when estimated longer than the
+/// left by more than [`FOLD_MARGIN_PX`].
+pub fn folds(left_px: u32, right_px: u32) -> bool {
+    right_px > left_px + FOLD_MARGIN_PX
+}
+
 /// The Details sections, in their order (item 10). The folding follow-up
 /// (31 Oct) removed Checks, Search trail and Cost and time from the new
 /// page (the original run view keeps them); the Checks lines that warn the
@@ -1339,6 +1424,45 @@ mod tests {
             guidelines: vec![],
             notable_findings: vec![],
         }
+    }
+
+    /// S1e: the layout's order is the same blocks as the page's, the CI and
+    /// Out of 100 on the left of their pairs.
+    #[test]
+    fn layout_order_has_the_same_blocks_and_two_pairs() {
+        let mut a = PAGE_ORDER.to_vec();
+        let mut b = LAYOUT_ORDER.to_vec();
+        let key = |x: &Block| format!("{x:?}");
+        a.sort_by_key(key);
+        b.sort_by_key(key);
+        assert_eq!(a, b);
+        assert_eq!(&LAYOUT_ORDER[..4], &PAGE_ORDER[..4]);
+        assert_eq!(&LAYOUT_ORDER[8..], &PAGE_ORDER[8..]);
+        let pos = |x: Block| LAYOUT_ORDER.iter().position(|b| *b == x).unwrap();
+        for p in PAIRS {
+            assert_eq!(pos(p.right), pos(p.left) + 1);
+        }
+        assert_eq!(PAIRS[0].left, Block::Forest);
+        assert_eq!(PAIRS[1].left, Block::OutOf100);
+    }
+
+    /// S1e: the fold rule. Many outcomes beside a short CI card fold; a few
+    /// do not; the comparison folds only with many rows.
+    #[test]
+    fn the_right_card_folds_only_when_clearly_longer() {
+        // The stored hernia Full answer: 2 CI rows, 52 outcomes, 5 rows.
+        assert!(folds(forest_px(2), outcomes_px(52)));
+        assert!(!folds(OUT_OF_100_PX, compare_px(5)));
+        // A few outcomes beside the CI card: no button.
+        assert!(!folds(forest_px(2), outcomes_px(5)));
+        assert!(!folds(forest_px(6), outcomes_px(8)));
+        // Even at the low estimate, the outcomes then pass the high CI one.
+        assert!(folds(forest_px(1), outcomes_px(6)));
+        assert!(!folds(OUT_OF_100_PX, compare_px(10)));
+        assert!(folds(OUT_OF_100_PX, compare_px(12)));
+        // Never when equal or within the margin.
+        assert!(!folds(500, 500 + FOLD_MARGIN_PX));
+        assert!(folds(500, 501 + FOLD_MARGIN_PX));
     }
 
     #[test]

@@ -473,6 +473,9 @@ pub async fn get_my_run(run_id: Uuid) -> Result<RunView, ServerFnError> {
         .await
         .ok()
         .flatten();
+    // S1e: the page's layout rides on the run it draws, so the server render
+    // and the hydration read the same value (absent from the wire when off).
+    run.answer_layout = state.runs.answer_layout;
     Ok(run)
 }
 
@@ -1253,6 +1256,8 @@ fn run_view(
     let status = v.summary.status;
     let run_id = v.summary.id;
     let intro_row = v.intro;
+    // S1e (`ANSWER_LAYOUT=on`): the answer page's layout.
+    let layout = v.answer_layout;
     // S1c (D1 A): a part failed and the answer is written again in one
     // piece: the early sections go (the engine deletes them too) and the page
     // says so in one line.
@@ -1323,7 +1328,7 @@ fn run_view(
     };
     let answer_block = answer.map(|a| match a {
         Some(Body::V2(a)) => answer_view(a).into_any(),
-        Some(Body::V3(a)) => page::answer_page_view(a).into_any(),
+        Some(Body::V3(a)) => page::answer_page_view(a, layout).into_any(),
         None => view! {
             <p class="box amber" role="status">
                 "This answer can't be shown. Please ask the question again."
@@ -1431,7 +1436,7 @@ fn run_view(
         live_draft.set(draft_text);
     }
     let answer_block = answer_block
-        .or_else(|| early.map(page::early_page_view))
+        .or_else(|| early.map(|e| page::early_page_view(e, layout)))
         .or_else(|| drafting.then(|| draft::answer_view(live_draft, rewriting)))
         .or_else(|| rewriting.then(draft::rewriting_view));
     let Some(t) = temporal else {
@@ -2800,7 +2805,22 @@ fn answer_v3_view(a: AnswerV3, prefix: &'static str) -> impl IntoView {
 #[cfg(feature = "ssr")]
 pub fn render_answer_v3(a: AnswerV3) -> String {
     use leptos::tachys::view::RenderHtml;
-    Owner::new().with(|| page::answer_page_view(a).to_html())
+    Owner::new().with(|| page::answer_page_view(a, false).to_html())
+}
+
+/// [`render_answer_v3`] in the S1e layout (`ANSWER_LAYOUT=on`), with its
+/// styles (server only; for tests and measuring).
+#[cfg(feature = "ssr")]
+pub fn render_answer_v3_layout(a: AnswerV3) -> String {
+    use leptos::tachys::view::RenderHtml;
+    Owner::new().with(|| page::answer_page_view(a, true).to_html())
+}
+
+/// The page's own styles (S1e: the shell's three), for wrapping a rendered
+/// answer to look at it outside the app (server only; for measuring).
+#[cfg(feature = "ssr")]
+pub fn page_styles() -> [&'static str; 3] {
+    [STYLE, ivory::IVORY_STYLE, tracker::TRACKER_STYLE]
 }
 
 /// The original run view (Part A item 13, owner decision 3): today's

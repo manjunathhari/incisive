@@ -235,6 +235,7 @@ pub async fn get_run_for_user(
         intro: None,
         draft: None,
         early: None,
+        answer_layout: false,
     }))
 }
 

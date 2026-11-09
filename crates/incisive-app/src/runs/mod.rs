@@ -292,6 +292,11 @@ pub struct RunsConfig {
     /// default, or `on`; set by `config`, never part of `RUN_LIMITS`).
     #[serde(skip)]
     pub number_complete: bool,
+    /// S1e: the answer page's layout (`ANSWER_LAYOUT`: `off`, the default, or
+    /// `on`; set by `config`, never part of `RUN_LIMITS`). UI only: the run
+    /// page reads it from [`RunView::answer_layout`]; no run reads it.
+    #[serde(skip)]
+    pub answer_layout: bool,
 }
 
 impl Default for RunsConfig {
@@ -301,6 +306,7 @@ impl Default for RunsConfig {
             focused: DepthSettings::FOCUSED,
             quick_parallel: false,
             number_complete: false,
+            answer_layout: false,
         }
     }
 }
@@ -524,6 +530,12 @@ pub struct RunView {
     /// the wire otherwise, so other pages are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub early: Option<String>,
+    /// S1e (`ANSWER_LAYOUT=on`): draw the answer page in the new layout. Set
+    /// by the run page's server function only (never by the JSON route), so
+    /// the server render and the hydration read the same value. Absent from
+    /// the wire when off, so every page is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answer_layout: bool,
 }
 
 /// What the run page may know of a run's introduction. A failed, skipped or

@@ -417,6 +417,19 @@ impl Config {
             }
         };
 
+        // S1e: the answer page's layout (default off; trimmed like
+        // QUICK_PARALLEL). UI only.
+        let answer_layout = match lookup("ANSWER_LAYOUT").as_deref().map(str::trim) {
+            None | Some("") | Some("off") => false,
+            Some("on") => true,
+            Some(_) => {
+                return Err(ConfigError::Invalid {
+                    var: "ANSWER_LAYOUT",
+                    reason: "expected on or off".into(),
+                });
+            }
+        };
+
         // Q3: complete the "not traced" numbers (default off; trimmed like
         // QUICK_PARALLEL).
         let number_complete = match lookup("NUMBER_COMPLETE").as_deref().map(str::trim) {
@@ -577,6 +590,7 @@ impl Config {
         };
         runs.quick_parallel = quick_parallel;
         runs.number_complete = number_complete;
+        runs.answer_layout = answer_layout;
         // S1 review I1: say once, at startup, when the Quick limit is too low
         // for the four parts (every Quick run then writes in one piece).
         if let Some(needed) = quick_parallel_shortfall(&runs, &model_prices, usd_inr, &agent_models)
@@ -1523,6 +1537,35 @@ mod tests {
                 Config::from_lookup(lookup(&pairs)),
                 Err(ConfigError::Invalid {
                     var: "NUMBER_COMPLETE",
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// S1e: `ANSWER_LAYOUT` is `off` (default) or `on`, trimmed; anything
+    /// else refuses at startup. It rides on `runs` and changes no limit and
+    /// no other switch.
+    #[test]
+    fn answer_layout_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert!(!c.runs.answer_layout, "off by default");
+        for (v, want) in [("on", true), ("off", false), (" on ", true), ("", false)] {
+            let mut pairs = full();
+            pairs.push(("ANSWER_LAYOUT", v));
+            let c = Config::from_lookup(lookup(&pairs)).unwrap();
+            assert_eq!(c.runs.answer_layout, want, "{v:?}");
+            assert_eq!(c.runs.quick, crate::runs::DepthSettings::QUICK);
+            assert_eq!(c.runs.focused, crate::runs::DepthSettings::FOCUSED);
+            assert!(!c.runs.quick_parallel && !c.runs.number_complete);
+        }
+        for bad in ["true", "ON", "1"] {
+            let mut pairs = full();
+            pairs.push(("ANSWER_LAYOUT", bad));
+            assert!(matches!(
+                Config::from_lookup(lookup(&pairs)),
+                Err(ConfigError::Invalid {
+                    var: "ANSWER_LAYOUT",
                     ..
                 })
             ));

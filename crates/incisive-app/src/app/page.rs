@@ -358,8 +358,13 @@ fn kicker(text: &'static str) -> AnyView {
 
 // ---------- the page ----------
 
-/// The interactive answer page (Part A), in [`ap::PAGE_ORDER`].
-pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
+/// The interactive answer page (Part A), in [`ap::PAGE_ORDER`]; with
+/// `layout` (S1e, `ANSWER_LAYOUT=on`) in [`ap::LAYOUT_ORDER`] instead
+/// ([`layout_page_view`]).
+pub(super) fn answer_page_view(a: AnswerV3, layout: bool) -> AnyView {
+    if layout {
+        return layout_page_view(a);
+    }
     let c = Ctx::new(&a);
     let vis = ap::visible(&a);
     let blocks: Vec<AnyView> = ap::PAGE_ORDER
@@ -377,7 +382,7 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
                     vis.no_numbers.then(no_numbers_view)
                 }
             }
-            Block::Outcomes => vis.outcomes.then(|| outcomes_view(&c)),
+            Block::Outcomes => vis.outcomes.then(|| outcomes_view(&c, false)),
             Block::Compare => vis.compare.then(|| compare_view(&c)),
             Block::Details => Some(
                 view! { {super::details::details_view(&c)} {super::details::sheets_view(&c)} }
@@ -397,6 +402,204 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
             {original}
         </div>
     }
+    .into_any()
+}
+
+// ---------- S1e: the new layout ----------
+
+/// S1e's own styles, drawn only with `ANSWER_LAYOUT=on` (the page is
+/// otherwise byte for byte today's). The run page's column widens to
+/// 1180 px while the answer page (or its early sections) shows, with the
+/// tracker's cards and rows to the same edges; the Expert Opinion and chat
+/// views keep today's width. Pairs are a two-column grid: the right card
+/// folds to the left card's height with CSS only (its content laid out out
+/// of flow, so it adds nothing to the row), with a checkbox and label as the
+/// button, so it works before hydration and nothing moves after load.
+/// Below 900 px the pairs stack and nothing folds.
+pub const LAYOUT_STYLE: &str = r##"
+main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), .rx-chat:target:not(:empty))) { max-width:1180px; }
+main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), .rx-chat:target:not(:empty))) .run-chrome :is(.rk-card, .rx-seg, details[class$="-fold"]) { max-width:none; }
+.ap-lx .ap-main { max-width:none; }
+.ap-lx .ap-lx-head { display:flex; flex-direction:column; gap:2px; padding-top:14px; }
+.ap-lx .ap-main .ap-lx-h, .ap-lx .ap-main .ap-details-title { margin:0; padding:0; font-size:22px; font-weight:700; line-height:1.25; color:var(--ink); }
+.ap-lx .ap-main .ap-details-title { padding-top:14px; }
+.ap-lx .ap-lx-sub { font-size:14px; line-height:1.45; color:var(--mute); }
+.ap-lx-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+.ap-lx-col { display:flex; flex-direction:column; min-width:0; }
+.ap-lx-col > * { flex:1 1 auto; }
+.ap-lx-pair.fold > .ap-lx-col { align-self:start; }
+.ap-lx-pair.fold > .ap-lx-r { position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr) auto; row-gap:10px; min-width:0; }
+.ap-lx-cb { position:absolute; top:0; left:0; width:1px; height:1px; margin:0; opacity:0; pointer-events:none; }
+.ap-lx-box { position:relative; min-height:0; overflow:hidden; }
+.ap-lx-box > * { position:absolute; top:0; left:0; right:0; min-height:100%; }
+.ap-lx-box::after { content:""; position:absolute; left:0; right:0; bottom:0; height:72px; background:linear-gradient(rgba(245,243,239,0), var(--iv-ground,#F5F3EF)); pointer-events:none; }
+.ap-lx-cb:checked ~ .ap-lx-box { overflow:visible; }
+.ap-lx-cb:checked ~ .ap-lx-box > * { position:static; }
+.ap-lx-cb:checked ~ .ap-lx-box::after { display:none; }
+.ap-lx-more { display:flex; align-items:center; justify-content:center; width:100%; min-height:44px; margin:0; padding:0 14px; border:1px solid var(--rule); border-radius:12px; background:#fff; color:#1F4E79; font-size:15px; font-weight:600; cursor:pointer; user-select:none; }
+.ap-lx-more:hover { background:#F2F5F9; }
+.ap-lx-more > span { align-items:center; gap:8px; }
+.ap-lx-all { display:inline-flex; }
+.ap-lx-less { display:none; }
+.ap-lx-sign { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:#1F4E79; color:#fff; font-size:16px; line-height:1; }
+.ap-lx-cb:checked ~ .ap-lx-more .ap-lx-all { display:none; }
+.ap-lx-cb:checked ~ .ap-lx-more .ap-lx-less { display:inline-flex; }
+.ap-lx-cb:focus-visible ~ .ap-lx-more { outline:2px solid #2C4A85; outline-offset:2px; }
+@media (max-width:899.98px) {
+  .ap-lx-pair { grid-template-columns:minmax(0,1fr); }
+  .ap-lx-pair.fold > .ap-lx-r { display:block; }
+  .ap-lx-box { overflow:visible; }
+  .ap-lx-box > * { position:static; }
+  .ap-lx-box::after, .ap-lx-more { display:none; }
+}
+"##;
+
+/// A heading over a pair (22 px, the left edge of the cards).
+fn lx_head(title: &'static str, sub: &'static str) -> AnyView {
+    view! {
+        <div class="ap-lx-head">
+            <h2 class="ap-lx-h">{title}</h2>
+            <p class="ap-lx-sub">{sub}</p>
+        </div>
+    }
+    .into_any()
+}
+
+/// Two cards side by side. With `fold` (its checkbox id and button text)
+/// the right card is cut to the left card's height, with the button under
+/// it; without, both stretch to the taller one. One card alone takes the
+/// full width.
+fn lx_pair(
+    left: Option<AnyView>,
+    right: Option<AnyView>,
+    fold: Option<(&'static str, String)>,
+) -> Option<AnyView> {
+    match (left, right) {
+        (Some(l), Some(r)) => Some(match fold {
+            Some((id, more)) => view! {
+                <div class="ap-lx-pair fold">
+                    <div class="ap-lx-col ap-lx-l">{l}</div>
+                    <div class="ap-lx-r">
+                        <input type="checkbox" class="ap-lx-cb" id=id />
+                        <div class="ap-lx-box">{r}</div>
+                        <label class="ap-lx-more" for=id>
+                            <span class="ap-lx-all"><span class="ap-lx-sign" aria-hidden="true">"+"</span>{more}</span>
+                            <span class="ap-lx-less"><span class="ap-lx-sign" aria-hidden="true">"\u{2212}"</span>"Show less"</span>
+                        </label>
+                    </div>
+                </div>
+            }
+            .into_any(),
+            None => view! {
+                <div class="ap-lx-pair">
+                    <div class="ap-lx-col ap-lx-l">{l}</div>
+                    <div class="ap-lx-col ap-lx-r">{r}</div>
+                </div>
+            }
+            .into_any(),
+        }),
+        (Some(one), None) | (None, Some(one)) => Some(one),
+        (None, None) => None,
+    }
+}
+
+/// The checkbox ids of the two folds (one answer page per document).
+pub(super) const FOLD_WHY: &str = "ap-lx-why";
+pub(super) const FOLD_DASH: &str = "ap-lx-dash";
+
+/// The button's text for the outcomes card: the real count.
+pub(super) fn show_all_outcomes(n: usize) -> String {
+    format!("Show all {n} outcomes")
+}
+
+/// The button's text for the comparison card.
+pub(super) const SHOW_MORE: &str = "Show more";
+
+/// S1e: the answer page in [`ap::LAYOUT_ORDER`]: the summary cards full
+/// width, then "Why this conclusion" (CI | outcomes) and "Counselling
+/// dashboard" (Out of 100 | Compare the arms) as pairs, then Details as
+/// today. The same components; the outcomes in a card.
+fn layout_page_view(a: AnswerV3) -> AnyView {
+    let c = Ctx::new(&a);
+    let vis = ap::visible(&a);
+    let w = c.w;
+    let n_outcomes = w.map_or(0, |w| w.outcomes.len())
+        + a.completeness
+            .as_ref()
+            .map_or(0, |cp| cp.added_outcomes.len());
+    let forest_rows = w.map_or(0, |w| ap::forest_rows(w, &c.groups).len());
+    let measures = w.map_or(0, |w| {
+        let pairs: Vec<NumGroup> = c
+            .groups
+            .iter()
+            .filter(|g| g.kind == ChartKind::Pair)
+            .cloned()
+            .collect();
+        ap::comparison_groups(w, &pairs)
+            .first()
+            .map_or(0, |g| g.items.len())
+    });
+    let mut blocks: Vec<AnyView> = Vec::new();
+    for b in ap::LAYOUT_ORDER {
+        let pair = ap::PAIRS.iter().find(|p| p.left == b);
+        if let Some(p) = pair {
+            let (left, right, fold) = if p.left == Block::Forest {
+                let left = if vis.forest {
+                    Some(forest_view(&c))
+                } else {
+                    vis.no_numbers.then(no_numbers_view)
+                };
+                let right = vis.outcomes.then(|| outcomes_view(&c, true));
+                let fold = (vis.forest
+                    && ap::folds(ap::forest_px(forest_rows), ap::outcomes_px(n_outcomes)))
+                .then(|| (FOLD_WHY, show_all_outcomes(n_outcomes)));
+                (left, right, fold)
+            } else {
+                let left = vis.out_of_100.then(|| out_of_100_view(&c));
+                let right = vis.compare.then(|| compare_view(&c));
+                let fold = ap::folds(ap::OUT_OF_100_PX, ap::compare_px(measures))
+                    .then(|| (FOLD_DASH, SHOW_MORE.to_string()));
+                (left, right, fold)
+            };
+            // The "no numbers" note is no card: it and the outcomes stack.
+            let stack = left.is_some() && right.is_some() && !vis.forest && p.left == Block::Forest;
+            if left.is_some() || right.is_some() {
+                blocks.push(lx_head(p.heading, p.sub));
+            }
+            if stack {
+                blocks.extend(left);
+                blocks.extend(right);
+            } else {
+                blocks.extend(lx_pair(left, right, fold));
+            }
+            continue;
+        }
+        if ap::PAIRS.iter().any(|p| p.right == b) {
+            continue;
+        }
+        match b {
+            Block::Header => blocks.push(header_view(&c)),
+            Block::Glance => blocks.extend(glance_view(&c)),
+            Block::BottomLine => blocks.push(bottom_line_view(&c)),
+            Block::Practice => blocks.extend(practice_view(&c)),
+            Block::Details => blocks.push(
+                view! { {super::details::details_view(&c)} {super::details::sheets_view(&c)} }
+                    .into_any(),
+            ),
+            _ => {}
+        }
+    }
+    let original = ap::LAYOUT_ORDER
+        .contains(&Block::Original)
+        .then(|| super::original_view(a.clone()));
+    view! {
+        <style>{LAYOUT_STYLE}</style>
+        <div class="ap ap-lx">
+            <div class="ap-main">{blocks}</div>
+            {original}
+        </div>
+    }
+    .into_any()
 }
 
 // ---------- S1c: the finished sections, early ----------
@@ -458,7 +661,10 @@ fn wait_card(
 /// (references numbered as on the final page, the "not traced" marks of the
 /// number check), quiet placeholders for the rest. The final page replaces
 /// it when the answer is stored.
-pub(super) fn early_page_view(e: crate::draft_page::EarlyAnswer) -> AnyView {
+pub(super) fn early_page_view(e: crate::draft_page::EarlyAnswer, layout: bool) -> AnyView {
+    if layout {
+        return early_layout_view(e);
+    }
     let c = Ctx::new(&e.answer);
     let mut blocks: Vec<AnyView> = Vec::new();
     if e.summary {
@@ -522,6 +728,90 @@ pub(super) fn early_page_view(e: crate::draft_page::EarlyAnswer) -> AnyView {
     view! {
         <style>{EARLY_STYLE}</style>
         <div class="ap">
+            <div class="ap-main ap-early">{blocks}</div>
+        </div>
+    }
+    .into_any()
+}
+
+/// S1e: the early page in the new layout's order: the summary's sections
+/// (or their placeholder), "Why this conclusion" with the CI and outcomes
+/// placeholders side by side, "Counselling dashboard" with the Out of 100
+/// and Compare the arms placeholders, then the Details rows.
+fn early_layout_view(e: crate::draft_page::EarlyAnswer) -> AnyView {
+    let c = Ctx::new(&e.answer);
+    let mut blocks: Vec<AnyView> = Vec::new();
+    if e.summary {
+        blocks.extend(glance_view(&c));
+        blocks.push(bottom_line_view(&c));
+        blocks.extend(practice_view(&c));
+    } else {
+        blocks.push(wait_card(
+            "At a glance \u{b7} Bottom line \u{b7} Clinical practice",
+            BEING_WRITTEN,
+            None,
+            false,
+        ));
+    }
+    let [why, dash] = ap::PAIRS;
+    blocks.push(lx_head(why.heading, why.sub));
+    blocks.extend(lx_pair(
+        Some(wait_card(
+            "Every estimate with a 95% CI",
+            BEING_WRITTEN,
+            None,
+            true,
+        )),
+        Some(wait_card(
+            "Outcome by outcome",
+            BEING_WRITTEN,
+            Some("Each outcome, with its numbers and certainty, appears when it has been checked against the trials."),
+            true,
+        )),
+        None,
+    ));
+    blocks.push(lx_head(dash.heading, dash.sub));
+    blocks.extend(lx_pair(
+        Some(wait_card(
+            "Out of 100 patients",
+            AFTER_OUTCOMES,
+            None,
+            false,
+        )),
+        Some(wait_card("Compare the arms", AFTER_OUTCOMES, None, false)),
+        None,
+    ));
+    let context: Vec<AnyView> = if e.context {
+        [
+            super::details::applicability(&c),
+            super::details::would_change(&c),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        vec![wait_card(
+            "Applicability \u{b7} What would change this answer",
+            BEING_WRITTEN,
+            None,
+            false,
+        )]
+    };
+    blocks.push(
+        view! {
+            <div class="ap-details">
+                <h3 class="ap-details-title">"Details"</h3>
+                {wait_card("The trials \u{b7} Conflicting evidence", BEING_WRITTEN, None, false)}
+                {context}
+            </div>
+        }
+        .into_any(),
+    );
+    blocks.push(super::details::sheets_view(&c));
+    view! {
+        <style>{EARLY_STYLE}</style>
+        <style>{LAYOUT_STYLE}</style>
+        <div class="ap ap-lx">
             <div class="ap-main ap-early">{blocks}</div>
         </div>
     }
@@ -1180,7 +1470,9 @@ fn bar_row(c: &Ctx, i: usize, j: usize, n: &Number, idx: usize, max: f64) -> Any
     .into_any()
 }
 
-fn outcomes_view(c: &Ctx) -> AnyView {
+/// Outcome by outcome; `card` (S1e) draws it inside a card like the CI
+/// card's, so the tops of a pair line up.
+fn outcomes_view(c: &Ctx, card: bool) -> AnyView {
     let Some(w) = c.w else {
         return ().into_any();
     };
@@ -1287,6 +1579,19 @@ fn outcomes_view(c: &Ctx) -> AnyView {
         })
         .collect();
     let total = cards.len() + added.len();
+    if card {
+        return view! {
+            <section class="ap-outcomes ap-card" aria-label="Outcome by outcome">
+                <div class="ap-row">
+                    <h3>"Outcome by outcome"</h3>
+                    <span class="ap-muted">{format!("{total} outcomes \u{b7} tap to open")}</span>
+                </div>
+                {cards}
+                {added}
+            </section>
+        }
+        .into_any();
+    }
     view! {
         <section class="ap-outcomes" aria-label="Outcome by outcome">
             <div class="ap-row">
