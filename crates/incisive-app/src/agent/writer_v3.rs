@@ -368,7 +368,7 @@ struct WireStudy {
     appraisal: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct WireBottomLine {
     text: String,
     certainty: String,
@@ -1978,14 +1978,14 @@ pub struct OutcomesPart {
 }
 
 /// The context part as the wire carries it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ContextPart {
     applicability: Applicability,
     would_change: Vec<String>,
 }
 
 /// The summary part as the wire carries it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct SummaryPart {
     bottom_line: WireBottomLine,
     #[serde(default)]
@@ -2012,6 +2012,61 @@ pub fn merge_sections(
         clinical_practice: s.clinical_practice,
         notable_findings: t.notable_findings,
     }
+}
+
+// ---------- S1c: the finished parts, reported early ----------
+//
+// The summary and context parts finish well before the trials and outcomes.
+// [`write_quick_parallel_with`] reports each the moment it is read, so the
+// team can check it and show it; nothing about the calls, their money, their
+// retries or the fallback changes, and the merged answer is the same.
+
+/// What the four-part writer reports while it works (S1c).
+pub enum PartEvent {
+    /// The summary part, read (first reply or its retry).
+    Summary(SummaryPart),
+    /// The context part, read.
+    Context(ContextPart),
+    /// A part failed for good (its retry included), or the writer failed:
+    /// the merged answer will not be written, so nothing reported before
+    /// will be in the answer. Sent at once, before the other parts are in;
+    /// nothing is reported after it.
+    Withdraw,
+}
+
+/// The answer holding only `summary` and `context` (either may be absent),
+/// read exactly as the merged four parts are ([`merge_sections`], then
+/// [`WireAnswer::into_answer`]), every other field empty. Each field of a
+/// part present equals the merged answer's for the same replies.
+pub fn early_answer(summary: Option<&SummaryPart>, context: Option<&ContextPart>) -> WrittenAnswer {
+    let trials = TrialsPart {
+        studies: Vec::new(),
+        conflicts: Vec::new(),
+        notable_findings: None,
+    };
+    let outcomes = OutcomesPart {
+        outcomes: Vec::new(),
+    };
+    let context = context.cloned().unwrap_or(ContextPart {
+        applicability: Applicability {
+            case_mix: String::new(),
+            india_cost_context: String::new(),
+            training: String::new(),
+        },
+        would_change: Vec::new(),
+    });
+    let summary = summary.cloned().unwrap_or(SummaryPart {
+        bottom_line: WireBottomLine {
+            text: String::new(),
+            certainty: String::new(),
+            certainty_reason: String::new(),
+        },
+        at_a_glance: None,
+        clinical_practice: None,
+    });
+    merge_sections(trials, outcomes, context, summary)
+        .into_answer()
+        .0
 }
 
 /// One part's call: the first reply (with the broken-stream retry), then,
@@ -2092,6 +2147,45 @@ pub async fn write_quick_parallel(
     llm: &AgentLlm,
     user: &str,
 ) -> Result<(WrittenAnswer, u32, bool), WriteFailure> {
+    write_quick_parallel_with(ctx, llm, user, None).await
+}
+
+/// [`write_quick_parallel`], reporting to `parts` (S1c) the summary and the
+/// context part the moment each is read, and [`PartEvent::Withdraw`] the
+/// moment any part fails for good (after which nothing more is reported).
+/// Reporting never waits and never fails the writer (a closed channel is
+/// ignored).
+pub async fn write_quick_parallel_with(
+    ctx: &RunContext,
+    llm: &AgentLlm,
+    user: &str,
+    parts: Option<tokio::sync::mpsc::UnboundedSender<PartEvent>>,
+) -> Result<(WrittenAnswer, u32, bool), WriteFailure> {
+    // S1c: whether a part has failed for good. Reports are sent under this
+    // lock, so a part read after a sibling failed is never reported, and a
+    // withdrawal always comes after any part reported before it.
+    let failed_once = std::sync::Mutex::new(false);
+    let report = |e: PartEvent| {
+        let failed = failed_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(tx) = &parts
+            && !*failed
+        {
+            let _ = tx.send(e);
+        }
+    };
+    let withdraw = || {
+        let mut failed = failed_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*failed {
+            *failed = true;
+            if let Some(tx) = &parts {
+                let _ = tx.send(PartEvent::Withdraw);
+            }
+        }
+    };
     let mut hooks: Vec<Option<super::llm::Streaming>> = vec![None, None, None, None];
     let mut draft: Option<drafts::PartsDraft> = None;
     if ctx.state.stream {
@@ -2131,11 +2225,42 @@ pub async fn write_quick_parallel(
     // `tokio::join!` waits for all four, also when one fails early: a failed
     // part never cancels the others (their calls are already paid for), and
     // the decision (merge, fall back, fail) is made once every part is in.
+    //
+    // S1c: the context and summary parts are reported as soon as each is
+    // read, before the others are in; the first part to fail for good (its
+    // reply includes its retry) withdraws them at once.
     let (t, o, c, s) = tokio::join!(
-        section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials),
-        section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes),
-        section_reply::<ContextPart>(ctx, &calls[2], &users[2], Section::Context),
-        section_reply::<SummaryPart>(ctx, &calls[3], &users[3], Section::Summary),
+        async {
+            let r = section_reply::<TrialsPart>(ctx, &calls[0], &users[0], Section::Trials).await;
+            if r.is_err() {
+                withdraw();
+            }
+            r
+        },
+        async {
+            let r =
+                section_reply::<OutcomesPart>(ctx, &calls[1], &users[1], Section::Outcomes).await;
+            if r.is_err() {
+                withdraw();
+            }
+            r
+        },
+        async {
+            let r = section_reply::<ContextPart>(ctx, &calls[2], &users[2], Section::Context).await;
+            match &r {
+                Ok(p) => report(PartEvent::Context(p.clone())),
+                Err(_) => withdraw(),
+            }
+            r
+        },
+        async {
+            let r = section_reply::<SummaryPart>(ctx, &calls[3], &users[3], Section::Summary).await;
+            match &r {
+                Ok(p) => report(PartEvent::Summary(p.clone())),
+                Err(_) => withdraw(),
+            }
+            r
+        },
     );
     // The hooks end with the calls: the merged draft makes its last write.
     drop(calls);

@@ -399,6 +399,135 @@ pub(super) fn answer_page_view(a: AnswerV3) -> impl IntoView {
     }
 }
 
+// ---------- S1c: the finished sections, early ----------
+
+/// The early page's own styles: the placeholders only (the finished sections
+/// use the final page's). Drawn only with an early answer.
+const EARLY_STYLE: &str = r##"
+.ap-main .ap-wait { background:#fff; border:1px dashed #D9D3C8; border-radius:16px; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+.ap-main .ap-wait-head { display:flex; justify-content:space-between; align-items:center; gap:12px; min-height:24px; }
+.ap-main .ap-wait-title { font-size:.95rem; font-weight:600; color:#4A4741; }
+.ap-main .ap-wait-state { flex:none; font-size:.78rem; font-weight:600; color:#2C4A85; animation:ap-wait 1.6s ease-in-out infinite; }
+.ap-main .ap-wait-state.later { font-weight:500; color:#6B675F; animation:none; }
+.ap-main .ap-wait-note { font-size:.85rem; line-height:1.45; color:#6B675F; }
+.ap-main .ap-wait-lines { display:flex; flex-direction:column; gap:6px; }
+.ap-main .ap-wait-lines span { display:block; height:10px; border-radius:6px; background:#EFECE6; }
+@keyframes ap-wait { 0%,100% { opacity:.45; } 50% { opacity:1; } }
+@media (prefers-reduced-motion:reduce) { .ap-main .ap-wait-state { animation:none; } }
+"##;
+
+/// What a placeholder says while its part is written.
+pub(super) const BEING_WRITTEN: &str = "Being written";
+/// What the charts' placeholder says: they are drawn from the outcomes.
+pub(super) const AFTER_OUTCOMES: &str = "After outcomes";
+
+/// A quiet card for a part still being written (owner Q1).
+fn wait_card(
+    title: &'static str,
+    state: &'static str,
+    note: Option<&'static str>,
+    lines: bool,
+) -> AnyView {
+    let class = if state == BEING_WRITTEN {
+        "ap-wait-state"
+    } else {
+        "ap-wait-state later"
+    };
+    view! {
+        <section class="ap-wait" aria-label=title>
+            <div class="ap-wait-head">
+                <span class="ap-wait-title">{title}</span>
+                <span class=class>{state}</span>
+            </div>
+            {note.map(|n| view! { <p class="ap-wait-note">{n}</p> })}
+            {lines.then(|| view! {
+                <div class="ap-wait-lines" aria-hidden="true">
+                    <span style="width:92%"></span>
+                    <span style="width:78%"></span>
+                    <span style="width:85%"></span>
+                </div>
+            })}
+        </section>
+    }
+    .into_any()
+}
+
+/// S1c: the run page while an answer written in four parts is still being
+/// written and its summary or context part is done and checked: those
+/// sections drawn by the final page's own components from `e.answer`
+/// (references numbered as on the final page, the "not traced" marks of the
+/// number check), quiet placeholders for the rest. The final page replaces
+/// it when the answer is stored.
+pub(super) fn early_page_view(e: crate::draft_page::EarlyAnswer) -> AnyView {
+    let c = Ctx::new(&e.answer);
+    let mut blocks: Vec<AnyView> = Vec::new();
+    if e.summary {
+        blocks.extend(glance_view(&c));
+        blocks.push(bottom_line_view(&c));
+        blocks.extend(practice_view(&c));
+    } else {
+        blocks.push(wait_card(
+            "At a glance \u{b7} Bottom line \u{b7} Clinical practice",
+            BEING_WRITTEN,
+            None,
+            false,
+        ));
+    }
+    blocks.push(wait_card(
+        "Outcome by outcome",
+        BEING_WRITTEN,
+        Some("Each outcome, with its numbers and certainty, appears when it has been checked against the trials."),
+        true,
+    ));
+    blocks.push(wait_card(
+        "Out of 100 people \u{b7} Every estimate with 95% CI",
+        AFTER_OUTCOMES,
+        None,
+        false,
+    ));
+    blocks.push(wait_card(
+        "The trials \u{b7} Conflicting evidence",
+        BEING_WRITTEN,
+        None,
+        false,
+    ));
+    if e.context {
+        let parts: Vec<AnyView> = [
+            super::details::applicability(&c),
+            super::details::would_change(&c),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !parts.is_empty() {
+            blocks.push(
+                view! {
+                    <div class="ap-details">
+                        <h3 class="ap-details-title">"Details"</h3>
+                        {parts}
+                    </div>
+                }
+                .into_any(),
+            );
+        }
+    } else {
+        blocks.push(wait_card(
+            "Applicability \u{b7} What would change this answer",
+            BEING_WRITTEN,
+            None,
+            false,
+        ));
+    }
+    blocks.push(super::details::sheets_view(&c));
+    view! {
+        <style>{EARLY_STYLE}</style>
+        <div class="ap">
+            <div class="ap-main ap-early">{blocks}</div>
+        </div>
+    }
+    .into_any()
+}
+
 // ---------- 1. title and subtitle ----------
 
 fn header_view(c: &Ctx) -> AnyView {

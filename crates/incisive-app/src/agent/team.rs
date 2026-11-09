@@ -569,7 +569,15 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
         .map(|s| s.pmid.clone())
         .collect();
     let written = if parallel {
-        writer_v3::write_quick_parallel(ctx, &ctx.llm, &user).await
+        // S1c: the summary and context parts, each checked and stored as the
+        // run's early answer as soon as it is read (the merged answer below
+        // is unchanged). The channel closes with the writer.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (written, ()) = tokio::join!(
+            writer_v3::write_quick_parallel_with(ctx, &ctx.llm, &user, Some(tx)),
+            store_early(ctx, rx, &answer, &studies, &selected),
+        );
+        written
     } else {
         writer_v3::write_counted(ctx, &ctx.llm, system, &user)
             .await
@@ -743,6 +751,90 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
             Ok(unwritten(ctx, answer, WRITE_REFUSED, "write_refused").await)
         }
         Err(WriteFailure::Step(e)) => Err(e.kind()),
+    }
+}
+
+// ---------- S1c: the finished parts of a four-part answer, early ----------
+
+/// The early answer from the parts read so far: `base` (the answer being
+/// built: references, searches, question) holding only those parts, after the
+/// same citation check (against `selected`) and the same number trace
+/// (against `allowed`, Quick's exact check) as the whole answer gets below.
+/// Each check reads a field on its own, so a part's text, kept and removed
+/// citations and "not traced" marks equal the final answer's.
+pub fn early_body(
+    base: &AnswerV3,
+    summary: Option<&writer_v3::SummaryPart>,
+    context: Option<&writer_v3::ContextPart>,
+    selected: &[String],
+    allowed: &[f64],
+) -> crate::draft_page::EarlyAnswer {
+    let mut written = writer_v3::early_answer(summary, context);
+    let mut integrity = IntegrityV3::default();
+    check_citations(&mut written, selected, &mut integrity);
+    let (untraced, _) = writer_v3::trace_numbers(
+        &written,
+        allowed,
+        |p| selected.iter().any(|s| s == p),
+        false,
+    );
+    let mut answer = base.clone();
+    answer.answer = Some(written);
+    answer.untraced = untraced;
+    crate::draft_page::EarlyAnswer {
+        summary: summary.is_some(),
+        context: context.is_some(),
+        answer,
+    }
+}
+
+/// How long one early-answer write may take: a slow pool skips it rather
+/// than delay the final answer.
+const EARLY_WRITE_LIMIT: Duration = Duration::from_secs(2);
+
+/// Store each early answer as the parts arrive, until the writer is done; at
+/// [`writer_v3::PartEvent::Withdraw`] (a part failed for good) delete it and
+/// stop (owner D1 A: never show text the final answer will not hold). Never
+/// fails the run: a failed or slow write is skipped and logged by id (and
+/// size) only (the end of the run, or recovery, removes the row).
+async fn store_early(
+    ctx: &RunContext,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<writer_v3::PartEvent>,
+    base: &AnswerV3,
+    studies: &[StudyInput],
+    selected: &[String],
+) {
+    use crate::runs::drafts::{self, Part};
+    use writer_v3::PartEvent;
+    let allowed = writer_v3::allowed_numbers(studies, None);
+    let (mut summary, mut context) = (None, None);
+    while let Some(e) = rx.recv().await {
+        match e {
+            PartEvent::Summary(p) => summary = Some(p),
+            PartEvent::Context(p) => context = Some(p),
+            PartEvent::Withdraw => {
+                drafts::clear(&ctx.state.pool, ctx.run_id, Part::Early).await;
+                tracing::info!(run_id = %ctx.run_id, "quick parallel: a part failed; early answer withdrawn");
+                return;
+            }
+        }
+        let early = early_body(base, summary.as_ref(), context.as_ref(), selected, &allowed);
+        let Ok(text) = serde_json::to_string(&early) else {
+            tracing::warn!(run_id = %ctx.run_id, "early answer could not be serialised");
+            continue;
+        };
+        let write = drafts::upsert(&ctx.state.pool, ctx.run_id, Part::Early, &text);
+        match tokio::time::timeout(EARLY_WRITE_LIMIT, write).await {
+            Ok(Ok(_)) => {
+                tracing::info!(run_id = %ctx.run_id, summary = early.summary, context = early.context, bytes = text.len(), "quick parallel: early answer stored");
+            }
+            Ok(Err(_)) => {
+                tracing::warn!(run_id = %ctx.run_id, bytes = text.len(), "early answer could not be stored");
+            }
+            Err(_) => {
+                tracing::warn!(run_id = %ctx.run_id, "early answer write too slow; skipped");
+            }
+        }
     }
 }
 

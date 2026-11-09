@@ -481,7 +481,9 @@ async fn finish(pool: &PgPool, run_id: Uuid, user_id: i64, end: End, cost_paise:
     };
     // Stage S1: whatever the end, the half-written answer goes with it. Writes
     // arriving later store nothing, as the run is no longer running.
-    super::drafts::clear(pool, run_id, super::drafts::Part::Answer).await;
+    // S1c: and the early sections of an answer written in four parts, in the
+    // same statement.
+    super::drafts::clear_answer_parts(pool, run_id).await;
     // The charges stand; only the unused remainder is released, less what
     // calls in flight still hold.
     if spend::release_keeping(pool, user_id, run_id, keep)

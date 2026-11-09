@@ -591,8 +591,20 @@ async fn at_the_cap_no_introduction_and_the_run_goes_on() {
         get_for_user(&pool, user.id, run_id).await.unwrap(),
         Some(None)
     );
-    assert!(reservations(&pool, user.id).await.is_empty());
+    // The run's status is stored before its reservation is released, so
+    // wait briefly for the release rather than racing it.
+    assert!(wait_no_reservations(&pool, user.id).await);
     assert!(charges(&pool, user.id).await.is_empty());
+}
+
+async fn wait_no_reservations(pool: &PgPool, uid: i64) -> bool {
+    for _ in 0..80 {
+        if reservations(pool, uid).await.is_empty() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
 }
 
 // ---------- the engine, on and off ----------
