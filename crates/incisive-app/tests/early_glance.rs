@@ -1451,3 +1451,244 @@ fn every_parts_one_piece_line_reads_as_rewriting() {
         assert!(incisive_app::draft_page::rewriting(&[step]), "{s:?}");
     }
 }
+
+// ---------- S1e: the answer page's layout (`ANSWER_LAYOUT=on`) ----------
+
+fn layout_state(pool: PgPool, layout: bool) -> AppState {
+    let mut st = ui_state(pool, true, true);
+    st.runs.answer_layout = layout;
+    st
+}
+
+/// The hydration payload names the layout (plain or escaped JSON).
+fn layout_key(html: &str) -> bool {
+    html.contains("\"answer_layout\"") || html.contains("\\\"answer_layout\\\"")
+}
+
+/// A finished Quick run whose answer is `body`.
+async fn finished(pool: &PgPool, uid: i64, body: &Value) -> Uuid {
+    let run = create_run(pool, uid, QUESTION, RunMode::Quick, 4000)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        set_status(pool, run, RunStatus::Running, None)
+            .await
+            .unwrap()
+    );
+    for line in [
+        "Researcher: selected 10 studies (8 RCTs)",
+        "Writer: writing the answer from 10 studies (10 with an abstract)",
+    ] {
+        add_step(pool, run, StepKind::Write, line).await.unwrap();
+    }
+    assert!(save_answer(pool, run, body).await.unwrap());
+    assert!(set_status(pool, run, RunStatus::Done, None).await.unwrap());
+    run
+}
+
+/// S1e: the switch reaches the page on the run it draws (the server
+/// function sets it; the hydration payload carries it only when on), and
+/// the finished page is drawn in the new layout; with it off the page, the
+/// payload and the JSON route are today's. With `ANSWER_LAYOUT_QUICK_HTML_OUT`
+/// set, the served page with the switch on is written there (measuring).
+#[tokio::test]
+async fn the_switch_reaches_the_finished_page_and_off_is_todays() {
+    let Some(pool) = pool().await else { return };
+    let (_, final_body) = a_real_four_part_run(&pool).await;
+    let (uid, email) = new_user(&pool).await;
+    let run = finished(&pool, uid, &final_body).await;
+    let off = layout_state(pool.clone(), false);
+    let on = layout_state(pool.clone(), true);
+    let (s, html_off) = page(&off, run, &email).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, html_on) = page(&on, run, &email).await;
+    if let Ok(out) = std::env::var("ANSWER_LAYOUT_QUICK_HTML_OUT") {
+        std::fs::write(out, &html_on).unwrap();
+    }
+    assert!(!layout_key(&html_off) && !html_off.contains("ap-lx"));
+    assert!(layout_key(&html_on));
+    let m = markup(&html_on);
+    assert!(m.contains(r#"<div class="ap ap-lx">"#));
+    assert!(at(&m, "Why this conclusion") < at(&m, r#"<div class="ap-details">"#));
+    assert!(
+        at(&m, r#"aria-label="What this means for clinical practice""#)
+            < at(&m, "Why this conclusion")
+    );
+    // The answer page in the layout is the one `render_answer_v3_layout`
+    // draws (the unit of the replay tests).
+    let a: AnswerV3 = serde_json::from_value(final_body.clone()).unwrap();
+    let lone = incisive_app::app::render_answer_v3_layout(a.clone());
+    let s = |h: &str| h.replace("<!>", "");
+    assert!(
+        s(&m).contains(&s(&lone[lone.find("<div class=\"ap ap-lx\">").unwrap()
+            ..lone.find("<details class=\"ap-original\"").unwrap()]))
+    );
+    if let Ok(out) = std::env::var("ANSWER_LAYOUT_QUICK_LONE_OUT") {
+        std::fs::write(out, &lone).unwrap();
+    }
+    // Off: the JSON route never carries it; the off page is the page
+    // `render_answer_v3` draws.
+    let user = incisive_app::identity::find_user(&pool, &email)
+        .await
+        .unwrap()
+        .unwrap();
+    for st in [&off, &on] {
+        let wire = serde_json::to_value(api::get_view(st, &user, run).await.unwrap()).unwrap();
+        assert!(wire.get("answer_layout").is_none());
+    }
+    let today = incisive_app::app::render_answer_v3(a);
+    let mo = markup(&html_off);
+    assert!(s(&mo).contains(&s(
+        &today[..today.find("<details class=\"ap-original\"").unwrap()]
+    )));
+}
+
+/// S1e: while a four-part Quick answer is written, the placeholders follow
+/// the new order: the summary's sections, "Why this conclusion" with the CI
+/// and outcomes placeholders side by side ("Being written"), "Counselling
+/// dashboard" with Out of 100 and Compare the arms ("After outcomes"), then
+/// the Details rows; the finished sections' markup as with the switch off.
+#[tokio::test]
+async fn the_early_page_follows_the_new_order() {
+    let Some(pool) = pool().await else { return };
+    let (uid, email) = new_user(&pool).await;
+    let run = writing(&pool, uid).await;
+    store_early(&pool, run, &early_via_body(true, true)).await;
+    let off = markup(
+        &page(&layout_state(pool.clone(), false), run, &email)
+            .await
+            .1,
+    );
+    let html = page(&layout_state(pool.clone(), true), run, &email).await.1;
+    if let Ok(out) = std::env::var("ANSWER_LAYOUT_EARLY_HTML_OUT") {
+        std::fs::write(out, &html).unwrap();
+    }
+    let m = markup(&html);
+    assert!(!off.contains("ap-lx"));
+    assert!(m.contains(r#"<div class="ap-main ap-early">"#) && m.contains("ap ap-lx"));
+    let order = [
+        r#"<section aria-label="At a glance" class="ap-card ap-glance">"#,
+        r#"aria-label="Bottom line""#,
+        r#"aria-label="What this means for clinical practice""#,
+        r#"<h2 class="ap-lx-h">Why this conclusion</h2>"#,
+        r#"<div class="ap-lx-pair">"#,
+        r#"<section aria-label="Every estimate with a 95% CI" class="ap-wait">"#,
+        r#"<section aria-label="Outcome by outcome" class="ap-wait">"#,
+        r#"<h2 class="ap-lx-h">Counselling dashboard</h2>"#,
+        r#"<div class="ap-lx-pair">"#,
+        r#"<section aria-label="Out of 100 patients" class="ap-wait">"#,
+        r#"<section aria-label="Compare the arms" class="ap-wait">"#,
+        r#"<div class="ap-details">"#,
+        r#"<h3 class="ap-details-title">Details</h3>"#,
+        r#"<section aria-label="The trials · Conflicting evidence" class="ap-wait">"#,
+        r#"aria-label="Applicability""#,
+        r#"aria-label="What would change this answer""#,
+    ];
+    let mut last = 0;
+    for t in order {
+        last += at(&m[last..], t) + t.len();
+    }
+    // The pairs: CI and outcomes in one, Out of 100 and Compare in the other.
+    let why = piece(
+        &m,
+        r#"<h2 class="ap-lx-h">Why this conclusion</h2>"#,
+        "Counselling dashboard",
+    );
+    assert_eq!(why.matches(">Being written<").count(), 2);
+    let dash = piece(&m, "Counselling dashboard", r#"<div class="ap-details">"#);
+    assert_eq!(dash.matches(">After outcomes<").count(), 2);
+    assert!(
+        !m.contains(r#"class="ap-lx-more""#) && !m.contains("ap-lx-pair fold"),
+        "no fold while written"
+    );
+    for (start, end) in [
+        (
+            r#"<section aria-label="Bottom line" class="ap-card">"#,
+            "</section>",
+        ),
+        (
+            r#"<section aria-label="What this means for clinical practice" class="ap-card">"#,
+            "</section>",
+        ),
+        (
+            r#"<details aria-label="Applicability" class="ap-sec ap-fold">"#,
+            "</details>",
+        ),
+        (
+            r#"<details aria-label="What would change this answer" class="ap-sec ap-fold">"#,
+            "</details>",
+        ),
+    ] {
+        assert_eq!(piece(&m, start, end), piece(&off, start, end), "{start}");
+    }
+    // The summary still being written: its placeholder first, the context
+    // under the Details heading.
+    let (uid2, email2) = new_user(&pool).await;
+    let run2 = writing(&pool, uid2).await;
+    store_early(&pool, run2, &early_via_body(false, true)).await;
+    let m2 = markup(
+        &page(&layout_state(pool.clone(), true), run2, &email2)
+            .await
+            .1,
+    );
+    assert!(
+        at(
+            &m2,
+            r#"aria-label="At a glance · Bottom line · Clinical practice""#
+        ) < at(&m2, "Why this conclusion")
+    );
+    assert!(
+        at(&m2, r#"<h3 class="ap-details-title">Details</h3>"#)
+            < at(&m2, r#"aria-label="Applicability""#)
+    );
+}
+
+/// S1e: the deploy workflow passes `ANSWER_LAYOUT` to both steps, writes it
+/// only when set, and refuses anything but on or off (ends trimmed); the
+/// infra README documents it.
+#[test]
+fn deploy_workflow_wires_the_layout_switch() {
+    let root = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    let deploy = std::fs::read_to_string(format!("{root}/.github/workflows/deploy.yml")).unwrap();
+    assert_eq!(
+        deploy
+            .matches("ANSWER_LAYOUT: ${{ vars.ANSWER_LAYOUT }}")
+            .count(),
+        2
+    );
+    assert!(deploy.contains(r#"optional += ["ANSWER_LAYOUT"]"#));
+    let start = deploy.find("al=\"${ANSWER_LAYOUT#").unwrap();
+    let end = start + deploy[start..].find("esac").unwrap() + 4;
+    let snippet: String = deploy[start..end]
+        .lines()
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (value, ok) in [
+        ("on", true),
+        (" off ", true),
+        ("", true),
+        ("ON", false),
+        ("o n", false),
+    ] {
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{snippet}\nexit 0"))
+            .env("ANSWER_LAYOUT", value)
+            .status()
+            .expect("bash");
+        assert_eq!(status.success(), ok, "ANSWER_LAYOUT={value:?}");
+    }
+    let readme = std::fs::read_to_string(format!("{root}/infra/README.md")).unwrap();
+    assert!(readme.contains("| `ANSWER_LAYOUT` | no |"));
+}
+
+/// S1e: no `inner_html` in the page's view code (escaped text only).
+#[test]
+fn the_layout_view_writes_no_raw_html() {
+    let src =
+        std::fs::read_to_string(format!("{}/src/app/page.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(!src.contains("inner_html="));
+    assert!(src.contains("fn layout_page_view") && src.contains("fn early_layout_view"));
+}
