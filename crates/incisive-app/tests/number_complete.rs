@@ -242,9 +242,10 @@ fn study_list() -> Value {
     })
 }
 
-/// The writer's bottom line: four numbers no abstract writes as such. Three
-/// follow from their cited abstract (a sum, 100 minus a percentage, a
-/// difference); 42 is in neither.
+/// The writer's bottom line: four numbers no abstract writes as such. Two
+/// follow from their cited abstract (100 minus a percentage, a difference);
+/// 65 is a sum only of two numbers that are not quoted alone (refused: a
+/// quote of three numbers), and 42 is in neither.
 fn bottom() -> String {
     format!(
         "Biological mesh had 65 recurrences in all [{SEEN_A}]. 10% did not complete follow up [{SEEN_B}]. \
@@ -274,7 +275,8 @@ const QUOTE_SUM: &str =
 const QUOTE_PCT: &str = "A total of 156 (90%) patients completed follow up.";
 const QUOTE_DIFF: &str = "P 22.9, A 21.2 tablets";
 
-/// The checker's reply: three supported items and one invented quote.
+/// The checker's reply: two supported items, a sum from a quote with three
+/// numbers (refused) and one invented quote.
 fn checker_json() -> Value {
     json!({"items": [
         {"id": "1", "pmid": SEEN_A, "quote": QUOTE_SUM, "rule": "sum"},
@@ -379,9 +381,9 @@ fn marked(a: &AnswerV3) -> Vec<String> {
         .collect()
 }
 
-/// Off (the default) and on: the same answer text; on, the three numbers
+/// Off (the default) and on: the same answer text; on, the two numbers
 /// that follow from their cited abstract lose their mark and keep their
-/// source's words, 42 stays marked, one small call is made and charged, and
+/// source's words, 65 and 42 stay marked, one small call is made and charged, and
 /// the study sheet shows the words.
 #[tokio::test]
 async fn quick_completes_the_marked_numbers_against_their_abstracts() {
@@ -416,14 +418,14 @@ async fn quick_completes_the_marked_numbers_against_their_abstracts() {
         serde_json::to_string(&on.answer.answer).unwrap(),
         serde_json::to_string(&off.answer.answer).unwrap()
     );
-    assert_eq!(marked(&on.answer), ["42"]);
+    assert_eq!(marked(&on.answer), ["65", "42"]);
     let i = on.answer.integrity;
     assert_eq!(
         (i.numbers_checked, i.numbers_untraced, i.numbers_completed),
         (
             off.answer.integrity.numbers_checked,
-            off.answer.integrity.numbers_untraced - 3,
-            3
+            off.answer.integrity.numbers_untraced - 2,
+            2
         )
     );
     let c = &on.answer.numbers_completed;
@@ -434,17 +436,16 @@ async fn quick_completes_the_marked_numbers_against_their_abstracts() {
     assert_eq!(
         got,
         [
-            ("65", SEEN_A, CompletionRule::Sum),
             ("10%", SEEN_B, CompletionRule::PercentFromCounts),
             ("1.7", SEEN_B, CompletionRule::Difference)
         ]
     );
-    assert_eq!(c[0].quote, QUOTE_SUM);
+    assert_eq!(c[0].quote, QUOTE_PCT);
     assert!(
         on.lines
             .iter()
             .any(|l| l
-                == "Number completeness: 3 of 4 completed against their sources; 1 left marked"),
+                == "Number completeness: 2 of 4 completed against their sources; 2 left marked"),
         "{:?}",
         on.lines
     );
@@ -487,16 +488,16 @@ async fn quick_completes_the_marked_numbers_against_their_abstracts() {
     assert_eq!(
         html.matches("Numbers checked against this abstract")
             .count(),
-        2
+        1,
+        "study B's sheet only"
     );
     let sheet_a = &html[html.find("id=\"sheet-1\"").unwrap()..];
     let sheet_a = &sheet_a[..sheet_a.find("</dialog>").unwrap()];
-    assert!(sheet_a.contains("Numbers checked against this abstract"));
-    assert!(
-        sheet_a.contains("biological meshes (53 recurrences [11.2%])"),
-        "{sheet_a}"
-    );
-    assert!(sheet_a.contains("(a sum)"));
+    assert!(!sheet_a.contains("Numbers checked against this abstract"));
+    let sheet_b = &html[html.find("id=\"sheet-2\"").unwrap()..];
+    let sheet_b = &sheet_b[..sheet_b.find("</dialog>").unwrap()];
+    assert!(sheet_b.contains(QUOTE_DIFF), "{sheet_b}");
+    assert!(sheet_b.contains("(a difference)"));
     assert!(html.matches("not traced").count() < html_off.matches("not traced").count());
 }
 

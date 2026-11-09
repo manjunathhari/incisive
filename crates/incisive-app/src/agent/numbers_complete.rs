@@ -19,10 +19,13 @@
 //! how the number follows from them ([`CompletionRule`]), or `not_found`.
 //!
 //! **Checks in code** ([`verify`]; the model is never trusted): the study
-//! must be one the item cites; the quote must occur in that study's title or
-//! abstract (whitespace runs, `−` and a minus followed by a space normalised,
-//! nothing else); and every marked value must follow from the numbers inside
-//! the quote by the stated rule. Only then is the item completed: its span
+//! must be one the item cites; the quote (at most [`MAX_QUOTE_CHARS`]) must
+//! occur whole in that study's title or abstract, matched apart (whitespace
+//! runs, `−` and a minus followed by a space normalised, nothing else), not
+//! starting or ending inside a number ([`occurs_whole`]); and every marked
+//! value must follow from the quote's number tokens by the stated rule
+//! ([`follows`]: exactly two tokens for arithmetic, a sign word right after
+//! the number for `sign_in_words`). Only then is the item completed: its span
 //! leaves `untraced` (the mark goes) and the quote is stored with it
 //! ([`apply`]). The answer's text is never changed.
 //!
@@ -34,6 +37,7 @@
 //! Privacy: nothing here logs the answer's text, the abstracts or the reply;
 //! only the run id, counts, tokens and seconds.
 
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -43,7 +47,7 @@ use super::answer_v3::{
     AnswerV3, CompletedNumber, CompletionRule, Span, WrittenAnswer, citation_ranges, number_text,
     text_fields,
 };
-use super::extractor::{all_allowed, has_own_sign, quote_values, written_numbers};
+use super::extractor::{all_allowed, has_own_sign, written_numbers};
 use super::llm::{Effort, OutputSchema, StepError, read_structured, wrap_source};
 use super::writer_v3::StudyInput;
 use super::{AgentLlm, RunContext, clip};
@@ -59,14 +63,32 @@ pub const MAX_STUDIES: usize = 8;
 /// Bytes of one study's title and abstract.
 pub const MAX_ABSTRACT_BYTES: usize = 5_000;
 /// A quote longer than this (in characters) is rejected: a short quote
-/// keeps the sum and difference rules from finding a chance pair.
-pub const MAX_QUOTE_CHARS: usize = 400;
+/// holds only the numbers used (review C2).
+pub const MAX_QUOTE_CHARS: usize = 120;
 /// `max_tokens` of the call (an item's reply is about 60–100 tokens).
 pub const MAX_TOKENS: u32 = 4_000;
 /// The step is not started with less than this left before the hard stop.
 pub const MIN_TIME: Duration = Duration::from_secs(30);
 /// Kept free before the hard stop when the call is waited for.
-pub const MARGIN: Duration = Duration::from_secs(10);
+pub const MARGIN: Duration = Duration::from_secs(20);
+/// The longest the call is waited for (review I3): a stuck call never holds
+/// the final page for long. Its charge is still booked when it returns.
+pub const MAX_WAIT: Duration = Duration::from_secs(30);
+/// Words after a number in which its sign word must sit (review I1).
+pub const SIGN_WINDOW: usize = 3;
+
+/// The words that say the opposite (an increase): one in the window
+/// refuses `sign_in_words` (review I1).
+pub const OPPOSITE_WORDS: [&str; 8] = [
+    "longer",
+    "higher",
+    "more",
+    "greater",
+    "larger",
+    "increase",
+    "increased",
+    "increases",
+];
 
 /// The words that say a number's sign (a decrease) in prose. A source's
 /// negative number may be written as its size with one of these, in the
@@ -92,15 +114,16 @@ For each item, find the words in ONE of the item's cited abstracts that support 
 - as_written: the abstract has the same number, written with other spacing or sign characters (\"- 0.02\" for \"-0.02\").
 - sign_in_words: the abstract gives a negative number and the answer writes its size with a word such as shorter, lower, \
 fewer or less (\"13.4 min shorter\" for \"-13.4 min\"), or the reverse.
-- sum: the number is the sum of two numbers in the quote (\"10 robotic and 10 open\" for 20).
-- difference: the number is the difference of two numbers in the quote.
-- percent_from_counts: the number is a percentage worked out from two numbers in the quote, or 100 minus a percentage \
-in the quote (\"77 (75%) completed\" for 25% who did not).
+- sum: the number is the sum of the two numbers in the quote (\"10 robotic and 10 open\" for 20); the quote holds \
+exactly those two numbers.
+- difference: the number is the difference of the two numbers in the quote, which holds exactly those two.
+- percent_from_counts: the number is a percentage worked out from the two counts in the quote (which holds exactly \
+those two), or 100 minus the one percentage in the quote (\"77 (75%) completed\" for 25% who did not).
 - not_found: no cited abstract supports it. Then give pmid and quote as empty strings.
 
 RULES:
-- quote: copy the words exactly, character for character, from that abstract: one short phrase or clause (at most 300 \
-characters) holding the numbers used. Never paraphrase, join separate passages or add words.
+- quote: copy the words exactly, character for character, from that abstract: one short phrase (at most 120 \
+characters) holding only the numbers used, written in digits. Never paraphrase, join separate passages or add words.
 - pmid: one of the item's cited PMIDs, the study the quote is from.
 - Use only the abstracts given. Never guess: when unsure, answer not_found.
 - Answer every item once, with its id.";
@@ -166,6 +189,9 @@ pub struct Item {
     pub values: Vec<MarkedValue>,
     /// The written number carries a sign of its own.
     pub own_sign: bool,
+    /// The answer's words right after the number, in its sentence (empty
+    /// for a structured number): where its sign word must be (review I1).
+    pub after: String,
     /// The sentence it sits in, or a short line for a structured number.
     pub context: String,
     /// The studies it cites (known ones only).
@@ -328,6 +354,7 @@ pub fn collect(
                     })
                     .collect(),
                 own_sign: has_own_sign(t, s),
+                after: clip(&t[e..ce.max(e)], 80),
                 context: clip(&t[cs..ce], MAX_CONTEXT_CHARS),
                 written,
                 pmids,
@@ -356,6 +383,7 @@ pub fn collect(
                 written,
                 values,
                 own_sign: n.value < 0.0,
+                after: String::new(),
                 pmids: known_only(ids, &known),
             }
         } else if let Some(i) = study_n_path(&span.field) {
@@ -374,6 +402,7 @@ pub fn collect(
                     decimals: 0,
                 }],
                 own_sign: false,
+                after: String::new(),
                 pmids: known_only(vec![st.pmid.clone()], &known),
             }
         } else {
@@ -511,8 +540,8 @@ pub fn user(p: &Prompt) -> String {
 // ---------- the checks ----------
 
 /// `s` with whitespace runs as one space, `−` as `-` and a minus followed by
-/// a space before a digit as the minus alone ("- 0.02" is "-0.02"). Nothing
-/// else is changed.
+/// a space before a digit as the minus alone ("to - 0.02" is "to -0.02"),
+/// except after a digit or `%` ("10 - 20" stays). Nothing else is changed.
 pub fn normalise(s: &str) -> String {
     let folded: String = s
         .chars()
@@ -522,8 +551,15 @@ pub fn normalise(s: &str) -> String {
     let mut out = String::with_capacity(spaced.len());
     let mut chars = spaced.chars().peekable();
     while let Some(c) = chars.next() {
+        // Review I2: after a digit or `%` a spaced dash is a range or a
+        // subtraction ("10 - 20"), never folded.
+        let after_value = out
+            .trim_end()
+            .chars()
+            .next_back()
+            .is_some_and(|p| p.is_ascii_digit() || p == '%');
         out.push(c);
-        if c == '-' && chars.peek() == Some(&' ') {
+        if c == '-' && !after_value && chars.peek() == Some(&' ') {
             let mut ahead = chars.clone();
             ahead.next();
             if ahead.peek().is_some_and(char::is_ascii_digit) {
@@ -543,49 +579,166 @@ fn round_to(x: f64, d: u32) -> f64 {
     (x * m).round() / m
 }
 
-/// Whether `text` has one of [`SIGN_WORDS`] (as a word, any case).
-pub fn has_sign_word(text: &str) -> bool {
-    text.split(|c: char| !c.is_alphabetic())
-        .any(|w| SIGN_WORDS.iter().any(|s| w.eq_ignore_ascii_case(s)))
+/// One number token of a (normalised) quote: digits with optional
+/// thousands groups, decimals and `%`; a `-` right before it is its sign
+/// unless a digit, letter or `%` precedes the dash. Number words are not
+/// tokens (review C2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Token {
+    pub value: f64,
+    pub pct: bool,
+    pub start: usize,
+    pub end: usize,
 }
 
-/// Whether `v` follows from `q` (the quote's numbers) by `rule`. `words`:
-/// the quote or the answer's sentence has a sign word; `own_sign`: the
-/// written number has its own sign.
-pub fn follows(
-    v: MarkedValue,
-    q: &[f64],
-    rule: CompletionRule,
-    words: bool,
-    own_sign: bool,
-) -> bool {
+static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\d+(?:,\d{3})*(?:\.\d+)?%?").expect("token pattern is valid")
+});
+
+/// The number tokens of `q` (see [`Token`]).
+pub fn tokens(q: &str) -> Vec<Token> {
+    let mut out = Vec::new();
+    for m in TOKEN.find_iter(q) {
+        // A run starting inside a longer number ("1.5" split) never occurs:
+        // the pattern is greedy from the left.
+        let mut start = m.start();
+        let digits = m.as_str().trim_end_matches('%').replace(',', "");
+        let Ok(mut value) = digits.parse::<f64>() else {
+            continue;
+        };
+        let before = q[..start].chars().next_back();
+        if before == Some('-') {
+            let prev = q[..start - 1].chars().next_back();
+            if !prev.is_some_and(|c| c.is_ascii_digit() || c.is_alphabetic() || c == '%') {
+                value = -value;
+                start -= 1;
+            }
+        }
+        out.push(Token {
+            value,
+            pct: m.as_str().ends_with('%'),
+            start,
+            end: m.end(),
+        });
+    }
+    out
+}
+
+/// The first [`SIGN_WINDOW`] words of `text`, lowercased.
+fn window(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+        .take(SIGN_WINDOW + 1)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether the words right after a number say a decrease: one of
+/// [`SIGN_WORDS`] within [`SIGN_WINDOW`] words ("less than" does not
+/// count), and none of [`OPPOSITE_WORDS`] there.
+pub fn says_decrease(after: &str) -> bool {
+    let w = window(after);
+    let near = &w[..w.len().min(SIGN_WINDOW)];
+    let decrease = near.iter().enumerate().any(|(i, x)| {
+        SIGN_WORDS.contains(&x.as_str())
+            && !(x == "less" && w.get(i + 1).is_some_and(|n| n == "than"))
+    });
+    decrease && !says_increase(after)
+}
+
+/// Whether one of [`OPPOSITE_WORDS`] is within [`SIGN_WINDOW`] words.
+pub fn says_increase(after: &str) -> bool {
+    window(after)
+        .iter()
+        .take(SIGN_WINDOW)
+        .any(|x| OPPOSITE_WORDS.contains(&x.as_str()))
+}
+
+/// Whether `v` follows from the quote `q` (normalised) by `rule` (review
+/// C2): `as_written`, one token equal to it; `sign_in_words`, a token of
+/// the same size and opposite sign, with a decrease word right after the
+/// answer's number (`after`) or the source's, and no increase word after
+/// the answer's; `sum` and `difference`, a quote of exactly two tokens not
+/// written as a range; `percent_from_counts`, exactly two tokens (no `%`,
+/// no range) giving the percentage, or exactly one `%` token (not followed
+/// by "CI", at most one other token, its count) giving 100 minus it.
+pub fn follows(v: MarkedValue, q: &str, rule: CompletionRule, after: &str, own_sign: bool) -> bool {
     let x = v.value;
-    let pairs = || {
-        q.iter().enumerate().flat_map(move |(i, a)| {
-            q.iter()
-                .enumerate()
-                .filter(move |(j, _)| *j != i)
-                .map(move |(_, b)| (*a, *b))
-        })
+    let toks = tokens(q);
+    let range = |a: &Token, b: &Token| {
+        matches!(
+            q[a.end..b.start].trim(),
+            "-" | "\u{2013}" | "\u{2014}" | "to"
+        )
+    };
+    let two = || match toks.as_slice() {
+        [a, b] if !range(a, b) => Some((*a, *b)),
+        _ => None,
     };
     match rule {
-        CompletionRule::AsWritten => q.iter().any(|a| same(*a, x)),
-        // The source's negative number as its size and a word, or the
-        // source's size and word as a signed number.
+        CompletionRule::AsWritten => toks.iter().any(|t| same(t.value, x)),
         CompletionRule::SignInWords => {
-            words
-                && q.iter().any(|a| {
-                    same(a.abs(), x.abs())
-                        && ((*a < 0.0 && x > 0.0 && !own_sign) || (*a > 0.0 && x < 0.0))
+            !says_increase(after)
+                && toks.iter().any(|t| {
+                    let words = says_decrease(after) || says_decrease(&q[t.end..]);
+                    words
+                        && same(t.value.abs(), x.abs())
+                        && ((t.value < 0.0 && x > 0.0 && !own_sign) || (t.value > 0.0 && x < 0.0))
                 })
         }
-        CompletionRule::Sum => pairs().any(|(a, b)| same(a + b, x)),
-        CompletionRule::Difference => pairs().any(|(a, b)| same(a - b, x)),
-        CompletionRule::PercentFromCounts => {
-            pairs().any(|(a, b)| b != 0.0 && same(round_to(100.0 * a / b, v.decimals), x))
-                || q.iter()
-                    .any(|p| (0.0..=100.0).contains(p) && same(round_to(100.0 - p, v.decimals), x))
+        CompletionRule::Sum => two().is_some_and(|(a, b)| same(a.value + b.value, x)),
+        CompletionRule::Difference => {
+            two().is_some_and(|(a, b)| same(a.value - b.value, x) || same(b.value - a.value, x))
         }
+        CompletionRule::PercentFromCounts => {
+            let counts = two().is_some_and(|(a, b)| {
+                !a.pct
+                    && !b.pct
+                    && [(a.value, b.value), (b.value, a.value)]
+                        .iter()
+                        .any(|(n, d)| *d != 0.0 && same(round_to(100.0 * n / d, v.decimals), x))
+            });
+            let pcts: Vec<&Token> = toks.iter().filter(|t| t.pct).collect();
+            let rest = match pcts.as_slice() {
+                [p] if toks.len() <= 2 => {
+                    let next = q[p.end..].trim_start();
+                    !next.starts_with("CI")
+                        && (0.0..=100.0).contains(&p.value)
+                        && same(round_to(100.0 - p.value, v.decimals), x)
+                }
+                _ => false,
+            };
+            counts || rest
+        }
+    }
+}
+
+/// Whether `nq` (a normalised quote) occurs in `source` (normalised) as a
+/// whole (review C1): not starting inside a number (after a digit, `.`,
+/// `,` or a minus) nor ending inside one (before a digit, `%`, or `.`/`,`
+/// and a digit).
+pub fn occurs_whole(source: &str, nq: &str) -> bool {
+    source.match_indices(nq).any(|(i, _)| {
+        let before = source[..i].chars().next_back();
+        let mut after = source[i + nq.len()..].chars();
+        let (a1, a2) = (after.next(), after.next());
+        let bad_before =
+            before.is_some_and(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '\u{2212}'));
+        let bad_after = a1.is_some_and(|c| {
+            c.is_ascii_digit()
+                || c == '%'
+                || (matches!(c, '.' | ',') && a2.is_some_and(|d| d.is_ascii_digit()))
+        });
+        !bad_before && !bad_after
+    })
+}
+
+/// The parts of a sent study's text a quote may come from: its title and
+/// its abstract, apart (a quote never spans them).
+fn parts(text: &str) -> Vec<&str> {
+    match text.split_once("\nAbstract: ") {
+        Some((t, a)) => vec![t.strip_prefix("Title: ").unwrap_or(t), a],
+        None => vec![text],
     }
 }
 
@@ -607,14 +760,15 @@ pub fn verify(
     }
     let (_, source) = studies.iter().find(|(p, _)| p == pmid)?;
     let nq = normalise(quote);
-    if !normalise(source).contains(&nq) {
+    if !parts(source)
+        .into_iter()
+        .any(|p| occurs_whole(&normalise(p), &nq))
+    {
         return None;
     }
-    let q = quote_values(&nq);
-    let words = has_sign_word(&nq) || has_sign_word(&it.context);
     it.values
         .iter()
-        .all(|v| follows(*v, &q, rule, words, it.own_sign))
+        .all(|v| follows(*v, &nq, rule, &it.after, it.own_sign))
         .then(|| CompletedNumber {
             span: it.span.clone(),
             written: it.written.clone(),
@@ -687,14 +841,24 @@ pub fn apply(answer: &mut AnswerV3, out: &NumberCompletion) {
     if out.completed.is_empty() {
         return;
     }
-    let before = answer.untraced.len();
+    // Only completions of a span still marked count (so the list and the
+    // counts always agree).
+    let kept: Vec<CompletedNumber> = out
+        .completed
+        .iter()
+        .filter(|c| answer.untraced.contains(&c.span))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
     answer
         .untraced
-        .retain(|s| !out.completed.iter().any(|c| c.span == *s));
-    let removed = u32::try_from(before - answer.untraced.len()).unwrap_or(u32::MAX);
-    answer.integrity.numbers_untraced = answer.integrity.numbers_untraced.saturating_sub(removed);
-    answer.integrity.numbers_completed = removed;
-    answer.numbers_completed = out.completed.clone();
+        .retain(|s| !kept.iter().any(|c| c.span == *s));
+    let n = u32::try_from(kept.len()).unwrap_or(u32::MAX);
+    answer.integrity.numbers_untraced = answer.integrity.numbers_untraced.saturating_sub(n);
+    answer.integrity.numbers_completed = n;
+    answer.numbers_completed = kept;
 }
 
 // ---------- the call ----------
@@ -729,7 +893,8 @@ pub async fn complete(
         tracing::info!(%run_id, marked, "number completeness skipped: time");
         return Ok(NumberCompletion::skipped(marked, "time"));
     }
-    complete_waiting(ctx, llm, &p, marked, left.saturating_sub(MARGIN)).await
+    let wait = left.saturating_sub(MARGIN).min(MAX_WAIT);
+    complete_waiting(ctx, llm, &p, marked, wait).await
 }
 
 /// [`complete`] once its time gate passed, waiting at most `wait` for the
@@ -962,6 +1127,7 @@ mod tests {
         assert!(rejected(reply("1", "", "", "not_found")));
         assert!(rejected(reply("1", A, "", "sum")));
         let long = format!("10 robotic and 10 open {}", "x".repeat(MAX_QUOTE_CHARS));
+        assert!(long.chars().count() > MAX_QUOTE_CHARS);
         assert!(rejected(reply("1", A, &long, "sum")));
         assert!(rejected(reply("9", A, "10 robotic and 10 open", "sum")));
         // Only whitespace and minus forms are normalised: other changes fail.
@@ -980,58 +1146,186 @@ mod tests {
     #[test]
     fn the_rules_follow_exactly() {
         let v = |value: f64, decimals: u32| MarkedValue { value, decimals };
-        let r = CompletionRule::PercentFromCounts;
-        assert!(follows(v(74.8, 1), &[77.0, 103.0], r, false, false));
-        assert!(!follows(v(74.8, 2), &[77.0, 103.0], r, false, false));
-        assert!(follows(v(75.0, 0), &[77.0, 103.0], r, false, false));
+        let f = |x: MarkedValue, q: &str, r: CompletionRule| follows(x, q, r, "", false);
+        let p = CompletionRule::PercentFromCounts;
+        assert!(f(v(74.8, 1), "77 of 103", p));
+        assert!(!f(v(74.8, 2), "77 of 103", p));
+        assert!(f(v(75.0, 0), "77 of 103", p));
+        assert!(f(v(10.0, 0), "156 (90%) completed", p), "100 - 90");
+        assert!(f(v(25.0, 0), "77 (75%) completed", p));
+        let d = CompletionRule::Difference;
+        assert!(f(v(1.7, 1), "P 22.9, A 21.2 tablets", d));
+        assert!(f(v(-1.7, 1), "P 22.9, A 21.2 tablets", d));
+        assert!(!f(v(1.8, 1), "P 22.9, A 21.2 tablets", d));
         assert!(
-            follows(v(10.0, 0), &[156.0, 90.0], r, false, false),
-            "100 - 90"
-        );
-        assert!(follows(
-            v(1.7, 1),
-            &[22.9, 21.2],
-            CompletionRule::Difference,
-            false,
-            false
-        ));
-        assert!(follows(
-            v(-1.7, 1),
-            &[22.9, 21.2],
-            CompletionRule::Difference,
-            false,
-            false
-        ));
-        assert!(!follows(
-            v(1.8, 1),
-            &[22.9, 21.2],
-            CompletionRule::Difference,
-            false,
-            false
-        ));
-        assert!(
-            !follows(v(20.0, 0), &[10.0], CompletionRule::Sum, false, false),
+            !f(v(20.0, 0), "10 robotic", CompletionRule::Sum),
             "a number is not used twice"
         );
-        let s = CompletionRule::SignInWords;
-        assert!(follows(v(13.4, 1), &[-13.4], s, true, false));
         assert!(
-            !follows(v(13.4, 1), &[-13.4], s, false, false),
+            !f(v(20.0, 0), "ten robotic and ten open", CompletionRule::Sum),
+            "words are not operands"
+        );
+        let s = CompletionRule::SignInWords;
+        let g = |x: MarkedValue, q: &str, after: &str, own: bool| follows(x, q, s, after, own);
+        assert!(g(v(13.4, 1), "-13.4 min", " min shorter with", false));
+        assert!(
+            !g(v(13.4, 1), "-13.4 min", " min with the robot", false),
             "needs a sign word"
         );
         assert!(
-            !follows(v(13.4, 1), &[13.4], s, true, false),
+            !g(v(13.4, 1), "13.4 min", " min shorter", false),
             "same sign is as written"
         );
         assert!(
-            !follows(v(13.4, 1), &[-13.4], s, true, true),
+            !g(v(13.4, 1), "-13.4 min", " min shorter", true),
             "its own sign must match"
         );
         assert!(
-            follows(v(-13.4, 1), &[13.4], s, true, true),
+            g(v(-13.4, 1), "13.4 min shorter", "", true),
             "the source says shorter"
         );
-        assert!(has_sign_word("13.4 min Shorter;") && !has_sign_word("shortened lessons"));
+        assert!(
+            !g(v(13.4, 1), "-13.4 min", " min less than", false),
+            "less than is not a sign"
+        );
+        assert_eq!(tokens("CI -0.04 to -0.02, COVID-19 1,136 3.7%").len(), 5);
+        assert_eq!(tokens("COVID-19")[0].value, 19.0);
+        assert_eq!(tokens("(-0.02)")[0].value, -0.02);
+    }
+
+    /// Review I4: each must-reject case stays marked.
+    #[test]
+    fn chance_matches_are_rejected() {
+        let v = |value: f64, decimals: u32| MarkedValue { value, decimals };
+        let p = CompletionRule::PercentFromCounts;
+        // "95% CI" is no percentage for 100 − p (5%).
+        assert!(!follows(v(5.0, 0), "95% CI", p, "", false));
+        assert!(!follows(v(5.0, 0), "(95% CI 0.2 to 0.4)", p, "", false));
+        // "n = 75" is no percentage (25%).
+        assert!(!follows(v(25.0, 0), "n = 75", p, "", false));
+        // A long quote with several numbers: no chance pair.
+        let q = "of 491 patients, 53 vs 12 recurrences at 2 years (P < .001)";
+        assert!(!follows(v(65.0, 0), q, CompletionRule::Sum, "", false));
+        assert!(!follows(
+            v(41.0, 0),
+            q,
+            CompletionRule::Difference,
+            "",
+            false
+        ));
+        assert!(!follows(v(10.8, 1), q, p, "", false));
+        // A spaced range is not a sum or difference.
+        let r = normalise("10 - 20");
+        assert_eq!(r, "10 - 20");
+        assert!(!follows(v(30.0, 0), &r, CompletionRule::Sum, "", false));
+        assert!(!follows(
+            v(-10.0, 0),
+            &r,
+            CompletionRule::Difference,
+            "",
+            false
+        ));
+        assert!(!follows(
+            v(10.0, 0),
+            &r,
+            CompletionRule::Difference,
+            "",
+            false
+        ));
+        assert!(!follows(
+            v(-20.0, 0),
+            &r,
+            CompletionRule::AsWritten,
+            "",
+            false
+        ));
+        assert!(!follows(
+            v(30.0, 0),
+            "10-20",
+            CompletionRule::Sum,
+            "",
+            false
+        ));
+        // A decrease word elsewhere in the sentence; an increase word next
+        // to the number.
+        let s = CompletionRule::SignInWords;
+        assert!(!follows(
+            v(13.4, 1),
+            "-13.4 min",
+            s,
+            " min longer, but blood loss was lower",
+            false
+        ));
+        assert!(!follows(
+            v(13.4, 1),
+            "-13.4 min",
+            s,
+            " min, and blood loss was lower",
+            false
+        ));
+        // as_written: a whole token only.
+        assert!(!follows(
+            v(3.0, 0),
+            "3.7%",
+            CompletionRule::AsWritten,
+            "",
+            false
+        ));
+        // Quotes cut out of a number in the source.
+        assert!(!occurs_whole("in 115 patients", "15 patients"));
+        assert!(!occurs_whole("rose 3.7% overall", "3"));
+        assert!(!occurs_whole("by 3.7% overall", "by 3"));
+        assert!(!occurs_whole("was -13.4 min", "13.4 min"));
+        assert!(!occurs_whole("of 1,500 cases", "of 1"));
+        assert!(occurs_whole("in 115 patients", "115 patients"));
+        assert!(occurs_whole("was -13.4 min.", "-13.4 min"));
+    }
+
+    /// Review I4, end to end through `verify`: a dropped minus for a Quick
+    /// "13.4 min longer" and a quote starting mid-number. The title and the
+    /// abstract are matched apart.
+    #[test]
+    fn verify_rejects_cut_quotes() {
+        let text = format!("Operative time was 13.4 min longer with the robot [{B}].");
+        let w = answer(&text, "x", json!([]));
+        let spans = vec![span_of(&text, "bottom_line.text", "13.4")];
+        let studies = vec![study(
+            B,
+            "Mean difference \u{2212}13.4 min in 115 patients; 3.7% had ileus.",
+        )];
+        let p = prompt(collect(&w, &spans, &[], known), &studies);
+        assert_eq!(p.items.len(), 1);
+        let ok = |q: &str, rule: &str| {
+            !check(
+                &Report {
+                    items: vec![reply("1", B, q, rule)],
+                },
+                &p,
+            )
+            .is_empty()
+        };
+        assert!(!ok("13.4 min", "as_written"), "dropped minus");
+        assert!(
+            !ok("\u{2212}13.4 min", "sign_in_words"),
+            "longer is the opposite"
+        );
+        assert!(!ok("\u{2212}13.4 min", "as_written"));
+        let text = format!("Fifteen: 15 patients [{B}].");
+        let w = answer(&text, "x", json!([]));
+        let p = prompt(
+            collect(&w, &[span_of(&text, "bottom_line.text", "15")], &[], known),
+            &studies,
+        );
+        assert!(
+            check(
+                &Report {
+                    items: vec![reply("1", B, "15 patients", "as_written")]
+                },
+                &p
+            )
+            .is_empty()
+        );
+        assert_eq!(parts("Title: T 1\nAbstract: A 2"), ["T 1", "A 2"]);
     }
 
     /// A structured number keeps only its untraced values to complete; a

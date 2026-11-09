@@ -2665,15 +2665,14 @@ async fn full_completes_a_marked_number_against_its_abstract() {
     let Some(pool) = pool().await else { return };
     let server = hernia_server().await;
     const NUMBERS_KEY: &str = "NUMBERS TO CHECK";
-    let quote =
-        "biological meshes (53 recurrences [11.2%]) compared with synthetic meshes (12 recurrences";
+    let quote = "P 15.4%, A 3.1%";
     let mut w = writer_json();
-    let text = format!("Biological mesh had 65 recurrences in all [{SEEN_A}].");
+    let text = format!("Moderate or severe pain was 12.3 points apart [{SEEN_B}].");
     w["bottom_line"]["text"] = json!(text);
     let base = ScriptedLlm::new()
         .when(NUMBERS_KEY)
         .reply_json(
-            json!({"items": [{"id": "1", "pmid": SEEN_A, "quote": quote, "rule": "sum"}]}),
+            json!({"items": [{"id": "1", "pmid": SEEN_B, "quote": quote, "rule": "difference"}]}),
             u(),
         )
         .when(STUDIES_HEADING)
@@ -2700,7 +2699,7 @@ async fn full_completes_a_marked_number_against_its_abstract() {
         a.untraced
     );
     assert_eq!(a.numbers_completed.len(), 1);
-    assert_eq!(a.numbers_completed[0].written, "65");
+    assert_eq!(a.numbers_completed[0].written, "12.3");
     assert_eq!(a.numbers_completed[0].quote, quote);
     assert_eq!(a.integrity.numbers_completed, 1);
     assert_eq!(by_key(&llm.requests(), NUMBERS_KEY).len(), 1);
