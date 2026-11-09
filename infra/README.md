@@ -716,6 +716,42 @@ Known limitations (minor, accepted):
 Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
 Rolling back: set `QUICK_PARALLEL=off` (and the Quick limit back, if you raised it) and re-run Deploy.
 
+### Number completeness (`NUMBER_COMPLETE`)
+
+With `NUMBER_COMPLETE=on`, Quick and Full runs check the numbers the number check marked "not
+traced" once more, after the writer's checks (in Full, after the completeness review) and before
+the answer is stored. One small structured call (the `completeness` model of `AGENT_MODELS`,
+Sonnet by default, low effort, `max_tokens` 4,000, step `number_complete`) reads **only** each
+marked number with its sentence (or its structured entry's label) and the references that sentence
+cites, plus the title and abstract of those studies: at most 20 numbers and 8 abstracts of 5,000
+bytes each, so about 55 KB at the caps (typically a few KB). No question, no answer, no evidence
+rows. For each number it returns the abstract's exact words and a rule (`as_written`,
+`sign_in_words`, `sum`, `difference`, `percent_from_counts`) or `not_found`.
+
+Code checks every reply: the study must be one the sentence cites; the words (at most 400
+characters) must occur in that study's title or abstract (only whitespace runs, `−` and a minus
+followed by a space are normalised); and the marked number must follow from the numbers in those
+words by the rule (equal; equal in size with a decrease word such as shorter, lower, fewer, less,
+reduced in the words or the sentence and the source's minus; the sum or difference of two of them;
+a percentage of two of them or 100 minus one, rounded as written). Only then does the mark go; the
+words are shown in the study's sheet ("Numbers checked against this abstract"). The answer's text
+is never changed, and the step line says `Number completeness: X of Y completed against their
+sources; Z left marked`.
+
+- **Money.** No reserve: the finish reserve, the writer's reserve and the four-part limit are
+  unchanged. The call holds its own estimate from what is left of the run's limit; when that does
+  not fit, the step is skipped (`Number completeness skipped: cost limit; …`) and the marks stay.
+  At Sonnet prices a typical call is about ₹1–3.
+- **Never fails a run.** Less than 30 s before the hard stop, a refusal for money, an API error, a
+  timeout or an unusable reply leave every mark as it was (`… skipped: <reason>; N left marked`).
+  No retry. With no marked number there is no call and no cost.
+- **The early At a glance card** (S1c) keeps its marks; they clear when the final answer arrives.
+
+| `NUMBER_COMPLETE` | no | `on` or `off`. With `off`: no call, and the stored answer exactly as before. | `off` |
+
+Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
+Rolling back: set `NUMBER_COMPLETE=off` and re-run Deploy; stored completions still show.
+
 ## Memory layer (Gemma embeddings)
 
 The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama
