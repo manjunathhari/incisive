@@ -1075,6 +1075,9 @@ fn study_body(c: &Ctx, pmid: &str, r: Option<&ReferenceV3>, sheet: bool) -> AnyV
 /// "Cited in": close sheet `n` and open the outcome `id` (browser only;
 /// the link then scrolls to it).
 fn go_to_outcome(n: Option<u16>, id: &str) {
+    // S1e: a folded outcomes card unfolds first, so the link scrolls to the
+    // outcome in place, not inside the clipped box.
+    let fold = super::page::fold_of(id);
     #[cfg(feature = "hydrate")]
     {
         use wasm_bindgen::JsCast;
@@ -1089,12 +1092,15 @@ fn go_to_outcome(n: Option<u16>, id: &str) {
         {
             let _ = f.call0(&d);
         }
+        if let Some(f) = fold {
+            super::page::open_fold(f);
+        }
         if let Some(o) = doc.get_element_by_id(id) {
             let _ = o.set_attribute("open", "");
         }
     }
     #[cfg(not(feature = "hydrate"))]
     {
-        let _ = (n, id);
+        let _ = (n, id, fold);
     }
 }

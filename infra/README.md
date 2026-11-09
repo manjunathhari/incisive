@@ -763,6 +763,26 @@ marked`.
 Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
 Rolling back: set `NUMBER_COMPLETE=off` and re-run Deploy; stored completions still show.
 
+### Answer page layout (`ANSWER_LAYOUT`)
+
+UI only (S1e). With `ANSWER_LAYOUT=on`, every answer page (Quick and Full, old runs too) is drawn
+in the new order: the header and At a glance, Bottom line, What this means for clinical practice
+(full width), then **Why this conclusion** with *Every estimate with a 95% CI* and *Outcome by
+outcome* side by side, then **Counselling dashboard** with *Out of 100 patients* and *Compare the
+arms* side by side, then Details, Copy as text and the study sheets as before. On a desktop the
+run page's column is about 1,180 px wide while the answer shows (the results and progress cards
+widen to the same edges; the Expert Opinion and chat views keep today's width); in each pair the
+right card is cut to the left card's height with a soft fade and a "+ Show all N outcomes" /
+"+ Show more" button (it works before the page's script loads; it shows only when the right card
+is estimated clearly longer; a link or tab into the card unfolds it). Below about 1,100 px, and
+in print, the pairs stack and nothing folds. While a Quick answer is written in four parts, the placeholders follow the same order. No engine, check, stored answer or cost
+change; the setting is read when the run page is drawn.
+
+| `ANSWER_LAYOUT` | no | `on` or `off`. With `off`: every page exactly as before. | `off` |
+
+Checked before the build (only the ends trimmed), and the app refuses any other value at startup.
+Rolling back: set `ANSWER_LAYOUT=off` and re-run Deploy.
+
 ## Memory layer (Gemma embeddings)
 
 The memory layer embeds records with `embeddinggemma` (768 floats) served by the owner's Ollama

@@ -2367,3 +2367,260 @@ fn ivory_redesign_keeps_the_answer_content_byte_identical() {
         );
     }
 }
+
+// ---------- S1e: the answer page's layout (`ANSWER_LAYOUT=on`) ----------
+
+/// `html` from `start` to the end of its element (`<tag` ... `</tag>`,
+/// counting nested tags of the same name).
+fn element<'a>(html: &'a str, start: &str) -> &'a str {
+    let a = html
+        .find(start)
+        .unwrap_or_else(|| panic!("missing {start:?}"));
+    let tag = start[1..]
+        .split(|c: char| c.is_whitespace() || c == '>')
+        .next()
+        .unwrap();
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut depth = 0usize;
+    let mut i = a;
+    loop {
+        let next_open = html[i + 1..].find(&open).map(|k| i + 1 + k);
+        let next_close = html[i..].find(&close).map(|k| i + k).expect("closed");
+        match next_open {
+            Some(o) if o < next_close => {
+                depth += 1;
+                i = o;
+            }
+            _ => {
+                if depth == 0 {
+                    return &html[a..next_close + close.len()];
+                }
+                depth -= 1;
+                i = next_close + 1;
+            }
+        }
+    }
+}
+
+/// S1e: with the switch on, the replay answers draw in the new order: the
+/// summary cards, "Why this conclusion" over [CI | outcomes in a card],
+/// "Counselling dashboard" over [Out of 100 | Compare the arms], then
+/// Details exactly as with the switch off; the fold's checkbox and button
+/// by the rule; no `inner_html` (escaped text only: the same text as off).
+/// With `ANSWER_LAYOUT_HTML_OUT` set, the enriched page is written there
+/// (for measuring in a browser).
+#[test]
+fn layout_on_draws_the_new_order_with_details_unchanged() {
+    // The replay answers and the three stored Full answers (temporal
+    // fixtures); the stored achalasia answer also as a Quick answer (only
+    // the header's mode label and re-run link read the mode).
+    let stored = |f: &str| -> AnswerV3 {
+        let p = format!(
+            "{}/tests/fixtures/temporal/full/{f}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    };
+    let mut quick = stored("achalasia");
+    quick.mode = RunMode::Quick;
+    let mut answers = part_a_answers();
+    answers.extend([
+        ("hernia stored", stored("hernia")),
+        ("achalasia stored", stored("achalasia")),
+        ("cholecystitis stored", stored("cholecystitis")),
+        ("achalasia as quick", quick),
+    ]);
+    let style = regex::Regex::new(r"(?s)<style>.*?</style>").unwrap();
+    let buttons =
+        regex::Regex::new(r"\+ ?(Show all \d+ outcomes|Show more) ?\u{2212} ?Show less").unwrap();
+    for (name, a) in answers {
+        let off = incisive_app::app::render_answer_v3(a.clone());
+        let on = incisive_app::app::render_answer_v3_layout(a.clone());
+        if let Ok(dir) = std::env::var("ANSWER_LAYOUT_HTML_DIR") {
+            let out = format!("{dir}/{}.html", name.replace(' ', "_"));
+            // The page's own styles around it, in a `<main>` with the run
+            // page's chrome (a results card and a folded row, as drawn).
+            let styles: String = incisive_app::app::page_styles()
+                .iter()
+                .map(|s| format!("<style>{s}</style>"))
+                .collect();
+            std::fs::write(
+                out,
+                format!(
+                    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{styles}</head><body><main><div class=\"run-chrome\"><h1 class=\"run-question\">{}</h1><div class=\"rk-card\" data-done=\"true\"><h2>Results</h2></div><details class=\"rk-fold\"><summary><span class=\"rk-fold-title\">Progress</span></summary></details></div>{on}</main></body></html>",
+                    a.question
+                ),
+            )
+            .unwrap();
+        }
+        assert!(on.contains(r#"<div class="ap ap-lx">"#), "{name}");
+        assert!(!off.contains("ap-lx"), "{name}: off has none of it");
+        let v = incisive_app::answer_page::visible(&a);
+        let (why, dash) = (v.forest && v.outcomes, v.out_of_100 && v.compare);
+        let mut order: Vec<&str> = vec![r#"<div class="ap-head">"#];
+        order.extend(v.glance.then_some(r#"aria-label="At a glance""#));
+        order.push(r#"aria-label="Bottom line""#);
+        order.extend(
+            v.practice
+                .then_some(r#"aria-label="What this means for clinical practice""#),
+        );
+        if v.forest || v.outcomes || v.no_numbers {
+            order.push(r#"<h2 class="ap-lx-h">Why this conclusion</h2>"#);
+            order.push("Every outcome, its numbers and how sure we can be");
+        }
+        order.extend(why.then_some(r#"<div class="ap-lx-pair"#));
+        order.extend(
+            v.forest
+                .then_some(r#"aria-label="Every estimate with a 95% CI""#),
+        );
+        order.extend(
+            v.outcomes.then_some(
+                r#"<section aria-label="Outcome by outcome" class="ap-outcomes ap-card">"#,
+            ),
+        );
+        if v.out_of_100 || v.compare {
+            order.push(r#"<h2 class="ap-lx-h">Counselling dashboard</h2>"#);
+            order.push("What it means for 100 patients like these, arm by arm");
+        }
+        order.extend(dash.then_some(r#"<div class="ap-lx-pair"#));
+        order.extend(
+            v.out_of_100
+                .then_some(r#"aria-label="Out of 100 patients""#),
+        );
+        order.extend(v.compare.then_some(r#"aria-label="Compare the arms""#));
+        order.push(r#"<div class="ap-details">"#);
+        order.push(r#"<details class="ap-original""#);
+        let mut last = 0;
+        for t in order {
+            let i = on[last..]
+                .find(t)
+                .unwrap_or_else(|| panic!("{name}: {t:?} out of order"));
+            last += i + t.len();
+        }
+        // Each pair wraps its two cards, the CI and Out of 100 on the left.
+        let pairs: Vec<&str> = on
+            .match_indices(r#"<div class="ap-lx-pair"#)
+            .map(|(i, _)| element(&on[i..], "<div"))
+            .collect();
+        let want: Vec<(&str, &str)> = [
+            (why, ("Every estimate with a 95% CI", "Outcome by outcome")),
+            (dash, ("Out of 100 patients", "Compare the arms")),
+        ]
+        .into_iter()
+        .filter_map(|(on, p)| on.then_some(p))
+        .collect();
+        assert_eq!(pairs.len(), want.len(), "{name}");
+        println!("{name}: visible {v:?}");
+        for (p, (l, r)) in pairs.iter().zip(want) {
+            let left = element(p, r#"<div class="ap-lx-col ap-lx-l">"#);
+            assert!(
+                left.contains(&format!(r#"aria-label="{l}""#)),
+                "{name}: {l}"
+            );
+            assert!(
+                !left.contains(&format!(r#"aria-label="{r}""#)),
+                "{name}: {r}"
+            );
+            assert!(p.contains(&format!(r#"aria-label="{r}""#)), "{name}: {r}");
+        }
+        // Details (and the sheets after it) byte for byte as with the
+        // switch off; the original run view too.
+        let details = |h: &str| -> String {
+            let i = h.find(r#"<div class="ap-details">"#).unwrap();
+            let j = h.find(r#"<details class="ap-original""#).unwrap();
+            h[i..j].to_string()
+        };
+        assert_eq!(details(&on), details(&off), "{name}: Details");
+        assert_eq!(split_page(&on).1, split_page(&off).1, "{name}");
+        // The other blocks too: the same components, the same markup.
+        for start in [
+            r#"<section aria-label="At a glance" class="ap-card ap-glance">"#,
+            r#"<section aria-label="Bottom line" class="ap-card">"#,
+            r#"<section aria-label="Every estimate with a 95% CI" class="ap-card">"#,
+            r#"<section aria-label="Out of 100 patients" class="ap-card">"#,
+            r#"<section aria-label="Compare the arms" class="ap-card">"#,
+        ] {
+            if off.contains(start) {
+                assert_eq!(element(&on, start), element(&off, start), "{name}: {start}");
+            }
+        }
+        // Only the outcome section's class differs.
+        let o_on = element(&on, r#"<section aria-label="Outcome by outcome""#);
+        let o_off = element(&off, r#"<section aria-label="Outcome by outcome""#);
+        assert_eq!(
+            o_on.replacen("ap-outcomes ap-card", "ap-outcomes", 1),
+            o_off,
+            "{name}"
+        );
+        // The same text, nothing lost (the headings and the buttons added).
+        let added = |h: &str| {
+            flat(&page_text(h))
+                .replace(
+                    "Why this conclusion Every outcome, its numbers and how sure we can be ",
+                    "",
+                )
+                .replace(
+                    "Counselling dashboard What it means for 100 patients like these, arm by arm ",
+                    "",
+                )
+        };
+        let t_on = added(&style.replace_all(split_page(&on).0, ""));
+        let t_off = flat(&page_text(split_page(&off).0));
+        let words = |t: &str| {
+            let mut w: Vec<String> = t.split_whitespace().map(String::from).collect();
+            w.sort();
+            w
+        };
+        assert_eq!(
+            words(&buttons.replace_all(&t_on, "")),
+            words(&t_off),
+            "{name}"
+        );
+        // The fold and its button follow the rule (checked in the unit tests).
+        let w = a.answer.as_ref().unwrap();
+        let n = w.outcomes.len()
+            + a.completeness
+                .as_ref()
+                .map_or(0, |c| c.added_outcomes.len());
+        let why_folds = on.contains(r#"id="ap-lx-why""#);
+        assert_eq!(
+            why_folds,
+            on.contains(&format!("Show all {n} outcomes")),
+            "{name}"
+        );
+        println!(
+            "{name}: {n} outcomes, why folds {why_folds}, dashboard folds {}",
+            on.contains(r#"id="ap-lx-dash""#)
+        );
+        assert!(!on.contains("inner_html"));
+    }
+}
+
+/// S1e (review M5): with the switch off the answer page is byte for byte
+/// the page main drew before S1e (787442e; `tests/fixtures/s1e/`, captured
+/// from main with `render_answer_v3`): the enriched hernia replay and the
+/// stored hernia Full answer.
+#[test]
+fn layout_off_is_byte_identical_to_main() {
+    let (a, _) = replay_answers();
+    let p = format!(
+        "{}/tests/fixtures/temporal/full/hernia.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let stored: AnswerV3 = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    for (a, golden) in [
+        (
+            enriched(a),
+            include_str!("fixtures/s1e/main_hernia_full.html"),
+        ),
+        (stored, include_str!("fixtures/s1e/main_hernia_stored.html")),
+    ] {
+        let html = incisive_app::app::render_answer_v3(a);
+        assert!(
+            html == golden,
+            "differs from main ({} vs {} bytes)",
+            html.len(),
+            golden.len()
+        );
+    }
+}
