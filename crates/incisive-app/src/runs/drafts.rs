@@ -106,6 +106,20 @@ pub async fn clear(pool: &PgPool, run_id: Uuid, part: Part) {
     }
 }
 
+/// The run has ended: its answer draft and its early sections go, in one
+/// statement (the Expert Opinion's draft is the opinion job's to clear).
+pub async fn clear_answer_parts(pool: &PgPool, run_id: Uuid) {
+    let r = sqlx::query(
+        "DELETE FROM incisive.run_drafts WHERE run_id = $1 AND part IN ('answer', 'early')",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await;
+    if r.is_err() {
+        tracing::warn!(%run_id, "answer drafts could not be deleted");
+    }
+}
+
 /// Recovery: remove drafts whose writer's row has ended, and any too old to
 /// have a live writer. Returns how many.
 pub async fn sweep(pool: &PgPool) -> sqlx::Result<u64> {
