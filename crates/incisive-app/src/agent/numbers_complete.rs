@@ -118,7 +118,8 @@ fewer or less (\"13.4 min shorter\" for \"-13.4 min\"), or the reverse.
 exactly those two numbers.
 - difference: the number is the difference of the two numbers in the quote, which holds exactly those two.
 - percent_from_counts: the number is a percentage worked out from the two counts in the quote (which holds exactly \
-those two), or 100 minus the one percentage in the quote (\"77 (75%) completed\" for 25% who did not).
+those two), or 100 minus the percentage written in brackets right after a count (\"77 (75%) completed\" for 25% \
+who did not).
 - not_found: no cited abstract supports it. Then give pmid and quote as empty strings.
 
 RULES:
@@ -539,9 +540,11 @@ pub fn user(p: &Prompt) -> String {
 
 // ---------- the checks ----------
 
-/// `s` with whitespace runs as one space, `−` as `-` and a minus followed by
-/// a space before a digit as the minus alone ("to - 0.02" is "to -0.02"),
-/// except after a digit or `%` ("10 - 20" stays). Nothing else is changed.
+/// `s` with whitespace runs as one space, `−` as `-`, an en dash used as a
+/// minus (before a digit, not after a digit or `%`: "MD –13.4" is "MD
+/// -13.4", "10–20" stays) as `-`, and a minus followed by a space before a
+/// digit as the minus alone ("to - 0.02" is "to -0.02"), except after a
+/// digit or `%` ("10 - 20" stays). Nothing else is changed.
 pub fn normalise(s: &str) -> String {
     let folded: String = s
         .chars()
@@ -558,6 +561,19 @@ pub fn normalise(s: &str) -> String {
             .chars()
             .next_back()
             .is_some_and(|p| p.is_ascii_digit() || p == '%');
+        // Re-review 1: PubMed often writes a minus as an en dash.
+        let c = if c == '\u{2013}' && !after_value && {
+            let mut ahead = chars.clone();
+            match ahead.next() {
+                Some(d) if d.is_ascii_digit() => true,
+                Some(' ') => ahead.next().is_some_and(|d| d.is_ascii_digit()),
+                _ => false,
+            }
+        } {
+            '-'
+        } else {
+            c
+        };
         out.push(c);
         if c == '-' && !after_value && chars.peek() == Some(&' ') {
             let mut ahead = chars.clone();
@@ -580,7 +596,7 @@ fn round_to(x: f64, d: u32) -> f64 {
 }
 
 /// One number token of a (normalised) quote: digits with optional
-/// thousands groups, decimals and `%`; a `-` right before it is its sign
+/// thousands groups, decimals (`.` or a middle dot) and `%`; a `-` right before it is its sign
 /// unless a digit, letter or `%` precedes the dash. Number words are not
 /// tokens (review C2).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -592,7 +608,7 @@ pub struct Token {
 }
 
 static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\d+(?:,\d{3})*(?:\.\d+)?%?").expect("token pattern is valid")
+    regex::Regex::new(r"\d+(?:,\d{3})*(?:[.\u{b7}]\d+)?%?").expect("token pattern is valid")
 });
 
 /// The number tokens of `q` (see [`Token`]).
@@ -602,7 +618,12 @@ pub fn tokens(q: &str) -> Vec<Token> {
         // A run starting inside a longer number ("1.5" split) never occurs:
         // the pattern is greedy from the left.
         let mut start = m.start();
-        let digits = m.as_str().trim_end_matches('%').replace(',', "");
+        // A middle-dot decimal ("3·7", re-review 2) is one number.
+        let digits = m
+            .as_str()
+            .trim_end_matches('%')
+            .replace(',', "")
+            .replace('\u{b7}', ".");
         let Ok(mut value) = digits.parse::<f64>() else {
             continue;
         };
@@ -660,16 +681,24 @@ pub fn says_increase(after: &str) -> bool {
 /// answer's number (`after`) or the source's, and no increase word after
 /// the answer's; `sum` and `difference`, a quote of exactly two tokens not
 /// written as a range; `percent_from_counts`, exactly two tokens (no `%`,
-/// no range) giving the percentage, or exactly one `%` token (not followed
-/// by "CI", at most one other token, its count) giving 100 minus it.
+/// no range) giving the percentage, or a count and its percentage in
+/// brackets ("77 (75%)") giving 100 minus the percentage.
 pub fn follows(v: MarkedValue, q: &str, rule: CompletionRule, after: &str, own_sign: bool) -> bool {
     let x = v.value;
     let toks = tokens(q);
+    // A range, a pair of bounds ("(0.2, 0.4)", re-review 4) or numbers
+    // after an interval word are never operands.
+    let interval = q.split(|c: char| !c.is_alphabetic()).any(|w| {
+        ["CI", "CrI", "IQR"].contains(&w)
+            || w.eq_ignore_ascii_case("interval")
+            || w.eq_ignore_ascii_case("range")
+    });
     let range = |a: &Token, b: &Token| {
-        matches!(
-            q[a.end..b.start].trim(),
-            "-" | "\u{2013}" | "\u{2014}" | "to"
-        )
+        interval
+            || matches!(
+                q[a.end..b.start].trim(),
+                "-" | "\u{2013}" | "\u{2014}" | "to" | "," | ";"
+            )
     };
     let two = || match toks.as_slice() {
         [a, b] if !range(a, b) => Some((*a, *b)),
@@ -698,11 +727,14 @@ pub fn follows(v: MarkedValue, q: &str, rule: CompletionRule, after: &str, own_s
                         .iter()
                         .any(|(n, d)| *d != 0.0 && same(round_to(100.0 * n / d, v.decimals), x))
             });
-            let pcts: Vec<&Token> = toks.iter().filter(|t| t.pct).collect();
-            let rest = match pcts.as_slice() {
-                [p] if toks.len() <= 2 => {
-                    let next = q[p.end..].trim_start();
-                    !next.starts_with("CI")
+            // Re-review 3: 100 − p only in the shape "N (p%)": a count, then
+            // its percentage in brackets, and nothing else numeric.
+            let rest = match toks.as_slice() {
+                [n, p] => {
+                    !n.pct
+                        && p.pct
+                        && q[n.end..p.start].trim() == "("
+                        && q[p.end..].starts_with(')')
                         && (0.0..=100.0).contains(&p.value)
                         && same(round_to(100.0 - p.value, v.decimals), x)
                 }
@@ -715,19 +747,24 @@ pub fn follows(v: MarkedValue, q: &str, rule: CompletionRule, after: &str, own_s
 
 /// Whether `nq` (a normalised quote) occurs in `source` (normalised) as a
 /// whole (review C1): not starting inside a number (after a digit, `.`,
-/// `,` or a minus) nor ending inside one (before a digit, `%`, or `.`/`,`
-/// and a digit).
+/// `,`, `·`, a minus or a dash) nor ending inside one (before a digit, `%`,
+/// or `.`/`,`/`·` and a digit).
 pub fn occurs_whole(source: &str, nq: &str) -> bool {
     source.match_indices(nq).any(|(i, _)| {
         let before = source[..i].chars().next_back();
         let mut after = source[i + nq.len()..].chars();
         let (a1, a2) = (after.next(), after.next());
-        let bad_before =
-            before.is_some_and(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '\u{2212}'));
+        let bad_before = before.is_some_and(|c| {
+            c.is_ascii_digit()
+                || matches!(
+                    c,
+                    '.' | ',' | '\u{b7}' | '-' | '\u{2212}' | '\u{2013}' | '\u{2014}'
+                )
+        });
         let bad_after = a1.is_some_and(|c| {
             c.is_ascii_digit()
                 || c == '%'
-                || (matches!(c, '.' | ',') && a2.is_some_and(|d| d.is_ascii_digit()))
+                || (matches!(c, '.' | ',' | '\u{b7}') && a2.is_some_and(|d| d.is_ascii_digit()))
         });
         !bad_before && !bad_after
     })
@@ -1191,6 +1228,73 @@ mod tests {
         assert_eq!(tokens("CI -0.04 to -0.02, COVID-19 1,136 3.7%").len(), 5);
         assert_eq!(tokens("COVID-19")[0].value, 19.0);
         assert_eq!(tokens("(-0.02)")[0].value, -0.02);
+    }
+
+    /// Re-review: en-dash minus, middle-dot decimals, lone percentages and
+    /// bounds in brackets.
+    #[test]
+    fn dashes_dots_and_bounds_are_read_right() {
+        let v = |value: f64, decimals: u32| MarkedValue { value, decimals };
+        let p = CompletionRule::PercentFromCounts;
+        // En dash: a minus before a digit, a range after one.
+        assert_eq!(normalise("MD \u{2013}13.4 min"), "MD -13.4 min");
+        assert_eq!(normalise("(\u{2013} 0.02)"), "(-0.02)");
+        assert_eq!(normalise("10\u{2013}20"), "10\u{2013}20");
+        assert_eq!(normalise("12% \u{2013} 15%"), "12% \u{2013} 15%");
+        assert!(!occurs_whole(&normalise("MD \u{2013}13.4 min"), "13.4 min"));
+        assert!(!occurs_whole("MD \u{2013}13.4 min", "13.4 min"));
+        let s = CompletionRule::SignInWords;
+        assert!(follows(
+            v(13.4, 1),
+            &normalise("MD \u{2013}13.4 min"),
+            s,
+            " min shorter with",
+            false
+        ));
+        assert!(!follows(
+            v(13.4, 1),
+            &normalise("MD \u{2013}13.4 min"),
+            s,
+            " min longer with",
+            false
+        ));
+        // Middle dot: one decimal number.
+        assert_eq!(tokens("3\u{b7}7%")[0].value, 3.7);
+        assert_eq!(tokens("3\u{b7}7%").len(), 1);
+        assert!(!occurs_whole("rose 3\u{b7}7% overall", "7%"));
+        assert!(!occurs_whole("rose 3\u{b7}7% overall", "rose 3"));
+        assert!(!follows(
+            v(10.0, 0),
+            "3\u{b7}7",
+            CompletionRule::Sum,
+            "",
+            false
+        ));
+        // No complement of a lone percentage.
+        for q in [
+            "95% confidence interval",
+            "95%-CI",
+            "90% CrI",
+            "sensitivity 80%",
+            "80% (n = 40)",
+        ] {
+            for x in [5.0, 10.0, 20.0, 60.0] {
+                assert!(!follows(v(x, 0), q, p, "", false), "{q} {x}");
+            }
+        }
+        assert!(follows(v(25.0, 0), "77 (75%) completed", p, "", false));
+        assert!(!follows(v(25.0, 0), "77 75% completed", p, "", false));
+        // Bounds in brackets are no operands.
+        let d = CompletionRule::Difference;
+        assert!(!follows(v(0.2, 1), "(0.2, 0.4)", d, "", false));
+        assert!(!follows(
+            v(0.6, 1),
+            "(0.2, 0.4)",
+            CompletionRule::Sum,
+            "",
+            false
+        ));
+        assert!(!follows(v(0.2, 1), "CI 0.2 and 0.4", d, "", false));
     }
 
     /// Review I4: each must-reject case stays marked.

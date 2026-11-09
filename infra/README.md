@@ -739,8 +739,11 @@ word (shorter, lower, fewer, less but not "less than", smaller, reduced, reducti
 decreased) within 3 words after the answer's number or the source's, and no increase word
 (longer, higher, more, greater, larger, increase…) after the answer's; `sum` / `difference`, a
 quote of exactly two tokens, not written as a range; `percent_from_counts`, exactly two count
-tokens giving the percentage, or exactly one `%` token (not "95% CI", at most one count beside
-it) giving 100 minus it, rounded as written. Only then does the mark go; the words are shown in
+tokens giving the percentage, or a count with its percentage in brackets ("77 (75%)") giving 100
+minus it, rounded as written. A minus written as an en dash ("MD –13.4") reads as a minus (not
+after a digit or `%`: "10–20" stays a range), a middle-dot decimal ("3·7") is one number, and two
+numbers separated only by a comma or semicolon, or in a quote naming a CI, CrI, IQR, interval or
+range, are never operands. Only then does the mark go; the words are shown in
 the study's sheet ("Numbers checked against this abstract"). The answer's text is never changed,
 and the step line says `Number completeness: X of Y completed against their sources; Z left
 marked`.
