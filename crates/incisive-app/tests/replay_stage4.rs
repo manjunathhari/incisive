@@ -2595,3 +2595,32 @@ fn layout_on_draws_the_new_order_with_details_unchanged() {
         assert!(!on.contains("inner_html"));
     }
 }
+
+/// S1e (review M5): with the switch off the answer page is byte for byte
+/// the page main drew before S1e (787442e; `tests/fixtures/s1e/`, captured
+/// from main with `render_answer_v3`): the enriched hernia replay and the
+/// stored hernia Full answer.
+#[test]
+fn layout_off_is_byte_identical_to_main() {
+    let (a, _) = replay_answers();
+    let p = format!(
+        "{}/tests/fixtures/temporal/full/hernia.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let stored: AnswerV3 = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    for (a, golden) in [
+        (
+            enriched(a),
+            include_str!("fixtures/s1e/main_hernia_full.html"),
+        ),
+        (stored, include_str!("fixtures/s1e/main_hernia_stored.html")),
+    ] {
+        let html = incisive_app::app::render_answer_v3(a);
+        assert!(
+            html == golden,
+            "differs from main ({} vs {} bytes)",
+            html.len(),
+            golden.len()
+        );
+    }
+}

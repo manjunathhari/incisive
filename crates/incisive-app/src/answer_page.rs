@@ -102,7 +102,9 @@ pub const PAIRS: [Pair; 2] = [
 // the right card's low (px at 1280 px wide, measured on the stored hernia
 // Full answer, 9 Nov: a CI row 91-108, a closed outcome 79-119 plus a 10 gap,
 // a comparison row 59-77 plus a 6 gap, the Out of 100 card 845), and a margin,
-// so the button never shows when the right card fits. When the rule says no
+// so the button never shows when the right card fits (the pairs stack below
+// 1,100 px, where columns are narrower than these estimates assume; a CI row
+// is estimated at 125, above the 108 measured). When the rule says no
 // fold the two cards stretch to the taller one: both edges still align and
 // nothing is hidden.
 
@@ -126,7 +128,7 @@ pub fn compare_px(measures: usize) -> u32 {
 /// two boxes): estimated high.
 pub const OUT_OF_100_PX: u32 = 900;
 const FOREST_BASE_PX: u32 = 280;
-const FOREST_ROW_PX: u32 = 110;
+const FOREST_ROW_PX: u32 = 125;
 const OUTCOMES_BASE_PX: u32 = 60;
 const OUTCOME_PX: u32 = 89;
 const COMPARE_BASE_PX: u32 = 420;

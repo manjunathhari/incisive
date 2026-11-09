@@ -773,9 +773,9 @@ arms* side by side, then Details, Copy as text and the study sheets as before. O
 run page's column is about 1,180 px wide while the answer shows (the results and progress cards
 widen to the same edges; the Expert Opinion and chat views keep today's width); in each pair the
 right card is cut to the left card's height with a soft fade and a "+ Show all N outcomes" /
-"+ Show more" button (CSS only, no script; it shows only when the right card is estimated clearly
-longer). Below about 900 px the pairs stack and nothing folds. While a Quick answer is written
-in four parts, the placeholders follow the same order. No engine, check, stored answer or cost
+"+ Show more" button (it works before the page's script loads; it shows only when the right card
+is estimated clearly longer; a link or tab into the card unfolds it). Below about 1,100 px, and
+in print, the pairs stack and nothing folds. While a Quick answer is written in four parts, the placeholders follow the same order. No engine, check, stored answer or cost
 change; the setting is read when the run page is drawn.
 
 | `ANSWER_LAYOUT` | no | `on` or `off`. With `off`: every page exactly as before. | `off` |

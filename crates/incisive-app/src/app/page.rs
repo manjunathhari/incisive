@@ -415,7 +415,10 @@ pub(super) fn answer_page_view(a: AnswerV3, layout: bool) -> AnyView {
 /// folds to the left card's height with CSS only (its content laid out out
 /// of flow, so it adds nothing to the row), with a checkbox and label as the
 /// button, so it works before hydration and nothing moves after load.
-/// Below 900 px the pairs stack and nothing folds.
+/// Below 1,100 px (and in print) the pairs stack and nothing folds. A link
+/// or tab into a folded card unfolds it: the page ticks the checkbox (after
+/// hydration, [`open_fold`]), and before that `:has(:target, :focus-visible)`
+/// unclips the box.
 pub const LAYOUT_STYLE: &str = r##"
 main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), .rx-chat:target:not(:empty))) { max-width:1180px; }
 main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), .rx-chat:target:not(:empty))) .run-chrome :is(.rk-card, .rx-seg, details[class$="-fold"]) { max-width:none; }
@@ -430,12 +433,13 @@ main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), 
 .ap-lx-pair.fold > .ap-lx-col { align-self:start; }
 .ap-lx-pair.fold > .ap-lx-r { position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr) auto; row-gap:10px; min-width:0; }
 .ap-lx-cb { position:absolute; top:0; left:0; width:1px; height:1px; margin:0; opacity:0; pointer-events:none; }
-.ap-lx-box { position:relative; min-height:0; overflow:hidden; }
+.ap-lx-box { position:relative; min-height:0; overflow:hidden; border-radius:16px; }
 .ap-lx-box > * { position:absolute; top:0; left:0; right:0; min-height:100%; }
-.ap-lx-box::after { content:""; position:absolute; left:0; right:0; bottom:0; height:72px; background:linear-gradient(rgba(245,243,239,0), var(--iv-ground,#F5F3EF)); pointer-events:none; }
-.ap-lx-cb:checked ~ .ap-lx-box { overflow:visible; }
-.ap-lx-cb:checked ~ .ap-lx-box > * { position:static; }
-.ap-lx-cb:checked ~ .ap-lx-box::after { display:none; }
+.ap-lx-box::after { content:""; position:absolute; left:0; right:0; bottom:0; height:72px; background:linear-gradient(rgba(255,255,255,0), #fff 80%); border:1px solid var(--rule); border-top:0; border-radius:0 0 16px 16px; pointer-events:none; }
+.ap-lx-cb:checked ~ .ap-lx-box, .ap-lx-box:has(:target, :focus-visible) { overflow:visible; }
+.ap-lx-cb:checked ~ .ap-lx-box > *, .ap-lx-box:has(:target, :focus-visible) > * { position:static; }
+.ap-lx-cb:checked ~ .ap-lx-box::after, .ap-lx-box:has(:target, :focus-visible)::after { display:none; }
+.ap-lx-r:has(.ap-lx-box :target, .ap-lx-box :focus-visible) > .ap-lx-cb:not(:checked) ~ .ap-lx-more { display:none; }
 .ap-lx-more { display:flex; align-items:center; justify-content:center; width:100%; min-height:44px; margin:0; padding:0 14px; border:1px solid var(--rule); border-radius:12px; background:#fff; color:#1F4E79; font-size:15px; font-weight:600; cursor:pointer; user-select:none; }
 .ap-lx-more:hover { background:#F2F5F9; }
 .ap-lx-more > span { align-items:center; gap:8px; }
@@ -445,12 +449,17 @@ main:has(.ap-lx):not(:has(.rx-expon, .rx-chaton, .rx-expert:target:not(:empty), 
 .ap-lx-cb:checked ~ .ap-lx-more .ap-lx-all { display:none; }
 .ap-lx-cb:checked ~ .ap-lx-more .ap-lx-less { display:inline-flex; }
 .ap-lx-cb:focus-visible ~ .ap-lx-more { outline:2px solid #2C4A85; outline-offset:2px; }
-@media (max-width:899.98px) {
+@media (max-width:1099.98px) {
   .ap-lx-pair { grid-template-columns:minmax(0,1fr); }
   .ap-lx-pair.fold > .ap-lx-r { display:block; }
   .ap-lx-box { overflow:visible; }
   .ap-lx-box > * { position:static; }
-  .ap-lx-box::after, .ap-lx-more { display:none; }
+  .ap-lx-box::after, .ap-lx-more, .ap-lx-cb { display:none; }
+}
+@media print {
+  .ap-lx-box { overflow:visible; }
+  .ap-lx-box > * { position:static; }
+  .ap-lx-box::after, .ap-lx-more, .ap-lx-cb { display:none; }
 }
 "##;
 
@@ -480,11 +489,11 @@ fn lx_pair(
                 <div class="ap-lx-pair fold">
                     <div class="ap-lx-col ap-lx-l">{l}</div>
                     <div class="ap-lx-r">
-                        <input type="checkbox" class="ap-lx-cb" id=id />
-                        <div class="ap-lx-box">{r}</div>
+                        <input type="checkbox" class="ap-lx-cb" id=id aria-label=more.clone() aria-controls=format!("{id}-box") />
+                        <div class="ap-lx-box" id=format!("{id}-box") on:focusin=move |_| open_fold(id)>{r}</div>
                         <label class="ap-lx-more" for=id>
-                            <span class="ap-lx-all"><span class="ap-lx-sign" aria-hidden="true">"+"</span>{more}</span>
-                            <span class="ap-lx-less"><span class="ap-lx-sign" aria-hidden="true">"\u{2212}"</span>"Show less"</span>
+                            <span class="ap-lx-all" aria-hidden="true"><span class="ap-lx-sign">"+"</span>{more}</span>
+                            <span class="ap-lx-less" aria-hidden="true"><span class="ap-lx-sign">"\u{2212}"</span>"Show less"</span>
                         </label>
                     </div>
                 </div>
@@ -506,6 +515,30 @@ fn lx_pair(
 /// The checkbox ids of the two folds (one answer page per document).
 pub(super) const FOLD_WHY: &str = "ap-lx-why";
 pub(super) const FOLD_DASH: &str = "ap-lx-dash";
+
+/// The fold holding the element `id` (the page's in-page links go only to
+/// outcomes: `outcome-<i>` and `outcome-added-<k>`).
+pub(super) fn fold_of(id: &str) -> Option<&'static str> {
+    id.starts_with("outcome-").then_some(FOLD_WHY)
+}
+
+/// Unfold the fold `id` (browser only; nothing when it is not drawn, as
+/// with the switch off or when the rule drew no fold).
+pub(super) fn open_fold(id: &str) {
+    #[cfg(feature = "hydrate")]
+    {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(id))
+        {
+            let _ = web_sys::js_sys::Reflect::set(&el, &"checked".into(), &true.into());
+        }
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = id;
+    }
+}
 
 /// The button's text for the outcomes card: the real count.
 pub(super) fn show_all_outcomes(n: usize) -> String {
@@ -1812,6 +1845,33 @@ fn compare_view(c: &Ctx) -> AnyView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S1e (review I1): a jump to an outcome unfolds its fold first; the
+    /// CSS unclips a box holding the target or the focus before hydration.
+    #[test]
+    fn a_jump_into_a_fold_opens_it() {
+        assert_eq!(fold_of("outcome-40"), Some(FOLD_WHY));
+        assert_eq!(fold_of("outcome-added-2"), Some(FOLD_WHY));
+        assert_eq!(fold_of("ref-3"), None);
+        assert_eq!(fold_of("sheet-1"), None);
+        for rule in [
+            ".ap-lx-box:has(:target, :focus-visible) { overflow:visible; }",
+            ".ap-lx-box:has(:target, :focus-visible) > * { position:static; }",
+            ".ap-lx-box:has(:target, :focus-visible)::after { display:none; }",
+            ".ap-lx-r:has(.ap-lx-box :target, .ap-lx-box :focus-visible) > .ap-lx-cb:not(:checked) ~ .ap-lx-more { display:none; }",
+            "@media print {",
+            "@media (max-width:1099.98px) {",
+        ] {
+            assert!(LAYOUT_STYLE.contains(rule), "{rule}");
+        }
+        // go_to_outcome opens the fold before the link scrolls.
+        let src = include_str!("details.rs");
+        let f = &src[src.find("fn go_to_outcome").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        let open = f.find("open_fold(").expect("go_to_outcome opens the fold");
+        assert!(f.contains("fold_of(id)"));
+        assert!(open < f.find("set_attribute(\"open\"").unwrap());
+    }
 
     #[test]
     fn a_ref_hash_names_its_study_sheet() {

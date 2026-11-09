@@ -1692,3 +1692,37 @@ fn the_layout_view_writes_no_raw_html() {
     assert!(!src.contains("inner_html="));
     assert!(src.contains("fn layout_page_view") && src.contains("fn early_layout_view"));
 }
+
+/// S1e (review M5): with the switch off the early page's answer part is byte
+/// for byte what main drew before S1e (787442e;
+/// `tests/fixtures/s1e/main_early_ap.html`, the served page's
+/// `<div class="ap">` with scripts and streaming slots read as `markup`).
+#[tokio::test]
+async fn the_early_page_off_is_byte_identical_to_main() {
+    let Some(pool) = pool().await else { return };
+    let (uid, email) = new_user(&pool).await;
+    let run = writing(&pool, uid).await;
+    store_early(&pool, run, &early_via_body(true, true)).await;
+    let m = markup(
+        &page(&layout_state(pool.clone(), false), run, &email)
+            .await
+            .1,
+    );
+    let start = at(&m, r#"<div class="ap"><div class="ap-main ap-early">"#);
+    let mut depth = 0usize;
+    let mut end = start;
+    let tags = regex::Regex::new(r"<div\b|</div>").unwrap();
+    for t in tags.find_iter(&m[start..]) {
+        if t.as_str() == "</div>" {
+            depth -= 1;
+            if depth == 0 {
+                end = start + t.end();
+                break;
+            }
+        } else {
+            depth += 1;
+        }
+    }
+    let golden = include_str!("fixtures/s1e/main_early_ap.html");
+    assert!(&m[start..end] == golden, "differs from main");
+}
