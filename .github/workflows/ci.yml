@@ -72,7 +72,10 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       # RUSTSEC-2023-0071 (rsa) is in Cargo.lock only via sqlx-mysql, which is never compiled
       # (cargo tree -i rsa is empty); no fixed version exists.
-      - run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071
+      # RUSTSEC-2026-0459 (libsqlite3-sys, SQLite CVE) is in Cargo.lock only via sqlx-sqlite,
+      # which is never compiled (cargo tree -i libsqlite3-sys is empty; the app uses Postgres).
+      # Proper fix later: upgrade sqlx to a release on libsqlite3-sys >= 0.39 (owner, 9 Nov).
+      - run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
 
   container:
     needs: ci
