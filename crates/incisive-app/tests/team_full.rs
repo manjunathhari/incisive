@@ -2710,3 +2710,99 @@ async fn full_completes_a_marked_number_against_its_abstract() {
         "{l:?}"
     );
 }
+
+// ---------- S3: an empty study list (Full) ----------
+
+use incisive_app::agent::answer::EMPTY_SELECTION;
+use incisive_app::agent::researcher::{RETRY_LINE, RETRY_STEP_LINE};
+
+fn empty_list() -> Value {
+    json!({
+        "searches": [], "selected": [], "considered_not_selected": [], "possible_contradictions": []
+    })
+}
+
+/// S3, Full: the same researcher retries an empty list once (the Full final
+/// prompt, the one line appended) and the run goes on to a full answer.
+#[tokio::test]
+async fn full_an_empty_study_list_is_retried_once_and_answered() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    // Keyed first: the first final call gets the empty list, the retry the
+    // usual one from the rest of the script.
+    let base = ScriptedLlm::new()
+        .when(RESEARCHER_FINAL)
+        .reply_json(empty_list(), u());
+    let llm = Arc::new(full_script_into(base, 1));
+    let (ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_some());
+    let reqs = llm.requests();
+    let fins = by_key(&reqs, RESEARCHER_FINAL);
+    assert_eq!(fins.len(), 2);
+    let (first, retry) = (request_user_text(fins[0]), request_user_text(fins[1]));
+    assert_eq!(retry, format!("{first}\n\n{RETRY_LINE}"));
+    assert_eq!(fins[0].system, fins[1].system);
+    assert!(
+        fins[1]
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("up to 12 studies")
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert_eq!(
+        l.iter().filter(|x| *x == RETRY_STEP_LINE).count(),
+        1,
+        "{l:?}"
+    );
+    assert!(
+        l.iter()
+            .any(|x| x.starts_with("Researcher: selected 2 studies"))
+    );
+}
+
+/// S3, Full: empty twice ends `partial` (`empty_selection`) with the exact
+/// message, before the extractor, the skeptic or the writer.
+#[tokio::test]
+async fn full_an_empty_retry_ends_partial_with_empty_selection() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let base = ScriptedLlm::new()
+        .when(RESEARCHER_FINAL)
+        .reply_json(empty_list(), u())
+        .when(RESEARCHER_FINAL)
+        .reply_json(empty_list(), u());
+    let llm = Arc::new(full_script_into(base, 1));
+    let (ctx, _uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        DepthSettings::FOCUSED,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let body = match &out {
+        PipelineOutcome::PartialKind(v, "empty_selection") => v.clone(),
+        other => panic!("{other:?}"),
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_none());
+    assert_eq!(a.empty_reason.as_deref(), Some(EMPTY_SELECTION));
+    let reqs = llm.requests();
+    assert_eq!(by_key(&reqs, RESEARCHER_FINAL).len(), 2);
+    assert!(by_key(&reqs, SKEPTIC_KEY).is_empty());
+    assert!(by_key(&reqs, STUDIES_HEADING).is_empty());
+}
