@@ -80,7 +80,9 @@ async fn the_step_never_logs_its_texts() {
     let m_abs = format!("zqxabstract{}", Uuid::new_v4().simple());
     let m_reply = format!("zqxreply{}", Uuid::new_v4().simple());
     let text = format!("{m_text} had 20 infants [{pmid}].");
-    let s = text.find("20").unwrap();
+    // Find " 20 " (not "20" alone): the random marker before it is hex and
+    // can itself contain "20", which put the span in the wrong place.
+    let s = text.find(" 20 ").unwrap() + 1;
     let abs = format!("{m_abs}: 10 robotic and 10 open infants.");
     let a: AnswerV3 = serde_json::from_value(json!({
         "version": 3, "question": "q", "mode": "quick", "created_at": "2026-11-09T00:00:00Z",
