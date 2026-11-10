@@ -858,3 +858,92 @@ async fn the_parts_draft_is_cleared_before_the_one_piece_writer() {
     // ... and it was gone when the one-piece writer started.
     assert_eq!(*probe.seen.lock().unwrap(), [0]);
 }
+
+// ---------- S3: the empty study list retry beside the four-part reserve ----------
+
+fn empty_list() -> Value {
+    json!({
+        "searches": [], "selected": [], "considered_not_selected": [], "possible_contradictions": []
+    })
+}
+
+fn final_requests(llm: &ScriptedLlm) -> Vec<MessagesRequest> {
+    llm.requests()
+        .into_iter()
+        .filter(|r| request_user_text(r).contains(FINAL_KEY) && r.tools.is_empty())
+        .filter(|r| !request_user_text(r).contains(STUDIES_HEADING))
+        .collect()
+}
+
+/// S3 review M1: the retry is a gathering call and leaves the four parts'
+/// reserve free. When the first final call's charge leaves room only in the
+/// reserve (about ₹1 above it, less than the retry's estimate), the retry is
+/// refused although the limit itself still has the reserve's room:
+/// `empty_selection`, no retry request, no step line.
+#[tokio::test]
+async fn the_retry_never_takes_the_four_part_reserve() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (_single, parallel, limit) = reserves();
+    let b = RunBudget::new(Uuid::nil(), 1, 1, Instant::now(), prices(), 88.0);
+    let turn_cost = b.cost_of(MODEL, &u()).unwrap();
+    // The first final call's cost: spent = limit - reserve - 100 paise.
+    let target = limit - parallel - 100 - 3 * turn_cost;
+    let mut out_tokens = 0u32;
+    while b.cost_of(MODEL, &usage(1000, out_tokens + 1000)).unwrap() <= target {
+        out_tokens += 1000;
+    }
+    let llm = Arc::new(sections_script(
+        ScriptedLlm::new()
+            .when(FINAL_KEY)
+            .reply_json(empty_list(), usage(1000, out_tokens)),
+    ));
+    let (ctx, uid) = ctx_with(&pool, &server, &llm, limit, true).await;
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(out, PipelineOutcome::PartialKind(_, "empty_selection")),
+        "{out:?}"
+    );
+    assert_eq!(ctx.budget.committed().finish_reserve, parallel);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let spent = ctx.budget.spent();
+    assert!(
+        spent <= limit - parallel,
+        "the reserve is untouched: {spent}"
+    );
+    assert!(limit - spent > 500, "the limit itself had room: {spent}");
+    assert_eq!(ctx.budget.held(), 0);
+    assert_eq!(final_requests(&llm).len(), 1, "no retry");
+    assert!(writer_requests(&llm).is_empty());
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(
+        !l.contains(&incisive_app::agent::researcher::RETRY_STEP_LINE.to_string()),
+        "{l:?}"
+    );
+}
+
+/// S3 review M1: with room for it, the retry is made beside the four-part
+/// reserve and the four parts are still written.
+#[tokio::test]
+async fn a_retry_beside_the_four_part_reserve_still_leaves_the_writers_room() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let (_single, parallel, limit) = reserves();
+    let llm = Arc::new(sections_script(
+        ScriptedLlm::new()
+            .when(FINAL_KEY)
+            .reply_json(empty_list(), u()),
+    ));
+    let (ctx, uid) = ctx_with(&pool, &server, &llm, limit, true).await;
+    let out = run_team(&ctx).await;
+    assert!(matches!(out, PipelineOutcome::Done(_)), "{out:?}");
+    assert!(body_of(&out).answer.is_some());
+    assert_eq!(ctx.budget.committed().finish_reserve, parallel);
+    assert!(ctx.budget.spent() <= limit);
+    assert_eq!(final_requests(&llm).len(), 2, "one retry");
+    for s in Section::ALL {
+        assert_eq!(section_requests(&llm, s).len(), 1, "{s:?} once");
+    }
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(l.contains(&incisive_app::agent::researcher::RETRY_STEP_LINE.to_string()));
+}

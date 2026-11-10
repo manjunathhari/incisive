@@ -1920,3 +1920,385 @@ async fn a_partial_run_leaves_no_draft() {
     assert_eq!(r.0, RunStatus::Partial, "{:?}", r.3);
     assert_eq!(draft_rows(&pool, r.5).await, 0);
 }
+
+// ---------- S3: an empty study list ----------
+
+use incisive_app::agent::answer::EMPTY_SELECTION;
+use incisive_app::agent::researcher::{RETRY_LINE, RETRY_STEP_LINE};
+
+/// Nothing selected and nothing considered: the reply that skipped the task.
+fn empty_list() -> Value {
+    json!({
+        "searches": [], "selected": [], "considered_not_selected": [], "possible_contradictions": []
+    })
+}
+
+/// The researcher's study-list requests (the first final call and any retry).
+fn final_requests(llm: &ScriptedLlm) -> Vec<MessagesRequest> {
+    llm.requests()
+        .into_iter()
+        .filter(|r| request_user_text(r).contains(FINAL_KEY) && r.tools.is_empty())
+        .filter(|r| !request_user_text(r).contains(STUDIES_HEADING))
+        .collect()
+}
+
+/// S3: an empty list after papers were seen is retried once, with the same
+/// transcript, system prompt, schema and `max_tokens` plus the one line; a
+/// usable retry carries on to a normal answer, and the step line says so.
+#[tokio::test]
+async fn an_empty_study_list_is_retried_once_and_the_retry_is_answered() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new())
+            .reply_json(empty_list(), u())
+            .reply_json(study_list(&[(SEEN_A, "RCT"), (SEEN_B, "SR_MA")]), u())
+            .when(STUDIES_HEADING)
+            .reply_json(writer_json(), usage(3000, 2500)),
+    );
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert!(a.answer.is_some());
+    assert_eq!(a.empty_reason, None);
+    assert_eq!(a.references.len(), 2);
+    assert_eq!(writer_requests(&llm).len(), 1);
+
+    let fins = final_requests(&llm);
+    assert_eq!(fins.len(), 2, "the first final call and one retry");
+    let (first, retry) = (request_user_text(&fins[0]), request_user_text(&fins[1]));
+    assert_eq!(retry, format!("{first}\n\n{RETRY_LINE}"));
+    assert_eq!(fins[0].system, fins[1].system);
+    assert_eq!(fins[0].max_tokens, fins[1].max_tokens);
+    assert_eq!(fins[0].output_config, fins[1].output_config);
+    assert_eq!(fins[1].model, MODEL);
+
+    let l = lines(&steps_of(&ctx, uid).await);
+    let at = |s: &str| l.iter().position(|x| x == s);
+    let retried = at(RETRY_STEP_LINE).expect("retry line");
+    let selected = at("Researcher: selected 2 studies (1 RCT, 1 meta-analysis)").expect("selected");
+    assert!(retried < selected, "{l:?}");
+    assert_eq!(l.iter().filter(|x| *x == RETRY_STEP_LINE).count(), 1);
+}
+
+/// S3: still empty after the retry: `partial`, `empty_selection`, the exact
+/// message and the search trail; no writer call and no second retry.
+#[tokio::test]
+async fn an_empty_retry_ends_partial_with_empty_selection() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new())
+            .reply_json(empty_list(), u())
+            .reply_json(empty_list(), u()),
+    );
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(out, PipelineOutcome::PartialKind(_, "empty_selection")),
+        "{out:?}"
+    );
+    let a = body_of(&out);
+    assert!(a.answer.is_none());
+    assert_eq!(
+        a.empty_reason.as_deref(),
+        Some("No studies could be selected from the papers found. Please run the question again.")
+    );
+    assert_eq!(a.empty_reason.as_deref(), Some(EMPTY_SELECTION));
+    assert_eq!(a.searches.len(), 1, "the trail is kept");
+    assert!(a.references.is_empty());
+    assert!(writer_requests(&llm).is_empty());
+    assert_eq!(final_requests(&llm).len(), 2);
+    assert_eq!(
+        llm.requests().len(),
+        5,
+        "three turns, the final call, one retry"
+    );
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+    assert!(
+        !l.iter().any(|x| x.starts_with("Researcher: selected")),
+        "{l:?}"
+    );
+    assert_eq!(l.last().map(String::as_str), Some("Answer ready"));
+}
+
+/// S3: a reply that lists considered papers but selects none is a genuine
+/// "no relevant evidence": no retry, unchanged.
+#[tokio::test]
+async fn considered_but_none_selected_is_not_retried() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(research_script(ScriptedLlm::new()).reply_json(study_list(&[]), u()));
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(a.empty_reason.as_deref(), Some(NO_EVIDENCE));
+    assert_eq!(llm.requests().len(), 4, "no retry, no writer");
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3: when the searches returned no papers, an empty list is not retried.
+#[tokio::test]
+async fn an_empty_list_with_no_papers_seen_is_not_retried() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    // A tool the model was not offered: an error result, nothing seen.
+    let llm = Arc::new(
+        turn(
+            ScriptedLlm::new(),
+            vec![tool_call("x1", "get_full_text", json!({"pmcid": "PMC1"}))],
+        )
+        .reply_blocks(
+            vec![ContentBlock::Text { text: "ok".into() }],
+            Some(StopReason::EndTurn),
+            u(),
+        )
+        .reply_json(empty_list(), u()),
+    );
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(a.empty_reason.as_deref(), Some(NO_EVIDENCE));
+    assert_eq!(llm.requests().len(), 3, "two turns and the final call");
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3: a retry whose hold is refused (the first final call's charge left
+/// less than its estimate) is not made: no retry line, `empty_selection`,
+/// nothing over the limit and nothing left held.
+#[tokio::test]
+async fn a_retry_that_does_not_fit_is_not_made() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    // 132,000 output tokens at $5/Mtok and ₹88/$: about ₹58.2 of the ₹60.
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new())
+            .reply_json(empty_list(), usage(1000, 132_000))
+            .reply_json(study_list(&[(SEEN_A, "RCT")]), u()),
+    );
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let r = research(&ctx, &ctx.llm, ctx.lit.clone()).await.unwrap();
+    assert!(r.empty_selection);
+    assert!(!r.final_failed);
+    assert!(r.selected.is_empty());
+    assert_eq!(r.searches.len(), 1);
+    assert_eq!(llm.requests().len(), 4, "no retry request");
+    assert_eq!(llm.remaining(), 1, "the retry's reply is unused");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(ctx.budget.spent() <= 6000);
+    assert_eq!(ctx.budget.held(), 0);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3: near the hard stop the retry is not made either.
+#[tokio::test]
+async fn no_retry_near_the_hard_stop() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    // One turn (then wrap-up for time), the empty list, the unused retry.
+    let llm = Arc::new(
+        turn(
+            ScriptedLlm::new(),
+            vec![tool_call(
+                "s1",
+                "search_pubmed",
+                json!({"query": "mesh[tiab] AND hernia[tiab]", "max_results": 5}),
+            )],
+        )
+        .reply_json(empty_list(), u())
+        .reply_json(study_list(&[(SEEN_A, "RCT")]), u()),
+    );
+    let settings = DepthSettings::QUICK;
+    let (uid, run, user) = new_run(&pool, 6000).await;
+    incisive_app::runs::store::set_status(&pool, run, RunStatus::Running, None)
+        .await
+        .unwrap();
+    let lit = literature(&server);
+    let hard = Duration::from_secs(u64::from(settings.agent_time_limit_s) + 60);
+    let budget = Arc::new(
+        RunBudget::new(run, uid, 6000, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s)
+            .aged_for_test(hard - Duration::from_secs(20)),
+    );
+    let ctx = RunContext {
+        state: app_state(pool.clone(), lit.clone()),
+        llm: agent_llm(llm.clone(), MODEL),
+        lit,
+        run_id: run,
+        user,
+        question: QUESTION.to_string(),
+        mode: RunMode::Quick,
+        settings,
+        budget,
+        cancel: CancelFlag::default(),
+    };
+    let r = research(&ctx, &ctx.llm, ctx.lit.clone()).await.unwrap();
+    assert!(r.empty_selection, "{r:?}");
+    assert_eq!(final_requests(&llm).len(), 1, "no retry");
+    assert_eq!(llm.remaining(), 1);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3: a retry that fails (the call errors) is not retried again:
+/// `empty_selection`.
+#[tokio::test]
+async fn a_failed_retry_ends_empty_selection() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        research_script(ScriptedLlm::new())
+            .reply_json(empty_list(), u())
+            .reply_text("not json", u())
+            .reply_json(study_list(&[(SEEN_A, "RCT")]), u()),
+    );
+    let (ctx, _uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(out, PipelineOutcome::PartialKind(_, "empty_selection")),
+        "{out:?}"
+    );
+    assert_eq!(
+        final_requests(&llm).len(),
+        2,
+        "one retry, no JSON retry of it"
+    );
+    assert_eq!(llm.remaining(), 1);
+}
+
+/// S3 review I1: with more than the retry's own time but less than the
+/// writer's minimum (150 s) plus it left before the hard stop, the retry is
+/// not made (a writer could not follow it): no step line, `empty_selection`.
+#[tokio::test]
+async fn no_retry_when_the_writer_could_not_follow_it() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        turn(
+            ScriptedLlm::new(),
+            vec![tool_call(
+                "s1",
+                "search_pubmed",
+                json!({"query": "mesh[tiab] AND hernia[tiab]", "max_results": 5}),
+            )],
+        )
+        .reply_json(empty_list(), u())
+        .reply_json(study_list(&[(SEEN_A, "RCT")]), u()),
+    );
+    let settings = DepthSettings::QUICK;
+    let (mut ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        settings,
+    )
+    .await;
+    let hard = Duration::from_secs(u64::from(settings.agent_time_limit_s) + 60);
+    // 160 s left: above 30 s, below 150 s + 30 s.
+    ctx.budget = Arc::new(
+        RunBudget::new(ctx.run_id, uid, 6000, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s)
+            .aged_for_test(hard - Duration::from_secs(160)),
+    );
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(out, PipelineOutcome::PartialKind(_, "empty_selection")),
+        "{out:?}"
+    );
+    assert_eq!(body_of(&out).empty_reason.as_deref(), Some(EMPTY_SELECTION));
+    assert_eq!(final_requests(&llm).len(), 1, "no retry");
+    assert_eq!(llm.remaining(), 1);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3 review M2: a reply whose selected studies are all unseen (dropped)
+/// is not an empty list: no retry, "No relevant evidence found." as before.
+#[tokio::test]
+async fn all_unseen_selections_are_not_retried() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(research_script(ScriptedLlm::new()).reply_json(
+        json!({
+            "searches": [],
+            "selected": [{"pmid": UNSEEN, "design": "RCT", "why": "from memory"}],
+            "considered_not_selected": [],
+            "possible_contradictions": []
+        }),
+        u(),
+    ));
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(a.empty_reason.as_deref(), Some(NO_EVIDENCE));
+    assert_eq!(a.integrity.dropped_unseen, 1);
+    assert_eq!(llm.requests().len(), 4, "no retry, no writer");
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}

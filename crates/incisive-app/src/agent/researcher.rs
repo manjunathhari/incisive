@@ -25,6 +25,27 @@
 //! An empty valid selection is not an error: the team pipeline then ends
 //! with "No relevant evidence found".
 //!
+//! **Empty study list (S3).** A reply with `selected` **and**
+//! `considered_not_selected` both empty while the searches returned papers
+//! is not a judgement (a real "nothing fits" lists what it rejected): the
+//! model skipped the task. It is logged (a warning, numbers only) and the
+//! final call is made **once** more with the same system
+//! prompt, schema and `max_tokens` over the same transcript, plus
+//! [`RETRY_LINE`]. The retry is one ordinary gathering call (hold from
+//! what is left of the limit, leaving the finish reserve free; call and
+//! charge; settle) with no JSON retry of its own; once its hold is taken,
+//! the step line [`RETRY_STEP_LINE`] ("Researcher: the study list came back
+//! empty; selecting again") says so. It is not made when less than the
+//! writer's minimum time ([`super::team::writer_min_time`]: Quick 150 s,
+//! Full 180 s) plus [`RETRY_MIN_TIME`] is left before the hard stop (a
+//! retry the writer could not follow would only spend money and end the run
+//! `writer_time`); a refused hold, a failed call or an unreadable reply ends
+//! it there. A usable retry carries
+//! on exactly as a first reply does; an empty one, or no retry, sets
+//! [`Research::empty_selection`] and the run ends `partial`
+//! (`empty_selection`). A reply that lists considered papers but selects
+//! none, or a run whose searches returned no papers, is unchanged.
+//!
 //! **Search trail.** The searches shown to the user are recorded by code as
 //! the tools run (query, database, hit count from the tool's own result),
 //! not taken from the model's `searches`, whose counts could be wrong.
@@ -476,6 +497,23 @@ the majority view, with a one-line note.";
 
 const FINAL_INSTRUCTION: &str = "Submit the study list now, as JSON matching the schema.";
 
+/// Appended to the final call's user text for the one retry of an empty
+/// study list (S3).
+pub const RETRY_LINE: &str = "Classify every candidate: put each relevant study in selected and each other paper you assessed in considered_not_selected.";
+
+/// The step line while the empty study list is retried (S3).
+pub const RETRY_STEP_LINE: &str = "Researcher: the study list came back empty; selecting again";
+
+/// The retry's own time (one low-effort call takes about 5 to 15 s): the
+/// empty study list is not retried with less than the writer's minimum time
+/// plus this left before the hard stop.
+pub const RETRY_MIN_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Nothing selected and nothing considered: the model skipped the task (S3).
+fn is_empty_list(list: &StudyList) -> bool {
+    list.selected.is_empty() && list.considered_not_selected.is_empty()
+}
+
 /// The first user message: the question, as data.
 pub fn task(question: &str) -> String {
     format!(
@@ -502,6 +540,10 @@ pub struct Research {
     /// read (review finding 1): nothing is selected, and the run ends
     /// `partial`, not `failed`.
     pub final_failed: bool,
+    /// S3: the study list came back empty although papers were seen, and
+    /// its one retry was empty too or could not be made. Nothing is
+    /// selected; the run ends `partial` (`empty_selection`).
+    pub empty_selection: bool,
 }
 
 impl Research {
@@ -638,15 +680,60 @@ pub async fn research(
                 stop: LoopStop::Other,
                 rounds,
                 final_failed: true,
+                empty_selection: false,
             });
         }
         Err(e) => return Err(e),
     };
 
     let seen = seen_pmids(&run.results);
-    let reported = run.output.selected.len();
-    let considered = run.output.considered_not_selected.len();
-    let v = validate_capped(run.output, &seen, max_selected(ctx.mode));
+    let mut output = run.output;
+    if is_empty_list(&output) && !seen.is_empty() {
+        let rounds = run.log.turns.len();
+        tracing::warn!(
+            run_id = %ctx.run_id,
+            seen = seen.len(),
+            reported = output.selected.len(),
+            considered = output.considered_not_selected.len(),
+            rounds,
+            "researcher returned an empty study list"
+        );
+        let retry = retry_empty(ctx, &call, &spec, &run.final_user).await?;
+        match retry {
+            Some(list) if !is_empty_list(&list) => {
+                tracing::info!(
+                    run_id = %ctx.run_id,
+                    outcome = "usable",
+                    reported = list.selected.len(),
+                    considered = list.considered_not_selected.len(),
+                    "researcher study list retry"
+                );
+                output = list;
+            }
+            other => {
+                tracing::warn!(
+                    run_id = %ctx.run_id,
+                    outcome = if other.is_some() { "empty" } else { "not_made" },
+                    seen = seen.len(),
+                    rounds,
+                    "researcher study list retry"
+                );
+                return Ok(Research {
+                    selected: Vec::new(),
+                    contradictions: Vec::new(),
+                    searches: rec.searches(),
+                    dropped_unseen: 0,
+                    stop: run.log.stop,
+                    rounds,
+                    final_failed: false,
+                    empty_selection: true,
+                });
+            }
+        }
+    }
+    let reported = output.selected.len();
+    let considered = output.considered_not_selected.len();
+    let v = validate_capped(output, &seen, max_selected(ctx.mode));
     let rcts = v
         .selected
         .iter()
@@ -702,7 +789,64 @@ pub async fn research(
         stop: run.log.stop,
         rounds: run.log.turns.len(),
         final_failed: false,
+        empty_selection: false,
     })
+}
+
+/// The one retry of an empty study list (see the module docs): the final
+/// call again with [`RETRY_LINE`] appended, as one ordinary call. `None`:
+/// not made (less than the writer's minimum time plus [`RETRY_MIN_TIME`]
+/// left before the hard stop, or its hold refused: no step line), failed,
+/// or unreadable; logged by kind only. If the hold is taken but the call
+/// then fails or its reply cannot be read, the retry line has already been
+/// shown and the run then ends with the `empty_selection` message. Cancel
+/// and unbooked money propagate.
+async fn retry_empty(
+    ctx: &RunContext,
+    call: &super::llm::LlmCall,
+    spec: &AgentSpec<'_>,
+    final_user: &str,
+) -> Result<Option<StudyList>, StepError> {
+    let left = ctx.budget.until_hard_stop(std::time::Instant::now());
+    if left < super::team::writer_min_time(ctx.mode) + RETRY_MIN_TIME {
+        tracing::info!(run_id = %ctx.run_id, left_s = left.as_secs(), "study list retry not made: near the hard stop");
+        return Ok(None);
+    }
+    let user = format!("{final_user}\n\n{RETRY_LINE}");
+    let not_made = |e: StepError| {
+        tracing::info!(run_id = %ctx.run_id, error_kind = e.kind(), "study list retry not made or failed");
+    };
+    // The hold is taken here (cancel check, hold, spawned call and charge);
+    // the line says so only once the retry is really under way.
+    let started = match call.start(
+        spec.final_system,
+        &user,
+        Some(spec.final_schema),
+        spec.final_max_tokens,
+    ) {
+        Ok(s) => s,
+        Err(e @ StepError::Cancelled) => return Err(e),
+        Err(e) => {
+            not_made(e);
+            return Ok(None);
+        }
+    };
+    add_line(ctx, StepKind::Note, RETRY_STEP_LINE).await;
+    let reply = match started.wait().await {
+        Ok(r) => r,
+        Err(e @ (StepError::Cancelled | StepError::Unrecorded)) => return Err(e),
+        Err(e) => {
+            not_made(e);
+            return Ok(None);
+        }
+    };
+    match super::llm::read_structured::<StudyList>(&reply) {
+        Ok(list) => Ok(Some(list)),
+        Err(fault) => {
+            super::llm::log_unreadable(call, &reply, fault, "study list retry unreadable");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]

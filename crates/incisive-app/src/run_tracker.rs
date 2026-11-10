@@ -284,6 +284,9 @@ fn role_of(line: &str, last: &'static str) -> (&'static str, String) {
     (role, line.to_string())
 }
 
+/// The sentence while the researcher's empty study list is retried (S3).
+const RESELECTING: &str = "Selecting the studies again";
+
 /// What the lines build up to.
 #[derive(Default)]
 struct Seen {
@@ -367,9 +370,15 @@ impl Seen {
                     if let Some((_, mix)) = rest.split_once(" (") {
                         self.selected_mix = mix.trim_end_matches(')').to_string();
                     }
+                    if self.sentence.as_deref() == Some(RESELECTING) {
+                        self.sentence = None;
+                    }
                     self.raise(search_end);
                 } else if body.starts_with("searching ") {
                     self.sentence = Some("Searching PubMed and Europe PMC".into());
+                } else if body.starts_with("the study list came back empty") {
+                    // S3: the study list is being made again.
+                    self.sentence = Some(RESELECTING.into());
                 } else if body.contains(" so far") {
                     self.searches = lead_number(body).or(self.searches);
                     if let Some((t, of)) = turn_of(body) {
@@ -1018,6 +1027,47 @@ mod tests {
         assert!(tr.recognised);
         assert_eq!(tr.rolling, "No colon at all");
         assert_eq!(tr.role, "Researcher");
+    }
+
+    /// S3: the researcher's retry line of an empty study list keeps the searches counted, says it is
+    /// selecting again, and gives way once the studies are selected; a run
+    /// that stays empty shows the stored message.
+    #[test]
+    fn the_empty_study_list_retry_line_reads_sensibly() {
+        let retry = "Researcher: the study list came back empty; selecting again";
+        #[cfg(feature = "ssr")]
+        assert_eq!(retry, crate::agent::researcher::RETRY_STEP_LINE);
+        let lines = [
+            "Researcher: searching PubMed and Europe PMC",
+            "Researcher: 5 searches so far (turn 4 of 8)",
+            retry,
+        ];
+        let tr = read(RunMode::Quick, &steps(&lines), RunState::Working, None);
+        assert!(tr.recognised);
+        assert_eq!(tr.role, "Researcher");
+        assert_eq!(
+            tr.rolling,
+            "The study list came back empty; selecting again"
+        );
+        assert_eq!(tr.sentence, "Selecting the studies again");
+        assert_eq!(row(&tr, "Searches run").value, number(5));
+        assert_eq!(row(&tr, "Studies selected").value, Value::Pending);
+
+        let mut more = lines.to_vec();
+        more.push("Researcher: selected 10 studies (8 RCTs, 2 meta-analyses)");
+        let tr = read(RunMode::Quick, &steps(&more), RunState::Working, None);
+        assert_eq!(row(&tr, "Studies selected").value, number(10));
+        assert_eq!(tr.sentence, "Searching PubMed and Europe PMC");
+        for mode in [RunMode::Quick, RunMode::Focused] {
+            let mut ended = lines.to_vec();
+            ended.push("Search stopped at the Quick limit after 4 rounds");
+            ended.push("Answer ready");
+            let msg = "No studies could be selected from the papers found. Please run the question again.";
+            let tr = read(mode, &steps(&ended), RunState::EndedEmpty, Some(msg));
+            assert_eq!(tr.sentence, msg);
+            assert_eq!(row(&tr, "Searches run").value, number(5));
+            assert!(!tr.ended_well);
+        }
     }
 
     #[test]

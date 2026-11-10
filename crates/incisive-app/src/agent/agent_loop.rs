@@ -306,6 +306,11 @@ pub struct AgentRun<T> {
     /// Every successful tool result as the model saw it (capped, wrapped),
     /// in order. Paper data: never logged.
     pub results: Vec<String>,
+    /// The final call's user message exactly as sent (the task, the
+    /// research transcript and the submit instruction), so a role can repeat
+    /// that call (S3: the researcher's one retry of an empty study list).
+    /// Holds the question and paper data: never logged.
+    pub final_user: String,
 }
 
 /// Told about every completed turn (its content-free log), before the next
@@ -768,6 +773,7 @@ pub async fn run_agent_observed<T: DeserializeOwned>(
         output,
         log,
         results: seen,
+        final_user: user,
     })
 }
 

@@ -90,6 +90,10 @@
 //!   a failed final study-list call after research: `partial`
 //!   (`researcher_incomplete`) with "No answer could be written: the
 //!   search stopped early…";
+//! * an empty study list (nothing selected, nothing considered, papers
+//!   seen) whose one retry was empty too or could not be made (S3):
+//!   `partial` (`empty_selection`) with "No studies could be selected from
+//!   the papers found. Please run the question again." and the trail;
 //! * nothing valid selected after a complete search: `done`, "No relevant
 //!   evidence found."; after research stopped early: `partial`;
 //! * the selected studies' records cannot be fetched at all: `failed`
@@ -110,7 +114,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use super::answer::{NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
+use super::answer::{EMPTY_SELECTION, NO_EVIDENCE, STOPPED_NO_ANSWER, WRITE_REFUSED};
 use super::answer_v3::{
     ANSWER_VERSION, AnswerV3, EvidenceV3, IntegrityV3, NotableFinding, ReferenceV3, SkepticItem,
     SkepticLead, SkepticOverlap, SkepticV3, Span, UnverifiedOutcomeV3,
@@ -362,6 +366,9 @@ async fn run(ctx: &RunContext) -> Result<(AnswerV3, Status), Stop> {
     let mut answer = base(ctx, &research, integrity);
     if research.final_failed {
         return Ok(unwritten(ctx, answer, STOPPED_NO_ANSWER, "researcher_incomplete").await);
+    }
+    if research.empty_selection {
+        return Ok(unwritten(ctx, answer, EMPTY_SELECTION, "empty_selection").await);
     }
     if research.selected.is_empty() {
         answer.empty_reason = Some(

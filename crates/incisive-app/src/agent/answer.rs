@@ -24,6 +24,12 @@ pub const NO_EVIDENCE: &str = "No relevant evidence found.";
 /// Bottom line when the search stopped early (cost or time limit) and no
 /// claim was written: not "no evidence", since the search was cut short.
 pub const STOPPED_NO_ANSWER: &str = "No answer could be written: the search stopped early, before enough evidence was read and checked.";
+/// Bottom line when the researcher's study list came back empty (nothing
+/// selected and nothing listed as considered, although the searches returned
+/// papers) and its one retry was empty too or could not be made (S3,
+/// `empty_selection`).
+pub const EMPTY_SELECTION: &str =
+    "No studies could be selected from the papers found. Please run the question again.";
 /// Bottom line when Write was refused for budget (the evidence may all have
 /// been read; only the write-up did not fit).
 pub const WRITE_REFUSED: &str = "The cost limit was reached before the answer could be written.";
