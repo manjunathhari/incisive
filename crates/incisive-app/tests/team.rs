@@ -2220,3 +2220,85 @@ async fn a_failed_retry_ends_empty_selection() {
     );
     assert_eq!(llm.remaining(), 1);
 }
+
+/// S3 review I1: with more than the retry's own time but less than the
+/// writer's minimum (150 s) plus it left before the hard stop, the retry is
+/// not made (a writer could not follow it): no step line, `empty_selection`.
+#[tokio::test]
+async fn no_retry_when_the_writer_could_not_follow_it() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(
+        turn(
+            ScriptedLlm::new(),
+            vec![tool_call(
+                "s1",
+                "search_pubmed",
+                json!({"query": "mesh[tiab] AND hernia[tiab]", "max_results": 5}),
+            )],
+        )
+        .reply_json(empty_list(), u())
+        .reply_json(study_list(&[(SEEN_A, "RCT")]), u()),
+    );
+    let settings = DepthSettings::QUICK;
+    let (mut ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        settings,
+    )
+    .await;
+    let hard = Duration::from_secs(u64::from(settings.agent_time_limit_s) + 60);
+    // 160 s left: above 30 s, below 150 s + 30 s.
+    ctx.budget = Arc::new(
+        RunBudget::new(ctx.run_id, uid, 6000, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s)
+            .aged_for_test(hard - Duration::from_secs(160)),
+    );
+    let out = run_team(&ctx).await;
+    assert!(
+        matches!(out, PipelineOutcome::PartialKind(_, "empty_selection")),
+        "{out:?}"
+    );
+    assert_eq!(body_of(&out).empty_reason.as_deref(), Some(EMPTY_SELECTION));
+    assert_eq!(final_requests(&llm).len(), 1, "no retry");
+    assert_eq!(llm.remaining(), 1);
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}
+
+/// S3 review M2: a reply whose selected studies are all unseen (dropped)
+/// is not an empty list: no retry, "No relevant evidence found." as before.
+#[tokio::test]
+async fn all_unseen_selections_are_not_retried() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let llm = Arc::new(research_script(ScriptedLlm::new()).reply_json(
+        json!({
+            "searches": [],
+            "selected": [{"pmid": UNSEEN, "design": "RCT", "why": "from memory"}],
+            "considered_not_selected": [],
+            "possible_contradictions": []
+        }),
+        u(),
+    ));
+    let (ctx, uid) = quick_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        6000,
+        DepthSettings::QUICK,
+    )
+    .await;
+    let out = run_team(&ctx).await;
+    let PipelineOutcome::Done(body) = out else {
+        panic!("{out:?}")
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(a.empty_reason.as_deref(), Some(NO_EVIDENCE));
+    assert_eq!(a.integrity.dropped_unseen, 1);
+    assert_eq!(llm.requests().len(), 4, "no retry, no writer");
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}

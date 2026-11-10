@@ -2806,3 +2806,42 @@ async fn full_an_empty_retry_ends_partial_with_empty_selection() {
     assert!(by_key(&reqs, SKEPTIC_KEY).is_empty());
     assert!(by_key(&reqs, STUDIES_HEADING).is_empty());
 }
+
+/// S3 review I1, Full: less than the writer's minimum (180 s) plus the
+/// retry's own time left: no retry, no step line, `empty_selection`.
+#[tokio::test]
+async fn full_no_retry_when_the_writer_could_not_follow_it() {
+    let Some(pool) = pool().await else { return };
+    let server = hernia_server().await;
+    let base = ScriptedLlm::new()
+        .when(RESEARCHER_FINAL)
+        .reply_json(empty_list(), u());
+    let llm = Arc::new(full_script_into(base, 1));
+    let settings = DepthSettings::FOCUSED;
+    let (mut ctx, uid) = full_ctx(
+        &pool,
+        literature(&server),
+        agent_llm(llm.clone(), MODEL),
+        20000,
+        settings,
+    )
+    .await;
+    let hard = Duration::from_secs(u64::from(settings.agent_time_limit_s) + 60);
+    // 190 s left: above 30 s, below 180 s + 30 s.
+    ctx.budget = Arc::new(
+        RunBudget::new(ctx.run_id, uid, 20000, Instant::now(), prices(), 88.0)
+            .with_time_limit(settings.agent_time_limit_s)
+            .aged_for_test(hard - Duration::from_secs(190)),
+    );
+    let out = run_team(&ctx).await;
+    let body = match &out {
+        PipelineOutcome::PartialKind(v, "empty_selection") => v.clone(),
+        other => panic!("{other:?}"),
+    };
+    let a: AnswerV3 = serde_json::from_value(body).unwrap();
+    assert_eq!(a.empty_reason.as_deref(), Some(EMPTY_SELECTION));
+    let reqs = llm.requests();
+    assert_eq!(by_key(&reqs, RESEARCHER_FINAL).len(), 1, "no retry");
+    let l = lines(&steps_of(&ctx, uid).await);
+    assert!(!l.contains(&RETRY_STEP_LINE.to_string()), "{l:?}");
+}

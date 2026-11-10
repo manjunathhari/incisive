@@ -35,9 +35,12 @@
 //! what is left of the limit, leaving the finish reserve free; call and
 //! charge; settle) with no JSON retry of its own; once its hold is taken,
 //! the step line [`RETRY_STEP_LINE`] ("Researcher: the study list came back
-//! empty; selecting again") says so. It is not made when less
-//! than [`RETRY_MIN_TIME`] is left before the hard stop; a refused hold, a
-//! failed call or an unreadable reply ends it there. A usable retry carries
+//! empty; selecting again") says so. It is not made when less than the
+//! writer's minimum time ([`super::team::writer_min_time`]: Quick 150 s,
+//! Full 180 s) plus [`RETRY_MIN_TIME`] is left before the hard stop (a
+//! retry the writer could not follow would only spend money and end the run
+//! `writer_time`); a refused hold, a failed call or an unreadable reply ends
+//! it there. A usable retry carries
 //! on exactly as a first reply does; an empty one, or no retry, sets
 //! [`Research::empty_selection`] and the run ends `partial`
 //! (`empty_selection`). A reply that lists considered papers but selects
@@ -501,8 +504,9 @@ pub const RETRY_LINE: &str = "Classify every candidate: put each relevant study 
 /// The step line while the empty study list is retried (S3).
 pub const RETRY_STEP_LINE: &str = "Researcher: the study list came back empty; selecting again";
 
-/// The empty study list is not retried with less than this left before the
-/// hard stop (one low-effort call takes about 5 to 15 s).
+/// The retry's own time (one low-effort call takes about 5 to 15 s): the
+/// empty study list is not retried with less than the writer's minimum time
+/// plus this left before the hard stop.
 pub const RETRY_MIN_TIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Nothing selected and nothing considered: the model skipped the task (S3).
@@ -791,8 +795,12 @@ pub async fn research(
 
 /// The one retry of an empty study list (see the module docs): the final
 /// call again with [`RETRY_LINE`] appended, as one ordinary call. `None`:
-/// not made (too close to the hard stop, or its hold refused), failed, or
-/// unreadable; logged by kind only. Cancel and unbooked money propagate.
+/// not made (less than the writer's minimum time plus [`RETRY_MIN_TIME`]
+/// left before the hard stop, or its hold refused: no step line), failed,
+/// or unreadable; logged by kind only. If the hold is taken but the call
+/// then fails or its reply cannot be read, the retry line has already been
+/// shown and the run then ends with the `empty_selection` message. Cancel
+/// and unbooked money propagate.
 async fn retry_empty(
     ctx: &RunContext,
     call: &super::llm::LlmCall,
@@ -800,7 +808,7 @@ async fn retry_empty(
     final_user: &str,
 ) -> Result<Option<StudyList>, StepError> {
     let left = ctx.budget.until_hard_stop(std::time::Instant::now());
-    if left < RETRY_MIN_TIME {
+    if left < super::team::writer_min_time(ctx.mode) + RETRY_MIN_TIME {
         tracing::info!(run_id = %ctx.run_id, left_s = left.as_secs(), "study list retry not made: near the hard stop");
         return Ok(None);
     }
