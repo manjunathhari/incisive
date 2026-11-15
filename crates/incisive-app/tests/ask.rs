@@ -1538,7 +1538,7 @@ async fn ask_page_in_stipple_has_hero_art_badge_and_spine() {
         assert!(!page.contains(gone), "{gone}");
     }
     // The hero holds the artwork first, then the label, heading and intro.
-    const HERO: &str = r#"<div class="st-hero">"#;
+    const HERO: &str = r#"<div class="iv-wrap st-hero">"#;
     let hero = page.find(HERO).expect("hero");
     let art = page.find(r#"<div class="st-hero-art""#).unwrap();
     let label = page.find(r#"<span class="st-label">"#).unwrap();
@@ -1547,6 +1547,8 @@ async fn ask_page_in_stipple_has_hero_art_badge_and_spine() {
     let form = page.find(r#"<form class="iv-form""#).unwrap();
     assert_eq!(art, hero + HERO.len());
     assert!(art < label && label < h1 && h1 < intro && intro < form);
+    // The hero is a band across the page, above both columns.
+    assert!(intro < page.find(r#"<div class="iv-wrap iv-ask">"#).unwrap());
     // The footer follows the page content.
     assert!(page.find(r#"class="iv-side""#).unwrap() < page.find("<footer").unwrap());
     // The spine: no latest-answer card is drawn without a database (see

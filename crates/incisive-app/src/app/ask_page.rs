@@ -500,50 +500,46 @@ pub fn AskPage() -> impl IntoView {
             </section>
     }
     .into_any();
-    // The stipple look (LOOK=stipple) wraps the heading in the hero, over
-    // its artwork, and closes the page with a footer; the ivory page is as
-    // it was. The same on the server and in the browser.
-    let stipple = matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple)));
-    let heading = if stipple {
-        view! {
-            <div class="st-hero">
-                <div class="st-hero-art" aria-hidden="true"></div>
-                <span class="st-label">"Educational tool only"</span>
-                <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
-                <p class="iv-intro">
-                    "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
-                </p>
+    // The stipple look (LOOK=stipple) lifts the heading into a hero band
+    // across the whole page, over its artwork, with the two columns below
+    // it, and closes the page with a footer; the ivory page is as it was.
+    // The same on the server and in the browser.
+    if !matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple))) {
+        return view! {
+            <div class="iv-wrap iv-ask">
+                <section class="iv-ask-main" aria-labelledby="ask-title">
+                    <div>
+                        <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
+                        <p class="iv-intro">
+                            "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
+                        </p>
+                    </div>
+                    {form}
+                    {move || action.value().get().map(outcome_view)}
+                    {latest_sec}
+                </section>
+                {aside}
             </div>
         }
-        .into_any()
-    } else {
-        view! {
-            <div>
-                <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
-                <p class="iv-intro">
-                    "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
-                </p>
-            </div>
-        }
-        .into_any()
-    };
-    let page = view! {
+        .into_any();
+    }
+    view! {
+        <div class="iv-wrap st-hero">
+            <div class="st-hero-art" aria-hidden="true"></div>
+            <span class="st-label">"Educational tool only"</span>
+            <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
+            <p class="iv-intro">
+                "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
+            </p>
+        </div>
         <div class="iv-wrap iv-ask">
             <section class="iv-ask-main" aria-labelledby="ask-title">
-                {heading}
                 {form}
                 {move || action.value().get().map(outcome_view)}
                 {latest_sec}
             </section>
             {aside}
         </div>
-    }
-    .into_any();
-    if !stipple {
-        return page;
-    }
-    view! {
-        {page}
         <footer class="st-foot">
             <span>"Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised"</span>
             <span>"Educational tool only"</span>

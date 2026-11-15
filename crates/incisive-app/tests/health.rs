@@ -532,7 +532,7 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
         <path d=\"M8 22 L22 8\" stroke=\"#2C4A85\" stroke-width=\"2.6\" stroke-linecap=\"round\"></path>\
         <circle cx=\"22\" cy=\"8\" r=\"2.4\" fill=\"#2C4A85\"></circle></svg></span>\
         <span class=\"st-wordmark\">Incisive</span></a>";
-    const HERO: &str = "<div class=\"st-hero\"><div class=\"st-hero-art\" aria-hidden=\"true\"></div>\
+    const HERO: &str = "<div class=\"iv-wrap st-hero\"><div class=\"st-hero-art\" aria-hidden=\"true\"></div>\
         <span class=\"st-label\">Educational tool only</span>";
     const FOOT: &str = "<footer class=\"st-foot\">\
         <span>Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised</span>\
@@ -560,8 +560,7 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
         ] {
             assert!(ivory_brand.contains(kept), "{path}: {kept}");
         }
-        // Ask alone has the hero and the footer; the hero opens where the
-        // ivory page has a plain `<div>`.
+        // Ask alone has the hero and the footer.
         let on_ask = path == "/";
         assert_eq!(
             stripped.matches(HERO).count(),
@@ -573,7 +572,25 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
             usize::from(on_ask),
             "{path}"
         );
-        let stripped = stripped.replacen(HERO, "<div>", 1).replacen(FOOT, "", 1);
+        // The hero band sits above the two columns in stipple; in ivory
+        // the same heading and intro are a plain `<div>` at the top of the
+        // main column. Put it back there before comparing.
+        let mut stripped = stripped.replacen(FOOT, "", 1);
+        if on_ask {
+            let at = stripped.find(HERO).unwrap();
+            let end = at + stripped[at..].find("</p></div>").unwrap() + "</p></div>".len();
+            let heading = format!("<div>{}", &stripped[at + HERO.len()..end]);
+            stripped.replace_range(at..end, "");
+            // Straight after the main column's opening tag.
+            assert_eq!(
+                stripped.matches("class=\"iv-ask-main\"").count(),
+                1,
+                "{path}"
+            );
+            let tag = stripped.find("class=\"iv-ask-main\"").unwrap();
+            let open = tag + stripped[tag..].find('>').unwrap() + 1;
+            stripped.insert_str(open, &heading);
+        }
         assert!(!stripped.contains("class=\"st-"), "{path}");
         let scrub = |s: &str| blank_attr(&blank_attr(s, "nonce"), "crossorigin");
         assert_eq!(scrub(&stripped), scrub(&ivory_rest), "{path}");

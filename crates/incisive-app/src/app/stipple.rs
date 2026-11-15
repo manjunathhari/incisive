@@ -82,7 +82,7 @@ html[data-look="stipple"] .st-badge svg circle { fill:currentColor; }
 html[data-look="stipple"] .st-wordmark { display:block; font-family:var(--iv-font); font-size:19px; font-weight:300; line-height:1.1; letter-spacing:.08em; text-transform:uppercase; white-space:nowrap; color:var(--iv-ink); }
 html[data-look="stipple"] .iv-head a:focus-visible, html[data-look="stipple"] .iv-ask a:focus-visible, html[data-look="stipple"] .iv-ask button:focus-visible { outline:3px solid var(--iv-accent); outline-offset:2px; }
 /* ---- Ask: the hero (label, heading and intro over the artwork) ---- */
-html[data-look="stipple"] .st-hero { position:relative; isolation:isolate; display:flex; flex-direction:column; justify-content:flex-end; min-height:330px; padding-bottom:10px; }
+html[data-look="stipple"] .st-hero { position:relative; isolation:isolate; display:flex; flex-direction:column; justify-content:flex-end; min-height:330px; padding-bottom:28px; }
 html[data-look="stipple"] .st-hero > :not(.st-hero-art) { max-width:640px; }
 html[data-look="stipple"] .st-hero-art { position:absolute; z-index:-1; pointer-events:none; top:0; left:50%; right:auto; width:min(100%, 390px); height:440px; transform:translateX(-50%); background-image:url(/look/sai-hero-day.webp); background-repeat:no-repeat; background-position:center top; background-size:100% auto; -webkit-mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); -webkit-mask-composite:source-in; mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); mask-composite:intersect; }
 /* The artwork runs past the hero, so what follows it is lifted over it: it stays behind the text and the cards. */
@@ -116,7 +116,9 @@ html[data-look="stipple"] .st-foot { display:flex; flex-wrap:wrap; justify-conte
 html[data-look="stipple"] body:has(.st-foot) { position:relative; min-height:100vh; }
 html[data-look="stipple"] body:has(.st-foot)::after { content:""; position:absolute; left:0; right:0; bottom:0; height:120px; z-index:-1; pointer-events:none; background:url(/look/foot-day.webp) center bottom / 560px 120px repeat-x; }
 @media (min-width:1100px) {
-  html[data-look="stipple"] .st-hero-art { top:-50px; right:-60px; left:auto; transform:none; width:600px; height:677px; background-position:center; background-size:cover; }
+  html[data-look="stipple"] .st-hero-art { top:-70px; right:-24px; left:auto; transform:none; width:600px; height:677px; background-position:center; background-size:cover; }
+  /* The page column as on the mock: 1312px wide, 64px gutters. */
+  html[data-look="stipple"] .iv-head-in, html[data-look="stipple"] main.wide { max-width:1440px; padding-left:64px; padding-right:64px; }
   /* The artwork reaches up behind the header. */
   html[data-look="stipple"] .iv-head { position:relative; z-index:1; }
 }
