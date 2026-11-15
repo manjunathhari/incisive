@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_location;
 
-use super::{MeResource, error_text};
+use super::{Look, LookCtx, MeResource, error_text};
 use crate::library::{self as lib, LibraryCard};
 
 /// The Figtree faces (self-hosted, OFL; `public/fonts/figtree`) and the
@@ -359,7 +359,8 @@ fn nav_icon(page: NavPage) -> AnyView {
     }
 }
 
-/// The shared header: the tinted logo tile, the name and subtitle, the nav
+/// The shared header: the tinted logo tile, the name and subtitle (in the
+/// stipple look: the round badge and the wordmark, no subtitle), the nav
 /// pill (a bottom tab bar on a phone, by CSS: one `<nav>`), today's date in
 /// IST and the initials avatar. The sign-in states are as before.
 #[component]
@@ -368,7 +369,35 @@ pub fn SiteHeader() -> impl IntoView {
     let path = use_location().pathname;
     let current = move || nav_page(&path.get());
     let date = lib::header_date(lib::now_utc());
-    let phone_sub = format!("{date} \u{b7} ");
+    // The brand: the tinted tile, name and subtitle lines (ivory), or the
+    // round badge and the wordmark alone (stipple). The same on the server
+    // and in the browser: the look does not change within a page.
+    let brand = match use_context::<LookCtx>() {
+        Some(LookCtx(Look::Stipple)) => view! {
+            <a class="iv-brand" href="/">
+                <span class="st-badge" aria-hidden="true">{mark_svg()}</span>
+                <span class="st-wordmark">"Incisive"</span>
+            </a>
+        }
+        .into_any(),
+        _ => {
+            let phone_sub = format!("{date} \u{b7} ");
+            view! {
+                <a class="iv-brand" href="/">
+                    <span class="iv-tile" aria-hidden="true">{mark_svg()}</span>
+                    <span class="iv-brand-text">
+                        <span class="iv-name">"Incisive"</span>
+                        <span class="iv-sub wide">
+                            "Medical literature \u{2014} searched, checked, summarised \u{b7} "
+                            <b>"Educational tool only"</b>
+                        </span>
+                        <span class="iv-sub phone">{phone_sub} <b>"Educational tool only"</b></span>
+                    </span>
+                </a>
+            }
+            .into_any()
+        }
+    };
     let link = move |page: NavPage, href: &'static str, label: &'static str| {
         view! {
             <a href=href aria-current=move || (current() == page).then_some("page")>
@@ -392,17 +421,7 @@ pub fn SiteHeader() -> impl IntoView {
     view! {
         <header class="iv-head">
             <div class="iv-head-in">
-                <a class="iv-brand" href="/">
-                    <span class="iv-tile" aria-hidden="true">{mark_svg()}</span>
-                    <span class="iv-brand-text">
-                        <span class="iv-name">"Incisive"</span>
-                        <span class="iv-sub wide">
-                            "Medical literature \u{2014} searched, checked, summarised \u{b7} "
-                            <b>"Educational tool only"</b>
-                        </span>
-                        <span class="iv-sub phone">{phone_sub} <b>"Educational tool only"</b></span>
-                    </span>
-                </a>
+                {brand}
                 <div class="iv-head-right">
                     <nav class="iv-nav" aria-label="Main">
                         {link(NavPage::Ask, "/", "Ask")}

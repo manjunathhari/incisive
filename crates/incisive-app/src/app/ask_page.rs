@@ -8,8 +8,8 @@ use leptos_router::hooks::{use_navigate, use_query_map};
 
 use super::ivory::{asked_times, cert_view, spine_view, verdict_or_status};
 use super::{
-    AskQuestion, error_text, get_my_ask_overview, load_mode, outcome_view, save_mode,
-    take_rerun_fragment,
+    AskQuestion, Look, LookCtx, error_text, get_my_ask_overview, load_mode, outcome_view,
+    save_mode, take_rerun_fragment,
 };
 use crate::agent::answer::{initial_mode, mode_label};
 use crate::ask::{AskOutcome, FullWords, full_words_text, word_count};
@@ -500,15 +500,37 @@ pub fn AskPage() -> impl IntoView {
             </section>
     }
     .into_any();
-    view! {
+    // The stipple look (LOOK=stipple) wraps the heading in the hero, over
+    // its artwork, and closes the page with a footer; the ivory page is as
+    // it was. The same on the server and in the browser.
+    let stipple = matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple)));
+    let heading = if stipple {
+        view! {
+            <div class="st-hero">
+                <div class="st-hero-art" aria-hidden="true"></div>
+                <span class="st-label">"Educational tool only"</span>
+                <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
+                <p class="iv-intro">
+                    "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
+                </p>
+            </div>
+        }
+        .into_any()
+    } else {
+        view! {
+            <div>
+                <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
+                <p class="iv-intro">
+                    "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
+                </p>
+            </div>
+        }
+        .into_any()
+    };
+    let page = view! {
         <div class="iv-wrap iv-ask">
             <section class="iv-ask-main" aria-labelledby="ask-title">
-                <div>
-                    <h1 class="iv-h1" id="ask-title">"What should the literature answer?"</h1>
-                    <p class="iv-intro">
-                        "Agents search PubMed and Europe PMC, verify each number, challenge the conclusion, and write one cited answer."
-                    </p>
-                </div>
+                {heading}
                 {form}
                 {move || action.value().get().map(outcome_view)}
                 {latest_sec}
@@ -516,6 +538,18 @@ pub fn AskPage() -> impl IntoView {
             {aside}
         </div>
     }
+    .into_any();
+    if !stipple {
+        return page;
+    }
+    view! {
+        {page}
+        <footer class="st-foot">
+            <span>"Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised"</span>
+            <span>"Educational tool only"</span>
+        </footer>
+    }
+    .into_any()
 }
 
 fn plural(n: u32, one: &str, many: &str) -> String {

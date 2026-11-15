@@ -24,12 +24,13 @@ use incisive_app::ask::{
     AskFailure, AskOutcome, FULL_TOO_LONG_MESSAGE, FullWords, full_words_text, gate_estimate,
     run_ask, word_count,
 };
+use incisive_app::config::Look;
 use incisive_app::db::{lazy_pool, migrate};
 use incisive_app::gate::{Classifier, ClaudeClassifier, GateDecision, GateError, Verdict};
 use incisive_app::identity::{IapVerifier, JwkSource, Role, User};
 use incisive_app::runs::worker::WorkerHandle;
 use incisive_app::runs::{RunMode, RunsConfig};
-use incisive_app::server::{AppState, api_routes, build_router};
+use incisive_app::server::{AppState, api_routes, build_router, build_router_with_look};
 use incisive_app::spend::{CapsConfig, ModelPrice, Prices, cost_paise};
 use leptos::config::LeptosOptions;
 use secrecy::SecretString;
@@ -1499,6 +1500,140 @@ async fn header_and_full_word_counter_render_on_the_server() {
     assert!(counter.contains("Full questions work best under 50 words."));
     assert!(counter.contains(&full_words_text(0)), "{counter}");
     assert!(counter.contains("0 / 100 words"));
+}
+
+// ---------- the stipple look: header and Ask (LOOK=stipple) ----------
+
+/// The Ask page as the server draws it in the given look (signed out, no
+/// database: the page still renders, with its sign-in and loading errors).
+async fn look_home_html(look: Look) -> String {
+    let st = state_with(unreachable_pool(), Arc::new(MustNotCall), false);
+    let opts = LeptosOptions::builder().output_name("incisive-app").build();
+    let res = build_router_with_look(Arc::new(AlwaysUp), st, opts, look)
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn ask_page_in_stipple_has_hero_art_badge_and_spine() {
+    let body = look_home_html(Look::Stipple).await;
+    for needle in [
+        r#"class="st-hero-art" aria-hidden="true""#,
+        r#"<span aria-hidden="true" class="st-badge">"#,
+        r#"<span class="st-wordmark">Incisive</span>"#,
+        r#"<span class="st-label">Educational tool only</span>"#,
+        "<footer class=\"st-foot\"><span>Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised</span><span>Educational tool only</span></footer>",
+        "What should the literature answer?",
+        "Read the evidence",
+        r#"<textarea id="question""#,
+    ] {
+        assert!(body.contains(needle), "{needle}\n{body}");
+    }
+    // The page content only: the style blocks name the ivory classes.
+    let page = &body[body.find("<body").expect("body")..];
+    for gone in ["iv-tile", "iv-sub", "iv-name"] {
+        assert!(!page.contains(gone), "{gone}");
+    }
+    // The hero holds the artwork first, then the label, heading and intro.
+    const HERO: &str = r#"<div class="st-hero">"#;
+    let hero = page.find(HERO).expect("hero");
+    let art = page.find(r#"<div class="st-hero-art""#).unwrap();
+    let label = page.find(r#"<span class="st-label">"#).unwrap();
+    let h1 = page.find(r#"<h1 class="iv-h1" id="ask-title">"#).unwrap();
+    let intro = page.find(r#"<p class="iv-intro">"#).unwrap();
+    let form = page.find(r#"<form class="iv-form""#).unwrap();
+    assert_eq!(art, hero + HERO.len());
+    assert!(art < label && label < h1 && h1 < intro && intro < form);
+    // The footer follows the page content.
+    assert!(page.find(r#"class="iv-side""#).unwrap() < page.find("<footer").unwrap());
+    // The spine: no latest-answer card is drawn without a database (see
+    // `ask_page_in_stipple_keeps_the_spine_on_latest_cards`), so here the
+    // promise is checked where it is made: the stipple styles never name it,
+    // and the ivory rule that paints it is the one in force.
+    assert!(!incisive_app::app::STIPPLE_STYLE.contains("iv-spine"));
+    assert!(body.contains(".iv-spine span.on { background:var(--iv-accent); }"));
+}
+
+/// With a test database: a signed-in Ask page draws its latest answer card
+/// with the certainty spine, the same markup in both looks.
+#[tokio::test]
+async fn ask_page_in_stipple_keeps_the_spine_on_latest_cards() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let u = make_user(&pool, "stipple", Role::Surgeon, 30_000).await;
+    sqlx::query(
+        "INSERT INTO incisive.runs (id, user_id, question, mode, status, limit_paise, finished_at) \
+         VALUES ($1, $2, $3, 'quick', 'failed', 1000, now())",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(u.id)
+    .bind(RULE_QUESTION)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut cards = Vec::new();
+    for look in [Look::Ivory, Look::Stipple] {
+        let st = state_with(pool.clone(), Arc::new(MustNotCall), true);
+        let opts = LeptosOptions::builder().output_name("incisive-app").build();
+        let res = build_router_with_look(Arc::new(AlwaysUp), st, opts, look)
+            .oneshot(
+                Request::get("/")
+                    .header("x-dev-user-email", &u.email)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        let class_at = body.find(r#"class="iv-lc">"#).expect("latest card");
+        // From the class on: the link before it carries the run's id.
+        let card = body[class_at..class_at + body[class_at..].find("</a>").unwrap()].to_string();
+        assert!(card.contains(r#"class="iv-spine"#), "{card}");
+        cards.push(card);
+    }
+    assert_eq!(cards[0], cards[1]);
+}
+
+#[tokio::test]
+async fn ask_page_in_ivory_has_no_stipple_markup() {
+    let body = look_home_html(Look::Ivory).await;
+    assert!(
+        body.contains(r#"<span aria-hidden="true" class="iv-tile">"#),
+        "{body}"
+    );
+    assert!(body.contains(TAGLINE), "{body}");
+    assert!(body.contains(r#"<span class="iv-name">Incisive</span>"#));
+    // No stipple class in the markup or the styles, and nothing from /look/.
+    for gone in [
+        "class=\"st-",
+        " st-",
+        ".st-",
+        "/look/",
+        "<footer",
+        "data-look",
+    ] {
+        assert!(!body.contains(gone), "{gone}");
+    }
+    // The plain builder is the same look.
+    let plain = home_html().await;
+    assert!(plain.contains(r#"<span aria-hidden="true" class="iv-tile">"#));
+    assert!(!plain.contains("class=\"st-") && !plain.contains("/look/"));
+}
+
+#[test]
+fn stipple_header_holds_on_the_narrowest_phone() {
+    let style = incisive_app::app::STIPPLE_STYLE;
+    assert!(style.contains("@media (max-width:359px)"));
+    assert!(style.contains("env(safe-area-inset-bottom"));
+    // The wordmark steps down there.
+    let from = style.find("@media (max-width:359px)").unwrap();
+    assert!(style[from..].contains(".st-wordmark { font-size:16px; }"));
 }
 
 // ---------- the owner's static preview (Ask UI, 2 Nov) ----------

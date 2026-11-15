@@ -414,26 +414,62 @@ fn stipple_style_is_scoped_and_leaves_the_answer_alone() {
         "building",
         "font-weight:600",
         "font-weight:700",
+        "font-weight: 600",
+        "font-weight: 700",
+        // As a weight or anywhere else.
+        "bold",
     ] {
         assert!(!style.contains(banned), "{banned}");
     }
     const SCOPE: &str = "html[data-look=\"stipple\"]";
     let mut rules = 0;
+    let mut media_rules = 0;
     for line in style.lines() {
         let Some((selectors, _)) = line.split_once('{') else {
             continue;
         };
         let selectors = selectors.trim();
-        if selectors.starts_with("@font-face") || selectors.starts_with("@media") {
+        if selectors.starts_with("@font-face") {
             continue;
         }
+        // A rule inside `@media` is held to the same scope: on its own
+        // line (checked like any other), or after the block's opening brace.
+        let selectors = if selectors.starts_with("@media") {
+            let rest = line.split_once('{').unwrap().1;
+            match rest.split_once('{') {
+                Some((inner, _)) => {
+                    media_rules += 1;
+                    inner.trim()
+                }
+                None => {
+                    assert!(rest.trim().is_empty(), "{line}");
+                    continue;
+                }
+            }
+        } else {
+            selectors
+        };
         // Each selector of a list carries the scope.
         for selector in selectors.split(',') {
             assert!(selector.trim().starts_with(SCOPE), "{line}");
         }
         rules += 1;
+        // Inside a block a rule's line is indented.
+        if line.starts_with("  ") {
+            media_rules += 1;
+        }
     }
     assert!(rules > 30, "{rules}");
+    // The rules inside the `@media` blocks were among those checked.
+    assert!(media_rules >= 8, "{media_rules}");
+    // No brace is left to a line the loop did not read as a rule or a block.
+    for line in style.lines() {
+        if line.trim() == "}" || line.contains('{') || !line.contains('}') {
+            continue;
+        }
+        // The one many-line rule: the variables, closed on their last line.
+        assert!(line.trim_start().starts_with("--iv-"), "{line}");
+    }
     // The variables Task 1 promises, at their day values.
     for needle in [
         "--iv-ground:#f7f4ec;",
@@ -471,11 +507,36 @@ fn blank_attr(html: &str, name: &str) -> String {
     out
 }
 
-/// The stipple page is the ivory page plus the `data-look` attribute and
-/// one last style block, and nothing else: the two page views in `shell`
-/// cannot drift apart unnoticed.
+/// Cuts the header's brand link (`<a … class="iv-brand">…</a>`) out of a
+/// page and returns the page without it and the link itself.
+fn cut_brand(html: &str) -> (String, String) {
+    let class_at = html.find("class=\"iv-brand\"").expect("brand link");
+    let start = html[..class_at].rfind("<a ").unwrap();
+    let end = class_at + html[class_at..].find("</a>").unwrap() + "</a>".len();
+    (
+        format!("{}{}", &html[..start], &html[end..]),
+        html[start..end].to_string(),
+    )
+}
+
+/// The stipple page is the ivory page plus the `data-look` attribute, one
+/// last style block and the markup the look draws for itself: the header's
+/// brand link on every page, and on Ask the hero opening and the footer.
+/// Those pieces are pinned here to the letter and taken out; what is left
+/// must be the ivory page, so nothing else can drift apart unnoticed. The
+/// ivory side is compared as served, less only its own brand link.
 #[tokio::test]
 async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block() {
+    const BRAND: &str = "<a href=\"/\" class=\"iv-brand\"><span aria-hidden=\"true\" class=\"st-badge\">\
+        <svg width=\"25\" height=\"25\" viewBox=\"0 0 30 30\" aria-hidden=\"true\" focusable=\"false\">\
+        <path d=\"M8 22 L22 8\" stroke=\"#2C4A85\" stroke-width=\"2.6\" stroke-linecap=\"round\"></path>\
+        <circle cx=\"22\" cy=\"8\" r=\"2.4\" fill=\"#2C4A85\"></circle></svg></span>\
+        <span class=\"st-wordmark\">Incisive</span></a>";
+    const HERO: &str = "<div class=\"st-hero\"><div class=\"st-hero-art\" aria-hidden=\"true\"></div>\
+        <span class=\"st-label\">Educational tool only</span>";
+    const FOOT: &str = "<footer class=\"st-foot\">\
+        <span>Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised</span>\
+        <span>Educational tool only</span></footer>";
     for path in ["/", "/no-such-page", "/history"] {
         let (_, ivory) = get(look_router(Look::Ivory), path).await;
         let (_, stipple) = get(look_router(Look::Stipple), path).await;
@@ -486,7 +547,35 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
             "",
             1,
         );
+        // The brand link: the badge and the wordmark in stipple, the tile,
+        // the name and both subtitle lines in ivory.
+        let (stripped, stipple_brand) = cut_brand(&stripped);
+        let (ivory_rest, ivory_brand) = cut_brand(&ivory);
+        assert_eq!(stipple_brand, BRAND, "{path}");
+        for kept in [
+            "class=\"iv-tile\"",
+            "class=\"iv-name\"",
+            "iv-sub wide",
+            "iv-sub phone",
+        ] {
+            assert!(ivory_brand.contains(kept), "{path}: {kept}");
+        }
+        // Ask alone has the hero and the footer; the hero opens where the
+        // ivory page has a plain `<div>`.
+        let on_ask = path == "/";
+        assert_eq!(
+            stripped.matches(HERO).count(),
+            usize::from(on_ask),
+            "{path}"
+        );
+        assert_eq!(
+            stripped.matches(FOOT).count(),
+            usize::from(on_ask),
+            "{path}"
+        );
+        let stripped = stripped.replacen(HERO, "<div>", 1).replacen(FOOT, "", 1);
+        assert!(!stripped.contains("class=\"st-"), "{path}");
         let scrub = |s: &str| blank_attr(&blank_attr(s, "nonce"), "crossorigin");
-        assert_eq!(scrub(&stripped), scrub(&ivory), "{path}");
+        assert_eq!(scrub(&stripped), scrub(&ivory_rest), "{path}");
     }
 }
