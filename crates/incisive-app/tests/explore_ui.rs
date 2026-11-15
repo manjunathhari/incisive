@@ -1142,3 +1142,134 @@ async fn the_ask_page_without_a_topic_is_unchanged() {
     let before = std::fs::read_to_string(&file).unwrap();
     assert!(now == before, "the Ask page changed with no topic");
 }
+
+// ---------- the stipple look (LOOK=stipple) ----------
+
+/// The app in a chosen look.
+fn look_router(st: AppState, look: incisive_app::config::Look) -> Router {
+    let opts = LeptosOptions::builder().output_name("incisive-app").build();
+    incisive_app::server::build_router_with_look(Arc::new(AlwaysUp), st, opts, look)
+}
+
+/// Blanks the value of every `name="…"` attribute (the per-request nonce
+/// and crossorigin values differ between two requests).
+fn blank_attr(html: &str, name: &str) -> String {
+    let open = format!("{name}=\"");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(&open) {
+        let after = at + open.len();
+        out.push_str(&rest[..after]);
+        let end = rest[after..].find('"').map_or(rest.len(), |e| after + e);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Two pages are the same; if not, the place where they part is shown.
+fn same(a: &str, b: &str) {
+    if a == b {
+        return;
+    }
+    let at = a
+        .bytes()
+        .zip(b.bytes())
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
+    let cut = |s: &str| {
+        let lo = (0..=at.saturating_sub(160))
+            .rev()
+            .find(|i| s.is_char_boundary(*i))
+            .unwrap_or(0);
+        let hi = (at + 160).min(s.len());
+        let hi = (hi..=s.len()).find(|i| s.is_char_boundary(*i)).unwrap();
+        s[lo..hi].to_string()
+    };
+    panic!("the pages part at byte {at}:\n  {}\n  {}", cut(a), cut(b));
+}
+
+/// Cuts the header's brand link out of a page.
+fn without_brand(html: &str) -> String {
+    let class_at = html.find("class=\"iv-brand\"").expect("brand link");
+    let start = html[..class_at].rfind("<a ").unwrap();
+    let end = class_at + html[class_at..].find("</a>").unwrap() + "</a>".len();
+    format!("{}{}", &html[..start], &html[end..])
+}
+
+/// Explore in the stipple look is the ivory page (map, list, side column:
+/// the same markup) plus the look's own pieces, pinned here to the letter:
+/// the attribute, the last style block in the head, the brand link, the
+/// footer, and the label and visible heading in place of the heading that
+/// ivory keeps for screen readers. Ivory has none of it.
+#[tokio::test]
+async fn explore_in_stipple_is_the_ivory_page_plus_its_label_and_heading() {
+    use incisive_app::config::Look;
+    const IVORY_HEAD: &str = "<h1 class=\"iv-sr\">Explore</h1>";
+    const STIPPLE_HEAD: &str =
+        "<span class=\"st-label\">Your map</span><h1 class=\"st-title\">Explore</h1>";
+    const FOOT: &str = "<footer class=\"st-foot\">\
+        <span>Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised</span>\
+        <span>Educational tool only</span></footer>";
+    let _g = SERIAL.lock().await;
+    let Some(pool) = connect().await else { return };
+    let (uid, email) = new_user(&pool, "surgeon").await;
+    let t = tag();
+    mapped_run(
+        &pool,
+        uid,
+        &t,
+        &[
+            paper(&pmid(&t, 1), "A trial", 2024, "RCT"),
+            paper(&pmid(&t, 2), "A cohort", 2019, "Retrospective cohort"),
+        ],
+    )
+    .await;
+    let st = state(pool.clone(), true);
+    let (s, ivory) = get(
+        look_router(st.clone(), Look::Ivory),
+        "/explore",
+        Some(&email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, stipple) = get(
+        look_router(st.clone(), Look::Stipple),
+        "/explore",
+        Some(&email),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Ivory: as it was. No stipple class, nothing from /look/, no mark.
+    for gone in ["class=\"st-", "/look/", "data-look", "Your map</span><h1"] {
+        assert!(!ivory.contains(gone), "{gone}");
+    }
+    assert_eq!(ivory.matches(IVORY_HEAD).count(), 1);
+    // The plain builder is the ivory look.
+    let (_, plain) = get(router(st.clone()), "/explore", Some(&email)).await;
+    let scrub = |s: &str| blank_attr(&blank_attr(s, "nonce"), "crossorigin");
+    same(&scrub(&plain), &scrub(&ivory));
+
+    // Stipple: one heading, the visible one, under its label.
+    assert_eq!(stipple.matches(STIPPLE_HEAD).count(), 1);
+    assert_eq!(stipple.matches("<h1").count(), 1);
+    assert!(!stipple.contains(IVORY_HEAD));
+    assert_eq!(stipple.matches(FOOT).count(), 1);
+    assert!(stipple.contains("<html lang=\"en\" data-look=\"stipple\">"));
+
+    // Take the look's pieces out: what is left is the ivory page.
+    let head_end = stipple.find("</head>").unwrap();
+    let start = stipple[..head_end].rfind("<style>").unwrap();
+    let end = start + stipple[start..].find("</style>").unwrap() + "</style>".len();
+    assert!(stipple[start..end].contains("html[data-look=\"stipple\"] .st-title"));
+    let stripped = format!("{}{}", &stipple[..start], &stipple[end..])
+        .replacen(" data-look=\"stipple\"", "", 1)
+        .replacen(FOOT, "", 1)
+        .replacen(STIPPLE_HEAD, IVORY_HEAD, 1);
+    assert!(!without_brand(&stripped).contains("class=\"st-"));
+    same(
+        &scrub(&without_brand(&stripped)),
+        &scrub(&without_brand(&ivory)),
+    );
+}

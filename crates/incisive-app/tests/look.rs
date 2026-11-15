@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use incisive_app::app::{CHROME_STYLES, IVORY_STYLE};
+use incisive_app::app::{CHROME_STYLES, IVORY_STYLE, STIPPLE_STYLE};
 use regex::Regex;
 
 /// A colour written out: `#` and 3, 4, 6 or 8 hex digits, or a colour function.
@@ -242,27 +242,29 @@ fn ivory_values_are_what_they_were() {
 /// chrome borrows none of the answer styles' variables.)
 const SET_ELSEWHERE: &[&str] = &["--m"];
 
+/// Variables a style reads from another block, always with a fallback
+/// (`var(--name, fallback)`), so the rule holds with or without that block.
+/// `--rt-era-bg` is the Temporal board's era colour, set per era by
+/// `EXPERT_STYLE` on the era card itself; the stipple rule repaints the
+/// same card and only swaps the fallback for eras without a colour.
+const READ_WITH_FALLBACK: &[(&str, &str)] = &[("STIPPLE_STYLE", "--rt-era-bg")];
+
+/// A style reads only what the ivory `:root` block declares or what it
+/// declares itself: the blocks are sent to the page separately (some only
+/// with their own component), so a variable declared in another block may
+/// not be there.
 #[test]
 fn no_variable_is_used_without_being_declared() {
-    // What ivory declares: every style but the stipple one.
-    let ivory: BTreeSet<&str> = CHROME_STYLES
-        .iter()
-        .filter(|(n, _)| *n != "STIPPLE_STYLE")
-        .flat_map(|(_, css)| definitions(css))
-        .map(|(n, _)| n)
-        .collect();
-    let stipple: BTreeSet<&str> = definitions(style("STIPPLE_STYLE"))
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect();
+    let root: BTreeSet<&str> = ivory_root().into_iter().map(|(n, _)| n).collect();
     let mut bad = Vec::new();
     for (name, css) in CHROME_STYLES {
+        let own: BTreeSet<&str> = definitions(css).into_iter().map(|(n, _)| n).collect();
         for var in used(css) {
             let v = var.as_str();
-            // The stipple style may also read what it declares itself.
-            let declared = ivory.contains(v)
+            let declared = root.contains(v)
+                || own.contains(v)
                 || SET_ELSEWHERE.contains(&v)
-                || (*name == "STIPPLE_STYLE" && stipple.contains(v));
+                || READ_WITH_FALLBACK.contains(&(*name, v));
             if !declared {
                 bad.push(format!("{name}: {var}"));
             }
@@ -270,14 +272,20 @@ fn no_variable_is_used_without_being_declared() {
     }
     assert!(
         bad.is_empty(),
-        "variables read but never declared:\n{}",
+        "variables read but declared neither in the ivory :root nor in the same style:\n{}",
         bad.join("\n")
     );
+    for (name, v) in READ_WITH_FALLBACK {
+        let bare = format!("var({v})");
+        assert!(!style(name).contains(&bare), "{name} reads {v} bare");
+        assert!(style(name).contains(&format!("var({v},")), "{name}: {v}");
+    }
     for v in SET_ELSEWHERE {
-        assert!(
-            !ivory.contains(v),
-            "{v} is declared now: take it off the list"
-        );
+        let anywhere = CHROME_STYLES
+            .iter()
+            .flat_map(|(_, css)| definitions(css))
+            .any(|(n, _)| n == *v);
+        assert!(!anywhere, "{v} is declared now: take it off the list");
     }
 }
 
@@ -292,4 +300,214 @@ fn the_pill_fill_reads_its_colours_from_variables() {
             "{var} is not an ivory variable"
         );
     }
+}
+
+// ---------- the stipple look over the chrome styles ----------
+
+const SCOPE: &str = "html[data-look=\"stipple\"] ";
+
+/// One style rule: its selectors (a list split at the commas) and its
+/// declarations (`name`, `value`).
+struct Rule {
+    selectors: Vec<String>,
+    declarations: Vec<(String, String)>,
+}
+
+/// The rules of a style, those inside `@media` and `@supports` included.
+/// `@font-face` and `@keyframes` blocks are skipped (no selectors there).
+/// Comments are dropped. None of the chrome styles has a comma inside a
+/// selector's brackets, so a list splits at every comma.
+fn rules(css: &str) -> Vec<Rule> {
+    let css = Regex::new(r"(?s)/\*.*?\*/").unwrap().replace_all(css, "");
+    let mut out = Vec::new();
+    // What a `}` closes: a group (`@media`), a skipped block, or a rule.
+    let mut open: Vec<&str> = Vec::new();
+    let mut text = String::new();
+    let mut selectors: Vec<String> = Vec::new();
+    for c in css.chars() {
+        match c {
+            '{' => {
+                let head = text.trim().to_string();
+                text.clear();
+                if open.last() == Some(&"skip") || open.last() == Some(&"rule") {
+                    open.push("skip");
+                } else if head.starts_with("@media") || head.starts_with("@supports") {
+                    open.push("group");
+                } else if head.starts_with('@') {
+                    open.push("skip");
+                } else {
+                    selectors = head
+                        .split(',')
+                        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .collect();
+                    open.push("rule");
+                }
+            }
+            '}' => {
+                if open.pop() == Some("rule") {
+                    let declarations = text
+                        .split(';')
+                        .filter_map(|d| d.split_once(':'))
+                        .map(|(n, v)| (n.trim().to_string(), v.trim().to_string()))
+                        .collect();
+                    out.push(Rule {
+                        selectors: std::mem::take(&mut selectors),
+                        declarations,
+                    });
+                }
+                text.clear();
+            }
+            _ => text.push(c),
+        }
+    }
+    assert!(open.is_empty(), "unbalanced braces");
+    out
+}
+
+/// The chrome styles a look restyles: every one but the stipple block.
+fn restyled() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    CHROME_STYLES.iter().filter(|(n, _)| *n != "STIPPLE_STYLE")
+}
+
+fn heavy(value: &str) -> bool {
+    let v = value.trim_end_matches("!important").trim();
+    v == "bold" || v == "bolder" || v.parse::<u32>().is_ok_and(|w| w > 500)
+}
+
+/// The fonts of the stipple look stop at 500: a heavier weight is faked by
+/// the browser. So every selector that asks for more in a chrome style (the
+/// whole of each: Ask, the Library, Explore, the tracker, the introduction,
+/// the draft, the Expert view and its board, the chat, the run page and
+/// Activity) is said again under the look's scope, where it outranks the
+/// original, at 300, 400 or 500.
+#[test]
+fn stipple_caps_every_heavy_weight() {
+    let stipple = rules(STIPPLE_STYLE);
+    let weight_of = |selector: &str| -> Option<String> {
+        stipple
+            .iter()
+            .filter(|r| r.selectors.iter().any(|s| s == selector))
+            .flat_map(|r| r.declarations.iter())
+            .filter(|(n, _)| n == "font-weight")
+            .map(|(_, v)| v.clone())
+            .next_back()
+    };
+    let mut found = 0;
+    let mut bad = Vec::new();
+    for (name, css) in restyled() {
+        for rule in rules(css) {
+            let is_heavy = rule
+                .declarations
+                .iter()
+                .any(|(n, v)| n == "font-weight" && heavy(v));
+            // The shorthand could carry a weight too: none does.
+            for (n, v) in &rule.declarations {
+                assert!(
+                    n != "font" || !(v.contains("bold") || v.contains("600") || v.contains("700")),
+                    "{name}: a weight in a `font` shorthand: {v}"
+                );
+            }
+            if !is_heavy {
+                continue;
+            }
+            for selector in &rule.selectors {
+                found += 1;
+                let scoped = format!("{SCOPE}{selector}");
+                match weight_of(&scoped).as_deref() {
+                    Some("300" | "400" | "500") => {}
+                    Some(other) => bad.push(format!("{name}: `{selector}` restated at {other}")),
+                    None => bad.push(format!("{name}: `{selector}` is not restated")),
+                }
+            }
+        }
+    }
+    // The reviewer's counts add up to more than a hundred.
+    assert!(found > 110, "only {found} heavy selectors read");
+    assert!(
+        bad.is_empty(),
+        "heavy weights the stipple look leaves:\n{}",
+        bad.join("\n")
+    );
+    // And the look itself asks for nothing heavier.
+    for rule in &stipple {
+        for (n, v) in &rule.declarations {
+            assert!(n != "font-weight" || !heavy(v), "{:?}: {v}", rule.selectors);
+        }
+    }
+}
+
+/// Boxes that may keep a solid ground-coloured background in the stipple
+/// look, each with its reason. (`body` needs no entry: the look restates it
+/// as transparent, so the dots show.)
+const GROUND_ALLOWED: &[&str] = &[];
+
+/// A box painted in the ground colour hides the dot layer behind it: a
+/// dot-free patch on the dotted page. Every chrome rule that paints one is
+/// given another background under the look's scope.
+#[test]
+fn stipple_paints_no_solid_ground_box() {
+    let paints_ground = |r: &Rule| {
+        r.declarations.iter().any(|(n, v)| {
+            (n == "background" || n == "background-color") && v.contains("--iv-ground")
+        })
+    };
+    let stipple = rules(STIPPLE_STYLE);
+    let repainted = |selector: &str| {
+        stipple.iter().any(|r| {
+            r.selectors.iter().any(|s| s == selector)
+                && !paints_ground(r)
+                && r.declarations
+                    .iter()
+                    .any(|(n, _)| n == "background" || n == "background-color")
+        })
+    };
+    let mut found = 0;
+    let mut bad = Vec::new();
+    for (name, css) in restyled() {
+        for rule in rules(css).iter().filter(|r| paints_ground(r)) {
+            for selector in &rule.selectors {
+                found += 1;
+                if GROUND_ALLOWED.contains(&selector.as_str()) {
+                    continue;
+                }
+                if !repainted(&format!("{SCOPE}{selector}")) {
+                    bad.push(format!("{name}: `{selector}`"));
+                }
+            }
+        }
+    }
+    assert!(found >= 8, "only {found} ground boxes read");
+    assert!(
+        bad.is_empty(),
+        "ground-coloured boxes the stipple look leaves:\n{}",
+        bad.join("\n")
+    );
+    // The look paints the ground once, on the page root, under the dots.
+    for rule in stipple.iter().filter(|r| paints_ground(r)) {
+        assert_eq!(rule.selectors, ["html[data-look=\"stipple\"]"]);
+    }
+}
+
+#[test]
+fn the_rule_reader_reads_groups_lists_and_comments() {
+    let read = rules(
+        "/* c { x:y } */ a, b  c { color:red; font-weight:700 }\n\
+         @media (max-width:1px) { d { e:f; } g { h:i } }\n\
+         @keyframes k { 0%,100% { o:1 } 50% { o:0 } }\n z { q:r; }",
+    );
+    let got: Vec<(Vec<String>, usize)> = read
+        .iter()
+        .map(|r| (r.selectors.clone(), r.declarations.len()))
+        .collect();
+    let s = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        got,
+        [
+            (s(&["a", "b c"]), 2),
+            (s(&["d"]), 1),
+            (s(&["g"]), 1),
+            (s(&["z"]), 1)
+        ]
+    );
+    assert!(heavy("700") && heavy("600") && heavy("bold") && !heavy("500") && !heavy("400"));
 }

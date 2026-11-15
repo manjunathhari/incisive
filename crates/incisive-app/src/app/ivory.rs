@@ -16,11 +16,15 @@ use crate::library::{self as lib, LibraryCard};
 /// ivory tokens and classes. Scoped to the chrome, Ask and Library classes:
 /// nothing here matches inside `.ap-main` or the original run view.
 ///
-/// `:root` holds every colour the page chrome uses, here and in the other
-/// chrome styles (`CHROME_STYLES`): the rules read them with `var()`, so a
-/// look restates the variables and no rule (`tests/look.rs`). `--kg-*` is
-/// the Explore map, `--tr-*` the run tracker and its pills, `--ex-*` the
-/// Expert view, `--rx-*` the chat.
+/// `:root` holds the colours the page chrome shares, here and in the other
+/// chrome styles (`CHROME_STYLES`): the rules read them with `var()` and no
+/// rule writes a colour out, so a look restates variables (`tests/look.rs`).
+/// Two styles keep colours of their own, declared in their own blocks: the
+/// Explore map's kind and rank colours (the `.kg` block of `EXPLORE_STYLE`)
+/// and the Expert view's ready, researcher, skeptic, warning and era colours
+/// (the `:root` block of `EXPERT_STYLE`). Of the names here, `--kg-*` is the
+/// Explore map, `--tr-*` the run tracker and its pills, `--ex-*` the Expert
+/// view, `--rx-*` the chat.
 pub const IVORY_STYLE: &str = r#"
 @font-face { font-family:'Figtree'; font-style:normal; font-display:swap; font-weight:400; src:url(/fonts/figtree/figtree-latin-ext-400-normal.woff2) format('woff2'); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
 @font-face { font-family:'Figtree'; font-style:normal; font-display:swap; font-weight:400; src:url(/fonts/figtree/figtree-latin-400-normal.woff2) format('woff2'); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }

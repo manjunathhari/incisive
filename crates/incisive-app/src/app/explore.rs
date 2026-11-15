@@ -20,7 +20,7 @@ use leptos::prelude::*;
 use leptos::server_fn::codec::Json;
 use serde::{Deserialize, Serialize};
 
-use super::error_text;
+use super::{Look, LookCtx, error_text};
 use crate::explore_page::{self as ep, Card, Group, Row};
 use crate::graph_view::{DotKind, MapData, MapFilter};
 
@@ -759,6 +759,9 @@ pub(super) fn graph_off() -> bool {
     !use_context::<crate::server::AppState>().is_some_and(|s| s.graph.settings.on)
 }
 
+/// The label over the page's heading in the stipple look.
+const STIPPLE_LABEL: &str = "Your map";
+
 #[component]
 pub fn ExplorePage() -> impl IntoView {
     // With `GRAPH` off this page does not exist.
@@ -791,11 +794,27 @@ pub fn ExplorePage() -> impl IntoView {
             let _ = missing.try_set(false);
         });
     }
+    // The stipple look (LOOK=stipple) shows the page's heading, under a
+    // label, as on the approved mock; in ivory it is for screen readers
+    // only, as it was. One `<h1>` either way.
+    let stipple = matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple)));
     let page = move |inner: AnyView| {
+        // Two whole views: the ivory page must not change by a byte.
+        if !stipple {
+            return view! {
+                <style>{EXPLORE_STYLE}</style>
+                <div class="iv-wrap kg" data-view=move || ui.view.get().as_str()>
+                    <h1 class="iv-sr">{ep::TITLE}</h1>
+                    {inner}
+                </div>
+            }
+            .into_any();
+        }
         view! {
             <style>{EXPLORE_STYLE}</style>
             <div class="iv-wrap kg" data-view=move || ui.view.get().as_str()>
-                <h1 class="iv-sr">{ep::TITLE}</h1>
+                <span class="st-label">{STIPPLE_LABEL}</span>
+                <h1 class="st-title">{ep::TITLE}</h1>
                 {inner}
             </div>
         }

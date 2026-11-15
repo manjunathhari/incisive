@@ -537,8 +537,23 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
     const FOOT: &str = "<footer class=\"st-foot\">\
         <span>Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised</span>\
         <span>Educational tool only</span></footer>";
-    for path in ["/", "/no-such-page", "/history"] {
+    // Ask, an unknown path, the Library, Activity, a run page and Explore
+    // (this router has no app state, so the last three are drawn in their
+    // signed-out or not-found state; `tests/explore_ui.rs` compares the
+    // full Explore page).
+    for path in [
+        "/",
+        "/no-such-page",
+        "/history",
+        "/activity",
+        "/runs/00000000-0000-0000-0000-000000000000",
+        "/explore",
+    ] {
         let (_, ivory) = get(look_router(Look::Ivory), path).await;
+        // Ivory: no stipple class, nothing from /look/, no mark.
+        for gone in ["class=\"st-", "/look/", "data-look"] {
+            assert!(!ivory.contains(gone), "{path}: {gone}");
+        }
         let (_, stipple) = get(look_router(Look::Stipple), path).await;
         let start = stipple.rfind("<style>").unwrap();
         let end = start + stipple[start..].find("</style>").unwrap() + "</style>".len();
