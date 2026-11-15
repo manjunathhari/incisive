@@ -30,7 +30,7 @@ html[data-look="stipple"] { color-scheme: light; background:var(--iv-ground);
   --iv-font:"Hanken Grotesk Variable","Hanken Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --iv-read:"Source Serif 4 Variable","Source Serif 4",Georgia,"Times New Roman",serif;
   --iv-button:#13263c; --iv-on-button:#ffffff; --iv-fill:#1e5aa0; --iv-on-fill:#ffffff; --st-mask:#000;
-  --tr-filling:var(--iv-accent); --tr-fill:var(--iv-tint); --tr-ring:var(--iv-accent); --tr-role-bg:var(--iv-tint);
+  --tr-filling:var(--iv-fill); --tr-fill:var(--iv-tint); --tr-ring:var(--iv-accent); --tr-role-bg:var(--iv-tint);
   --iv-avatar-bg:var(--iv-border); --iv-dash:var(--iv-border); --iv-accent-deep:var(--iv-fill); --iv-faint:var(--iv-muted); }
 /* The cream sits on the page root and the body is clear, so the fixed dot layer (behind everything) shows over it. */
 html[data-look="stipple"] body { background:transparent; }
