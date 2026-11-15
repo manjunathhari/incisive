@@ -24,8 +24,9 @@
 /// scope test reads it line by line).
 ///
 /// `--iv-faint` is the fading tail of a draft being written: lighter than
-/// the muted text on purpose (about 3.1:1 on a white card; ivory's is about
-/// 3.6:1), since it marks words that may still change.
+/// the muted text on purpose, but no fainter than ivory's (about 3.7:1 on a
+/// white card; ivory's is about 3.6:1), since it is real text that may
+/// stay on screen while the stream pauses.
 pub const STIPPLE_STYLE: &str = r#"
 @font-face { font-family:'Hanken Grotesk Variable'; font-style:normal; font-display:swap; font-weight:300 500; src:url(/fonts/hanken-grotesk/hanken-grotesk-latin-ext-wght-normal.woff2) format('woff2-variations'); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
 @font-face { font-family:'Hanken Grotesk Variable'; font-style:normal; font-display:swap; font-weight:300 500; src:url(/fonts/hanken-grotesk/hanken-grotesk-latin-wght-normal.woff2) format('woff2-variations'); unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
@@ -39,7 +40,7 @@ html[data-look="stipple"] { color-scheme: light; background:var(--iv-ground);
   --iv-read:"Source Serif 4 Variable","Source Serif 4",Georgia,"Times New Roman",serif;
   --iv-button:#13263c; --iv-on-button:#ffffff; --iv-fill:#1e5aa0; --iv-on-fill:#ffffff; --st-mask:#000;
   --tr-filling:var(--iv-fill); --tr-fill:var(--iv-tint); --tr-ring:var(--iv-accent); --tr-role-bg:var(--iv-tint);
-  --iv-avatar-bg:var(--iv-border); --iv-dash:var(--iv-border); --iv-accent-deep:var(--iv-fill); --iv-faint:#8a94a0; }
+  --iv-avatar-bg:var(--iv-border); --iv-dash:var(--iv-border); --iv-accent-deep:var(--iv-fill); --iv-faint:#7b8692; }
 /* The cream sits on the page root and the body is clear, so the fixed dot layer (behind everything) shows over it. */
 html[data-look="stipple"] body { background:transparent; }
 html[data-look="stipple"] body::before { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none; background:url(/look/stipple-day.svg) 0 0/480px 480px repeat; }
@@ -417,5 +418,34 @@ html[data-look="stipple"] .activity-title ~ .scroll tr:last-child td { border-bo
   html[data-look="stipple"] .rx .rx-btn { align-self:stretch; justify-content:center; }
   /* The log keeps readable columns and scrolls sideways inside its card. */
   html[data-look="stipple"] .activity-title ~ .scroll table { min-width:680px; }
+}
+/* Review of the page restyle: blue text on the tint, and citation links on
+   the era cards, use the deeper blue so they meet 4.5:1. */
+html[data-look="stipple"] .iv-wrap button.iv-filter[aria-pressed="true"] { color:var(--iv-fill); }
+html[data-look="stipple"] .iv-wrap .kg-switch button[aria-pressed="true"] { color:var(--iv-fill); }
+html[data-look="stipple"] .rk-tag { color:var(--iv-fill); }
+html[data-look="stipple"] .rx .rx-source { color:var(--iv-fill); }
+html[data-look="stipple"] .rx-line-surgeon { color:var(--iv-fill); }
+html[data-look="stipple"] .rx .rx-thumb[aria-pressed="true"] { color:var(--iv-fill); }
+html[data-look="stipple"] .rx .rx-modes input:checked + label { color:var(--iv-fill); }
+html[data-look="stipple"] .rx .rx-close { color:var(--iv-fill); }
+html[data-look="stipple"] .rx-pre:has(.rx-chat:target:not(:empty)) a.rx-tab[href='#chat'] { color:var(--iv-fill); }
+html[data-look="stipple"] .rx-pre:has(.rx-expert:target:not(:empty)) a.rx-tab[href='#expert'] { color:var(--iv-fill); }
+html[data-look="stipple"] .iv-nav a[aria-current="page"] { color:var(--iv-fill); }
+html[data-look="stipple"] .iv-step { color:var(--iv-fill); }
+html[data-look="stipple"] .iv-modepill { color:var(--iv-fill); }
+html[data-look="stipple"] .run-chrome .badge.mode { color:var(--iv-fill); }
+html[data-look="stipple"] .rt-chip { color:var(--iv-fill); }
+html[data-look="stipple"] .iv-wrap .kg-links button { color:var(--iv-fill); }
+html[data-look="stipple"] .rx-who { color:var(--iv-fill); }
+html[data-look="stipple"] .rt a.rt-cite { color:var(--iv-fill); }
+/* Chart value labels: no outline stroke, which made them look heavier. */
+html[data-look="stipple"] .rt svg text { stroke:none; }
+/* The serif ships upright only. */
+html[data-look="stipple"] .iv-lib .iv-lib-verdict.iv-status { font-style:normal; }
+html[data-look="stipple"] .rt-empty { font-style:normal; }
+@media (min-width:1100px) {
+  /* Explore fills the wider page column. */
+  html[data-look="stipple"] .kg-main { max-width:none; }
 }
 "#;
