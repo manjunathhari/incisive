@@ -108,7 +108,7 @@ html[data-look="stipple"] .iv-ask .iv-kicker { font-size:11.5px; font-weight:500
 html[data-look="stipple"] .iv-wrap button.iv-send { background:var(--iv-button); color:var(--iv-on-button); align-self:center; height:52px; min-height:52px; padding:0 28px; border-radius:26px; font-size:16px; font-weight:500; }
 html[data-look="stipple"] .iv-wrap button.iv-primary { background:var(--iv-button); color:var(--iv-on-button); padding:0 18px; border-radius:999px; }
 /* Off: the same pill washed out, the words still readable (about 4.9:1 on a white card). */
-html[data-look="stipple"] .iv-wrap button.iv-send[disabled], html[data-look="stipple"] .iv-wrap button.iv-primary[disabled] { background:var(--iv-button); color:var(--iv-on-button); opacity:.65; cursor:default; }
+html[data-look="stipple"] .iv-wrap button.iv-send[disabled], html[data-look="stipple"] .iv-wrap button.iv-primary[disabled] { background:var(--iv-line); color:var(--iv-ink); opacity:1; cursor:default; }
 html[data-look="stipple"] .iv-wrap button.iv-ghost, html[data-look="stipple"] .iv-wrap button.iv-starter { border:1px solid var(--iv-border); background:var(--iv-card); color:var(--iv-ink); border-radius:999px; min-height:44px; padding:0 16px; font-size:13px; }
 html[data-look="stipple"] .iv-privacy { margin:0; background:var(--iv-tint); border-radius:16px; padding:12px 14px; font-family:var(--iv-read); font-size:14.5px; color:var(--iv-muted); }
 html[data-look="stipple"] .iv-privacy svg { margin-top:3px; }
