@@ -560,18 +560,16 @@ async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block()
         ] {
             assert!(ivory_brand.contains(kept), "{path}: {kept}");
         }
-        // Ask alone has the hero and the footer.
+        // Ask alone has the hero.
         let on_ask = path == "/";
         assert_eq!(
             stripped.matches(HERO).count(),
             usize::from(on_ask),
             "{path}"
         );
-        assert_eq!(
-            stripped.matches(FOOT).count(),
-            usize::from(on_ask),
-            "{path}"
-        );
+        // Every page closes with the footer line, just before `</main>`.
+        assert_eq!(stripped.matches(FOOT).count(), 1, "{path}");
+        assert!(stripped.contains(&format!("{FOOT}</main>")), "{path}");
         // The hero band sits above the two columns in stipple; in ivory
         // the same heading and intro are a plain `<div>` at the top of the
         // main column. Put it back there before comparing.

@@ -502,7 +502,7 @@ pub fn AskPage() -> impl IntoView {
     .into_any();
     // The stipple look (LOOK=stipple) lifts the heading into a hero band
     // across the whole page, over its artwork, with the two columns below
-    // it, and closes the page with a footer; the ivory page is as it was.
+    // it; the ivory page is as it was.
     // The same on the server and in the browser.
     if !matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple))) {
         return view! {
@@ -540,10 +540,6 @@ pub fn AskPage() -> impl IntoView {
             </section>
             {aside}
         </div>
-        <footer class="st-foot">
-            <span>"Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised"</span>
-            <span>"Educational tool only"</span>
-        </footer>
     }
     .into_any()
 }

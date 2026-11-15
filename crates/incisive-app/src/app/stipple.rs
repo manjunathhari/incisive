@@ -112,7 +112,7 @@ html[data-look="stipple"] .iv-ask .iv-composed p, html[data-look="stipple"] .iv-
 html[data-look="stipple"] .iv-ask .iv-foot { font-family:var(--iv-read); font-size:13.5px; }
 html[data-look="stipple"] .iv-ask .iv-advisory { font-family:var(--iv-read); font-size:12.5px; }
 /* ---- Ask: the footer and the dot band at the foot of the page ---- */
-html[data-look="stipple"] .st-foot { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 24px; margin-top:40px; padding-top:18px; padding-bottom:calc(110px + env(safe-area-inset-bottom, 0px)); border-top:1px solid var(--iv-border); font-family:var(--iv-font); font-size:13.5px; color:var(--iv-muted); }
+html[data-look="stipple"] .st-foot { font-family:var(--iv-font); display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 24px; margin-top:40px; padding-top:18px; padding-bottom:calc(110px + env(safe-area-inset-bottom, 0px)); border-top:1px solid var(--iv-border); font-family:var(--iv-font); font-size:13.5px; color:var(--iv-muted); }
 html[data-look="stipple"] body:has(.st-foot) { position:relative; min-height:100vh; }
 html[data-look="stipple"] body:has(.st-foot)::after { content:""; position:absolute; left:0; right:0; bottom:0; height:120px; z-index:-1; pointer-events:none; background:url(/look/foot-day.webp) center bottom / 560px 120px repeat-x; }
 @media (min-width:1100px) {

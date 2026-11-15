@@ -493,7 +493,21 @@ pub fn PageMain(children: Children) -> impl IntoView {
     let missing = RwSignal::new(missing_now);
     provide_context(PageMissing(missing));
     let class = move || (is_wide(&path.get()) && !missing.get()).then_some("wide");
-    view! { <main class=class>{children()}</main> }
+    // The stipple look (LOOK=stipple) closes every page with the footer
+    // line that says what Incisive is; the ivory page is as it was.
+    if !matches!(use_context::<LookCtx>(), Some(LookCtx(Look::Stipple))) {
+        return view! { <main class=class>{children()}</main> }.into_any();
+    }
+    view! {
+        <main class=class>
+            {children()}
+            <footer class="st-foot">
+                <span>"Incisive \u{b7} Medical literature \u{2014} searched, checked, summarised"</span>
+                <span>"Educational tool only"</span>
+            </footer>
+        </main>
+    }
+    .into_any()
 }
 
 // ---------- shared card pieces ----------
