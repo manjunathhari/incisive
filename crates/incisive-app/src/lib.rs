@@ -39,6 +39,8 @@ pub mod identity;
 pub mod library;
 #[cfg(feature = "ssr")]
 pub mod lit;
+/// The page look (`LOOK`): ivory or stipple (no Leptos).
+pub mod look;
 /// The memory layer (off by default).
 #[cfg(feature = "ssr")]
 pub mod memory;

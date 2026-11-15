@@ -8,8 +8,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
+use incisive_app::config::Look;
 use incisive_app::health::{Readiness, health_routes};
-use incisive_app::server::build_router;
+use incisive_app::server::{build_router, build_router_with_look};
 use leptos::config::LeptosOptions;
 use tower::ServiceExt;
 
@@ -257,5 +258,199 @@ async fn figtree_is_self_hosted_and_google_fonts_are_never_requested() {
     // The ivory styles never reach the answer content.
     for sel in [".ap-main", ".ap ", ".ap{", ".ap-original", ".answer"] {
         assert!(!style.contains(sel), "{sel}");
+    }
+}
+
+/// The app with a chosen look, serving static files from `public/`.
+fn look_router(look: Look) -> Router {
+    let public = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
+    let opts = LeptosOptions::builder()
+        .output_name("incisive-app")
+        .site_root(public)
+        .build();
+    build_router_with_look(Arc::new(AlwaysUp), identity_state(), opts, look)
+}
+
+/// `LOOK` unset or `ivory`: the page carries no trace of the stipple look
+/// and still asks for Figtree.
+#[tokio::test]
+async fn ivory_look_is_unchanged_and_asks_for_nothing_new() {
+    let (status, body) = get(look_router(Look::Ivory), "/").await;
+    assert_eq!(status, StatusCode::OK);
+    for absent in [
+        "data-look",
+        "hanken-grotesk",
+        "source-serif-4",
+        "/look/",
+        "stipple",
+    ] {
+        assert!(!body.contains(absent), "{absent}");
+    }
+    assert!(body.contains("/fonts/figtree/figtree-latin-400-normal.woff2"));
+    // The plain builder is the ivory look.
+    let opts = LeptosOptions::builder()
+        .output_name("incisive-app")
+        .site_root(concat!(env!("CARGO_MANIFEST_DIR"), "/public"))
+        .build();
+    let (_, plain) = get(
+        build_router(Arc::new(AlwaysUp), identity_state(), opts),
+        "/",
+    )
+    .await;
+    assert!(!plain.contains("data-look"));
+    assert!(!plain.contains("stipple"));
+    // The page head is as it was: `<html>` bare, three style blocks, then
+    // the reload placeholder and the scripts, with nothing new between.
+    for page in [&body, &plain] {
+        assert!(page.starts_with("<!DOCTYPE html><html lang=\"en\"><head>"));
+        assert_eq!(page.matches("<style>").count(), 3);
+        assert!(page.contains("</style><!><link rel=\"modulepreload\""));
+    }
+}
+
+/// `LOOK=stipple`: the page is marked, the stipple styles follow the ivory
+/// ones, and its fonts and images are served by the app itself.
+#[tokio::test]
+async fn stipple_look_serves_its_own_fonts_and_images() {
+    let public = concat!(env!("CARGO_MANIFEST_DIR"), "/public");
+    let style = incisive_app::app::STIPPLE_STYLE;
+    let (status, body) = get(look_router(Look::Stipple), "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<html lang=\"en\" data-look=\"stipple\">"));
+    assert!(style.contains("color-scheme: light;"));
+    assert!(body.contains("html[data-look=\"stipple\"] { color-scheme: light;"));
+    assert!(body.contains("/look/stipple-day.svg"));
+    // One more style block than ivory, the last of the four.
+    assert_eq!(body.matches("<style>").count(), 4);
+    let last = body.rfind("<style>").unwrap();
+    assert!(
+        body[last..].starts_with("<style>\n@font-face { font-family:'Hanken Grotesk Variable';")
+    );
+    assert!(
+        body.find(".rx-seg").unwrap() < last,
+        "after the tracker styles"
+    );
+    assert!(!body.contains("fonts.googleapis.com"));
+    assert!(!body.contains("fonts.gstatic.com"));
+    // The not-found page wears the look too.
+    let (_, missing) = get(look_router(Look::Stipple), "/no-such-page").await;
+    assert!(missing.contains("<html lang=\"en\" data-look=\"stipple\">"));
+    assert!(missing.contains("Page not found"));
+    // The stipple block comes after the ivory one, so its variables win.
+    let ivory_at = body.find(":root { --iv-ground:#F5F3EF;").unwrap();
+    let stipple_at = body.find("--iv-ground:#f7f4ec;").unwrap();
+    assert!(ivory_at < stipple_at);
+    // Ivory's own font is still there for the pieces not yet restyled.
+    assert!(body.contains("/fonts/figtree/figtree-latin-400-normal.woff2"));
+
+    for name in [
+        "stipple-day.svg",
+        "stipple-night.svg",
+        "foot-day.webp",
+        "foot-night.webp",
+        "sai-hero-day.webp",
+        "sai-hero-night.webp",
+    ] {
+        let path = format!("/look/{name}");
+        let res = look_router(Look::Stipple)
+            .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+    }
+
+    // Every font the stipple styles name is served as a real woff2 file.
+    let fonts: Vec<&str> = style
+        .split("url(")
+        .skip(1)
+        .map(|rest| rest.split(')').next().unwrap())
+        .filter(|u| u.starts_with("/fonts/"))
+        .collect();
+    assert_eq!(fonts.len(), 4, "{fonts:?}");
+    for path in fonts {
+        assert!(
+            path.starts_with("/fonts/hanken-grotesk/")
+                || path.starts_with("/fonts/source-serif-4/"),
+            "{path}"
+        );
+        let res = look_router(Look::Stipple)
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some("font/woff2"),
+            "{path}"
+        );
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..4], b"wOF2", "{path}");
+    }
+    // The OFL licences sit next to the files.
+    for dir in ["hanken-grotesk", "source-serif-4"] {
+        let licence = std::fs::read_to_string(format!("{public}/fonts/{dir}/LICENSE.txt")).unwrap();
+        assert!(
+            licence.contains("SIL Open Font License, Version 1.1"),
+            "{dir}"
+        );
+    }
+}
+
+/// Every stipple rule is under `html[data-look="stipple"]`, and none reaches
+/// the answer content.
+#[test]
+fn stipple_style_is_scoped_and_leaves_the_answer_alone() {
+    let style = incisive_app::app::STIPPLE_STYLE;
+    for banned in [
+        ".ap-main",
+        ".ap ",
+        ".ap{",
+        ".ap-original",
+        ".answer",
+        "googleapis",
+        "gstatic",
+        "building",
+        "font-weight:600",
+        "font-weight:700",
+    ] {
+        assert!(!style.contains(banned), "{banned}");
+    }
+    const SCOPE: &str = "html[data-look=\"stipple\"]";
+    let mut rules = 0;
+    for line in style.lines() {
+        let Some((selectors, _)) = line.split_once('{') else {
+            continue;
+        };
+        let selectors = selectors.trim();
+        if selectors.starts_with("@font-face") || selectors.starts_with("@media") {
+            continue;
+        }
+        // Each selector of a list carries the scope.
+        for selector in selectors.split(',') {
+            assert!(selector.trim().starts_with(SCOPE), "{line}");
+        }
+        rules += 1;
+    }
+    assert!(rules > 30, "{rules}");
+    // The variables Task 1 promises, at their day values.
+    for needle in [
+        "--iv-ground:#f7f4ec;",
+        "--iv-accent:#1f6bd0;",
+        "--iv-r:18px;",
+        "--iv-button:#13263c;",
+        "--iv-on-fill:#ffffff;",
+        "'Hanken Grotesk Variable'; font-style:normal; font-display:swap; font-weight:300 500;",
+        "'Source Serif 4 Variable'; font-style:normal; font-display:swap; font-weight:400;",
+        "body::before { content:\"\"; position:fixed; inset:0; z-index:-1; pointer-events:none; background:url(/look/stipple-day.svg) 0 0/480px 480px repeat; }",
+        " .iv-h1 { font-weight:300; }",
+        " .iv-name { font-weight:300; }",
+    ] {
+        assert!(style.contains(needle), "{needle}");
+    }
+    // Left to ivory: the alert and warning colours.
+    for kept in ["--iv-alert", "--iv-warn"] {
+        assert!(!style.contains(kept), "{kept}");
     }
 }

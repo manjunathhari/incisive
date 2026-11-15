@@ -10,7 +10,7 @@ use incisive_app::{
     identity::{IAP_JWK_URL, IapVerifier, JwkSource, ensure_owner_until_done},
     lit::http::{AllowlistedClient, OaPolicy, default_user_agent},
     runs::worker::{WorkerHandle, recovery_loop},
-    server::{AppState, build_router, install_panic_hook},
+    server::{AppState, build_router_with_look, install_panic_hook},
     spend::CapsConfig,
 };
 use leptos::config::get_configuration;
@@ -226,10 +226,11 @@ async fn main() {
         }
     });
 
-    let app = build_router(
+    let app = build_router_with_look(
         Arc::new(PgReadiness::new(pool, migrated)),
         state,
         leptos_options.clone(),
+        config.look,
     );
     let listener = tokio::net::TcpListener::bind(leptos_options.site_addr)
         .await

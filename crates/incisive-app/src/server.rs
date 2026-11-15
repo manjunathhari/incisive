@@ -15,7 +15,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::agent::{AgentLlm, Literature};
 use crate::app::{App, shell};
 use crate::ask::{ASK_BODY_LIMIT, activity_handler, ask_handler, me_handler};
-use crate::config::AppEnv;
+use crate::config::{AppEnv, Look};
 use crate::gate::Classifier;
 use crate::health::{Readiness, health_routes};
 use crate::identity::{IapVerifier, IdentityState};
@@ -282,10 +282,22 @@ fn route_list() -> Vec<AxumRouteListing> {
     ROUTES.get_or_init(|| generate_route_list(App)).clone()
 }
 
+/// The app in the ivory look (`LOOK` unset).
 pub fn build_router(
     r: Arc<dyn Readiness>,
     state: AppState,
     leptos_options: LeptosOptions,
+) -> Router {
+    build_router_with_look(r, state, leptos_options, Look::Ivory)
+}
+
+/// The app in the given look (`LOOK`): every page, the not-found page
+/// included, is drawn by `shell` with it.
+pub fn build_router_with_look(
+    r: Arc<dyn Readiness>,
+    state: AppState,
+    leptos_options: LeptosOptions,
+    look: Look,
 ) -> Router {
     let routes = route_list();
     let context_state = state.clone();
@@ -296,10 +308,12 @@ pub fn build_router(
             move || provide_context(context_state.clone()),
             {
                 let opts = leptos_options.clone();
-                move || shell(opts.clone())
+                move || shell(opts.clone(), look)
             },
         )
-        .fallback(leptos_axum::file_and_error_handler(shell))
+        .fallback(leptos_axum::file_and_error_handler(
+            move |opts: LeptosOptions| shell(opts, look),
+        ))
         // Server functions (`/api/fn/*`) get the same cap as `POST /api/ask`. They
         // read the raw body, which axum's `DefaultBodyLimit` does not cover, so the
         // limit is enforced on the body itself (413 when exceeded).

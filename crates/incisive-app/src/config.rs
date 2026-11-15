@@ -4,6 +4,9 @@ use secrecy::SecretString;
 use std::fmt;
 
 use crate::agent::llm::AgentModels;
+/// The page look (`LOOK`). Defined in `crate::look`, which the browser build
+/// shares (this module is server only).
+pub use crate::look::Look;
 use crate::runs::{Engine, QuickEngine, RunsConfig};
 use crate::spend::Prices;
 
@@ -64,6 +67,8 @@ pub struct Config {
     /// The knowledge graph (`GRAPH`: `off`, the default, or `on`; `GRAPH_MODEL`,
     /// priced when on in prod; `GRAPH_FROM`, a `YYYY-MM-DD` date, required when on).
     pub graph: crate::graph::settings::GraphSettings,
+    /// The page look (`LOOK`: `ivory`, the default, or `stipple`).
+    pub look: Look,
     /// The memory layer (`MEMORY`, default off; `GEMMA_URL`, `GEMMA_AUTH`,
     /// `EMBED_MODEL`, `MEMORY_TOPIC_MATCH`, `MEMORY_GATE_MATCH`).
     pub memory: crate::memory::settings::MemorySettings,
@@ -480,6 +485,14 @@ impl Config {
             }
         };
 
+        let look = match lookup("LOOK").as_deref() {
+            None => Look::Ivory,
+            Some(value) => Look::parse(value).ok_or_else(|| ConfigError::Invalid {
+                var: "LOOK",
+                reason: "expected `ivory` or `stipple`".to_string(),
+            })?,
+        };
+
         let graph = {
             use crate::graph::settings::GraphSettings;
             let on = match lookup("GRAPH").as_deref() {
@@ -640,6 +653,7 @@ impl Config {
             stream,
             intro,
             graph,
+            look,
             memory,
             chat,
             ncbi_api_key: lookup("NCBI_API_KEY").map(SecretString::from),
@@ -1647,6 +1661,34 @@ mod tests {
                 assert!(reason.contains("INTRO_MODEL"));
             }
             e => panic!("{e:?}"),
+        }
+    }
+
+    /// `LOOK` is `ivory` (default) or `stipple`; anything else fails startup.
+    #[test]
+    fn look_switch() {
+        let c = Config::from_lookup(lookup(&full())).unwrap();
+        assert_eq!(c.look, Look::Ivory, "ivory by default");
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut p = full();
+            p.extend_from_slice(extra);
+            Config::from_lookup(lookup(&p))
+        };
+        assert_eq!(with(&[("LOOK", "ivory")]).unwrap().look, Look::Ivory);
+        assert_eq!(with(&[("LOOK", "stipple")]).unwrap().look, Look::Stipple);
+        // Same trimming as GRAPH: blanks around the value are ignored, and a
+        // blank value is unset (ivory).
+        assert_eq!(with(&[("LOOK", "")]).unwrap().look, Look::Ivory);
+        assert_eq!(with(&[("LOOK", " stipple\n")]).unwrap().look, Look::Stipple);
+        for bad in ["dark", "Stipple", "on", "stipple night"] {
+            assert_eq!(
+                with(&[("LOOK", bad)]).unwrap_err(),
+                ConfigError::Invalid {
+                    var: "LOOK",
+                    reason: "expected `ivory` or `stipple`".to_string(),
+                },
+                "{bad}"
+            );
         }
     }
 

@@ -44,6 +44,8 @@ mod intro;
 mod ivory;
 mod library_page;
 mod page;
+// The stipple look's styles (LOOK=stipple).
+mod stipple;
 mod tracker;
 use crate::runs::{RUN_NOT_FOUND_MESSAGE, RunMode, RunStatus, RunSummary, RunView};
 /// The chat window's styles (exported for the scope test).
@@ -53,6 +55,11 @@ pub use expert::{ANSWER_VIEW, EXPERT_STYLE};
 /// The ivory styles (exported for the scope test: none of them reach the
 /// answer content).
 pub use ivory::IVORY_STYLE;
+/// The stipple styles (exported for the scope test: every rule is under
+/// `html[data-look="stipple"]`, and none reaches the answer content).
+pub use stipple::STIPPLE_STYLE;
+
+pub use crate::look::Look;
 use uuid::Uuid;
 
 const STYLE: &str = r#"
@@ -326,24 +333,77 @@ fieldset.depth legend { font-weight:600; padding:0; margin-bottom:6px; }
 @media (max-width:480px) { .ap-dl { grid-template-columns:1fr; } .ap-bar-row { grid-template-columns:minmax(0,96px) minmax(0,1fr) auto; } }
 "#;
 
-pub fn shell(options: LeptosOptions) -> impl IntoView {
-    view! {
-        <!DOCTYPE html>
-        <html lang="en">
-            <head>
-                <meta charset="utf-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1" />
-                <style>{STYLE}</style>
-                <style>{ivory::IVORY_STYLE}</style>
-                <style>{tracker::TRACKER_STYLE}</style>
-                <AutoReload options=options.clone() />
-                <HydrationScripts options />
-                <MetaTags />
-            </head>
-            <body>
-                <App />
-            </body>
-        </html>
+/// The page look, provided by [`App`] for the components that differ by
+/// look.
+#[derive(Clone, Copy)]
+pub struct LookCtx(pub Look);
+
+/// The look of the page being drawn. On the server [`shell`] provides it
+/// before `App` runs; in the browser it is read back from `<html data-look>`
+/// (absent: ivory).
+fn current_look() -> Look {
+    if let Some(LookCtx(look)) = use_context::<LookCtx>() {
+        return look;
+    }
+    #[cfg(feature = "hydrate")]
+    {
+        let value = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|html| html.get_attribute("data-look"));
+        Look::from_attr(value.as_deref())
+    }
+    #[cfg(not(feature = "hydrate"))]
+    Look::Ivory
+}
+
+/// The page around the app. With `Look::Ivory` it is exactly the page as it
+/// was; with `Look::Stipple` `<html>` carries `data-look="stipple"` and the
+/// stipple styles follow the other three blocks (so they win).
+pub fn shell(options: LeptosOptions, look: Look) -> impl IntoView {
+    use leptos::either::Either;
+    provide_context(LookCtx(look));
+    // Two whole pages rather than one with optional pieces: an optional
+    // piece leaves a marker in the HTML even when absent, and the ivory page
+    // must not change by a byte.
+    match look {
+        Look::Ivory => Either::Left(view! {
+            <!DOCTYPE html>
+            <html lang="en">
+                <head>
+                    <meta charset="utf-8" />
+                    <meta name="viewport" content="width=device-width, initial-scale=1" />
+                    <style>{STYLE}</style>
+                    <style>{ivory::IVORY_STYLE}</style>
+                    <style>{tracker::TRACKER_STYLE}</style>
+                    <AutoReload options=options.clone() />
+                    <HydrationScripts options />
+                    <MetaTags />
+                </head>
+                <body>
+                    <App />
+                </body>
+            </html>
+        }),
+        Look::Stipple => Either::Right(view! {
+            <!DOCTYPE html>
+            <html lang="en" data-look="stipple">
+                <head>
+                    <meta charset="utf-8" />
+                    <meta name="viewport" content="width=device-width, initial-scale=1" />
+                    <style>{STYLE}</style>
+                    <style>{ivory::IVORY_STYLE}</style>
+                    <style>{tracker::TRACKER_STYLE}</style>
+                    <style>{stipple::STIPPLE_STYLE}</style>
+                    <AutoReload options=options.clone() />
+                    <HydrationScripts options />
+                    <MetaTags />
+                </head>
+                <body>
+                    <App />
+                </body>
+            </html>
+        }),
     }
 }
 
@@ -788,6 +848,8 @@ fn error_text(e: &ServerFnError) -> String {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    // The look (LOOK), for the components that differ by it.
+    provide_context(LookCtx(current_look()));
     let me: MeResource = Resource::new(|| (), |_| get_me());
     // The header reads it (one `/api/fn/me` per load).
     provide_context(me);
