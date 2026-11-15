@@ -210,10 +210,11 @@ pub fn timed_fill(secs: i64, usual: f32) -> u8 {
     ((secs.max(0) as f32 / usual) * 100.0).clamp(0.0, FILL_HOLD) as u8
 }
 
-/// The pill's fill: lavender fading softly into white at `pct`.
+/// The pill's fill: lavender fading softly into white at `pct` (the look's
+/// `--tr-fill` into its card colour).
 pub fn fill_background(pct: u8) -> String {
     format!(
-        "background:linear-gradient(to right,#E6ECF8 {}%,#FFFFFF {}%)",
+        "background:linear-gradient(to right,var(--tr-fill) {}%,var(--iv-card) {}%)",
         pct.saturating_sub(14),
         pct
     )
@@ -1462,11 +1463,11 @@ mod tests {
     fn the_fill_fades_softly_into_white() {
         assert_eq!(
             fill_background(52),
-            "background:linear-gradient(to right,#E6ECF8 38%,#FFFFFF 52%)"
+            "background:linear-gradient(to right,var(--tr-fill) 38%,var(--iv-card) 52%)"
         );
         assert_eq!(
             fill_background(5),
-            "background:linear-gradient(to right,#E6ECF8 0%,#FFFFFF 5%)"
+            "background:linear-gradient(to right,var(--tr-fill) 0%,var(--iv-card) 5%)"
         );
     }
 

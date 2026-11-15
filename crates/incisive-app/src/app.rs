@@ -58,6 +58,19 @@ pub use ivory::IVORY_STYLE;
 /// The stipple styles (exported for the scope test: every rule is under
 /// `html[data-look="stipple"]`, and none reaches the answer content).
 pub use stipple::STIPPLE_STYLE;
+/// The page chrome's styles by name: every style constant but the answer
+/// content's (`STYLE`, `LAYOUT_STYLE`, `EARLY_STYLE`). Each takes its colours
+/// from variables, so a look can restate them (exported for the look test).
+pub const CHROME_STYLES: &[(&str, &str)] = &[
+    ("IVORY_STYLE", ivory::IVORY_STYLE),
+    ("EXPLORE_STYLE", explore::EXPLORE_STYLE),
+    ("TRACKER_STYLE", tracker::TRACKER_STYLE),
+    ("INTRO_STYLE", intro::INTRO_STYLE),
+    ("DRAFT_STYLE", draft::DRAFT_STYLE),
+    ("EXPERT_STYLE", expert::EXPERT_STYLE),
+    ("CHAT_STYLE", chat::CHAT_STYLE),
+    ("STIPPLE_STYLE", stipple::STIPPLE_STYLE),
+];
 
 pub use crate::look::Look;
 use uuid::Uuid;

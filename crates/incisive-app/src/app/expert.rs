@@ -64,7 +64,7 @@ pub const EXPERT_STYLE: &str = r##"
 .rx-scen .lab { font-size:.7rem; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--iv-muted); }
 .rx-scen .choice { color:var(--iv-ink); font-weight:700; }
 .rx-act { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
-.rx .rx-btn { font:inherit; font-weight:700; font-size:.92rem; border-radius:14px; padding:10px 14px; min-height:46px; display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid var(--iv-accent); background:var(--iv-accent); color:#fff; text-align:left; text-decoration:none; }
+.rx .rx-btn { font:inherit; font-weight:700; font-size:.92rem; border-radius:14px; padding:10px 14px; min-height:46px; display:flex; justify-content:space-between; align-items:center; gap:10px; border:1px solid var(--iv-accent); background:var(--iv-accent); color:var(--iv-on-fill); text-align:left; text-decoration:none; }
 .rx-expert a.rx-cite, .rt a.rt-cite { color:var(--iv-accent); font-weight:600; }
 .rx-seg a:focus-visible, .rx-seg button:focus-visible, .rx-expert a:focus-visible, .rx-expert button:focus-visible, .rt a:focus-visible, .rt summary:focus-visible { outline:2px solid var(--iv-accent); outline-offset:2px; }
 /* While the Expert opinion is open: the verdict sits right under the pills. */
@@ -137,7 +137,7 @@ pub const EXPERT_STYLE: &str = r##"
 .rt-tb-chat { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:18px; overflow:hidden; min-width:0; }
 .rt-seats { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding:12px 16px; font-size:.85rem; font-weight:600; border-bottom:1px solid var(--iv-border); }
 .rt-seats > span { display:inline-flex; gap:7px; align-items:center; }
-.rt-av { flex:none; width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; color:#fff; }
+.rt-av { flex:none; width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:.8rem; font-weight:700; color:var(--ex-on-mark); }
 .rt-av.r { background:var(--rt-res); } .rt-av.s { background:var(--rt-skp); } .rt-av.p { background:var(--iv-accent); }
 .rt-tabs { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); background:var(--iv-ground); }
 a.rt-tab { padding:10px 12px; display:flex; flex-direction:column; gap:3px; border-right:1px solid var(--iv-border); border-bottom:1px solid var(--iv-border); border-top:3px solid transparent; font-size:.74rem; line-height:1.3; min-width:0; color:var(--iv-ink); text-decoration:none; }
@@ -145,7 +145,7 @@ a.rt-tab:last-child { border-right:0; }
 a.rt-tab.r { border-top-color:var(--rt-res); } a.rt-tab.s { border-top-color:var(--rt-skp); }
 a.rt-tab b { font-size:.72rem; letter-spacing:.05em; text-transform:uppercase; }
 a.rt-tab.r b { color:var(--rt-res); } a.rt-tab.s b { color:var(--rt-skp); }
-a.rt-tab.on.r { background:var(--rt-res); color:#fff; } a.rt-tab.on.s { background:var(--rt-skp); color:#fff; } a.rt-tab.on b { color:#fff; }
+a.rt-tab.on.r { background:var(--rt-res); color:var(--ex-on-mark); } a.rt-tab.on.s { background:var(--rt-skp); color:var(--ex-on-mark); } a.rt-tab.on b { color:var(--ex-on-mark); }
 .rt .rt-hint { max-width:none; padding:18px 16px; color:var(--iv-muted); font-size:.92rem; text-align:center; }
 .rt-tb-chat:not(.rt-hyd):has(.rt-round:target) .rt-hint { display:none; }
 .rt-round { display:none; flex-direction:column; gap:7px; padding:16px 16px 18px; }

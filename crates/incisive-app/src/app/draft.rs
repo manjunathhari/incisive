@@ -16,10 +16,10 @@ use crate::draft_page::{
 };
 use crate::run_tracker as rt;
 
-const DRAFT_STYLE: &str = r##"
+pub(super) const DRAFT_STYLE: &str = r##"
 .dr { display:flex; flex-direction:column; gap:12px; width:100%; max-width:760px; margin:10px 0 0; font-family:var(--iv-font); color:var(--iv-ink); min-width:0; overflow-wrap:anywhere; }
 .dr-rewrite { margin:0; padding:10px 12px; background:var(--iv-tint); color:var(--iv-accent); border-radius:10px; font-size:13px; font-weight:600; }
-.dr-banner { margin:0; padding:10px 12px; background:var(--iv-warn-bg); color:var(--iv-warn); border:1px solid #F0E2C2; border-radius:10px; font-size:13px; font-weight:600; }
+.dr-banner { margin:0; padding:10px 12px; background:var(--iv-warn-bg); color:var(--iv-warn); border:1px solid var(--iv-warn-line); border-radius:10px; font-size:13px; font-weight:600; }
 .dr-card { padding:14px 16px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:14px; }
 .dr-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin:0 0 6px; }
 .dr-card h2 { margin:0; font-size:15px; font-weight:700; }
@@ -27,7 +27,7 @@ const DRAFT_STYLE: &str = r##"
 .dr-card p { margin:0; font-size:14px; line-height:1.5; }
 .dr-card p + p { margin-top:8px; }
 .dr-c { color:var(--iv-muted); }
-.dr-fade { color:#8B877F; }
+.dr-fade { color:var(--iv-faint); }
 .dr-ul { margin:8px 0 0; padding-left:18px; font-size:14px; line-height:1.45; }
 .dr-o { margin-top:10px; padding-top:10px; border-top:1px solid var(--iv-rule); }
 .dr-on { font-weight:600; margin-bottom:4px !important; }

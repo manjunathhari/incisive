@@ -18,12 +18,12 @@ use crate::runs::{RunMode, StepLine};
 /// The tracker's styles. In the page's head, so a redraw never flashes.
 pub const TRACKER_STYLE: &str = r##"
 .rx-seg { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); background:var(--iv-card); border:1px solid var(--iv-border); border-radius:999px; padding:4px; gap:4px; margin:4px 0 12px; font-family:var(--iv-font); }
-.rx-seg .rx-tab { font:inherit; font-size:14px; font-weight:600; border:0; border-radius:999px; padding:6px 10px; min-height:44px; background:var(--iv-card); color:#6B675F; cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:7px; text-align:center; text-decoration:none; min-width:0; }
+.rx-seg .rx-tab { font:inherit; font-size:14px; font-weight:600; border:0; border-radius:999px; padding:6px 10px; min-height:44px; background:var(--iv-card); color:var(--iv-muted); cursor:pointer; display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:7px; text-align:center; text-decoration:none; min-width:0; }
 .rx-seg .rx-tab[disabled] { cursor:default; opacity:1; }
-.rx-seg .rx-tab[data-state="filling"] { color:#56688F; }
-.rx-seg .rx-tab[data-state="ready"] { background:#E8F1EC; color:#557060; }
-.rx-seg .rx-tab[data-clicked="true"] { box-shadow:inset 0 0 0 1px #A9B8D6; }
-.rx-seg .rx-dot, .rx-seg .rk-dot { flex:none; width:8px; height:8px; border-radius:999px; background:#5E8A72; }
+.rx-seg .rx-tab[data-state="filling"] { color:var(--tr-filling); }
+.rx-seg .rx-tab[data-state="ready"] { background:var(--tr-ready-bg); color:var(--tr-ready); }
+.rx-seg .rx-tab[data-clicked="true"] { box-shadow:inset 0 0 0 1px var(--tr-ring); }
+.rx-seg .rx-dot, .rx-seg .rk-dot { flex:none; width:8px; height:8px; border-radius:999px; background:var(--tr-dot); }
 .rk-card { margin:0 0 10px; padding:20px 24px; background:var(--iv-card); border:1px solid var(--iv-border); border-radius:20px; color:var(--iv-ink); }
 /* S1c (owner): the run's top cards and folded rows end where the answer's do (760px). */
 .run-chrome .rk-card, .run-chrome .rx-seg, .run-chrome details[class$="-fold"] { max-width:760px; }
@@ -55,7 +55,7 @@ pub const TRACKER_STYLE: &str = r##"
 .rk-fold > summary { list-style:none; min-height:48px; display:flex; align-items:center; gap:12px; cursor:pointer; }
 .rk-fold > summary::-webkit-details-marker { display:none; }
 .rk-fold-title { flex:none; font-size:15px; font-weight:600; color:var(--iv-ink); }
-.rk-role { flex:none; padding:3px 10px; border-radius:999px; background:#EFF2F9; color:#56688F; font-size:12px; font-weight:600; }
+.rk-role { flex:none; padding:3px 10px; border-radius:999px; background:var(--tr-role-bg); color:var(--tr-filling); font-size:12px; font-weight:600; }
 .rk-roll { flex:1; min-width:0; height:22px; overflow:hidden; display:block; }
 .rk-roll-in { display:block; }
 .rk-roll-in.moved { transform:translateY(-22px); animation:rk-roll .45s ease; }

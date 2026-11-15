@@ -13,8 +13,10 @@
 /// The Hanken Grotesk and Source Serif 4 faces (self-hosted, OFL;
 /// `public/fonts/hanken-grotesk`, `public/fonts/source-serif-4`; the
 /// `unicode-range` split is fontsource's), the day values of the `--iv-*`
-/// variables, the fixed dot layer (`public/look`), the weight cap, and the
-/// header and Ask page in this look. One rule to a line, each under
+/// variables (and of the other chrome colours that would clash with them;
+/// the rest keep their ivory values), the fixed dot layer (`public/look`),
+/// the weight cap, and the header and Ask page in this look. One rule to a
+/// line, each under
 /// `html[data-look="stipple"]` (the scope test reads it line by line).
 pub const STIPPLE_STYLE: &str = r#"
 @font-face { font-family:'Hanken Grotesk Variable'; font-style:normal; font-display:swap; font-weight:300 500; src:url(/fonts/hanken-grotesk/hanken-grotesk-latin-ext-wght-normal.woff2) format('woff2-variations'); unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF; }
@@ -27,7 +29,9 @@ html[data-look="stipple"] { color-scheme: light; background:var(--iv-ground);
   --iv-r:18px; --iv-r-sm:16px;
   --iv-font:"Hanken Grotesk Variable","Hanken Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --iv-read:"Source Serif 4 Variable","Source Serif 4",Georgia,"Times New Roman",serif;
-  --iv-button:#13263c; --iv-on-button:#ffffff; --iv-fill:#1e5aa0; --iv-on-fill:#ffffff; }
+  --iv-button:#13263c; --iv-on-button:#ffffff; --iv-fill:#1e5aa0; --iv-on-fill:#ffffff; --st-mask:#000;
+  --tr-filling:var(--iv-accent); --tr-fill:var(--iv-tint); --tr-ring:var(--iv-accent); --tr-role-bg:var(--iv-tint);
+  --iv-avatar-bg:var(--iv-border); --iv-dash:var(--iv-border); --iv-accent-deep:var(--iv-fill); --iv-faint:var(--iv-muted); }
 /* The cream sits on the page root and the body is clear, so the fixed dot layer (behind everything) shows over it. */
 html[data-look="stipple"] body { background:transparent; }
 html[data-look="stipple"] body::before { content:""; position:fixed; inset:0; z-index:-1; pointer-events:none; background:url(/look/stipple-day.svg) 0 0/480px 480px repeat; }
@@ -84,7 +88,7 @@ html[data-look="stipple"] .iv-head a:focus-visible, html[data-look="stipple"] .i
 /* ---- Ask: the hero (label, heading and intro over the artwork) ---- */
 html[data-look="stipple"] .st-hero { position:relative; isolation:isolate; display:flex; flex-direction:column; justify-content:flex-end; min-height:330px; padding-bottom:28px; }
 html[data-look="stipple"] .st-hero > :not(.st-hero-art) { max-width:640px; }
-html[data-look="stipple"] .st-hero-art { position:absolute; z-index:-1; pointer-events:none; top:0; left:50%; right:auto; width:min(100%, 390px); height:440px; transform:translateX(-50%); background-image:url(/look/sai-hero-day.webp); background-repeat:no-repeat; background-position:center top; background-size:100% auto; -webkit-mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); -webkit-mask-composite:source-in; mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); mask-composite:intersect; }
+html[data-look="stipple"] .st-hero-art { position:absolute; z-index:-1; pointer-events:none; top:0; left:50%; right:auto; width:min(100%, 390px); height:440px; transform:translateX(-50%); background-image:url(/look/sai-hero-day.webp); background-repeat:no-repeat; background-position:center top; background-size:100% auto; -webkit-mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, var(--st-mask) 40%, transparent 100%), linear-gradient(to bottom, var(--st-mask) 50%, transparent 92%); -webkit-mask-composite:source-in; mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, var(--st-mask) 40%, transparent 100%), linear-gradient(to bottom, var(--st-mask) 50%, transparent 92%); mask-composite:intersect; }
 /* The artwork runs past the hero, so what follows it is lifted over it: it stays behind the text and the cards. */
 html[data-look="stipple"] .st-hero ~ *, html[data-look="stipple"] .iv-ask .iv-side { position:relative; }
 html[data-look="stipple"] .st-label { display:block; margin:0 0 14px; font-size:11.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--iv-accent); }

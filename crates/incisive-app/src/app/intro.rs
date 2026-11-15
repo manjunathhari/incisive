@@ -13,7 +13,7 @@ use crate::runs::IntroView;
 
 /// The introduction's styles. Drawn only with the introduction, so a page
 /// without one is unchanged.
-const INTRO_STYLE: &str = r##"
+pub(super) const INTRO_STYLE: &str = r##"
 .in-tag { margin-top:3px; font-size:12px; line-height:1.35; color:var(--iv-muted); }
 .in-text { display:flex; flex-direction:column; gap:10px; margin-top:10px; }
 .in-text p { margin:0; font-size:14.5px; line-height:1.5; color:var(--iv-ink); text-wrap:pretty; }

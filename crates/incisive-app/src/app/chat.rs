@@ -44,7 +44,7 @@ pub const CHAT_STYLE: &str = r##"
 .rx-intro { margin:0; font-size:15px; line-height:1.45; color:var(--iv-body); }
 .rx .rx-starter { font:inherit; text-align:left; background:var(--iv-card); border:1px solid var(--iv-line); border-radius:16px; padding:12px 14px; min-height:44px; font-size:15px; font-weight:500; color:var(--iv-ink); line-height:1.35; cursor:pointer; width:100%; }
 .rx-turn { display:flex; flex-direction:column; gap:8px; min-width:0; }
-.rx-q { align-self:flex-end; max-width:86%; background:var(--iv-accent); color:#fff; border-radius:16px; padding:10px 14px; font-size:15px; line-height:1.4; white-space:pre-wrap; }
+.rx-q { align-self:flex-end; max-width:86%; background:var(--iv-accent); color:var(--iv-on-fill); border-radius:16px; padding:10px 14px; font-size:15px; line-height:1.4; white-space:pre-wrap; }
 .rx-reply { background:var(--iv-card); border:1px solid var(--iv-border); border-radius:16px; padding:12px 14px; display:flex; flex-direction:column; gap:10px; min-width:0; }
 .rx-wait { font-size:14px; color:var(--iv-muted); line-height:1.4; }
 .rx-text { font-size:15.5px; line-height:1.5; color:var(--iv-ink); white-space:pre-wrap; }
@@ -54,9 +54,9 @@ pub const CHAT_STYLE: &str = r##"
 .rx-cut { font-size:13px; line-height:1.35; color:var(--iv-muted); }
 .rx-flags { background:var(--iv-warn-bg); border-radius:10px; padding:8px 10px; display:flex; flex-direction:column; gap:4px; }
 .rx-flags-h { font-size:13px; font-weight:700; color:var(--iv-warn); }
-.rx-flag { font-size:13px; line-height:1.35; color:#6B4600; }
+.rx-flag { font-size:13px; line-height:1.35; color:var(--rx-flag); }
 .rx-line-surgeon { font-size:14.5px; font-weight:600; color:var(--iv-accent); background:var(--iv-tint); border-radius:10px; padding:9px 12px; line-height:1.4; }
-.rx-line-safety { font-size:14.5px; font-weight:700; color:var(--iv-alert); background:#FDECEA; border-radius:10px; padding:9px 12px; line-height:1.4; }
+.rx-line-safety { font-size:14.5px; font-weight:700; color:var(--iv-alert); background:var(--iv-bad-bg); border-radius:10px; padding:9px 12px; line-height:1.4; }
 .rx-acts { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
 .rx-acts form { display:contents; }
 .rx .rx-thumb { width:44px; height:44px; padding:0; border-radius:999px; border:0; display:flex; align-items:center; justify-content:center; cursor:pointer; background:none; color:var(--iv-muted); }
@@ -70,10 +70,10 @@ pub const CHAT_STYLE: &str = r##"
 .rx .rx-modes input:focus-visible + label { outline:2px solid var(--iv-accent); outline-offset:2px; }
 .rx-ask { display:flex; gap:8px; align-items:flex-end; }
 .rx .rx-ask textarea { flex:1 1 auto; width:auto; min-width:0; resize:none; field-sizing:content; max-height:140px; border:1px solid var(--iv-line); border-radius:16px; padding:12px 14px; font-family:var(--iv-font); font-size:15px; line-height:1.3; background:var(--iv-card); color:var(--iv-ink); min-height:46px; }
-.rx .rx-send { flex:none; width:46px; height:46px; padding:0; border-radius:999px; border:0; display:flex; align-items:center; justify-content:center; color:#fff; background:var(--iv-accent); cursor:pointer; }
+.rx .rx-send { flex:none; width:46px; height:46px; padding:0; border-radius:999px; border:0; display:flex; align-items:center; justify-content:center; color:var(--iv-on-fill); background:var(--iv-accent); cursor:pointer; }
 .rx .rx-send[disabled] { background:var(--iv-muted); opacity:1; cursor:default; }
 .rx-foot { font-size:12px; line-height:1.35; color:var(--iv-muted); }
-.rx-back { position:fixed; inset:0; z-index:50; background:rgba(28,27,25,.42); display:flex; align-items:flex-end; justify-content:center; }
+.rx-back { position:fixed; inset:0; z-index:50; background:var(--rx-scrim); display:flex; align-items:flex-end; justify-content:center; }
 .rx-sheet { background:var(--iv-card); width:100%; max-width:760px; max-height:80vh; overflow-y:auto; border-radius:20px 20px 0 0; padding:16px 16px 20px; display:flex; flex-direction:column; gap:10px; }
 .rx-sheet-head { position:sticky; top:0; z-index:1; background:var(--iv-card); display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .rx-sheet-src { font-size:13px; font-weight:700; color:var(--iv-muted); }
