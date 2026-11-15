@@ -454,3 +454,39 @@ fn stipple_style_is_scoped_and_leaves_the_answer_alone() {
         assert!(!style.contains(kept), "{kept}");
     }
 }
+
+/// Blanks the value of every `name="…"` attribute (the per-request nonce
+/// and crossorigin values differ between two requests).
+fn blank_attr(html: &str, name: &str) -> String {
+    let open = format!("{name}=\"");
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(&open) {
+        let after = at + open.len();
+        out.push_str(&rest[..after]);
+        let end = rest[after..].find('"').map_or(rest.len(), |e| after + e);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The stipple page is the ivory page plus the `data-look` attribute and
+/// one last style block, and nothing else: the two page views in `shell`
+/// cannot drift apart unnoticed.
+#[tokio::test]
+async fn stipple_page_is_the_ivory_page_plus_the_attribute_and_one_style_block() {
+    for path in ["/", "/no-such-page", "/history"] {
+        let (_, ivory) = get(look_router(Look::Ivory), path).await;
+        let (_, stipple) = get(look_router(Look::Stipple), path).await;
+        let start = stipple.rfind("<style>").unwrap();
+        let end = start + stipple[start..].find("</style>").unwrap() + "</style>".len();
+        let stripped = format!("{}{}", &stipple[..start], &stipple[end..]).replacen(
+            " data-look=\"stipple\"",
+            "",
+            1,
+        );
+        let scrub = |s: &str| blank_attr(&blank_attr(s, "nonce"), "crossorigin");
+        assert_eq!(scrub(&stripped), scrub(&ivory), "{path}");
+    }
+}
