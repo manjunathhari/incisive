@@ -84,7 +84,7 @@ html[data-look="stipple"] .iv-head a:focus-visible, html[data-look="stipple"] .i
 /* ---- Ask: the hero (label, heading and intro over the artwork) ---- */
 html[data-look="stipple"] .st-hero { position:relative; isolation:isolate; display:flex; flex-direction:column; justify-content:flex-end; min-height:330px; padding-bottom:10px; }
 html[data-look="stipple"] .st-hero > :not(.st-hero-art) { max-width:640px; }
-html[data-look="stipple"] .st-hero-art { position:absolute; z-index:-1; pointer-events:none; top:0; right:0; width:100%; height:700px; background-image:url(/look/sai-hero-day.webp); background-repeat:no-repeat; background-position:center top; background-size:auto 440px; -webkit-mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); -webkit-mask-composite:source-in; mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); mask-composite:intersect; }
+html[data-look="stipple"] .st-hero-art { position:absolute; z-index:-1; pointer-events:none; top:0; left:50%; right:auto; width:min(100%, 390px); height:440px; transform:translateX(-50%); background-image:url(/look/sai-hero-day.webp); background-repeat:no-repeat; background-position:center top; background-size:100% auto; -webkit-mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); -webkit-mask-composite:source-in; mask-image:radial-gradient(ellipse 60% 55% at 60% 38%, #000 40%, transparent 100%), linear-gradient(to bottom, #000 50%, transparent 92%); mask-composite:intersect; }
 /* The artwork runs past the hero, so what follows it is lifted over it: it stays behind the text and the cards. */
 html[data-look="stipple"] .st-hero ~ *, html[data-look="stipple"] .iv-ask .iv-side { position:relative; }
 html[data-look="stipple"] .st-label { display:block; margin:0 0 14px; font-size:11.5px; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--iv-accent); }
@@ -92,7 +92,7 @@ html[data-look="stipple"] .st-hero .iv-h1 { font-size:52px; line-height:1.05; le
 html[data-look="stipple"] .st-hero .iv-intro { margin:16px 0 0; font-family:var(--iv-read); font-size:20px; line-height:1.45; }
 /* ---- Ask: the controls ---- */
 html[data-look="stipple"] .iv-ask .iv-kicker { font-size:11.5px; font-weight:500; letter-spacing:.16em; color:var(--iv-accent); }
-html[data-look="stipple"] .iv-wrap button.iv-send { background:var(--iv-button); color:var(--iv-on-button); min-height:52px; padding:0 28px; border-radius:26px; font-size:16px; font-weight:500; }
+html[data-look="stipple"] .iv-wrap button.iv-send { background:var(--iv-button); color:var(--iv-on-button); align-self:center; height:52px; min-height:52px; padding:0 28px; border-radius:26px; font-size:16px; font-weight:500; }
 html[data-look="stipple"] .iv-wrap button.iv-primary { background:var(--iv-button); color:var(--iv-on-button); padding:0 18px; border-radius:999px; }
 /* Off: the same pill washed out, the words still readable (about 4.9:1 on a white card). */
 html[data-look="stipple"] .iv-wrap button.iv-send[disabled], html[data-look="stipple"] .iv-wrap button.iv-primary[disabled] { background:var(--iv-button); color:var(--iv-on-button); opacity:.65; cursor:default; }
@@ -115,13 +115,15 @@ html[data-look="stipple"] .iv-ask .iv-advisory { font-family:var(--iv-read); fon
 html[data-look="stipple"] .st-foot { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 24px; margin-top:40px; padding-top:18px; padding-bottom:calc(110px + env(safe-area-inset-bottom, 0px)); border-top:1px solid var(--iv-border); font-family:var(--iv-font); font-size:13.5px; color:var(--iv-muted); }
 html[data-look="stipple"] body:has(.st-foot) { position:relative; min-height:100vh; }
 html[data-look="stipple"] body:has(.st-foot)::after { content:""; position:absolute; left:0; right:0; bottom:0; height:120px; z-index:-1; pointer-events:none; background:url(/look/foot-day.webp) center bottom / 560px 120px repeat-x; }
-@media (min-width:900px) {
-  html[data-look="stipple"] .st-hero-art { top:-50px; right:40px; left:auto; width:600px; height:677px; background-position:center; background-size:cover; }
+@media (min-width:1100px) {
+  html[data-look="stipple"] .st-hero-art { top:-50px; right:-60px; left:auto; transform:none; width:600px; height:677px; background-position:center; background-size:cover; }
   /* The artwork reaches up behind the header. */
   html[data-look="stipple"] .iv-head { position:relative; z-index:1; }
 }
-@media (max-width:899px) {
+@media (max-width:1099px) {
   html[data-look="stipple"] .st-hero { min-height:470px; }
+}
+@media (max-width:899px) {
   html[data-look="stipple"] .st-hero .iv-h1 { font-size:35px; line-height:1.07; letter-spacing:-.025em; }
   html[data-look="stipple"] .st-hero .iv-intro { font-size:17px; }
 }
